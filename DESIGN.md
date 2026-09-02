@@ -214,7 +214,11 @@ Nothing to do: the agent runs the system `ssh`, which reads
 `~/.ssh/config` on every connection, so `Include`, `Match`, wildcards,
 `ProxyJump`, `ProxyCommand`, `IdentityAgent`, `CertificateFile` and
 everything else behave exactly as they do for `ssh`. Edits to the config
-take effect on the next reconnect, with no snapshot to keep honest.
+take effect on the next reconnect, with no snapshot to keep honest. The one
+deliberate exception is connection sharing and timeouts: the agent always
+overrides `ControlMaster`, `ControlPath`, `ControlPersist` and the
+keepalive settings so it never shares a TCP connection with the user's
+terminal sessions (§6.1).
 
 The CLI still runs `ssh -G <host>` at `add` time and in `sshdrive show`, so
 the user can see what the location resolves to ("user: alec, port: 2222,
@@ -565,6 +569,21 @@ ssh -S $TMPDIR/sshdrive-%C -s <host> sftp      # a second SFTP channel for bulk 
 ssh -S $TMPDIR/sshdrive-%C <host> sh -s        # exec channels: probe, sweep, inotifywait, helper (§9.2)
 ```
 
+- **The connection is ours alone.** The user's `~/.ssh/config` may set
+  `ControlMaster auto` with a `ControlPath` for the host, in which case a
+  plain `ssh nas` would silently attach to a terminal session's socket, or
+  a terminal would attach to ours. Neither is acceptable: we want our own
+  TCP connection with our own keepalive and timeout settings, tuned for a
+  Finder that must not hang, and the user's interactive sessions want
+  theirs. `ssh` gives command-line `-o` options precedence over every
+  config file, so the `ControlMaster`, `ControlPath`, `ControlPersist`,
+  `ConnectTimeout`, `ServerAliveInterval` and `ServerAliveCountMax` values
+  above always win over whatever the config says for that host. The
+  `ControlPath` under `$TMPDIR/sshdrive-%C` is namespaced to us, so no
+  other client will find it either. The same list of options is passed to
+  every secondary channel, and `sshdrive show` prints any control-socket
+  settings the config would have applied, so the user can see they were
+  overridden.
 - The master's stdio is the primary SFTP channel, used for metadata
   (`stat`, `readdir`, `rename`, small files). A second SFTP channel carries
   bulk downloads and uploads so a long transfer never blocks a listing.
@@ -1427,6 +1446,11 @@ Questions that were open during drafting and how they were settled:
 - **Secrets:** passphrases and passwords are always stored in the keychain
   and served to `ssh` by our askpass program, so mounts come up at login
   before any agent is unlocked. Keys themselves are never copied.
+- **Connection sharing is never inherited.** The agent's `ssh` always
+  overrides any `ControlMaster`/`ControlPath`/`ControlPersist` and
+  keepalive settings from `~/.ssh/config`, so it neither attaches to the
+  user's interactive sessions nor lets them attach to ours, and its short
+  timeouts apply only to our connection.
 - **Host keys:** the user's `known_hosts`, checked strictly by the agent.
   No pinning of our own, no re-trust command; the fix for a changed key is
   the same `ssh-keygen -R` it would be for `ssh`.
