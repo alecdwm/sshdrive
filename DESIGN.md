@@ -359,7 +359,10 @@ anchors(seq INTEGER PK, changed_identifier TEXT, change_kind TEXT)
 roots(path TEXT PK, reason TEXT, last_seen REAL)   -- change-detection root set (§6.5)
 ```
 
-- Identifier = UUID minted the first time we see a path.
+- Identifier = UUID minted the first time we see a path. The root is the
+  one exception: it is a permanent row with the empty path and the
+  identifier `NSFileProviderItemIdentifier.rootContainer`, created when the
+  domain is, so it can carry a pin state and xattrs like any other item.
 - Rename/move initiated by the user (via `modifyItem`) updates `path` and keeps
   the identifier.
 - Renames done remotely (outside Finder) appear as delete + create at the
@@ -979,6 +982,47 @@ slow links without shell access are the main performance risk; `sshdrive
 pins` reports subtree size and file count so the user can see what they've
 signed up for.
 
+#### 7.1.2 Pinning the root
+
+"Keep this whole location offline" is a legitimate request and must not be
+a special case that falls through somewhere. The root is an item like any
+other in every mechanism above, and the places where it could have been
+different are pinned down here:
+
+- **It has a row.** The index holds a permanent root row (§5.3) whose
+  `pin_state` works exactly like a folder's. Pinning the root is situation
+  A of §7.1.1 with no ancestor; every other item becomes situation C and can
+  be excluded individually; unpinning the root is situation B and, by
+  invariant 2, clears every marker in the location.
+- **It has a path.** `RelativePath` allows zero components (§9.1); that
+  value is the root and is what the transport joins to `remotePath`
+  unchanged. `sshdrive pin <name> /` and `sshdrive pin <name> .` both name
+  it, `sshdrive pins` renders it as `/`, and `pin` prints the location's
+  total size and file count from the last probe before starting, since
+  "keep everything" on a home directory or a media share is a large
+  decision.
+- **It gets the policy.** `item(for: .rootContainer)` returns the root row
+  with `contentPolicy = .downloadEagerlyAndKeepDownloaded` when pinned.
+  Whether the system honours the eager policy on the root container the
+  same way it does on a folder is recorded by S6; if it does not, the agent
+  applies the pin to every top-level item instead (situation A on each,
+  written as one operation and reported as one root pin), which produces
+  the same effective state.
+- **It is a watch root.** A pinned root puts the whole location into the
+  recursive part of the root set (§6.5): `find` from the root, `inotifywait
+  -r` on it, the helper watching its own `--root`. At tier 0 that is a
+  `readdir` of every directory in the location per cycle, which `pin`
+  warns about along with the size.
+- **It is reachable from Finder.** The root has no parent to right-click in
+  Finder's list. What Finder offers when the user right-clicks the
+  background of the location's top-level window, or its sidebar entry, is
+  recorded by S6; if the custom actions are shown there with the root
+  container as the selected item, "Keep Downloaded" works on it unchanged.
+  The CLI is the guaranteed path either way.
+- **Excluding under a pinned root** is how a user keeps "everything except
+  `Videos`", and moving items around inside the location never changes
+  their kept state, since every path in it inherits from the root.
+
 ### 7.2 Pinning from Finder's context menu
 
 The CLI is the source of truth, but the natural place to pin a folder is the
@@ -1083,7 +1127,8 @@ sshdrive status [<name>] [--json] [--probe]
 sshdrive evict <name> [path] [--all] [--unpin-all]
 sshdrive pin <name> <remote-path>
                                   keep a folder or file fully offline (§7.1); same
-                                  effect as Finder's "Keep Downloaded" entry (§7.2)
+                                  effect as Finder's "Keep Downloaded" entry (§7.2).
+                                  `/` or `.` pins the whole location (§7.1.2)
 sshdrive unpin <name> <remote-path>
                                   clears an explicit pin, or excludes the path if it
                                   inherits a pin from a folder above (§7.1.1)
@@ -1246,7 +1291,8 @@ that; the rest follows.
 **One chokepoint for every remote path.** The SFTP layer has no API that
 takes a string path. Every operation takes a `RelativePath`, a value type
 that can only be constructed from validated components, and the transport
-joins it to the canonical root itself. A component is rejected if it is
+joins it to the canonical root itself. A path may have zero components,
+which is the root itself (§7.1.2); a component is rejected if it is
 empty, `.`, `..`, or contains `/` or NUL. Filenames arriving from the system
 (`createItem`, `modifyItem` renames) and paths arriving from the CLI, the
 sweep output, `inotifywait` and the helper all pass through that constructor
@@ -1387,7 +1433,7 @@ uploads are held by the system and survive.
 | S3 | Minimal replicated extension: list, open, save, rename against a real SFTP server through the agent; observe the sidebar label and mount path with two domains and with `displayName` set to `nas` versus `SSH Drive - nas`; confirm the system requests `enumerateChanges` on a folder's enumerator when Finder shows it; what Finder does with `.filenameCollision`; what the delete confirmation looks like without `allowsTrashing`. Include a containment test: replace an enumerated directory with a symlink to `/etc` on the server and confirm nothing inside it is listed, fetched or deleted. | Settles the naming scheme (§2, §4), the root-set design (§6.5), the trash decision (§5.4), and the §9.1 guarantees from the first build. |
 | S4 | Does `evictItem` work for files in our domain, does atime on materialized files advance on read, and does the system refuse to evict an item with pending changes? | Determines whether TTL eviction can use real last-access and whether it needs a pending-upload check of its own. |
 | S5 | Behaviour when throwing `.serverUnreachable` for writes: how long the system retries, and whether `NWPathMonitor` + `signalEnumerator` reliably wakes the flush. What the extension sees when the agent's mach service is unavailable (login item disabled). | The "no fuss across network drops" requirement rests on this, and so does the agent-missing message (§5.2). |
-| S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, whether the built-in "Remove Download" is hidden, fails, or succeeds on a pinned item, and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
+| S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, whether the built-in "Remove Download" is hidden, fails, or succeeds on a pinned item, and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. Also: does the eager policy on the item returned for `.rootContainer` download the whole location, and do custom actions appear when right-clicking the background of the location's top-level window or its sidebar entry, with the root as the selected item (§7.1.2)? | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
 | S7 | Run tier 1 and tier 2 (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running `inotifywait` stream coexist with two SFTP channels on one connection, and how long does the `find -mmin` sweep take on a 1M-file tree with 200 roots? Check `-mmin` and `-printf` across GNU, BSD and busybox `find`, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells. | Decides whether tiers 1–2 are practical on one connection, sets the default poll interval, and proves the quoting design. |
 | S8 | Return an item with `contentType = .symbolicLink` and `symlinkTargetPath`: does the system create a real symlink under CloudStorage, does Finder badge it, does a relative target resolve inside the mount, how does Finder present a dangling one, does `ln -s` inside the mount reach `createItem` with the target intact so escaping targets can be refused? | Confirms §5.7 end to end. |
 | S9 | Does calling `NSFileProviderManager.add(domain)` with an existing identifier and a new `displayName` rename the domain in place, keeping cache and pending uploads? | If yes, `set nickname` stops re-creating the domain and the §13 data-loss caveat goes away. |
@@ -1472,6 +1518,7 @@ Questions that were open during drafting and how they were settled:
 - **Permissions** are mapped to Finder capabilities using `id` from the
   probe; SFTP-only accounts see everything as writable.
 - **Pins** live only in the index, with export/import for portability.
+  The root is pinnable like any folder (§7.1.2).
 - **Content versions** are size + mtime at the polling tiers and gain
   nanosecond mtime + inode wherever the helper or GNU `find` runs.
 - **Nickname changes** re-create the domain, because the sidebar name is the
