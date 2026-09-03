@@ -286,7 +286,13 @@ TCP connection with the user's terminal sessions; `UpdateHostKeys`, so an
 and the session-shape keywords (`RemoteCommand`, `RequestTTY`,
 `StdinNull`, `ForkAfterAuthentication`, `BatchMode`,
 `PermitLocalCommand`, `ForwardAgent`) that would detach the master or
-break a `ProxyJump` hop. Mux clients read no config at all (§6.1).
+break a `ProxyJump` hop. One more keyword is overridden for most
+locations: `IdentityAgent` is forced to `none` on every runtime
+connection of a location that authenticated without a key agent at
+`add`, so that a 1Password or Secretive agent named in the config is
+never asked to sign for a mount that has its own stored passphrase
+(§4.2, §6.1); a location that needed the agent at `add` keeps the
+config's value. Mux clients read no config at all (§6.1).
 
 The agent runs `ssh -G <host>` at `add` time and for `sshdrive show`, so
 the user can see what the location resolves to ("user: alec, port: 2222,
@@ -573,8 +579,8 @@ answered from the index by the extension itself:
 |---|---|
 | `enumerator(for: container)` → `enumerateItems` | `opendir/readdir` the mapped path over SFTP, reconcile with the index, return items. Records the folder as recently viewed (§6.5). |
 | `enumerator(for: container)` → `enumerateChanges(from:)` | Same, diffed against the index; this is how a folder refreshes when Finder shows it (verify in S3). |
-| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by change detection (§6.4) from the index, in the extension (§5.2). Never touches the network or the agent. |
-| `item(for: identifier)` | Read the index row, in the extension (§5.2). Never touches the network or the agent. |
+| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by change detection (§6.4) from the index, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
+| `item(for: identifier)` | Read the index row, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
 | `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file (§5.2); the extension then returns that URL. Partial fetches serve range requests for large media. The `Progress` the extension returns is fed by byte counts from the agent, and cancelling it cancels the transfer (§5.2). |
 | `createItem` | `mkdir`, `symlink` (§5.7), or upload-to-temp + non-overwriting `rename` into place (§5.5). |
 | `modifyItem` | Depending on `changedFields`: rename/move (non-overwriting `rename`, with every descendant's path rewritten in the index, §5.3), content (upload + `posix-rename`, then a post-upload `lstat` that records the new version, §5.5), attributes (`setstat` mtime), extended attributes (stored locally, §5.4). |
@@ -845,7 +851,16 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   The close comes first because the reader has the `-shm` mapped, and
   truncating a mapped file under a live process faults it on its next
   access; the sidecars go because a zero-length database with a
-  surviving WAL would have that WAL replayed into it. The reader's side of this is one rule: any SQLite
+  surviving WAL would have that WAL replayed into it. An extension
+  instance that the system launches between the close and the truncate
+  is covered by one rule at reader open: before an instance opens the
+  index for the first time it asks the agent whether the index is
+  ready, one XPC call per instance launch rather than per item, and an
+  agent mid-restore answers no, so the instance serves
+  `.serverUnreachable` and opens nothing until the reopen callback
+  arrives. An agent that cannot be reached at all leaves the instance
+  free to open the reader, since a missing agent is the case the direct
+  reader exists for. The reader's side of this is one rule: any SQLite
   error, a corrupt page, a not-a-database header during the truncate
   window, a missing table, is answered as `.serverUnreachable`, never as
   `.noSuchItem`, so a rebuild in progress can never look like a
@@ -1014,7 +1029,10 @@ and are ignored by every change-detection tier.
   `content_version`, and resets the row's `inode` and `mtime_ns` to null
   (§5.3), because the rename gave the path a new inode that `lstat`
   cannot report. The item `createItem` / `modifyItem` return carries the
-  truncated date, so the system's copy and the server's agree. The next
+  date the `lstat` read back, which is the truncated date when the
+  `setstat` was honoured and the server's own write time when an account
+  is not allowed to set times, so the system's copy and the server's
+  agree either way. The next
   poll, sweep or helper event for that path then finds a version the
   index already holds, records the fresh inode and ns-mtime, and reports
   nothing, so the agent's own writes never come back as remote changes or
