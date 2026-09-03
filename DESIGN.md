@@ -879,7 +879,8 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   the only copy that exists: the system's replica holds every identifier
   it has been given, keyed by the file it shows the user. So the index
   runs in WAL mode, the agent takes a `VACUUM INTO
-  domains/<id>/index.sqlite.bak` once a day and after pin changes,
+  domains/<id>/index.sqlite.bak` once a day, after a reconcile, and after
+  pin changes,
   debounced to at most one per minute so a Finder multi-select that pins
   hundreds of items produces one backup rather than hundreds, and a
   corrupt index is restored from the backup, with the anchors since then
@@ -1788,8 +1789,9 @@ index), or at tier 0 a `readdir` of every root with the rotation of
 working-set anchor (§5.3).
 
 **Schedule for tiers 0 and 1.** Every 60 s while the user has touched the
-domain in the last 10 minutes, every 10 min otherwise, and immediately on
-network-up. The helper replaces the schedule with events; a sweep still
+domain in the last 10 minutes (a File Provider request for it that was
+not a system request, or a CLI command naming it), every 10 min
+otherwise, and immediately on network-up. The helper replaces the schedule with events; a sweep still
 runs every 30 min as insurance against missed events.
 
 #### Tier 0: SFTP poll
@@ -1808,7 +1810,9 @@ find "$@"             \( -type d -o -type f \) -cmin -<N> -print0     # pin root
 ```
 
 Two invocations because `-maxdepth` applies to every starting point of one
-`find`. `-cmin` (change time) rather than `-mmin`: ctime moves whenever
+`find`, and each is run in batches of at most 64 KB of root arguments,
+since the roots reach `find` as its argv and a few thousand
+`materialized` roots would otherwise brush a kernel's argument limit. `-cmin` (change time) rather than `-mmin`: ctime moves whenever
 mtime does, and also on `chmod`, `chown` and on writes that preserve mtime
 (`rsync -t`, `cp -p`, `touch -r`), all of which `-mmin` would miss and all
 of which change our content or metadata version. `-cmin` rather than
