@@ -28,8 +28,11 @@ already made, the questions still open, and the order of work.
   SSH and similar). If `ssh nas` works in a terminal, `sshdrive add nas`
   works, with one class of exception: anything that needs a human on every
   connection (a touch-required FIDO key, a one-time code) cannot run
-  unattended, and `add` refuses it with an explanation rather than mounting
-  something that breaks on the first reconnect (§4.2). The agent runs `ssh`
+  unattended. `add` refuses the ones `ssh` itself reports, with an
+  explanation, rather than mounting something that breaks on the first
+  reconnect; prompts raised inside a key agent (Secretive, 1Password, a
+  FIDO key held by `ssh-agent`) are invisible to `add` and are caught by
+  the authentication deadline instead (§4.2). The agent runs `ssh`
   with the `PATH` and `SSH_AUTH_SOCK` of the user's login shell, not
   launchd's, so agents and `ProxyCommand` tools set up in a shell rc file
   work too (§6.1).
@@ -204,7 +207,9 @@ Entitlements per target:
   "identityFile": "~/.ssh/id_nas",   // optional override, passed as -o IdentityFile= -o IdentitiesOnly=yes
   "sshOptions": ["ProxyJump=bastion"], // optional extra -o options, verbatim
   "remotePath": "/srv/media",        // optional; default is the SFTP realpath of "." (the user's home)
-  "secrets": ["password:alec@nas"],  // which keychain items exist: password:<user>@<host>, passphrase:<keypath> (§4.2)
+  "secrets": ["password:alec@nas.tail1234.ts.net"],
+                                     // which keychain items exist: password:<user>@<hostname>, passphrase:<keypath>;
+                                     // user and hostname as resolved by `ssh -G`, never the alias (§4.2)
   "cacheTTL": "1h",                  // 15m | 1h | 12h | 1d | 1w | 1mo | never
   "permissions": "mode",             // mode | none: whether server mode bits become Finder capabilities (§5.4)
   "watchMode": "auto",               // auto | poll | sweep | inotify | helper (§6.4)
@@ -242,7 +247,12 @@ terminal sessions (§6.1).
 
 The agent runs `ssh -G <host>` at `add` time and for `sshdrive show`, so
 the user can see what the location resolves to ("user: alec, port: 2222,
-identity: ~/.ssh/id_nas (from ~/.ssh/config)"). Explicit flags on `add`
+identity: ~/.ssh/id_nas (from ~/.ssh/config)"). `ssh -G` prints resolved
+values only, with no indication of where each came from, and lists the
+default identity files whether or not the config named one; the "from
+~/.ssh/config" attribution comes from diffing `ssh -G <host>` against
+`ssh -F /dev/null -G <host>`, since a value that differs between the two
+came from the config. Explicit flags on `add`
 become overrides stored in the location and passed as `-o` options, which
 take precedence over the config file, as they do for `ssh`. The
 environment `ssh` sees is described in §6.1: launchd's, with `PATH` and
@@ -287,15 +297,18 @@ The agent classifies the prompt:
 | Prompt from `ssh` | Keychain item | Answer |
 |---|---|---|
 | `Enter passphrase for key '<path>':` | `passphrase:<path>` | the stored passphrase |
-| `<user>@<host>'s password:` | `password:<user>@<host>` | the stored password |
-| a keyboard-interactive `Password:` with no user or host in the text | `password:<user>@<host>` for the destination of the asking `ssh` (from its argv), `<user>` from `ssh -G` | the stored password |
+| `<user>@<hostname>'s password:` | `password:<user>@<hostname>` | the stored password |
+| a keyboard-interactive `Password:` with no user or host in the text | `password:<user>@<hostname>` for the destination of the asking `ssh` (from its argv), `<user>` and `<hostname>` from `ssh -G` | the stored password |
 | `SSH_ASKPASS_PROMPT=confirm` (the host-key question, §4.3) | none | during `add`: relayed to the terminal; otherwise refused |
 | `SSH_ASKPASS_PROMPT=none` (`Confirm user presence for key …`) | none | acknowledged; during `add` this marks the key as touch-required (below) |
 | `Enter PIN for … key`, a one-time code, anything else | none | refused |
 
-Keying passwords by `<user>@<host>` rather than by location is what makes
-`ProxyJump` work with password auth on both hops: each hop's prompt names
-its own host and gets its own item. A refused prompt makes `ssh` fail; the
+Keying passwords by `<user>@<hostname>` rather than by location is what
+makes `ProxyJump` work with password auth on both hops: each hop's prompt
+names its own host and gets its own item. `<hostname>` is the resolved
+`hostname` from `ssh -G`, which is also the string `ssh` puts in the
+prompt; the alias the user typed never appears in a key, so `nas` and
+`nas.tail1234.ts.net` share one item. A refused prompt makes `ssh` fail; the
 domain shows `.notAuthenticated`, reconnection stops (§6.1), and
 `sshdrive status` prints the prompt text so the user knows what the server
 wanted.
@@ -328,6 +341,23 @@ FIDO key generated with `no-touch-required`, or a password. Mounting such a
 location would succeed once and then fail into `.notAuthenticated` on the
 first unattended reconnect, with nobody watching for the touch; refusing up
 front is kinder. `sshdrive unlock` for one-time codes is future work (§14).
+
+**What `add` cannot see, and the authentication deadline.** A key held by
+an agent is signed by the agent, and any prompt for a touch or a
+biometric comes from the agent's own UI, never through `ssh`'s askpass:
+Secretive keys configured to require Touch ID, 1Password's per-session
+authorisation, and a FIDO key loaded into `ssh-agent` all pass the collect
+connection while the user is at the keyboard and then wait for a human on
+every unattended reconnect. `add` cannot detect these, and `ConnectTimeout`
+does not cover the authentication phase. So every connection carries an
+**authentication deadline** of the agent's own: if `ssh` has not reached
+the SFTP init reply 60 s after it was started, the agent kills it and
+treats the result as an authentication failure. Reconnection stops (§6.1)
+and `sshdrive status` says "authentication did not complete within 60 s;
+a key agent may be waiting for a touch or approval", with the fix: use a
+stored passphrase, an agent key that does not prompt, or a password, then
+`sshdrive test`. The first unattended reconnect is therefore what tells
+the user, once, rather than a prompt appearing on every retry.
 
 ### 4.3 Host keys
 
@@ -370,7 +400,7 @@ Every call is forwarded to the agent (§5.2), which does the work:
 | `item(for: identifier)` | Read the index row. Never touches the network. |
 | `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file (§5.2); the extension then returns that URL. Partial fetches serve range requests for large media. |
 | `createItem` | `mkdir`, `symlink` (§5.7), or upload-to-temp + non-overwriting `rename` into place (§5.5). |
-| `modifyItem` | Depending on `changedFields`: rename/move (non-overwriting `rename`), content (upload + `posix-rename`), attributes (`setstat` mtime), extended attributes (stored locally, §5.4). |
+| `modifyItem` | Depending on `changedFields`: rename/move (non-overwriting `rename`, with every descendant's path rewritten in the index, §5.3), content (upload + `posix-rename`, then a post-upload `lstat` that records the new version, §5.5), attributes (`setstat` mtime), extended attributes (stored locally, §5.4). |
 | `deleteItem` | `remove`, or `rmdir` after a server-side depth-first walk when the recursive option is set (§5.5). |
 | `materializedItemsDidChange` | Forwarded so the agent can refresh its root set (§6.5) and the pin safety net (§7.2). |
 | `performAction` | Pin / unpin (§7.2). |
@@ -439,6 +469,7 @@ only copy of everything we know about the remote tree:
 items(identifier TEXT PK, path TEXT UNIQUE, parent TEXT, type, size, mtime,
       mtime_ns INTEGER, inode INTEGER,  -- when a push tier or GNU sweep reports them (§6.4)
       uid INTEGER, gid INTEGER, mode INTEGER,
+      generation INTEGER DEFAULT 0,  -- bumped when ns-mtime or inode evidence shows a change SFTP cannot (below)
       content_version TEXT, last_fetch REAL, deleted_at REAL,
       pin_state INTEGER DEFAULT 0,   -- 0 inherit, 1 pinned, -1 excluded (§7.1.1)
       hidden INTEGER DEFAULT 0,      -- 1 symlink omitted (§5.7), 2 name collision (§5.4), 3 our temp file, 4 local-only (§5.4)
@@ -453,16 +484,31 @@ held(path TEXT PK, dir TEXT, first_missing REAL, recheck_at REAL)   -- mass-dele
   identifier `NSFileProviderItemIdentifier.rootContainer`, created when the
   domain is, so it can carry a pin state and xattrs like any other item.
 - Rename/move initiated by the user (via `modifyItem`) updates `path` and keeps
-  the identifier.
+  the identifier. Moving a directory rewrites `path` on every descendant
+  row, and on the matching rows of `roots` and `held`, in one transaction;
+  pin markers need nothing extra because `pin_state` lives on the same
+  rows. That is O(subtree) per directory rename and is the price of
+  path-keyed tables; `parent` is kept alongside `path` so the rewrite can
+  walk by identifier rather than by string prefix. A rename reported by
+  the helper (tier 3) is applied the same way.
 - Renames done remotely (outside Finder) appear as delete + create at the
   polling tiers; tiers 2 and 3 report real renames and the identifier is
   kept.
-- `content_version` = `"\(size)-\(mtime)"` at the polling tiers. SFTP v3
-  reports mtime in whole seconds, so two writes of the same size within one
-  second, or a `cp -p` that preserves mtime, are indistinguishable. Where
-  the helper or a GNU `find` sweep runs, the version becomes
-  `"\(size)-\(mtime_ns)-\(inode)"` and those cases are caught. Metadata
-  version = content version plus mode, uid, gid and the pin state.
+- `content_version` = `"\(size)-\(mtime)-\(generation)"` at every tier,
+  with mtime in the whole seconds SFTP v3 reports. The size and mtime
+  fields must be reproducible from a plain SFTP `lstat`, because that is
+  all the conflict check in §5.5 has in hand, and because a location can
+  change tier mid-session (§6.4): a version whose format depended on the
+  tier would turn every tier change into a modification of every item and
+  every save on a helper-tier location into a conflict. So the nanosecond
+  mtime and inode that the helper or a GNU `find` sweep report are stored
+  in their own columns and used only by change detection: when either
+  differs from the stored value while size and second-mtime do not (two
+  writes of equal size within one second, a `cp -p` that preserved mtime),
+  the agent bumps the row's `generation`, which changes the version and
+  makes the system re-fetch. The conflict check compares only the size and
+  mtime fields. Metadata version = content version plus mode, uid, gid and
+  the pin state.
 - A rename reported by the helper (§6.4 tier 3) whose destination path
   already has a row is applied as a *modify* of the destination's
   identifier, and the source row is deleted. Editors save by writing a
@@ -472,9 +518,13 @@ held(path TEXT PK, dir TEXT, first_missing REAL, recheck_at REAL)   -- mass-dele
   suppress events *about* temp names but still report a rename *out of*
   one, so a save through `.file.swp` or `file~` reaches the index as one
   content change to `file`.
-- If the system presents an anchor the index no longer knows (index
-  rebuilt), the agent answers `.syncAnchorExpired` and the system
-  re-enumerates.
+- `anchors` is pruned to the newest 30 days or 100,000 rows, whichever is
+  smaller. If the system presents an anchor the index no longer knows
+  (older than the oldest kept row, or the index was rebuilt), the agent
+  answers `.syncAnchorExpired` and the system re-enumerates; pruning and
+  rebuilds are the only two sources of that error. `enumerateItems` on the
+  working set returns no items and the current sequence number as the
+  anchor: the working set is only ever a change stream, never a listing.
 - The index is the only copy of the identifiers; losing it turns every
   item into a delete plus a create as far as the system is concerned,
   which drops the cache and every local xattr. It therefore runs in WAL
@@ -502,12 +552,15 @@ sent to the server exactly as the system provides them; we never
 normalise.
 
 **Permissions become capabilities.** The capability probe (§8.1) runs
-`id -u -G` where exec is available, and every item's `capabilities` are
-computed from its `mode`, `uid`, `gid` and that identity: a file the
-account cannot write loses `allowsWriting`, a directory it cannot write
-loses `allowsAddingSubItems`, `allowsRenaming` and `allowsDeleting` follow
-the parent's write bit. Finder then shows a lock and refuses the edit up
-front instead of failing the upload later. SFTP-only accounts, where the
+`id -u` and `id -G` where exec is available, and every item's `capabilities` are
+computed from its `mode`, `uid`, `gid` and that identity: a file loses
+`allowsWriting` when the account cannot write it **or cannot write its
+directory**, because replacing content goes through a temp file in that
+directory (§5.5), so a writable file in a read-only directory is shown
+locked rather than failing at save time; a directory the account cannot
+write loses `allowsAddingSubItems`; `allowsRenaming` and `allowsDeleting`
+follow the parent's write bit. Finder then shows a lock and refuses the
+edit up front instead of failing the upload later. SFTP-only accounts, where the
 identity is unknown, get full capabilities and learn about permission
 errors from the sync error list. Owner and mode are shown in Finder's Get
 Info as far as the system displays them.
@@ -566,6 +619,21 @@ and are ignored by every change-detection tier.
   restored (that needs root) and hard links to the old inode are broken;
   both are documented. Servers without `posix-rename` do `remove` + `rename`,
   a non-atomic window that `status` reports as a degraded capability.
+  Creating the temp file needs write permission on the directory, so a
+  file the account can write inside a directory it cannot is **not
+  saveable through SSH Drive**: the upload fails with `EACCES`, which
+  becomes a sync error, and where the identity is known the capability
+  mapping (§5.4) already shows such files locked. Writing in place was
+  considered and rejected: it would preserve the inode, owner, ACLs and
+  hard links, but leaves a truncated file if the connection drops
+  mid-upload and a partial-file window on every save.
+- **After every upload,** create or modify, the agent `setstat`s the mode
+  back, sets the mtime to the `contentModificationDate` the system passed
+  in, `lstat`s the result, and records that size and mtime as the item's
+  `content_version`, which is what `createItem` / `modifyItem` return.
+  The next poll, sweep or helper event for that path then finds a version
+  the index already holds and reports nothing, so the agent's own writes
+  never come back as remote changes or as conflicts against themselves.
 - **Conflicts:** if the `lstat` shows a `content_version` different from the
   `baseVersion` the system passed us, the remote changed underneath the
   user. Policy: upload the local content as `<name> (conflicted copy from
@@ -710,16 +778,16 @@ Per mounted location the agent keeps one master connection and opens
 channels on it as needed, all through the system `ssh`:
 
 ```
-ssh -N -o ControlMaster=yes -o ControlPath=$TMPDIR/sshdrive-%C -o ControlPersist=yes \
-    -o StrictHostKeyChecking=yes -o ConnectTimeout=5 \
+ssh -N -o ControlMaster=yes -o ControlPath=$TMPDIR/sshdrive-<id8> -o ControlPersist=no \
+    -o StrictHostKeyChecking=yes -o ConnectTimeout=15 \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=2 \
     -o NumberOfPasswordPrompts=1 -o LogLevel=ERROR \
     <overrides as -o User= / Port= / IdentityFile=> <sshOptions…> <host>
                                                 # the master: no session, only the mux socket
-ssh -S $TMPDIR/sshdrive-%C -s <host> sftp      # SFTP channel for metadata
-ssh -S $TMPDIR/sshdrive-%C -s <host> sftp      # SFTP channel for bulk transfers
-ssh -S $TMPDIR/sshdrive-%C <host> sh -s        # exec channels: probe, sweep, inotifywait, helper (§9.2)
-ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the connection down
+ssh -S $TMPDIR/sshdrive-<id8> -s <host> sftp   # SFTP channel for metadata
+ssh -S $TMPDIR/sshdrive-<id8> -s <host> sftp   # SFTP channel for bulk transfers
+ssh -S $TMPDIR/sshdrive-<id8> <host> sh -s     # exec channels: probe, sweep, inotifywait, helper (§9.2)
+ssh -S $TMPDIR/sshdrive-<id8> -O check <host>  # is the master process alive (local only); -O exit tears it down
 ```
 
 - **The master carries no session.** It is `-N`: authentication, the TCP
@@ -727,9 +795,17 @@ ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the con
   is a mux client with its own process, so a wedged SFTP channel (a
   protocol error, a stuck server-side `sftp-server`) is killed and
   reopened on its own without touching the connection, and the master
-  outlives any one of them. `-O check` is the cheap liveness probe and
-  `-O exit` the clean shutdown. The master's exit is the disconnect signal
-  for the location.
+  outlives any one of them. `ControlPersist` is `no`, and must stay so:
+  with ControlPersist set, `ssh` forks the master into the background
+  after authentication and the process the agent spawned exits, even
+  under `-N`, which would leave the agent with no pid to supervise, no
+  stderr to read and no exit to watch. With it off, the `-N` master is
+  the agent's child for the life of the connection and its exit is the
+  disconnect signal for the location. `-O check` asks that process, over
+  the socket, whether it is alive; it says nothing about the server or
+  the TCP connection, so it is the cheap "is our child sane" check and
+  the per-request deadline (§6.2) is the real liveness probe. `-O exit`
+  is the clean shutdown.
 - **The connection is ours alone.** The user's `~/.ssh/config` may set
   `ControlMaster auto` with a `ControlPath` for the host, in which case a
   plain `ssh nas` would silently attach to a terminal session's socket, or
@@ -740,7 +816,7 @@ ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the con
   config file, so the `ControlMaster`, `ControlPath`, `ControlPersist`,
   `ConnectTimeout`, `ServerAliveInterval` and `ServerAliveCountMax` values
   above always win over whatever the config says for that host. The
-  `ControlPath` under `$TMPDIR/sshdrive-%C` is namespaced to us, so no
+  `ControlPath` under `$TMPDIR/sshdrive-<id8>` is namespaced to us, so no
   other client will find it either, and `sshdrive show` prints any
   control-socket settings the config would have applied, so the user can
   see they were overridden.
@@ -750,8 +826,22 @@ ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the con
   are channels on one TCP connection, so a server's `MaxSessions` (default
   10) is comfortably enough; the agent never holds more than five open per
   location.
-- `ControlPath` lives under `$TMPDIR` because Unix socket paths are limited
-  to 104 bytes and the group container path is long.
+- `ControlPath` is `$TMPDIR/sshdrive-<id8>`, the first eight hex digits
+  of the location id, and deliberately not `%C`. `%C` hashes user, host
+  and port, so two locations on one host (§13) would compute the same
+  socket path: the second master would find it, print "ControlSocket
+  already exists, disabling multiplexing", and its mux clients would
+  silently attach to the first location's connection. Length is the other
+  reason: Unix socket paths are limited to 104 bytes, `$TMPDIR` on macOS
+  is about 50, and `ssh` binds the socket under a temporary `<path>.<pid>`
+  name before renaming it, so a 40-character `%C` hash does not fit and
+  the group container path is longer still.
+- **Orphans are not adopted.** If the agent crashes, its `ssh -N` children
+  live on with their sockets in place, and `ControlMaster=yes` against an
+  existing socket disables multiplexing and leaves later mux clients
+  attaching to the orphan. So before its first connection the agent runs
+  `-O exit` against every `sshdrive-*` socket in `$TMPDIR` and unlinks
+  whatever is left.
 - **Dead connections are detected three ways**, because keepalive alone
   leaves a 30 s window (`15 s × 2`) in which every request stalls: the
   keepalive itself; a per-request deadline in the SFTP client (§6.2), after
@@ -766,7 +856,16 @@ ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the con
   `sshdrive test`, `sshdrive passwd`, or a change to the location's
   settings. A stale password retried every minute is a `fail2ban` ban
   within the hour, and a refused prompt (§4.2) is never going to succeed
-  unattended. stderr is kept for `sshdrive status` in both cases.
+  unattended. An authentication that has not completed by the 60 s
+  deadline (§4.2) is classified the same way and stops. The one exception
+  is a key agent that is not ready: `agent refused operation` and `Error
+  connecting to agent` on stderr are what 1Password and Secretive produce
+  between login and their first unlock, so those are classified as
+  **transient** and retried with the network backoff (§6.3) capped at
+  5 minutes, and the mount comes up once the agent is unlocked without
+  the user running `sshdrive test`. Reconnection stops only after `ssh`
+  has been refused with its keys actually offered. stderr is kept for
+  `sshdrive status` in every case.
 - **Environment for every `ssh`:** launchd's, with `HOME` so
   `~/.ssh/config` is found, the askpass variables (§4.2), and `PATH` and
   `SSH_AUTH_SOCK` replaced by a **login shell snapshot**. A launchd agent's
@@ -774,11 +873,17 @@ ssh -S $TMPDIR/sshdrive-%C -O check <host>     # liveness; -O exit tears the con
   system `ssh-agent`'s; a 1Password or Secretive socket exported from
   `.zshrc`, or a `ProxyCommand` that calls `cloudflared`, `tailscale` or
   `aws` from `/opt/homebrew/bin`, works in a terminal and is invisible to
-  launchd. The agent therefore runs
-  `$SHELL -ilc 'printf "%s\0%s\0" "$PATH" "$SSH_AUTH_SOCK"'` with a 10 s
-  timeout and takes the last two NUL-separated fields (interactive login
-  shells print banners), at agent start and again on every `add`, `test`
-  and `passwd`. Interactive *and* login, because most people put exports
+  launchd. The agent therefore runs the user's login shell, taken from
+  `getpwuid` rather than `$SHELL`, as `<shell> -ilc 'exec /usr/bin/env -0'`
+  with stdin from `/dev/null`, `TERM=dumb` and a 10 s timeout, and takes
+  `PATH` and `SSH_AUTH_SOCK` from the NUL-separated output, at agent
+  start and again on every `add`, `test` and `passwd`. `env -0` rather
+  than a `printf` of the two variables because the command has to be
+  valid in every shell: in fish `"$PATH"` expands to the list joined by
+  spaces, not colons. NUL separation keeps banners printed by rc files
+  out of the values, and stdin from `/dev/null` stops an rc file that
+  reads input or `exec`s tmux from hanging until the timeout.
+  Interactive *and* login, because most people put exports
   in `.zshrc`, not `.zprofile`. If the shell fails or times out, launchd's
   values are used and `sshdrive doctor` says so. `sshdrive show` prints
   the snapshot in use and its age. Only those two variables are taken;
@@ -841,7 +946,10 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
    touching the network. A path change, wake from sleep, or `sshdrive test`
    resets the breaker. While an attempt is in progress every other call
    fails fast too, rather than queueing behind it.
-3. `ConnectTimeout=5` bounds the one attempt that does go out.
+3. `ConnectTimeout=15` bounds the TCP and banner phase of the one attempt
+   that does go out. 15 rather than 5 because `ProxyCommand` tunnels such
+   as `cloudflared access ssh` routinely take longer than 5 s to hand over
+   a connection. Authentication has its own 60 s deadline (§4.2).
 4. A connection that died silently is found by the per-request deadline
    (§6.2) and, after sleep, by dropping the master outright (§6.1), so the
    breaker opens within seconds rather than after the keepalive window.
@@ -853,9 +961,12 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
 SFTP cannot push changes, but the SSH connection can run commands on the
 server when the account has shell (exec) access. Change detection therefore
 has four tiers. All tiers produce the same thing: a set of "dirty" remote
-paths that the agent re-`stat`s over SFTP, diffs against the index, and
-turns into working-set anchors, followed by `signalEnumerator(for:
-.workingSet)`. Nothing on the File Provider side knows which tier is active.
+paths that the agent re-`stat`s over SFTP (re-`readdir`s, for a
+directory, since a deletion is only visible as an absence in its parent's
+listing), diffs against the index, and turns into working-set anchors,
+followed by `signalEnumerator(for: .workingSet)`. Nothing on the File
+Provider side knows which tier is active, and the version format (§5.3)
+is the same at every tier so that a tier change is invisible too.
 
 | Tier | Mode | Needs on the server | Latency | Cost per cycle |
 |---|---|---|---|---|
@@ -906,10 +1017,17 @@ Two invocations because `-maxdepth` applies to every starting point of one
 mtime does, and also on `chmod`, `chown` and on writes that preserve mtime
 (`rsync -t`, `cp -p`, `touch -r`), all of which `-mmin` would miss and all
 of which change our content or metadata version. `-cmin` rather than
-`-newerct` because GNU, BSD and busybox all accept it and only GNU takes an
-epoch timestamp; `N` is the minutes since the previous sweep, rounded up,
-plus one minute of overlap. Duplicates are harmless because the result is
-diffed anyway. Both files and directories are matched: a directory's ctime
+`-newerct` because GNU, BSD and current busybox all accept it and only GNU
+takes an epoch timestamp; busybox builds older than 1.34, which some
+Synology DSM releases ship, lack `-cmin`, so the probe checks for it and
+the sweep falls back to `-mmin`, losing the `chmod`/`chown`/preserved-mtime
+cases, which `status` reports as a note. `N` is computed from the
+**server's** clock, never the Mac's: every sweep script prints `date +%s`
+first, the agent stores it, and the next sweep's `N` is the minutes
+between the stored value and the new one, rounded up, plus one minute of
+overlap. Measured on the Mac's clock, a server running a few minutes
+behind would silently miss every change until the 30-minute insurance
+sweep. Duplicates are harmless because the result is diffed anyway. Both files and directories are matched: a directory's ctime
 changes on create, delete and rename inside it, but an in-place edit
 changes only the file's own, so the file test is needed too. There is no `-xdev`: a NAS root routinely contains separate
 mounts (ZFS datasets, bind mounts), and containment comes from not following
@@ -945,8 +1063,10 @@ default) a connection that died under a sleeping laptop is noticed only
 when TCP gives up, hours later. Every reconnect would then add another
 `inotifywait` holding another full set of watches, until `max_user_watches`
 is exhausted and the tier drops. So no watcher is ever started bare: the
-stdin script (§9.2) starts `inotifywait` in the background and then loops
-reading stdin, and the agent writes a heartbeat line every 15 s. When no
+stdin script (§9.2) starts `inotifywait` in the background with its stdin
+redirected from `/dev/null`, so the child cannot consume the heartbeat
+lines, and then loops reading stdin, and the agent writes a heartbeat
+line every 15 s. When no
 line has arrived for 60 s, or stdin hits EOF, the script kills its child
 and exits. `read -t` is used where `sh` supports it (bash, zsh, ksh,
 busybox) and a `sleep`-and-mtime watchdog where it does not (dash); the
@@ -970,8 +1090,11 @@ in `SSH Drive.app`. Deployment happens over the existing connection:
    `--version`, which catches `noexec` mounts.
 2. Upload `sshdrive-helper-<version>-<os>-<arch>` over SFTP if
    `sha256sum`/`shasum` of the remote copy does not match the hash embedded in
-   the app. The version is tied to the app release; upgrades happen the same
-   way. Versions other than ours whose mtime is older than seven days are
+   the app. Where the server has neither tool, verification is the remote
+   file's size against the embedded binary plus running it with
+   `--version`, which prints its version and its own embedded build hash;
+   any mismatch re-uploads. The version is tied to the app release;
+   upgrades happen the same way. Versions other than ours whose mtime is older than seven days are
    removed: two Macs sharing one account may run different app versions,
    and each keeps its own file without deleting the other's while it is in
    use.
@@ -987,8 +1110,12 @@ What it adds over tier 2: inotify/FSEvents/kqueue used directly (no watch
 tool to install), root-set changes applied live without a restart, real
 rename events with identifiers preserved (a rename onto an existing path is
 applied as a modify of that path, §5.3), nanosecond mtime and inode in every
-event, server-side coalescing and ignore rules (`.git`, editor temp files, our
-own `.sshdrive-upload-*`), an `overflow` event that makes the agent run a
+event, server-side coalescing and a fixed, short ignore list (our own
+`.sshdrive-upload-*` and editor scratch names: `.*.swp`, `*~`, `.#*`,
+`4913`; `.git` is deliberately not on it, because a repository browsed
+through the mount must show a current `.git` or `git status` inside it
+acts on stale objects; the list is printed on the change-detection line
+of `sshdrive status`), an `overflow` event that makes the agent run a
 sweep rather than silently missing changes, and a `sweep` subcommand that does
 tier 1's job with size/mtime/inode included so no follow-up `stat`s are
 needed. It never listens on a socket, never runs detached, and exits when its
@@ -999,9 +1126,11 @@ The helper is on by default and is the first thing `auto` tries, even where
 `inotifywait` is installed, because it is the most reliable push mechanism,
 the only one that reports renames, and needs nothing installed on the
 server. Since it does place our code on the remote machine, `sshdrive add`
-states this plainly in its output ("SSH Drive will upload a small helper
-binary to ~/.cache/sshdrive on this server to watch for changes; disable
-with `sshdrive set <name> helper off`"), and `sshdrive status` shows the
+states this plainly in its output, after the probe has chosen the
+directory so the message names the real one ("SSH Drive will upload a
+small helper binary to ~/.cache/sshdrive on this server to watch for
+changes; disable with `sshdrive set <name> helper off`"), and `sshdrive
+status` shows the
 exact remote path and version in use. `helper off` stops it and removes the
 binary on the next connection; `helper on` re-enables it. Deployment
 failures are never fatal: the location silently continues at the next tier
@@ -1030,8 +1159,13 @@ the items fetches from the server and fails with `.noSuchItem`, which
 Finder shows as an error on that file; that is the honest state.
 `sshdrive status` shows "14 deletions held in Photos, re-check at 14:32",
 `sshdrive accept-deletions <name> [path]` applies them now, and
-`sshdrive test` re-checks now. The guard applies at every tier, to the
-reconnect sweep, and to the root's own listing. S5 records what the system
+`sshdrive test` re-checks now. The guard applies to deletions **inferred
+from a listing**: a tier 0 poll, the re-`readdir` of a dirty directory at
+any tier, the reconnect sweep, and the root's own listing. It does not
+apply to explicit delete events from tiers 2 and 3: an `rm -rf Photos`
+produces one event per item and is real, while a vanished mount produces
+no events at all, so holding event-driven deletions would only leave
+thousands of ghosts in Finder for 35 minutes. S5 records what the system
 does with a pending local edit on an item we report deleted, which decides
 whether the guard also needs to hold deletions of items the system lists
 as pending.
@@ -1099,6 +1233,17 @@ effective state from the `pin_state` markers on it and its ancestors before
 evicting. A file the user fetched with Finder's built-in "Download Now" is
 treated like any other cached file and falls under the TTL; use `sshdrive
 pin` to keep it.
+
+**Anything that opens files downloads them.** A dataless file is
+materialized by whichever process opens it, not only Finder: `grep -r` in
+the mount, an antivirus scanner, a backup tool other than Time Machine
+(which excludes `~/Library/CloudStorage`), or a build that reads a whole
+tree will download everything it touches, and the TTL is the only thing
+that later frees the space. This is true of every File Provider domain.
+v1 adds no mechanism against it: no download budget, no size cap on
+unsolicited fetches. The user docs say it plainly, and `sshdrive status`
+shows the materialized total so an unexpected download is at least
+visible.
 
 ### 7.1 Pinning: keep a folder fully offline
 
@@ -1178,7 +1323,11 @@ Three invariants govern every change:
    exclusion when nothing above is kept. Invariant 2 makes this safe: a pin
    nested inside a kept subtree with no exclusion in between can
    never behave differently from inheriting, because any change to the
-   ancestor wipes it. So such redundant markers are never created.
+   ancestor wipes it. So such redundant markers are never created. One
+   case needs spelling out: markers move with their paths (below), so an
+   exclusion can end up with no pin above it. "Make this kept" on such an
+   item removes the exclusion *and* writes `pinned`, since removing the
+   exclusion alone would leave it inheriting nothing.
 
 Because of invariant 3 there are only two user-facing operations, `pin`
 ("keep downloaded") and `unpin` ("don't keep downloaded"), and each item is
@@ -1189,7 +1338,7 @@ in exactly one of five situations:
 | A. plain | none | no | writes `pinned` here; subtree cleared | no-op (CLI says so; Finder hides the entry) |
 | B. pin root | `pinned`, on this item | yes | CLI only: re-asserts the pin, clearing the subtree (the one-command reset). Finder hides the entry. | removes the pin; subtree cleared; content stays and goes under the TTL |
 | C. inheriting a pin | `pinned`, on an ancestor | yes | no-op (CLI names the covering ancestor; Finder hides the entry) | writes `excluded` here; subtree cleared; ancestor and siblings untouched |
-| D. exclusion | `excluded`, on this item | no | removes the exclusion, so the item is kept by the ancestor's pin again; subtree cleared | no-op |
+| D. exclusion | `excluded`, on this item | no | removes the exclusion, so the item is kept by the ancestor's pin again, or writes `pinned` in its place when no ancestor is pinned (an exclusion moved out of its kept tree); subtree cleared | no-op |
 | E. inheriting an exclusion | `excluded`, on an ancestor | no | writes `pinned` here (re-include below the exclusion); subtree cleared | no-op |
 
 Finder always shows exactly the one entry that changes the item's effective
@@ -1203,7 +1352,15 @@ them:
 - Unpinning the top folder forgets its exclusions too, so a later re-pin
   starts clean. Both `pin` and `unpin` print how many nested states they
   cleared, so a reset is visible: "Pinned Projects (cleared 3 nested
-  exclusions and 1 nested pin)".
+  exclusions and 1 nested pin)". Finder has no output channel, so the
+  same clearing is silent there: "Don't Keep Downloaded" followed by
+  "Keep Downloaded" on a pin root discards every exclusion under it and
+  starts downloading whatever they held. This is accepted. A Finder path
+  that cleared nothing would make the same two clicks mean different
+  things in Finder and in the CLI, which was judged worse than the
+  occasional surprise; `sshdrive pins` shows what is left, and the badge
+  on a previously excluded folder reappears, which is the only feedback
+  Finder gives.
 - Exclusions can nest: pin `Projects`, exclude `Projects/archive`, re-pin
   `Projects/archive/2026`. Each level wins over the one above it.
 - The recursive watch of kept subtrees (§6.5) skips excluded subtrees.
@@ -1420,7 +1577,9 @@ offers. The probe runs on every connection and on `sshdrive test` and
 `domains/<id>/capabilities.json` with a timestamp and the server banner. It
 consists of the SFTP `extensions` list from the SFTP init reply, whether an
 exec channel opens, and one shell script (§9.2) that reports
-`uname -sm`, `id -u -G`, the `find` flavour, the presence of `inotifywait`,
+`uname -sm`, `id -u` and `id -G` (two commands: POSIX `id` accepts only
+one of `-u`, `-g`, `-G` per invocation), the `find` flavour and whether
+it takes `-cmin`, the presence of `inotifywait`,
 `fswatch`, `sha256sum`/`shasum`, and a writable, executable cache directory.
 
 The catalogue of server-dependent features:
@@ -1429,7 +1588,7 @@ The catalogue of server-dependent features:
 |---|---|---|
 | Change detection | helper · inotify · sweep · poll | shell access plus a writable directory for the helper; otherwise `inotify-tools`/`fswatch` on the server |
 | Rename detection | rename events (helper) · delete+create | the helper |
-| Change versions | ns-mtime + inode (helper or GNU sweep) · size + mtime | shell access |
+| Change evidence | ns-mtime + inode (helper or GNU sweep) · size + mtime | shell access |
 | Permissions | mapped to Finder capabilities (`id` available) · everything writable | shell access; `permissions none` turns the mapping off where ACLs make mode bits misleading (§5.4) |
 | Atomic overwrite | `posix-rename@openssh.com` · remove+rename | OpenSSH ≥ 4.9 or a server that offers the extension |
 | Durable writes | `fsync@openssh.com` · none | OpenSSH ≥ 6.3 |
@@ -1467,8 +1626,9 @@ SSH Drive - nas
 
   Capabilities  7/8 optimal   probed 3m ago
   ● change detection   helper 1.2.0 at ~/.cache/sshdrive (push, ~1s)   watch-mode auto
+        ignores: .sshdrive-upload-*  .*.swp  *~  .#*  4913
   ● rename detection   helper move events
-  ● change versions    ns-mtime + inode
+  ● change evidence    ns-mtime + inode
   ● permissions        mapped (uid 1000, groups 1000 100)
   ● atomic overwrite   posix-rename@openssh.com
   ● durable writes     fsync@openssh.com
@@ -1486,7 +1646,7 @@ SSH Drive - work
         upgrade: shell access on the server enables the helper (push); without a writable directory, inotify-tools also enables push, and plain shell access enables remote sweep
   ◐ rename detection   delete + create (identifiers not preserved on remote renames)
         upgrade: the helper, which needs shell access
-  ◐ change versions    size + mtime (same-second rewrites of equal size are missed)
+  ◐ change evidence    size + mtime (same-second rewrites of equal size are missed)
         upgrade: shell access
   ◐ permissions        everything shown writable; permission errors appear after upload
         upgrade: shell access
@@ -1640,6 +1800,10 @@ So:
   helper deployment and every other remote command. The same script
   carries the heartbeat loop that kills its child when the agent stops
   writing to it (§6.4 tier 2).
+- **Background children never share the script's stdin.** `inotifywait`,
+  `find`, `fswatch` and the helper are started with `</dev/null`, so the
+  wrapper is the only reader of the heartbeat lines and a child cannot
+  swallow them and get itself killed for silence.
 - **Output is NUL-delimited** wherever a filename can appear (`-print0`,
   `%0` in `inotifywait`'s format, NDJSON from the helper) and parsed as
   bytes, never split on newlines.
@@ -1667,10 +1831,17 @@ So:
   item if needed, notices the launchd-managed instance already holds the
   mach service, and exits. macOS asks the user once to allow the login item;
   that system notification is the only "UI" the user ever sees.
-- The cask's `uninstall` stanza runs `sshdrive remove --all --force` before
-  deleting the app, so no ghost domains are left in the sidebar, and
-  unregisters the login item. `zap` removes the group container and keychain
-  items.
+- Homebrew runs a cask's `uninstall` directives on `brew upgrade` and
+  `brew reinstall` as well as on `brew uninstall`, so nothing destructive
+  may live there. The `uninstall` stanza only quits the agent (`quit:` on
+  the bundle id and `launchctl:` on the agent label); locations, domains,
+  the local replica and pending uploads all survive an upgrade untouched.
+  `zap` is where removal lives: it runs `sshdrive remove --all --force`,
+  unregisters the login item, and deletes the group container and the
+  keychain items. A plain `brew uninstall --cask ssh-drive` therefore
+  leaves domains registered for a provider that no longer exists; their
+  sidebar entries show as unavailable until `brew uninstall --zap` or a
+  reinstall, and the cask's `caveats` say so.
 
 ### 10.1 Repository and hosting
 
@@ -1726,12 +1897,12 @@ uploads are held by the system and survive.
 | # | Question | Why it matters |
 |---|---|---|
 | S1 | The process boundary, in this order: (a) a sandboxed File Provider appex connects to the app-group-prefixed mach service declared in the `SMAppService` agent's plist, and launchd starts the agent on that lookup; (b) the agent's listener validates the peer's audit token against our code requirement (§5.2); (c) a `FileHandle` opened by the extension crosses NSXPC and the agent can write through it; (d) the app bundle with an embedded Developer ID profile and `keychain-access-groups` on the agent passes notarization and reaches the data-protection keychain, while the bare CLI and askpass launch with no restricted entitlements (§3.1); (e) `NSFileProviderManager.add(domain)` from the launchd-started agent associates the domain with our extension, and `open -g` from a Homebrew `postflight` registers both the extension and the login item. | Everything else in the design assumes (a) through (d). If any of them fails, the component split in §3 changes before a line of SFTP is written. (e) decides whether install needs any manual step. |
-| S2 | `ssh` under our supervision, run from the launchd-started agent and not from a terminal: `none` auth against Tailscale SSH; an encrypted ed25519 key via askpass with `SSH_ASKPASS_REQUIRE=force` and the token protocol (§4.2); a key reachable only through an `SSH_AUTH_SOCK` exported in `.zshrc` and a `ProxyCommand` that calls a Homebrew tool, both of which only the login shell snapshot (§6.1) makes work; `ProxyJump` with a password on both hops; the `SSH_ASKPASS_PROMPT` values `ssh` sets for the host-key question and a FIDO user-presence notice; a `-N` master with SFTP and exec mux clients, and killing one client without disturbing the others; throughput of our SFTP client with pipelining against `sftp(1)` and `rsync` on a 1 GB file and on 10,000 small files. | Validates the transport decision and the auth goal in §1 before anything is built on it, including the claim that a location which passes `add` cannot fail from the agent. |
-| S3 | Minimal replicated extension: list, open, save, rename against a real SFTP server through the agent; observe the sidebar label and mount path with two domains and with `displayName` set to `nas` versus `SSH Drive - nas`; confirm the system requests `enumerateChanges` on a folder's enumerator when Finder shows it; what Finder does with `.filenameCollision`; what the delete confirmation looks like without `allowsTrashing`. Include a containment test: replace an enumerated directory with a symlink to `/etc` on the server and confirm nothing inside it is listed, fetched or deleted. Measure the cost of `item(for:)` as an XPC round trip to the agent under a 50,000-entry listing (§5.2). | Settles the naming scheme (§2, §4), the root-set design (§6.5), the trash decision (§5.4), the §9.1 guarantees from the first build, and whether the extension needs a metadata cache of its own. |
-| S4 | Does `evictItem` work for files in our domain, does atime on materialized files advance on read, and does the system refuse to evict an item with pending changes? | Determines whether TTL eviction can use real last-access and whether it needs a pending-upload check of its own. |
-| S5 | Behaviour when throwing `.serverUnreachable` for writes: how long the system retries, and whether `NWPathMonitor` + `signalEnumerator` reliably wakes the flush. What the extension sees when the agent's mach service is unavailable (login item disabled). What the system does with a pending local edit when the extension reports that item, or its parent, deleted through the working set. | The "no fuss across network drops" requirement rests on this, and so does the agent-missing message (§5.2). The last question decides whether the mass-deletion guard (§6.4) must also hold deletions of pending items. |
-| S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, whether the built-in "Remove Download" is hidden, fails, or succeeds on a pinned item, and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. Also: does the eager policy on the item returned for `.rootContainer` download the whole location, and do custom actions appear when right-clicking the background of the location's top-level window or its sidebar entry, with the root as the selected item (§7.1.2)? | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
-| S7 | Run tier 1 and tier 2 (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running `inotifywait` stream coexist with two SFTP channels on one connection, and how long does the `find -cmin` sweep take on a 1M-file tree with 200 roots? Check `-cmin` and `-printf` across GNU, BSD and busybox `find`, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells. Kill the client abruptly with `ClientAliveInterval` unset on the server and record whether a bare `inotifywait` survives, and whether the heartbeat wrapper (§6.4 tier 2) kills it within a minute under dash, busybox and bash. | Decides whether tiers 1–2 are practical on one connection, sets the default poll interval, proves the quoting design, and proves that nothing we start outlives the connection. |
+| S2 | `ssh` under our supervision, run from the launchd-started agent and not from a terminal: `none` auth against Tailscale SSH; an encrypted ed25519 key via askpass with `SSH_ASKPASS_REQUIRE=force` and the token protocol (§4.2); a key reachable only through an `SSH_AUTH_SOCK` exported in `.zshrc` and a `ProxyCommand` that calls a Homebrew tool, both of which only the login shell snapshot (§6.1) makes work; `ProxyJump` with a password on both hops; the `SSH_ASKPASS_PROMPT` values `ssh` sets for the host-key question and a FIDO user-presence notice; a `-N` master with SFTP and exec mux clients, and killing one client without disturbing the others; that the master stays in the foreground as our child with `ControlPersist=no` and detaches with `ControlPersist=yes` (§6.1); the 60 s authentication deadline firing against an agent-held key that waits for a touch, and `agent refused operation` being retried rather than stopping (§4.2, §6.1); throughput of our SFTP client with pipelining against `sftp(1)` and `rsync` on a 1 GB file and on 10,000 small files. | Validates the transport decision and the auth goal in §1 before anything is built on it, including the claim that a location which passes `add` cannot fail from the agent. |
+| S3 | Minimal replicated extension: list, open, save, rename against a real SFTP server through the agent; observe the sidebar label and mount path with two domains and with `displayName` set to `nas` versus `SSH Drive - nas`; confirm the system requests `enumerateChanges` on a folder's enumerator when Finder shows it; what Finder does with `.filenameCollision`; what the delete confirmation looks like without `allowsTrashing`. Include a containment test: replace an enumerated directory with a symlink to `/etc` on the server and confirm nothing inside it is listed, fetched or deleted. Measure the cost of `item(for:)` as an XPC round trip to the agent under a 50,000-entry listing (§5.2); if it is too slow, measure the alternative, the extension opening `index.sqlite` read-only in WAL mode from the group container, which the single-writer design already permits (§5.3). | Settles the naming scheme (§2, §4), the root-set design (§6.5), the trash decision (§5.4), the §9.1 guarantees from the first build, and whether the extension reads the index directly instead of asking the agent for every item. |
+| S4 | Does `evictItem` work for files in our domain, does atime on materialized files advance on read, does the system refuse to evict an item with pending changes, and do Finder tags and other xattrs served from our index survive eviction, which §5.4 assumes? | Determines whether TTL eviction can use real last-access, whether it needs a pending-upload check of its own, and whether local xattrs need re-applying after an evict. |
+| S5 | Behaviour when throwing `.serverUnreachable` for writes: how long the system retries, and whether `NWPathMonitor` + `signalEnumerator` reliably wakes the flush. How long the system waits after `.serverUnreachable` from `fetchContents` before calling again, since that, not our breaker, bounds the spinner Finder shows when a fetch arrives during a reconnect (§6.3). What the extension sees when the agent's mach service is unavailable (login item disabled). What the system does with a pending local edit when the extension reports that item, or its parent, deleted through the working set. | The "no fuss across network drops" requirement rests on this, and so does the agent-missing message (§5.2). The last question decides whether the mass-deletion guard (§6.4) must also hold deletions of pending items. |
+| S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, does it enumerate subfolders that have never been opened in Finder (the offline claim in §7.1 depends on it), do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, whether the built-in "Remove Download" is hidden, fails, or succeeds on a pinned item, and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. Also: does the eager policy on the item returned for `.rootContainer` download the whole location, and do custom actions appear when right-clicking the background of the location's top-level window or its sidebar entry, with the root as the selected item (§7.1.2)? | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
+| S7 | Run tier 1 and tier 2 (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running `inotifywait` stream coexist with two SFTP channels on one connection, and how long does the `find -cmin` sweep take on a 1M-file tree with 200 roots? Check `-cmin` and `-printf` across GNU, BSD and busybox `find`, including the busybox on a real Synology DSM box and the `-mmin` fallback (§6.4), the server-clock sweep window against a server whose clock is five minutes behind, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells, plus the `env -0` shell snapshot (§6.1) under fish. Kill the client abruptly with `ClientAliveInterval` unset on the server and record whether a bare `inotifywait` survives, and whether the heartbeat wrapper (§6.4 tier 2) kills it within a minute under dash, busybox and bash. | Decides whether tiers 1–2 are practical on one connection, sets the default poll interval, proves the quoting design, and proves that nothing we start outlives the connection. |
 | S8 | Return an item with `contentType = .symbolicLink` and `symlinkTargetPath`: does the system create a real symlink under CloudStorage, does Finder badge it, does a relative target resolve inside the mount, how does Finder present a dangling one, does `ln -s` inside the mount reach `createItem` with the target intact so escaping targets can be refused? | Confirms §5.7 end to end. |
 | S9 | Does calling `NSFileProviderManager.add(domain)` with an existing identifier and a new `displayName` rename the domain in place, keeping cache and pending uploads? | If yes, `set nickname` stops re-creating the domain and the §13 data-loss caveat goes away. |
 | S10 | Finder tags on an item whose extension returns `extendedAttributes` from local storage: does tagging round-trip, and does the system keep re-offering the `modifyItem` if we accept the change without a version bump? | Confirms the local-xattr policy (§5.4) does not produce a retry loop. |
@@ -1796,13 +1967,26 @@ Questions that were open during drafting and how they were settled:
   itself, so mounts come up at login before any agent is unlocked. Items
   are keyed by `user@host` so both hops of a `ProxyJump` can use passwords.
   Prompts that need a human every time (FIDO touch, PIN, one-time code) are
-  refused at `add`. Keys themselves are never copied.
+  refused at `add`. Keys themselves are never copied. Items are keyed by
+  the `user` and `hostname` that `ssh -G` resolves, never by the alias.
+- **Authentication has a 60 s deadline of the agent's own** (§4.2), because
+  `add` cannot see a touch or biometric prompt raised inside a key agent
+  and `ConnectTimeout` does not cover authentication. A timeout is
+  treated like a refusal and stops reconnection; "agent refused
+  operation" is transient and retried, so 1Password and Secretive mounts
+  come up after login without user action. No silent second connection
+  at `add`, no periodic retry that would spam prompts.
 - **`ssh` runs with the login shell's `PATH` and `SSH_AUTH_SOCK`**,
-  snapshotted by the agent (§6.1), and `add` verifies through the agent, so
-  there is no environment in which a location can pass `add` and then fail.
-- **The master connection is `-N`**: no session of its own, every channel a
-  mux client, so channels restart independently and only the master's exit
-  means disconnect. Reconnection stops on auth and host-key failures.
+  snapshotted by the agent (§6.1) through `env -0` so every shell,
+  including fish, yields the same answer, and `add` verifies through the
+  agent, so there is no environment in which a location can pass `add`
+  and then fail.
+- **The master connection is `-N` with `ControlPersist=no`**: no session of
+  its own, every channel a mux client, so channels restart independently
+  and only the master's exit means disconnect; ControlPersist would
+  detach the master from the agent. The control socket is named by
+  location id, not `%C`, so two locations on one host never share one.
+  Reconnection stops on auth and host-key failures.
 - **Minimum macOS is 14.** Supporting 13 would cost a VM in every test run
   for few users.
 - **Connection sharing is never inherited.** The agent's `ssh` always
@@ -1817,13 +2001,25 @@ Questions that were open during drafting and how they were settled:
 - **Writes** replace files via temp + `posix-rename`, then restore the mode.
   Owner, group and hard links are not preserved; this is documented rather
   than worked around with in-place writes and their partial-file window.
+  There is no in-place fallback either: a writable file in a directory the
+  account cannot write is shown locked and cannot be saved through SSH
+  Drive. Every upload ends with an `lstat` whose result becomes the
+  item's version, so our own writes never echo back as remote changes.
 - **TTL** measures time since the last read, using unfiltered atime with
   `last_fetch` as the floor. System readers (Spotlight, Quick Look) count as
   reads. Watching opens precisely would need Endpoint Security, which a
   login agent cannot have.
 - **Root set** for change detection is materialized + pinned + recently
   viewed (§6.5), not everything ever enumerated.
-- **Helper** stays on by default and first in the ladder.
+- **Helper** stays on by default and first in the ladder. Its ignore list
+  is our temp files and editor scratch names only; `.git` is watched like
+  anything else. Without a hash tool on the server it is verified by size
+  and by running `--version`.
+- **Sweep windows use the server's clock**, not the Mac's.
+- **The mass-deletion guard holds only listing-derived deletions**;
+  explicit delete events from the push tiers are applied at once.
+- **No download budget in v1.** Any process that opens every file under
+  the mount downloads the share; this is documented, not prevented (§7).
 - **Name collisions** (case, normalisation, invalid UTF-8): the name already
   visible wins, then byte order; the rest are hidden and reported.
 - **Large deletions are held and re-checked** before being reported
@@ -1841,8 +2037,20 @@ Questions that were open during drafting and how they were settled:
   probe; SFTP-only accounts see everything as writable.
 - **Pins** live only in the index, with export/import for portability.
   The root is pinnable like any folder (§7.1.2).
-- **Content versions** are size + mtime at the polling tiers and gain
-  nanosecond mtime + inode wherever the helper or GNU `find` runs.
+- **Content versions are size + second-mtime + generation at every tier.**
+  The version the system sees must be reproducible from an SFTP `lstat`,
+  or the conflict check breaks and a tier change re-versions every item.
+  Nanosecond mtime and inode from the helper or GNU `find` only feed
+  change detection, which bumps the generation when they show a change
+  SFTP cannot (§5.3).
+- **Invariant 2 applies from Finder too, silently.** A Finder toggle on a
+  pin root clears nested exclusions exactly as the CLI does, with no
+  output; identical semantics in both places won over a warning Finder
+  cannot show (§7.1.1).
+- **The cask's `uninstall` stanza only quits the agent.** Homebrew runs it
+  on every upgrade, so `remove --all` and the container and keychain
+  cleanup live under `zap`; a plain uninstall leaves unavailable sidebar
+  entries until `zap` (§10).
 - **Nickname changes** re-create the domain, because the sidebar name is the
   domain's `displayName` and is fixed at creation. This drops the local cache
   and pending uploads, which is accepted; `set nickname` is refused while
