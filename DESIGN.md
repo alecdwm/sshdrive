@@ -362,10 +362,22 @@ makes `ProxyJump` work with password auth on both hops: each hop's prompt
 names its own host and gets its own item. `<hostname>` is the resolved
 `hostname` from `ssh -G`, which is also the string `ssh` puts in the
 prompt; the alias the user typed never appears in a key, so `nas` and
-`nas.tail1234.ts.net` share one item. A refused prompt makes `ssh` fail; the
-domain shows `.notAuthenticated`, reconnection stops (§6.1), and
-`sshdrive status` prints the prompt text so the user knows what the server
-wanted.
+`nas.tail1234.ts.net` share one item. A refused PIN, one-time code or
+`confirm` makes `ssh` fail; the domain shows `.notAuthenticated`,
+reconnection stops (§6.1), and `sshdrive status` prints the prompt text
+so the user knows what the server wanted. A passphrase prompt for a key
+file that has no stored item is different. `ssh` walks every
+`identityfile` in order, and with `IdentityAgent=none` (§6.1) it opens
+each encrypted one itself, so a key the location never used still asks.
+The agent answers that with an empty passphrase; `ssh` gives up on that
+key after its single attempt (`NumberOfPasswordPrompts=1` bounds
+passphrase attempts as well) and moves on to the next, and nothing is
+stopped. If no key works, the "Permission denied" that follows is
+classified on exit like any other. A password prompt with no stored item
+is answered the same way, and since `ssh` gets one password attempt the
+exit that follows stops reconnection with the prompt text in `status`,
+which is the right outcome for a server that has started asking for a
+credential the location does not have.
 
 **Collecting secrets** happens once, in `sshdrive add` (and again in
 `sshdrive passwd`). The CLI does not run `ssh`. It asks the agent to make
@@ -416,7 +428,10 @@ and try your key agent instead"), because a user whose only key lives in
 1Password and whose server also accepts passwords would otherwise type a
 password and end up with a location that quietly authenticates by
 password. An empty answer is a refusal of that prompt: nothing is stored,
-and the attempt fails over. If that attempt fails to
+and the attempt fails over. The same Enter-to-skip applies to a
+passphrase prompt for a key the user does not mean to use for this
+location: `ssh` moves to the next identity, exactly as it will at
+runtime (above). If that attempt fails to
 authenticate, the second runs with the agent socket, so agent-only keys
 (1Password, Secretive, a FIDO key loaded into `ssh-agent`) still work. A
 location that passes only the second attempt is recorded as
@@ -978,8 +993,9 @@ and are ignored by every change-detection tier.
   Samba-backed share, OpenSSH's `link` fails with `EEXIST`, the
   confirming `lstat` finds a file at the destination, and the rule above
   would report a collision for a legitimate rename. So when the `lstat`
-  confirms a destination and the two names differ only by case, the
-  agent asks SFTP `realpath` for both; if they agree, the names are one
+  confirms a destination and the two names differ only by case or by
+  Unicode normalisation (APFS is insensitive to both), the agent asks
+  SFTP `realpath` for both; if they agree, the names are one
   file and the rename is redone with `posix-rename@openssh.com`, which
   is `rename(2)` and changes case in place. Where the server lacks
   `posix-rename` the rename goes through a temporary third name.
@@ -1902,9 +1918,9 @@ TTL unless it has been used again.
 TTL values map to seconds: `15m`, `1h`, `12h`, `1d`, `1w`, `1mo` (30 days),
 `never`. Default: `1d`.
 
-Kept items (§7.1.1) are never evicted: the agent derives each item's
-effective state from the `pin_state` markers on it and its ancestors before
-evicting. A file the user fetched with Finder's built-in "Download Now" is
+Kept items (§7.1.1) are never evicted: the agent reads each item's
+`kept` column (§5.3), which it maintains from the markers on the item
+and its ancestors, before evicting. A file the user fetched with Finder's built-in "Download Now" is
 treated like any other cached file and falls under the TTL; use `sshdrive
 pin` to keep it.
 
@@ -1931,7 +1947,9 @@ Two words are used strictly throughout this document:
   Finder menu act on. Every pinned item is kept; most kept items are not
   pinned, they inherit it.
 
-Markers live in the index (`pin_state`) and nowhere else. The index is the
+Markers live in the index (`pin_state`), and the index is the only
+authority; `pins.json` beside it (§5.3) is a write-only copy for
+recovery, never read while the index is healthy. The index is the
 agent's, and every pin change, from the CLI or from Finder, is one XPC call
 to the agent, so there is one writer and no second store to keep in sync.
 `sshdrive pins --export` writes the marker list as JSON and `--import` reads
@@ -2221,7 +2239,9 @@ sshdrive add [user@]host-or-alias[:port] [--nickname NAME] [--remote-path PATH]
 
 sshdrive list                     table: name, host, secrets, mounted, TTL, state
 sshdrive show <name>              full detail: ssh binary and version, `ssh -G` resolution,
-                                  environment snapshot (§6.1), mount path, last error
+                                  environment snapshot (§6.1), whether the location runs with
+                                  IdentityAgent=none or through the key agent (§6.1), the
+                                  ProxyJump chain the agent built, mount path, last error
 sshdrive remove <name> [--keep-files]
                                   removes domain + config, and each keychain item the
                                   location names that no remaining location also names
@@ -2707,7 +2727,7 @@ held by the system and survive.
 | # | Question | Why it matters |
 |---|---|---|
 | S1 | The process boundary, in this order: (a) a sandboxed File Provider appex connects to the app-group-prefixed mach service declared in the `SMAppService` agent's plist, and launchd starts the agent on that lookup; (b) the agent's listener validates the peer's audit token against our code requirement (§5.2); (c) a `FileHandle` opened by the extension crosses NSXPC and the agent can write through it; (d) the app bundle with an embedded Developer ID profile and `keychain-access-groups` on the agent passes notarization and reaches the data-protection keychain, while the bare CLI and askpass launch with no restricted entitlements (§3.1); (e) `NSFileProviderManager.add(domain)` from the launchd-started agent associates the domain with our extension, and `open -g` from a Homebrew `postflight` registers both the extension and the login item; (f) after `brew reinstall --cask` has sent the agent TERM and replaced the bundle, the mach service comes back on the next lookup without a logout (§10); and (g) Homebrew's `signal:` stanza actually finds the launchd-started agent by bundle id (§10). | Everything else in the design assumes (a) through (d). If any of them fails, the component split in §3 changes before a line of SFTP is written. (e) decides whether install needs any manual step. |
-| S2 | `ssh` under our supervision, run from the launchd-started agent and not from a terminal: `none` auth against Tailscale SSH; an encrypted ed25519 key via askpass with `SSH_ASKPASS_REQUIRE=force` and the token protocol (§4.2); the two-step collect connection of §4.2, `IdentityAgent=none` first against a key that `ssh-agent` already holds, confirming the passphrase prompt is seen and stored, then the agent pass for an agent-only key; a key reachable only through an `SSH_AUTH_SOCK` exported in `.zshrc` and a `ProxyCommand` that calls a Homebrew tool, both of which only the login shell snapshot (§6.1) makes work; a two-hop `ProxyJump` chain built by the agent as its own `ProxyCommand` (§6.1), with a password on both hops and with `ControlMaster auto` set for the bastion in `~/.ssh/config`, confirming the hop uses neither the user's socket nor the key agent during the `IdentityAgent=none` pass; the `SSH_ASKPASS_PROMPT` values `ssh` sets for the host-key question and a FIDO user-presence notice; a `-N` master with SFTP and exec mux clients, and killing one client without disturbing the others; a mux client spawned after its socket was removed, confirming that with `-F /dev/null`, `BatchMode=yes` and `ProxyCommand=/usr/bin/false` it exits at once rather than connecting on its own, and that the agent classifies that exit as master lost (§6.1); that the master stays in the foreground as our child with `ControlPersist=no` and detaches with `ControlPersist=yes` (§6.1); the 60 s authentication deadline firing against an agent-held key that waits for a touch, and `agent refused operation` being retried rather than stopping (§4.2, §6.1); the screen-unlock and present-user request re-arm firing exactly once each after a deadline stop, with the domain still connected, and a request arriving with input idle over 30 s not firing it (§4.2, §5.6); a host block carrying `RemoteCommand`, `RequestTTY force` and `ForkAfterAuthentication yes`, confirming the session-shape overrides (§6.1) keep the master in the foreground and the mux clients working; an `agentDependent` location whose `identityagent` socket does not exist at spawn time, confirming the pre-spawn socket check classifies it transient where `ssh`'s own stderr at `LogLevel=ERROR` would not (§6.1); a first-pass location on a Mac whose config names 1Password through `IdentityAgent`, confirming the runtime `IdentityAgent=none` keeps 1Password silent across a reconnect (§6.1); a hop whose bastion has `ControlPath` set in the config, confirming `ControlPath=none` keeps it off that socket (§6.1); an identity path with a space and a quote inside the agent-built `ProxyCommand` (§6.1); throughput of our SFTP client with pipelining against `sftp(1)` and `rsync` on a 1 GB file and on 10,000 small files. | Validates the transport decision and the auth goal in §1 before anything is built on it, including the claim that a location which passes `add` cannot fail from the agent. |
+| S2 | `ssh` under our supervision, run from the launchd-started agent and not from a terminal: `none` auth against Tailscale SSH; an encrypted ed25519 key via askpass with `SSH_ASKPASS_REQUIRE=force` and the token protocol (§4.2); the two-step collect connection of §4.2, `IdentityAgent=none` first against a key that `ssh-agent` already holds, confirming the passphrase prompt is seen and stored, then the agent pass for an agent-only key; a key reachable only through an `SSH_AUTH_SOCK` exported in `.zshrc` and a `ProxyCommand` that calls a Homebrew tool, both of which only the login shell snapshot (§6.1) makes work; a two-hop `ProxyJump` chain built by the agent as its own `ProxyCommand` (§6.1), with a password on both hops and with `ControlMaster auto` set for the bastion in `~/.ssh/config`, confirming the hop uses neither the user's socket nor the key agent during the `IdentityAgent=none` pass; the `SSH_ASKPASS_PROMPT` values `ssh` sets for the host-key question and a FIDO user-presence notice; a `-N` master with SFTP and exec mux clients, and killing one client without disturbing the others; a mux client spawned after its socket was removed, confirming that with `-F /dev/null`, `BatchMode=yes` and `ProxyCommand=/usr/bin/false` it exits at once rather than connecting on its own, and that the agent classifies that exit as master lost (§6.1); that the master stays in the foreground as our child with `ControlPersist=no` and detaches with `ControlPersist=yes` (§6.1); the 60 s authentication deadline firing against an agent-held key that waits for a touch, and `agent refused operation` being retried rather than stopping (§4.2, §6.1); the screen-unlock and present-user request re-arm firing exactly once each after a deadline stop, with the domain still connected, and a request arriving with input idle over 30 s not firing it (§4.2, §5.6); a host block carrying `RemoteCommand`, `RequestTTY force` and `ForkAfterAuthentication yes`, confirming the session-shape overrides (§6.1) keep the master in the foreground and the mux clients working; an `agentDependent` location whose `identityagent` socket does not exist at spawn time, confirming the pre-spawn socket check classifies it transient where `ssh`'s own stderr at `LogLevel=ERROR` would not (§6.1); a first-pass location on a Mac whose config names 1Password through `IdentityAgent`, confirming the runtime `IdentityAgent=none` keeps 1Password silent across a reconnect (§6.1); a key whose passphrase lives in the login keychain through `UseKeychain`, confirming the launchd-started `ssh` reads it without a keychain dialog (§4.2); an identity list whose first encrypted key has no stored passphrase, confirming the empty answer skips it and the second key authenticates without the location stopping (§4.2); a hop whose bastion has `ControlPath` set in the config, confirming `ControlPath=none` keeps it off that socket (§6.1); an identity path with a space and a quote inside the agent-built `ProxyCommand` (§6.1); throughput of our SFTP client with pipelining against `sftp(1)` and `rsync` on a 1 GB file and on 10,000 small files. | Validates the transport decision and the auth goal in §1 before anything is built on it, including the claim that a location which passes `add` cannot fail from the agent. |
 | S3 | Minimal replicated extension against the **fake backend** of milestone 1 (§12), so it runs before any transport exists: list, open, save, rename; observe the sidebar label and mount path with two domains and with `displayName` set to `nas` versus `SSH Drive - nas`; confirm the system requests `enumerateChanges` on a folder's enumerator when Finder shows it, and if not, whether it at least creates a container enumerator on a revisit, which decides which of §6.5's two fallbacks applies; what Finder does with `.filenameCollision`; what the delete confirmation looks like without `allowsTrashing`; what the system does when `modifyItem` returns an item whose version differs from the upload, since the conflict path of §5.5 assumes it re-fetches and does not re-offer; and how an atomic save from TextEdit, Xcode and Word reaches the extension, one `modifyItem` on the original identifier or a `createItem` plus `deleteItem`, since without tombstones (§5.3) the latter loses a pin or tag placed on that one file. What `.syncAnchorExpired` from a working set whose `enumerateItems` returns nothing makes the system re-enumerate (§5.3), with the agent's catch-up sweep disabled for the test so the system's own behaviour is visible. Confirm the extension can open `index.sqlite` read-only in WAL mode from the group container inside the sandbox while the agent is writing to it (§5.2), that it sees `meta.reconciling` and `meta.generation` change promptly, that a restore through the backup API into the live file is visible to the open reader, what the system does when `item(for:)` itself throws `.serverUnreachable`, which the reconcile stall (§5.2) assumes is harmless, and measure `item(for:)` served that way against the XPC round trip it falls back to, under a 50,000-entry listing. **Deferred to milestone 3, against a real server:** the containment test, replacing an enumerated directory with a symlink to `/etc` on the server and confirming nothing inside it is listed, fetched or deleted. | Settles the naming scheme (§2, §4), the root-set design (§6.5), the trash decision (§5.4), and that the extension's direct index reads work from the sandbox; the deferred part settles the §9.1 guarantees from the first networked build. |
 | S4 | Does `evictItem` work for files in our domain, does atime on materialized files advance on read, does the system refuse to evict an item with pending changes, do Finder tags and other xattrs served from our index survive eviction, which §5.4 assumes, and does a launchd agent's `stat` under `~/Library/CloudStorage` draw a TCC prompt on 14 or 15 (§7)? | Determines whether TTL eviction can use real last-access, whether it needs a pending-upload check of its own, and whether local xattrs need re-applying after an evict. |
 | S5 | Behaviour when throwing `.serverUnreachable` for writes: how long the system retries, whether `signalErrorResolved(.serverUnreachable)` reliably wakes the flush, and whether `signalEnumerator` alone does (§5.6). Whether requests still reach the extension while the domain is connected but every call fails fast, which the deadline re-arm depends on (§4.2). How long the system waits after `.serverUnreachable` from `fetchContents` before calling again, since that, not our breaker, bounds the spinner Finder shows when a fetch arrives during a reconnect (§6.3). What the extension sees when the agent's mach service is unavailable (login item disabled), and whether `disconnect(reason:)` can be called from inside the extension at all; if not, the extension answers `.serverUnreachable` and the message lives only in `sshdrive doctor` (§5.2). Whether the system times out an `enumerateItems` that takes the full 75 s the breaker may hold a call during a reconnect (§6.3), and what it does to the extension if so. What the system does with a pending local edit when the extension reports that item, or its parent, deleted through the working set. What the system does with an item whose `fetchContents` fails with `.noSuchItem` versus `.cannotSynchronize`, since the mass-deletion guard (§6.4) needs the second to leave the item in place. Whether a `readdir` and `lstat` walk of the mount is served from the replica while every enumeration returns `.serverUnreachable`, which the reconcile stall (§5.3) depends on. | The "no fuss across network drops" requirement rests on this, and so does the agent-missing message (§5.2). The last question decides whether the mass-deletion guard (§6.4) must also hold deletions of pending items. |
@@ -2922,8 +2942,9 @@ Questions that were open during drafting and how they were settled:
 - **Remote renames at polling tiers** stay delete + create in v1.
 - **Permissions** are mapped to Finder capabilities using `id` from the
   probe; SFTP-only accounts see everything as writable.
-- **Pins** live only in the index, with export/import for portability.
-  The root is pinnable like any folder (§7.1.2).
+- **Pins** live in the index, with a write-only recovery copy beside it
+  and export/import for portability. The root is pinnable like any
+  folder (§7.1.2).
 - **Content versions are size + second-mtime + generation at every tier.**
   The version the system sees must be reproducible from an SFTP `lstat`,
   or the conflict check breaks and a tier change re-versions every item.
