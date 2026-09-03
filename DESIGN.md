@@ -930,7 +930,10 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   `"\(size)-\(mtime)-0"`. An item whose generation was never bumped
   therefore comes back with exactly the version the system holds and is
   not re-fetched; only an item whose generation had moved, which the
-  walk cannot know, changes version and is fetched again. An item the
+  walk cannot know, changes version and is fetched again. Leaving every
+  version null instead would move every materialized item's version on
+  the next listing, make the system re-download the whole cache, and
+  turn every pending edit into a conflict. An item the
   system lists in `enumeratorForPendingItems()` is the exception: its
   replica file holds the pending edit, so its size and mtime are the
   edit's, not the server's, and its version is left null and comes back
@@ -941,10 +944,7 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   re-created after the backup was taken) takes the replica's, since
   that is what the user's file is keyed by, and the row's pin marker and
   xattrs go with the old identifier as they would for any deletion.
-  Leaving the
-  version null instead would move every materialized item's version on
-  the next listing, make the system re-download the whole cache, and
-  turn every pending edit into a conflict. The metadata version does
+  The metadata version does
   move for every row, since mode, owner and the xattr hash are not in
   the replica, and that costs a metadata re-read, not a transfer. Items
   created since the backup therefore keep
