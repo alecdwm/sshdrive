@@ -377,10 +377,22 @@ struct Fault: ParsableCommand {
     @Option(name: .customLong("fetch-delay"), help: "Milliseconds to hold each fetchContents open.")
     var fetchDelay: Int?
 
+    @Option(
+        name: .customLong("version-mismatch"),
+        help: "on or off: modifyItem replies with versions that are not the ones written.")
+    var versionMismatch: String?
+
+    @Option(
+        name: .customLong("collisions"),
+        help: "on or off: fail every createItem with .filenameCollision.")
+    var collisions: String?
+
     func run() throws {
         var arguments = ["name": name]
         if let writes { arguments["writes"] = writes }
         if let fetchDelay { arguments["fetchDelay"] = String(fetchDelay) }
+        if let versionMismatch { arguments["versionMismatch"] = versionMismatch }
+        if let collisions { arguments["collisions"] = collisions }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.fault", arguments: arguments))
     }
 }

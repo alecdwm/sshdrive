@@ -35,6 +35,16 @@
 		  pin state (DESIGN.md sections 2, 7.2). TODO milestone 8: handle them in
 		  NSFileProviderCustomAction.performAction. They are declared now so spike S6 can
 		  record where Finder puts them.
+
+		  The bound key is "fileproviderItems", lower-case p, and it is a key path on the
+		  evaluated object, not a substitution variable: "$fileProviderItems" throws
+		  "Can't get value for 'fileProviderItems' in bindings {}" and the whole rule is
+		  then dropped. It is the only spelling in the dyld shared cache (s6-8,
+		  2026-09-04). The rules are the "at least one" form of section 7.2, so a mixed
+		  selection shows both entries; that form is also false on an empty selection,
+		  where the "all selected items" form ("SUBQUERY(...).@count ==
+		  fileproviderItems.@count") would be 0 == nil-count, i.e. true, and would show
+		  both entries at once.
 		-->
 		<key>NSExtensionFileProviderActions</key>
 		<array>
@@ -44,7 +54,7 @@
 				<key>NSExtensionFileProviderActionName</key>
 				<string>Keep Downloaded</string>
 				<key>NSExtensionFileProviderActionActivationRule</key>
-				<string>SUBQUERY(fileProviderItems, $item, $item.userInfo.kept == 0).@count == $fileProviderItems.@count</string>
+				<string>SUBQUERY(fileproviderItems, $item, $item.userInfo.kept == 0).@count &gt; 0</string>
 			</dict>
 			<dict>
 				<key>NSExtensionFileProviderActionIdentifier</key>
@@ -52,7 +62,7 @@
 				<key>NSExtensionFileProviderActionName</key>
 				<string>Don't Keep Downloaded</string>
 				<key>NSExtensionFileProviderActionActivationRule</key>
-				<string>SUBQUERY(fileProviderItems, $item, $item.userInfo.kept == 1).@count == $fileProviderItems.@count</string>
+				<string>SUBQUERY(fileproviderItems, $item, $item.userInfo.kept == 1).@count &gt; 0</string>
 			</dict>
 		</array>
 	</dict>

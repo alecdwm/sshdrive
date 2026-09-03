@@ -127,6 +127,7 @@ sshdrive debug materialized <name> [--pending]
 sshdrive debug stat <name> <path> [--read]
 sshdrive debug xattr <name> <path>
 sshdrive debug fault <name> [--writes on|off] [--fetch-delay MS]
+                             [--version-mismatch on|off] [--collisions on|off]
 sshdrive debug transfers <name> [--reset]
 sshdrive debug stabilize <name>
 sshdrive debug testing <name> list|run
@@ -146,6 +147,9 @@ plus an `lstat` from the launchd-started agent, exactly as section 7's loop will
 and it is also what forces the system to ingest a chain it has never enumerated (s6-3);
 `xattr` prints what the index serves; `fault --writes on` makes every upload fail so an
 edit stays pending, and `--fetch-delay` holds each fetch open so concurrency is visible;
+`--version-mismatch on` makes `modifyItem` reply with versions that are not the ones
+written (s3-7) and `--collisions on` makes every `createItem` fail `.filenameCollision`
+(s3-4), both added 2026-09-04 evening;
 `transfers` is the concurrency count and per-fetch timeline; `stabilize` is
 `waitForStabilization` plus `waitForChanges(below:)`, which is the only reliable way to
 stop measuring fileproviderd's throttling instead of its behaviour; `testing` is the
@@ -310,7 +314,14 @@ Two halves; do them separately.
   Cancel a large download from Finder's progress UI. Expected: the extension's `Progress`
   cancels, the agent stops writing, and no half file is left materialized.
 
-  Result:
+  Result: **Not answerable from Finder: there is no cancel control.** With `debug fault
+  --fetch-delay 40000` holding a fetch open, Finder draws a pie-style progress ring in the
+  list row (AX shows a `progress indicator` in the row), but hovering does not turn it into
+  a stop button, a click on it does nothing (`debug transfers` still `inFlight 1`, no
+  cancellation in the agent's log), and the contextual menu on a downloading item offers no
+  Stop. So on 26.4 a third-party provider gets no per-item cancel affordance, and the real
+  question - does our `Progress` cancel cleanly - belongs in a milestone 3 test rather than
+  in Finder. (results.md 2026-09-04 late.)
 
 ### (d) Restricted entitlements: the profile, the keychain, and the bare tools
 
@@ -528,7 +539,10 @@ debugger.
   Expected: the four operations reach `enumerateItems`, `fetchContents`, `modifyItem` and
   `modifyItem` with `.filename` in `changedFields`, and the fake tree ends up matching.
 
-  Result:
+  Result: **PASS.** List, open and save were done headlessly in the signed pass; the Finder
+  half is now done too. A rename driven from Finder is exactly one `modifyItem` with
+  `changedFields=0x2` (`.filename`), and the fake tree ends up matching. (results.md
+  2026-09-04 evening.)
 
 - [ ] **s3-2. Sidebar label and mount path, `nas` vs `SSH Drive - nas`** &mdash; **GUI**
 
@@ -543,7 +557,11 @@ debugger.
   and what the Finder sidebar reads, so the sidebar never says "SSH Drive - SSH Drive -
   nas". This is what settles the naming scheme.
 
-  Result:
+  Result: **Never prefix; the system adds the app name itself.** `displayName "nas"` mounts at
+  `SSHDrive-nas` and Finder's `displayed name` for it is `SSH Drive - nas`; `displayName
+  "SSH Drive - nas2"` mounts at `SSHDrive-SSHDrive-nas2` and reads `SSH Drive - SSH Drive -
+  nas2`. Directory = `<app name>-<displayName>` with spaces removed, label = `<app display
+  name> - <displayName>`. Sections 2 and 4 corrected. (results.md 2026-09-04 evening.)
 
 - [ ] **s3-3. Does the system call `enumerateChanges` on a folder's enumerator when Finder shows it?** &mdash; **GUI**
 
@@ -552,14 +570,28 @@ debugger.
 
   Expected: decides which of section 6.5's two fallbacks applies to the `viewed` reason.
 
-  Result:
+  Result: **No - and it does not make a container enumerator again either.** Opening a folder
+  logs one `enumerateItems` per folder on the way down, once. Navigating away and back,
+  closing and reopening the window, and creating a file on the server while the window is
+  open produce no further container-enumerator call of any kind; the new file arrives
+  through the working set. So neither of section 6.5's two fallbacks exists and the
+  `viewed` reason can only be armed from our own first `enumerateItems`. (results.md
+  2026-09-04 evening.)
 
 - [ ] **s3-4. What Finder does with `.filenameCollision`** &mdash; **GUI**
 
   Create a collision in the fake tree (`debug mutate nas create-file Documents/README.md`
   next to an existing `readme.md`), then look at the folder in Finder.
 
-  Result:
+  Result: **Finder never hands us a collision, and `.filenameCollision` is a retry loop, not a
+  dialog.** A Finder `duplicate` resolves the name itself (`run copy.sh`). A case collision
+  arriving from the server is resolved by the system on its replica alone - the older item
+  becomes `README-renamed 2.txt` in the mount with no `modifyItem` and no change on the
+  server. And with `debug fault --collisions on`, every `createItem` answering
+  `.filenameCollision` is retried by fileproviderd with a doubling backoff for ever, with
+  no alert, no badge and nothing in the pending set; the creates all land once the fault is
+  off. So that error may only be returned when the name will stop being taken.
+  (results.md 2026-09-04 evening.)
 
 - [ ] **s3-5. `fileSystemFlags.userExecutable` and `chmod +x`** &mdash; **VM** for the first half, **GUI** for the round trip
 
@@ -572,7 +604,12 @@ debugger.
   Expected (section 5.4): a served item with `userExecutable` materializes executable, and
   a `chmod +x` inside the mount arrives as `.fileSystemFlags` in `changedFields`.
 
-  Result:
+  Result: **PASS on both halves.** A served 755 file materializes `-rwx------` (signed pass), and
+  `chmod +x` on a 644 file in the mount arrives as `modifyItem … changedFields=0x100`
+  (`1 << 8`, `.fileSystemFlags`). `chmod +x` on a file that is already 755 produces nothing,
+  since owner-execute is the only bit the replica carries. The skeleton's `modifyItem`
+  ignores the field, so the system puts the local mode straight back; that is milestone 4.
+  (results.md 2026-09-04 evening.)
 
 - [ ] **s3-6. The delete confirmation without `allowsTrashing`** &mdash; **GUI**
 
@@ -592,14 +629,27 @@ debugger.
   `.Trash`. Whatever Finder's confirmation wording turns out to be, it is asked about an
   item with no trash container behind it. See results.md, 2026-09-04.
 
-  Result:
+  Result: **Finder deletes, immediately.** AppleScript `delete` schedules an `FPDeleteOperation`
+  (not a trash operation), finishes in milliseconds and removes the file from the replica
+  and the server. The dialog a person gets is Finder's own and its wording is fixed:
+  *"Are you sure you want to delete “<name>”?"* / *"This item will be deleted immediately.
+  You can’t undo this action."* with a **Delete** button
+  (`LocalizableMerged.strings` MT16_V1, MT18_V1, AL7; plural forms MT16_V2/MT18_V2).
+  `NSExtensionFileProviderAllowsSystemDeleteAlerts = 0` would suppress it; we want it, so it
+  stays unset. (results.md 2026-09-04 evening.)
 
 - [ ] **s3-7. `modifyItem` returning a version that differs from the upload** &mdash; **GUI**
 
   Expected (section 5.5): the system re-fetches and does not re-offer the same change. The
   conflict path depends on it.
 
-  Result:
+  Result: **Half right, and the wrong half matters.** With `debug fault --version-mismatch on`,
+  the system records whatever version the reply carries (`versionIdentifier` became
+  `…-fault`, `isMostRecentVersionDownloaded 1`, `hasUnresolvedConflicts 0`), does **not**
+  re-offer - and does **not** re-fetch either, then or on the next read (`debug transfers`
+  total 0). So section 5.5's conflict copy would leave the replica holding local bytes under
+  a remote version for ever; it now calls `evictItem` on the identifier after returning the
+  remote item. Section 5.5 corrected. (results.md 2026-09-04 evening.)
 
 - [ ] **s3-8. Atomic saves from TextEdit, Xcode and Word** &mdash; **GUI**
 
@@ -607,7 +657,14 @@ debugger.
   pair loses a pin or a tag on that file, because there are no tombstones (section 5.3).
   Record each app separately.
 
-  Result:
+  Result: **TextEdit: one `modifyItem` on the original identifier**, `changedFields=0x289`
+  (contents | lastUsedDate | contentModificationDate | extendedAttributes, with
+  `com.apple.TextEncoding`), preceded by a `0x8` on open and a `0x80` on the parent. No
+  `createItem`, no `deleteItem`, identifier unchanged. A shell temp-file-plus-`mv` over the
+  target behaves identically (`0xc1`, same identifier). **Xcode: not exercised** - Xcode
+  26.4's `source document` does not implement `save` (-1708) and Cmd-S needs Accessibility.
+  **Pages, Numbers, Keynote and Microsoft Office are not installed on the VM.**
+  (results.md 2026-09-04 evening.)
 
 - [ ] **s3-9. `.syncAnchorExpired` from a working set whose `enumerateItems` returns nothing** &mdash; **GUI**
 
@@ -829,7 +886,29 @@ below were corrected to match.
   Download" entry. Record every entry for both states, and confirm no other route evicts a
   kept item (drag out, "Optimise Storage", the Storage pane).
 
-  Result: **needs-Finder**, not attempted.
+  Result: **Two built-in entries, and `Remove Download` is shown on a kept item.** Captured at
+  the screen (2026-09-04 late). The contextual menu's third slot is `Download Now` when the
+  item is dataless and `Remove Download` when it is materialized, following `isDownloaded`
+  and nothing else - a pinned, downloaded file gets `Remove Download` like any other. The
+  rest is Finder's usual list (`Open`, `Open With`, `Move to Bin`, `Get Info`, `Rename`,
+  `Compress`, `Duplicate`, `Make Alias`, `Quick Look`, `Copy`, `Share…`, tags,
+  `Quick Actions`). Note `Move to Bin` is offered although `allowsTrashing` is never set;
+  `Delete Immediately…` lives in the **File** menu. A kept item carries no badge, because we
+  declare no decorations, and Finder draws no built-in `Keep Downloaded` for us.
+  Earlier the same day, headlessly: **dropping `allowsEvicting` does nothing.**
+  `fileproviderctl evaluate` prints the system's own capabilities, and for a pinned,
+  downloaded file whose row serves 47 (no `allowsEvicting`) it reports 0x2000006F -
+  the bit put back - stably over forty seconds, with `userInfo.kept = 1` in the same
+  snapshot. What the system does track is `isDownloaded`: a dataless item loses the bit
+  whatever we serve. So section 2's "not offered Remove Download at all" and section 7.2's
+  second belt are wrong on 26.4; the documented lever is the per-provider
+  `NSExtensionFileProviderAllowsUserControlledEviction = false` (and
+  `NSExtensionFileProviderAllowsContextualMenuDownloadEntry = 0` for "Download Now").
+  Finder 26.4 also ships its own **Keep Downloaded** entry and a **Kept Downloaded** badge
+  (`LocalizableMerged.strings` N153.7/N153.8, NE88.3.2), which our custom action's label
+  would duplicate - worth looking at before milestone 8. The eviction guarantee itself is
+  unaffected: the eager `contentPolicy` is what refuses (s6-5).
+  (results.md 2026-09-04 evening.)
 
 - [ ] **s6-8. Do our custom actions appear at the top level of the context menu or in a submenu?** &mdash; **GUI**
 
@@ -838,7 +917,26 @@ below were corrected to match.
   `fileproviderctl evaluate <item>` prints what the system thinks applies, which is worth
   recording next to what Finder actually draws.
 
-  Result: **needs-Finder**, not attempted.
+  Result: **Top level, last in the menu, one of the pair at a time.** Captured at the screen
+  (2026-09-04 late): our entry is drawn at the very bottom of the contextual menu, **below
+  `Quick Actions`, at the top level** - not inside `Quick Actions` and not in an app-named
+  submenu - with a leading empty checkbox glyph. An unkept item shows `Keep Downloaded`, a
+  kept one `Don't Keep Downloaded`, and never both, which is the activation rules working.
+  Finder's own `Keep Downloaded` strings exist but are not drawn for a third-party provider,
+  so there is no duplicate label.
+
+  Getting there first needed the rule fix. `evaluate`
+  reported `Can't get value for 'fileProviderItems' in bindings {}` for both: the bound key
+  is **`fileproviderItems`, lower-case p** (the only spelling anywhere in the dyld shared
+  cache; Apple's documentation uses the other one) and it is a **key path, not a `$`
+  substitution variable** - `$fileProviderItems` throws out of `NSVariableExpression` and
+  the rule is dropped silently. Rewritten to section 7.2's `.@count > 0` form with the right
+  key they evaluate `pin YES / unpin NO` on an unpinned item and the reverse on a pinned
+  one. Recorded while there: the "all selected items" form
+  (`SUBQUERY(k, …).@count == k.@count`) is `0 == nil-count`, i.e. **true**, on an empty
+  selection, which is a second reason for section 7.2's form. Where Finder draws the two
+  entries is a drawing question no terminal can answer.
+  (results.md 2026-09-04 evening.)
 
 - [ ] **s6-9. Does an eager policy on `.rootContainer` download the whole location?** &mdash; **VM**
 
@@ -854,7 +952,15 @@ below were corrected to match.
 
 - [ ] **s6-10. Do the custom actions appear on the window background and the sidebar entry, with the root as the selected item?** &mdash; **GUI**
 
-  Result: **needs-Finder**, not attempted.
+  Result: **Window background yes, sidebar no.** Captured at the screen (2026-09-04 late).
+  Right-clicking the empty area of a window in the mount gives `New Folder / Get Info /
+  View / Use Groups / Sort By / Show View Options` and then our entry at the top level,
+  evaluated against the **folder being shown**. Right-clicking the sidebar row gives
+  `Open in New Tab / Show "SSH Drive" / Download Now / Remove from Sidebar / Get Info /
+  Add to Dock` and **none of our actions**, so pinning a whole location has no Finder route
+  and the CLI is it. Headlessly beforehand, `fileproviderctl evaluate <mount directory>` -
+  the "root as the selected item" case - gives `pin YES / unpin NO` unpinned and the reverse
+  pinned, so nothing excludes the root itself. (results.md 2026-09-04 evening and late.)
 
 - [ ] **s6-11. How many `fetchContents` calls the system keeps open at once for an eager subtree** &mdash; **VM** (`debug fault --fetch-delay`)
 

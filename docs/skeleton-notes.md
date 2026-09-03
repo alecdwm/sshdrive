@@ -87,6 +87,7 @@ sshdrive debug materialized <name> [--pending]
 sshdrive debug stat <name> <path> [--read]
 sshdrive debug xattr <name> <path>
 sshdrive debug fault <name> [--writes on|off] [--fetch-delay MS]
+                            [--version-mismatch on|off] [--collisions on|off]
 sshdrive debug transfers <name> [--reset]
 sshdrive debug stabilize <name>
 sshdrive debug testing <name> list|run
@@ -144,7 +145,11 @@ evict`, `sshdrive pin` and the eviction timer replace them in milestones 7 and 8
   in the system's pending set (that is the item s4-3 tries to evict). `--fetch-delay` holds
   each `fetchContents` open for that many milliseconds; a fake-backed fetch is a memory copy
   that finishes before the next one starts, so without it the concurrency s6-11 counts is
-  always 1. **Turn both off before leaving the VM.**
+  always 1. `--version-mismatch on` makes `modifyItem` reply with content and metadata
+  versions that are not the ones just written, which is how s3-7 found that the system takes
+  the reply at face value and never re-fetches; `--collisions on` makes every `createItem`
+  fail `.filenameCollision`, which is how s3-4 found that the system then retries the create
+  for ever with no alert. **Turn all four off before leaving the VM.**
 - **`transfers <name> [--reset]`** - in-flight, peak concurrent and total `fetchContents`,
   with a per-fetch timeline (start and end, seconds from the first) so the overlap is
   visible rather than inferred from a peak.
@@ -209,4 +214,17 @@ evict`, `sshdrive pin` and the eviction timer replace them in milestones 7 and 8
    the interface accepts them.
 10. ~~**`contentPolicy = .inherited` as the neutral value** for an unpinned item~~ -
     confirmed 2026-09-04 (s6-12): it forces nothing. Whether Finder's context menu shows
-    our two actions at the top level is still open (s6-8) and needs a screen.
+    our two actions at the top level is still open (s6-8) and needs a screen. The rules
+    themselves were dead until 2026-09-04 evening: the bound key is `fileproviderItems`
+    (lower-case p) and it is a key path, not a `$` substitution variable - either mistake
+    drops the entry silently. Fixed in `Apps/FileProvider/Info.plist`; the corrected rules
+    evaluate under `fileproviderctl evaluate`.
+11. **Finder's own "Keep Downloaded".** Finder 26.4 ships strings for a built-in
+    `Keep Downloaded` entry and a `Kept Downloaded` badge, and our custom action uses the
+    same label (section 7.2). Whether Finder offers its own to a third-party provider needs
+    a screen; our items report `isKeepDownloaded = 0` even under an eager policy, so the
+    flag is the system's own (s6-7).
+12. **Dropping `allowsEvicting` changes nothing** on 26.4: the system reports the bit set on
+    a pinned, downloaded item whose row cleared it, and clears it on any dataless item. The
+    documented per-provider lever is
+    `NSExtensionFileProviderAllowsUserControlledEviction = false` (s6-7).

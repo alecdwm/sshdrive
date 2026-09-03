@@ -80,11 +80,11 @@ Secretive, or anything else that answers on `SSH_AUTH_SOCK`; the literal
 |---|---|
 | A File Provider extension must ship inside an `.app` bundle and is loaded by the system from `Contents/PlugIns/*.appex`. | We need an app bundle even with no windows. The app is an agent app (`LSUIElement = true`): no Dock icon, no menu bar, no windows. |
 | The extension runs in its own sandboxed process, launched by the system on demand and killed when idle. It cannot reach `~/.ssh`, `ssh-agent`'s socket, or spawn `ssh`. | The extension does no networking at all. Every SSH connection, every SFTP request and every long-running watch stream lives in the background agent; the extension is an XPC client of the agent (§5.2). |
-| Each `NSFileProviderDomain` gets its own Finder sidebar entry (under "Locations") and is mounted under `~/Library/CloudStorage/`. Domains persist across reboots. The exact sidebar label and folder name the system derives from the app name and `displayName` is what spike S3 records. | One domain per location. Whether `displayName` should be `SSH Drive - nas` or just `nas` is decided by S3, so that the sidebar does not read "SSH Drive - SSH Drive - nas". |
+| Each `NSFileProviderDomain` gets its own Finder sidebar entry (under "Locations") and is mounted under `~/Library/CloudStorage/`. Domains persist across reboots. The system builds both names itself from the app name and `displayName`: the directory is `<app name>-<displayName>` with spaces removed and the label Finder draws is `<app display name> - <displayName>` (S3, 2026-09-04). | One domain per location, and **`displayName` is the bare nickname**. A `displayName` of `SSH Drive - nas` mounts at `SSHDrive-SSHDrive-nas` and reads "SSH Drive - SSH Drive - nas" in the sidebar (§4). |
 | `NSFileProviderReplicatedExtension` (macOS 11+) keeps a system-side copy of the tree, calls us to fetch content, and marks items dataless until fetched. `item(for:)` is called constantly and must be answered from local state. | On-demand download and offline browsing of already-seen folders are provided by the system, not by us. Items are always served from our index (§5.3), never by a network `stat`. |
 | The system handles retry/backoff when we throw `NSFileProviderError.serverUnreachable`. Pending local changes are held by the system and re-offered later; `enumeratorForPendingItems()` lists them and the system refuses to evict an item with unsynced changes. | Offline writes "just queue" if we fail fast and correctly. "Pending uploads" in `status` comes from the system, not from a flag of ours. |
 | `NSFileProviderManager.evictItem(identifier:)` and `enumeratorForMaterializedItems()` exist for the containing app. Reports show eviction fails for folders and for some files (`.nonEvictable`). | Evict files only, tolerate per-item failures, retry next cycle. |
-| Finder gives third-party domains "Download Now" and "Remove Download" for free. Those are one-off actions; the downloaded copy is still evictable. Permanent "keep offline" is not a Finder feature for third-party providers: the extension declares it per item through `contentPolicy` (`.downloadEagerlyAndKeepDownloaded`, macOS 13+). An item whose `capabilities` omit `allowsEvicting` is not offered "Remove Download" at all. | Pinning is ours to implement (§7.1): store pin markers, return the policy for kept items, drop `allowsEvicting` from them so Finder's own menu cannot undo the pin, keep kept subtrees polled, and skip kept items in TTL eviction. |
+| Finder gives third-party domains "Download Now" and "Remove Download" for free. Those are one-off actions; the downloaded copy is still evictable. Permanent "keep offline" is not a Finder feature for third-party providers: the extension declares it per item through `contentPolicy` (`.downloadEagerlyAndKeepDownloaded`, macOS 13+). Omitting `allowsEvicting` from an item's `capabilities` does **not** take "Remove Download" away: the system reports the bit set again on any downloaded item and clear on any dataless one, whatever we serve, and Finder duly draws the entry on a kept file (S6, 2026-09-04). The two built-in entries are the only ones Finder contributes, and a provider's own actions land at the bottom of the same menu. The documented per-provider switches are `NSExtensionFileProviderAllowsUserControlledEviction = false` and `NSExtensionFileProviderAllowsContextualMenuDownloadEntry = 0`. | Pinning is ours to implement (§7.1): store pin markers, return the eager policy for kept items - **that**, not the capability, is what refuses an eviction - keep kept subtrees polled, and skip kept items in TTL eviction (§7.2). |
 | An extension can add its own Finder context-menu entries (`NSExtensionFileProviderActions` in the appex Info.plist, handled by `NSFileProviderCustomAction.performAction`). Each entry has a label and an `NSPredicate` activation rule evaluated over the selected items, including their `userInfo`. Finder's own "Remove Download" cannot be intercepted. | Pin/unpin get their own menu entries, shown conditionally on pin state (§7.2). |
 | Items declare `capabilities` (`allowsWriting`, `allowsRenaming`, `allowsDeleting`, `allowsTrashing`, `allowsAddingSubItems`, …). Without `allowsTrashing`, Finder deletes immediately after a confirmation dialog. A Finder copy arrives as a plain `createItem` with content; there is no copy callback and no API for reporting remote free space. | No trash (§5.4). Permissions map to capabilities (§5.4). "Server-side copy" and "free space in Finder" are not features we can offer. |
 | SFTP has no change notifications and no stable file IDs. The SSH connection that carries it can also run commands on the server when the account has shell access. | Change detection is tiered (§6.4): SFTP polling always works; an exec channel unlocks a remote `find` sweep or our own helper. We keep our own path → identifier index (§5.3). |
@@ -255,8 +255,9 @@ Entitlements per target:
 }
 ```
 
-Display name = nickname ?? host, prefixed with `"SSH Drive - "` only if S3
-shows the system does not add the app name itself.
+Display name = nickname ?? host, **never prefixed**: the system prepends the
+app name itself, in the mount directory and in the sidebar label alike
+(S3, 2026-09-04; §2).
 
 Notes on the spec:
 
@@ -982,7 +983,11 @@ one already visible in the index keeps its slot, and among newcomers the
 byte-wise lowest name is shown; the rest are recorded with `hidden = 2`.
 `readdir` order is not stable across polls on hash-ordered directories, so
 it cannot be the tie-breaker: the visible name must not flip from one cycle
-to the next. Names that are not valid UTF-8 are hidden the same way, which is why
+to the next. Left to itself the system copes rather than failing - it renames
+the item already in its replica to `<name> 2.<ext>` and does not report that
+rename back, so the server name is untouched (S3, 2026-09-04) - but the user
+is then looking at a name the server does not have, which is why we hide one
+instead. Names that are not valid UTF-8 are hidden the same way, which is why
 the index stores names as bytes (§5.3). Hidden
 names hold their slot: a create or rename to one of them fails with
 `.filenameCollision`. `sshdrive status` lists hidden names under "not
@@ -1040,9 +1045,16 @@ recommends `sshdrive set <name> permissions none` on the permissions line
 (§8.1). It does not switch by itself, since a plain Linux box with `acl`
 installed is still mode-governed.
 
-**No trash.** `allowsTrashing` is never set. Finder asks "will be deleted
-immediately, are you sure?" and then calls `deleteItem`, which removes the
-item on the server. This is honest for a remote filesystem and avoids
+**No trash.** `allowsTrashing` is never set, but Finder still labels the
+route **"Move to Bin"** in the contextual menu (the File menu carries both
+"Move to Bin" and "Delete Immediately…"); what makes it honest is the
+alert. Finder asks *"Are you sure you want to delete “<name>”?"* over
+*"This item will be deleted immediately. You can't undo this action."*,
+with a **Delete** button, and then calls `deleteItem`, which removes the
+item on the server (S3 and S6, 2026-09-04; the strings are Finder's own
+MT16/MT18/AL7). `NSExtensionFileProviderAllowsSystemDeleteAlerts = 0`
+would suppress that alert for a provider drawing its own; we want Finder's, so
+it stays unset. This is honest for a remote filesystem and avoids
 inventing a server-side trash that other SFTP clients would not understand.
 `allowsTrashing` alone is not enough, because it governs only whether an
 *item* may be trashed: the domain is also added with
@@ -1115,7 +1127,13 @@ drops them with its type test.
   a race between the two calls. Either way the refusal arrives as a
   bare `FAILURE` status (§6.2), so the agent confirms it with an `lstat`
   of the destination before reporting `.filenameCollision`, and reports
-  an ordinary sync error when nothing is there. Servers that are not
+  an ordinary sync error when nothing is there. `.filenameCollision` is
+  **not** a way to refuse a create for good: the system draws no alert for
+  it, puts nothing in the pending set, and retries the create with a
+  doubling backoff for ever (S3, 2026-09-04). It may only be answered when
+  the name is about to stop being taken - the conflict copy below, which
+  moves our own file aside - and never as a standing refusal, or it is the
+  `.Trash` loop of §5.4 again. Servers that are not
   OpenSSH may overwrite on a plain `rename`; the probe tests this once,
   in the location root, and where it overwrites every create and rename
   gets an `lstat` preflight instead, with `status` showing the cost
@@ -1189,14 +1207,21 @@ drops them with its type test.
   `LocalHostName` since it is the Mac's content that is being set aside,
   return the remote item as current, record a working-set anchor for the
   new sibling so Finder shows it at once, and log. This mirrors
-  Dropbox/OneDrive behaviour and never loses data. It rests on the system
+  Dropbox/OneDrive behaviour and never loses data. It rested on the system
   treating a `modifyItem` that returns an item with a different version
   as "the server won": re-fetching that content and not re-offering the
-  local edit. S3 records that this is what happens; if the system keeps
-  re-offering instead, the fallback is to accept the modification (return
-  the uploaded version) and make the conflict copy from the *remote*
-  content, which keeps the same no-data-loss property with the names
-  swapped. The check-then-rename is not atomic; a write landing in that
+  local edit. **Only the second half is true** (S3, 2026-09-04). The
+  system takes the returned version at face value - it records it, marks
+  the item most-recent-version-downloaded, sets no conflict flag, never
+  re-offers the edit, and never re-fetches, then or on the next open. So
+  returning the remote item on its own would leave the replica holding the
+  *local* bytes under the *remote* version, for ever. The agent therefore
+  calls `NSFileProviderManager.evictItem(identifier:)` on that item
+  straight after returning it - eviction works on files, directories and
+  the root (S4, 2026-09-04) - which makes the next open download the
+  remote content. The same finding is a second reason the post-upload
+  `lstat` above is not optional: a version we invent is a version the next
+  sweep will not recognise, and nothing will correct it. The check-then-rename is not atomic; a write landing in that
   one round trip is lost the same way it would be with any two SFTP
   clients.
 - **Durability:** `fsync@openssh.com` after each upload when the server
@@ -2028,27 +2053,26 @@ Every tier watches the same bounded set of directories, kept in the
 |---|---|---|
 | `materialized` | every directory that contains at least one materialized file, from `enumeratorForMaterializedItems()` refreshed on `materializedItemsDidChange` | the last materialized file in it is evicted |
 | `pinned` | every pin root, watched recursively, excluded subtrees pruned | the pin is removed |
-| `viewed` | every directory Finder has enumerated in the last 30 minutes | 30 minutes after the last enumeration |
+| `viewed` | every directory the extension has been asked to enumerate this session | the 256-entry cap evicts it, or the agent restarts (S3: there is no second enumeration to time from) |
 
 Directories never listed, or listed long ago and holding nothing
-downloaded, are not polled by anyone. They refresh when Finder next shows
-them, through the per-folder `enumerateChanges` request (§5.1; S3 confirms
-the system issues it). That keeps tier 0's cost proportional to what the
-user is actually looking at or holding, not to everything they ever
-browsed.
+downloaded, are not polled by anyone. That keeps tier 0's cost
+proportional to what the user is actually looking at or holding, not to
+everything they ever browsed.
 
-That per-folder request is the one File Provider behaviour this section
-depends on, and S3 is what confirms it, so the fallback is decided now
-rather than after the spike. If the system creates a container
-enumerator when Finder shows a folder but never asks it for changes,
-the enumerator's creation is the view signal instead: the agent lists
-the directory then, diffs it against the index, and reports the
-differences through the working set, which the system does honour, and
-the `viewed` reason is recorded from the same event. If S3 finds that no
-enumerator is created on a revisit either, the replica alone is shown
-and the only refresh a folder with nothing downloaded can get is a
-poll, so in that case the `viewed` reason keeps its directories for the
-rest of the session, still capped at 256, rather than for 30 minutes.
+**The system gives no per-folder refresh at all** (S3, 2026-09-04). A
+folder is enumerated exactly once, the first time it is shown: opening it,
+navigating away and back, closing and reopening the window, and a remote
+change landing while it is open all produce no further container-enumerator
+call - not `enumerateChanges`, not a second `enumerateItems`, not even a
+new enumerator. Everything after that first listing reaches the window
+through the working set. So the third of the fallbacks this section
+prepared is the one in force: the `viewed` reason is armed from our own
+`enumerateItems`, which fires once per folder, and it keeps its
+directories for the rest of the session, still capped at 256, rather than
+for 30 minutes. A folder with nothing downloaded and nothing pinned gets
+no refresh other than a poll, and that is only true while it is still in
+the viewed set.
 
 The `viewed` reason is bounded, because "Finder has enumerated" is not
 the same as "the user has looked at": `ls -R`, a Spotlight pass,
@@ -2409,8 +2433,21 @@ the extension. The activation rules read it:
 
 | Menu label | Shown when | Handler |
 |---|---|---|
-| **Keep Downloaded** | at least one selected item is not kept: `SUBQUERY(FILEPROVIDER_ITEMS, $item, $item.userInfo.kept == 0).@count > 0` | `sshdrive pin` semantics (§7.1.1, situations A, D, E) for each selected item that is not kept; kept items in the selection are skipped. Bump metadata versions, signal the working set; the system then eagerly downloads. |
-| **Don't Keep Downloaded** | at least one selected item is kept: `SUBQUERY(FILEPROVIDER_ITEMS, $item, $item.userInfo.kept == 1).@count > 0` | `sshdrive unpin` semantics (situations B, C) for each selected kept item: remove the pin if it is the pin root, otherwise record an exclusion. Not-kept items are skipped. No eviction. |
+| **Keep Downloaded** | at least one selected item is not kept: `SUBQUERY(fileproviderItems, $item, $item.userInfo.kept == 0).@count > 0` | `sshdrive pin` semantics (§7.1.1, situations A, D, E) for each selected item that is not kept; kept items in the selection are skipped. Bump metadata versions, signal the working set; the system then eagerly downloads. |
+| **Don't Keep Downloaded** | at least one selected item is kept: `SUBQUERY(fileproviderItems, $item, $item.userInfo.kept == 1).@count > 0` | `sshdrive unpin` semantics (situations B, C) for each selected kept item: remove the pin if it is the pin root, otherwise record an exclusion. Not-kept items are skipped. No eviction. |
+
+The bound key is **`fileproviderItems`, lower-case p**, and it is a key
+path on the evaluated object, not a `$` substitution variable. Both
+mistakes are silent: `$fileProviderItems` raises out of
+`NSVariableExpression` against an empty bindings dictionary, the rule is
+dropped, and the entry never appears, with nothing in any log. The
+capital-P spelling Apple's documentation uses does not occur anywhere in
+the dyld shared cache (S6, 2026-09-04). The `.@count > 0` form above is
+also what makes an empty selection match neither entry: the "all selected
+items" form, `SUBQUERY(k, …).@count == k.@count`, is `0 == nil-count`,
+i.e. true, when there is no selection, and would show both at once.
+`fileproviderctl evaluate <path>` prints each rule and its verdict, which
+is how to check a change to them without a screen.
 
 Two labels, one concept. The entries are worded as a policy ("keep" / "don't
 keep") rather than an action on the current download, so they read as a pair
@@ -2421,30 +2458,46 @@ which we leave entirely to Finder. The division of labour is:
   subtree eager and non-evictable. "Don't Keep Downloaded" returns it to
   lazy; the content stays on disk and falls under the location's TTL.
 - **Finder's entries act now.** "Download Now" materializes an unkept item
-  once; "Remove Download" evicts an unkept item immediately. A kept item
-  is returned without `allowsEvicting` in its capabilities, so Finder
-  does not offer "Remove Download" on it at all; a user who wants space
-  back chooses "Don't Keep Downloaded" first, which brings the capability
-  back with the next metadata version, and then Finder's "Remove
-  Download", or waits for the TTL.
+  once; "Remove Download" evicts an unkept item immediately. A user who
+  wants space back on a kept item chooses "Don't Keep Downloaded" first,
+  and then Finder's "Remove Download", or waits for the TTL.
 
-  **What actually enforces this is the `contentPolicy`, not the
-  capability** (S6, 2026-09-04). `evictItem` refused a file whose row still
-  carried `allowsEvicting`, purely because the folder above it was eager;
-  and `allowsEvicting` is `API_DEPRECATED("use NSFileProviderContentPolicy
+  **What enforces this is the `contentPolicy`, not the capability** (S6,
+  2026-09-04). `evictItem` refused a file whose row still carried
+  `allowsEvicting`, purely because the folder above it was eager; and
+  `allowsEvicting` is `API_DEPRECATED("use NSFileProviderContentPolicy
   instead", macos(11.0, 13.0))`. So the guarantee "a kept item is not
-  evicted" rests on the eager policy, which is where §7.1 puts it, and
-  dropping `allowsEvicting` is a second, deprecated belt whose only job is
-  the Finder menu entry - which is exactly what S6's remaining Finder
-  question has to confirm. If it turns out not to remove the entry, the
-  header names the lever that does:
+  evicted" rests on the eager policy, which is where §7.1 puts it.
+
+  **Dropping `allowsEvicting` is not a second belt: it does nothing.**
+  `fileproviderctl evaluate` on a pinned, downloaded file whose row served
+  capabilities `47` reported `0x2000006F` back - the bit put in again -
+  unchanged over forty seconds, with `userInfo.kept = 1` in the same
+  snapshot, so the item had certainly been re-read. What the system does
+  track is `isDownloaded`: a dataless item loses the bit whatever we
+  serve, a materialized one has it. The item is still kept, because the
+  policy refuses the eviction; the *menu entry* is simply not ours to
+  remove per item. The header names the lever that is:
   `NSExtensionFileProviderAllowsUserControlledEviction = false` in the
   appex's `NSExtension` dictionary, which "suppress[es] the user's ability
   to evict the item in the UI but retain[s] the ability of the OS or the
   provider's program to evict items" - i.e. it hides Finder's entry on
-  every item while leaving §7's own loop working. That is a per-provider
-  switch, not per item, so it is only right if the answer is that a
-  provider cannot hide the entry per item at all.
+  every item while leaving §7's own loop working. It is a per-provider
+  switch: setting it takes "Remove Download" away from unkept items too,
+  which is a worse menu for the common case, so **it stays unset** and a
+  "Remove Download" on a kept item is left to fail, caught by the
+  re-assert net below. Milestone 8 revisits that with a screen in front of
+  it. The neighbouring key
+  `NSExtensionFileProviderAllowsContextualMenuDownloadEntry = 0` removes
+  "Download Now" the same way, and is likewise unset.
+
+  Finder 26.4 also carries strings for a **built-in "Keep Downloaded"**
+  entry and a "Kept Downloaded" badge of its own, and our items report
+  `isKeepDownloaded = 0` even under an eager policy, so that flag is the
+  system's and is not driven by our `contentPolicy`. It draws neither for
+  us: an unkept item in the mount shows exactly one "Keep Downloaded" and
+  it is ours (S6, 2026-09-04). No label clash, and no built-in entry to
+  compete with.
 
 Mixed selections show both entries, and each acts only on the items it
 applies to, so selecting a kept folder together with a plain file and
@@ -2456,10 +2509,23 @@ D). Whether an item's kept state is its own pin or inherited is deliberately
 not visible in Finder, since by invariant 3 the two never behave differently;
 `sshdrive pins` shows the markers for anyone who wants them.
 
-Spike S6 records what Finder actually shows for kept and unkept items, in
-particular that dropping `allowsEvicting` removes "Remove Download" from
-the menu. `materializedItemsDidChange` is the safety net for any other
-route: a kept file turning dataless without our handler having run is
+**Where the entries land** (S6, 2026-09-04, captured on screen). Finder's
+own File Provider entries are exactly two, both in the third slot of the
+contextual menu, right after "Open" and "Open With": **"Download Now"**
+when the item is dataless, **"Remove Download"** when it is materialized.
+Which one appears follows `isDownloaded` and nothing else - a kept,
+downloaded file is offered "Remove Download" like any other. Our two
+entries are drawn **at the very bottom of the menu, below "Quick Actions",
+at the top level**, each with a leading empty checkbox glyph, and exactly
+one of the pair ever appears. The same entry is offered on a **right-click
+of the window background**, where the item it acts on is the folder being
+shown; it is **not** offered on the **sidebar row** for the domain, whose
+menu is "Open in New Tab / Show “SSH Drive” / Download Now / Remove from
+Sidebar / Get Info / Add to Dock". So a whole location can be pinned only
+from the CLI, which is where §7.1.2 puts it anyway.
+
+`materializedItemsDidChange` is therefore the safety net for the "Remove
+Download" route as much as for any other: a kept file turning dataless without our handler having run is
 **re-asserted**, not read as intent. The agent bumps the item's metadata
 version and signals the working set so the system re-applies the eager
 policy and fetches it again, logs the event, and `sshdrive status`
@@ -2474,7 +2540,10 @@ treats every such eviction as "Don't Keep Downloaded" instead, debounced
 per pin root so a folder eviction arriving one child at a time results
 in a single change. S6 decides which of the two the net does, and it
 does the same one for every eviction, since the agent cannot tell routes
-apart. "Turning" is the operative word either way: a freshly pinned tree is full of kept files that are dataless
+apart. As of 2026-09-04 Finder's "Remove Download" **is** offered on a kept
+item (the capability cannot be withheld, above) and the eager policy makes
+it fail, so the net re-asserts; the remaining question is only whether
+Finder reports that failure to the user or swallows it. "Turning" is the operative word either way: a freshly pinned tree is full of kept files that are dataless
 because their eager download has not reached them yet, so only a file
 the agent had seen as materialized in an earlier
 `enumeratorForMaterializedItems` pass (§7) counts, and the agent keeps
@@ -3169,8 +3238,8 @@ there, so that this list cannot drift from the body.
   `posix-rename` (§5.5).
 - **The overwrite-rename probe runs in the location root;** `create-check
   lstat` forces the preflight (§5.5).
-- **No trash;** Finder deletes are immediate after its confirmation
-  (§5.4).
+- **No trash;** Finder deletes are immediate after its confirmation, whose
+  wording is now quoted (§5.4).
 - **Name collisions:** the visible name wins, then byte order; the rest
   are hidden and reported (§5.4).
 - **Permissions map to capabilities and `fileSystemFlags`** per location
@@ -3202,9 +3271,10 @@ there, so that this list cannot drift from the body.
 - **Large listing-derived deletions are held and re-checked;** helper
   delete events apply at once; held fetches fail with
   `.cannotSynchronize` (§6.4).
-- **The root set** is materialized + pinned + recently viewed; viewed is
-  capped at 256, materialized is rotated at tier 0, both skip pin roots;
-  the per-folder refresh has a decided fallback (§6.5).
+- **The root set** is materialized + pinned + viewed; viewed is capped at
+  256, materialized is rotated at tier 0, both skip pin roots; there is no
+  per-folder refresh, so viewed is armed once per folder and lasts the
+  session (§6.5).
 - **Remote renames at polling tiers stay delete + create** (§6.5, §14).
 - **TTL** measures time since last read where atime allows, otherwise
   since last fetch or save, with `last_fetch` as the floor; system
@@ -3213,9 +3283,9 @@ there, so that this list cannot drift from the body.
 - **Pins** live in the index with a write-only recovery copy; one rule
   for nested states; invariant 2 applies from Finder silently; the root
   is pinnable (§7.1, §7.1.1, §7.1.2).
-- **Kept items drop `allowsEvicting`;** an eviction that reaches one
-  anyway is re-asserted, unless S6 finds a deliberate route, in which
-  case it unpins (§7.2).
+- **Kept items drop `allowsEvicting`, which the system puts back;** an
+  eviction that reaches one anyway is re-asserted, unless S6 finds a
+  deliberate route, in which case it unpins (§7.2).
 - **Every remote script starts with a sentinel;** the SFTP subsystem
   behind a chatty rc file is worked around through an exec channel, not
   refused (§9.2).
@@ -3260,6 +3330,41 @@ there, so that this list cannot drift from the body.
   menu (2026-09-04, S6, §7.2).
 - **The system holds at most six `fetchContents` calls open at once** for an
   eager subtree (2026-09-04, S6, §6.2).
+- **`displayName` is the bare nickname:** the system prepends the app name to
+  both the mount directory and the sidebar label, so any prefix of ours
+  stutters (2026-09-04, S3, §2, §4).
+- **There is no per-folder refresh.** A folder is enumerated once, ever;
+  revisits and remote changes produce no container-enumerator call, so the
+  `viewed` root-set reason is armed from that one `enumerateItems` and held
+  for the session (2026-09-04, S3, §6.5).
+- **A `modifyItem` reply is believed:** the system records whatever version it
+  carries, never re-fetches and never re-offers, so a conflict copy must
+  `evictItem` the item after returning the remote one (2026-09-04, S3, §5.5).
+- **`.filenameCollision` is retried for ever with no alert,** so it may only be
+  answered when the name is about to be freed (2026-09-04, S3, §5.5).
+- **An atomic save keeps the identifier:** TextEdit and a shell temp+rename
+  both arrive as one `modifyItem` on the original item, so the no-tombstones
+  rule costs nothing there (2026-09-04, S3, §5.3, §5.5).
+- **A case collision left alone is renamed by the system on its replica only,**
+  which is why the visible-name rule hides one instead (2026-09-04, S3, §5.4).
+- **Dropping `allowsEvicting` does not remove "Remove Download":** the system
+  reports the bit from `isDownloaded`, not from us, and the only lever is the
+  per-provider `NSExtensionFileProviderAllowsUserControlledEviction`, left
+  unset (2026-09-04, S6, §2, §7.2).
+- **A custom action's activation rule binds `fileproviderItems`,** lower-case
+  p, as a key path and not a `$` variable; either mistake drops the entry
+  silently (2026-09-04, S6, §7.2).
+- **Our two entries are drawn at the top level, last in the contextual menu,**
+  and on the window background but **not** on the sidebar row, so a whole
+  location is pinned only from the CLI (2026-09-04, S6, §7.2).
+- **Finder's own File Provider entries are just "Download Now" and "Remove
+  Download",** chosen by `isDownloaded`, and it draws no built-in "Keep
+  Downloaded" for a third-party provider (2026-09-04, S6, §7.2).
+- **The contextual entry is "Move to Bin" even with no `allowsTrashing`;** the
+  alert is what makes the delete honest (2026-09-04, S6, §5.4).
+- **Finder gives a third-party download no cancel control:** the list-row
+  progress ring is not clickable, so the extension's `Progress` cancellation
+  has to be tested from code (2026-09-04, S1 c2, §5.2).
 
 ---
 

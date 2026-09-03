@@ -163,7 +163,11 @@ enum ControlCommands {
             let runtime = try await resolveRuntime(arguments)
             let writes = arguments["writes"].map { $0 == "on" }
             let delay = arguments["fetchDelay"].flatMap { Int($0) }
-            await runtime.setFault(writes: writes, fetchDelayMilliseconds: delay)
+            let mismatch = arguments["versionMismatch"].map { $0 == "on" }
+            let collisions = arguments["collisions"].map { $0 == "on" }
+            await runtime.setFault(
+                writes: writes, fetchDelayMilliseconds: delay, versionMismatch: mismatch,
+                collisions: collisions)
             return try json(await runtime.transferStats(reset: false))
 
         case "debug.transfers":

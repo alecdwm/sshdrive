@@ -5,6 +5,546 @@ One entry per sub-question, newest date first. Steps and expected answers are in
 
 ---
 
+## 2026-09-04 (late) - what Finder actually draws: s6-7, s6-8, s6-10, and S1 c2
+
+The owner granted **Screen Recording** and then **Accessibility** to
+`/usr/libexec/sshd-keygen-wrapper`, which turns the three drawing questions into ordinary
+work: `screencapture -x` produces a 2646x1558 PNG (a 2x Retina capture of a 1323x779-point
+display) and `System Events` UI scripting reads and drives Finder's windows. Same VM, same
+signed Debug build, two domains `nas` and `nas2`.
+
+### How the captures were taken, for the next person
+
+Two things that do **not** work and cost time:
+
+- `perform action "AXShowMenu"` on a Finder list row: the row exposes only
+  `AXShowDefaultUI` / `AXShowAlternateUI`, so this silently does nothing.
+- `tell application "System Events" to key down control` + `click at {x, y}`: the synthetic
+  click does not carry the modifier and Finder opens nothing.
+
+What works is a real right-click posted with CoreGraphics. A six-line Swift program
+(`CGEvent(mouseEventSource:mouseType:.rightMouseDown/.rightMouseUp …).post(tap:
+.cghidEventTap)`) at the row's AX `position`, with `Accessibility` granted, opens the
+contextual menu; `screencapture -x` then captures it and `key code 53` dismisses it. The
+row is located by asking Finder to `select` the file and then taking `first row … whose
+selected is true`; matching rows by name does not work, because a Finder list row's static
+texts read `missing value`. AX coordinates are points and `CGEvent` takes points, so no
+scaling is needed, but the resulting PNG is 2x.
+
+The contextual menu itself is **not readable through AX** (`menu 1 of window 1` of the
+Finder process does not exist while it is open), so the entries below are read off the
+screenshots.
+
+### s6-7. The built-in entries, pinned versus unpinned - **and "Remove Download" is shown on a kept item**
+
+Three captures in one folder of the mount, all in list view.
+
+**Unpinned, downloaded** (`report-001.txt`):
+
+```
+Open
+Open With                    >
+Remove Download
+------
+Move to Bin
+------
+Get Info / Rename / Compress "report-001.txt" / Duplicate / Make Alias / Quick Look
+------
+Copy / Share...
+------
+(tag colours) / Tags...
+------
+Quick Actions                >
+[ ] Keep Downloaded
+```
+
+**Pinned, downloaded** (`report-000.txt`, `debug policy … eager-keep`): byte-for-byte the
+same list, with two differences - the last entry reads `[ ] Don't Keep Downloaded`, and
+**`Remove Download` is still there.**
+
+**Unpinned, dataless** (`report-003.txt` after `debug evict`): `Download Now` replaces
+`Remove Download`, the row carries the system's cloud-with-arrow badge, and the last entry
+is `[ ] Keep Downloaded` again.
+
+So the built-in File Provider entries on 26.4 are exactly two, both in the third slot of
+the menu: **`Download Now`** when the item is dataless and **`Remove Download`** when it is
+materialized. Which one appears follows `isDownloaded` and nothing else. This is the
+picture that goes with the capability measurement earlier today: an item served without
+`allowsEvicting` still gets `Remove Download`. §2 and §7.2 are corrected accordingly, and
+the `NSExtensionFileProviderAllowsUserControlledEviction` question is now a real decision
+for milestone 8 rather than a maybe.
+
+Two incidentals:
+
+- **`Move to Bin` is offered even though `allowsTrashing` is never set.** The contextual
+  menu has no `Delete Immediately…`; that entry is in the **File** menu, which for a file in
+  the mount reads `… Move to Bin / Delete Immediately… / Eject`. So the deletion path a user
+  takes from the contextual menu is `Move to Bin`, and §5.4's alert is what turns it into an
+  immediate delete.
+- **No decoration.** The kept file's row carries no badge of ours, because we declare no
+  `NSFileProviderDecorations`; §7.2's pin badge is still unwritten. The only badge in the
+  mount is the system's own dataless cloud.
+
+### s6-8. Top level or submenu? - **top level, last, and only one of the pair**
+
+Our custom actions are drawn **at the very bottom of the contextual menu, below `Quick
+Actions`, at the top level** - not inside `Quick Actions`, not inside a submenu named after
+the app. Each is drawn with a leading empty checkbox-style glyph, which is how Finder
+renders `NSExtensionFileProviderActions` entries. Exactly one of the pair appears, which is
+the activation rules working: `Keep Downloaded` on an unkept item, `Don't Keep Downloaded`
+on a kept one.
+
+That also settles the worry from this morning's entry. Finder 26.4 does carry strings for a
+built-in `Keep Downloaded` (N153.7/N153.8) and a `Kept Downloaded` badge, but it does not
+draw them for us: an unpinned item shows exactly **one** `Keep Downloaded`, and the pinned
+one shows `Don't Keep Downloaded`, a label that exists only in our Info.plist. So there is
+no duplicate-label problem and §7.2 keeps its wording.
+
+### s6-10. Window background and sidebar - **background yes, sidebar no**
+
+**Right-click on the empty area of the window** (no selection):
+
+```
+New Folder
+------
+Get Info
+------
+View                         >
+Use Groups
+Sort By                      >
+Show View Options
+------
+[ ] Keep Downloaded
+```
+
+So the action is offered on the background too, at the top level, and the item it is
+evaluated against is the **folder being shown** - here `Documents/Reports`, unpinned, hence
+the pin entry. Nothing about the root container is special; the same is true with the mount
+itself open.
+
+**Right-click on the sidebar row** (`SSH Drive - nas`):
+
+```
+Open in New Tab
+Show "SSH Drive"
+Download Now
+------
+Remove from Sidebar
+Get Info
+Add to Dock
+```
+
+**Our entries are absent from the sidebar menu.** The built-in `Download Now` is there
+(the domain root is not materialized), and `Show "SSH Drive"` names the *provider*, not the
+domain. So `sshdrive pin <name>` on a whole location has no Finder route; the CLI is it.
+§7.2 says so now.
+
+### s3-2 confirmed visually
+
+The sidebar with both domains present reads, under **Locations**:
+
+```
+iCloud Drive
+SSH Drive - nas2
+SSH Drive - nas
+chosen-newt
+Macintosh HD
+AirDrop
+Bin
+```
+
+which is exactly the `<app display name> - <displayName>` composition measured this
+morning, with `displayName` the bare nickname.
+
+### S1 c2. Cancelling a download from Finder's progress UI - **there is no cancel control**
+
+With `debug fault nas --fetch-delay 40000` holding one `fetchContents` open, a `cat` of a
+dataless file makes Finder draw a **pie-style progress ring** in the list row (AX: the row
+gains a `progress indicator` next to its `image` and `text field`). Hovering the pointer
+over it for 1.5 s does not turn it into a stop button, and a left click on its centre does
+nothing: `debug transfers` still reports `inFlight 1`, the file stays dataless until the
+fault's 40 s elapse, and the agent logs no cancellation. The contextual menu on a
+downloading item offers no `Stop`/`Cancel` either.
+
+So on 26.4 there is **no per-item cancel affordance in Finder's list view** for a
+third-party provider, and c2's real question - does our `Progress` cancel cleanly - cannot
+be asked from there. It stays open, and the honest place to test it is
+`NSProgress.cancel()` from a unit or integration test in milestone 3, not Finder.
+
+### State the VM was left in
+
+Fault flags all off, `nas2` removed, `nas` re-created with its 8 files, no pin markers, no
+Finder windows open, the helper binaries under `/tmp` deleted. `sshtest` untouched.
+
+---
+
+## 2026-09-04 (evening) - the Finder questions of S3 and S6, from a console session
+
+Same VM (macOS **26.4.1** arm64, 25E253, Xcode 26.4), the signed Debug build from
+`scripts/mac-build.sh signed` at `/Applications/SSH Drive.app`, fake-backed domains added
+with `sshdrive debug fake add`. This pass differs from the earlier ones in that `alec` is
+logged in at the console (`CGSessionCopyCurrentDictionary` reports
+`kCGSSessionOnConsoleKey = 1`, no `ScreenIsLocked`), so **Apple Events reach Finder,
+TextEdit and Xcode from the ssh session** and the runbook's GUI questions can be driven by
+`osascript`.
+
+### What the three routes could and could not do
+
+| Route | Verdict |
+|---|---|
+| `fileproviderctl evaluate <item>` | **Works, and is the best tool here.** It prints the system's own copy of the item, the evaluated activation rules, the decorations, the capability letters and the content policy. `evaluate <action> <item> <target>` evaluates `NSFileProviderUserInteractions` only, of which we declare none, so it prints an empty interaction set; its error message is a useful catalogue of the valid actions: `Create, Move, MoveOut, MoveIn, Copy, CopyIn, CopyOut, Trash, Delete, Rename, ExcludeFromSync`. |
+| `osascript` driving Finder / TextEdit | **Works, no TCC dialog needed.** `kTCCServiceAppleEvents` is already allowed for `/usr/libexec/sshd-keygen-wrapper` in the user TCC database, so Finder and TextEdit scripting ran without prompting anybody. |
+| `screencapture -x` | **Blocked, and cannot be unblocked from a terminal.** Every attempt returns `could not create image from display`, and `tccd` logs `Service kTCCServiceScreenCapture does not allow prompting; returning denied` with `responsible=/usr/libexec/sshd-keygen-wrapper`. Routing it through Finder (`tell application "Finder" to do shell script "screencapture …"`) does not change the attribution. Screen Recording is a system-database service, so the owner has to add it by hand in System Settings > Privacy & Security > Screen Recording; it will never prompt. |
+
+Accessibility is denied the same way (`tell application "System Events" to return UI
+elements enabled` is `false`), so **no context menu could be opened or read**. Everything
+below that talks about a menu is either the system's own evaluation of what applies or
+Finder's own localized strings, never a picture of a menu.
+
+### New `sshdrive debug` hooks and one Info.plist fix this pass added
+
+- `debug fault <name> --version-mismatch on|off` - `modifyItem` replies with content and
+  metadata versions that are not the ones just written (s3-7). The index keeps the true
+  versions; only the reply lies.
+- `debug fault <name> --collisions on|off` - every `createItem` fails
+  `.filenameCollision`, which is the error §5.5's `lstat`-after-`FAILURE` check will raise
+  for real in milestone 4 (s3-4).
+- The container enumerator now logs `enumerateItems` and `enumerateChanges` with the
+  container identifier, which is the only way to answer s3-3.
+- `Apps/FileProvider/Info.plist`: **both action activation rules were dead.** See s6-8.
+
+`swift test` is 33/33.
+
+---
+
+### s3-2. Sidebar label and mount path, `nas` versus `SSH Drive - nas` - **never prefix; the system adds the app name itself**
+
+Three domains at once, `displayName` exactly as given:
+
+```
+displayName "nas"                -> ~/Library/CloudStorage/SSHDrive-nas
+displayName "nas2"               -> ~/Library/CloudStorage/SSHDrive-nas2
+displayName "SSH Drive - nas2"   -> ~/Library/CloudStorage/SSHDrive-SSHDrive-nas2
+```
+
+and what Finder itself shows for each (`tell application "Finder" to get displayed name
+of …`, which is the sidebar and window-title string):
+
+```
+SSHDrive-nas             -> "SSH Drive - nas"
+SSHDrive-nas2            -> "SSH Drive - nas2"
+SSHDrive-SSHDrive-nas2   -> "SSH Drive - SSH Drive - nas2"
+```
+
+So the directory name is `<app name with spaces removed>-<displayName with spaces
+removed>` and the label Finder draws is `<app display name> - <displayName>`. The app name
+is contributed by the system in both, and a `displayName` of `SSH Drive - nas2` gives
+exactly the stutter §2 was worried about. **`displayName` is the bare nickname**, which
+settles §2 and §4. (`mdls` disagrees with Finder and reports the raw directory name;
+Finder's `displayed name` is the one users see.)
+
+### s3-3. Does the system call `enumerateChanges` on a folder's enumerator when Finder shows it? - **No; it does not even make a container enumerator again**
+
+With the enumerators logging, a Finder window opened on `Documents/Reports` produced
+exactly two calls, both `enumerateItems`, one per folder on the way down:
+
+```
+enumerateItems container=ECC9E10F-…   (Documents)
+enumerateItems container=DF39F98B-…   (Documents/Reports)
+```
+
+Navigating away and back, closing the window and reopening it on the same folder, and
+creating a file in that folder on the server while the window was open produced **no
+further container-enumerator calls at all** - not `enumerateChanges`, not a second
+`enumerateItems`. The new file still appeared in the open window within ~20 s, through the
+working set. So a folder is listed once, ever, and after that Finder is fed from the
+replica.
+
+This settles §6.5: neither of the two fallbacks it hoped for exists. The system gives us
+no "this folder is being looked at" signal, so the `viewed` reason can only be armed from
+our own `enumerateItems` - which fires once, on first show - and everything after that has
+to come from the working set.
+
+### s3-4. What Finder does with `.filenameCollision` - **it never asks the user; the system retries the create for ever**
+
+Two different things happen and they should not be confused.
+
+**A real collision inside Finder never reaches us.** `duplicate` of `run.sh` creates
+`run copy.sh`; Finder resolves the name itself before calling the provider.
+
+**A case collision arriving from the server is resolved by the system, silently, on the
+replica only.** With `README-renamed.txt` already there, `debug mutate nas create-file
+README-RENAMED.TXT` gave:
+
+```
+server + index:  README-RENAMED.TXT   README-renamed.txt
+the mount:       README-RENAMED.TXT   README-renamed 2.txt
+```
+
+The system renamed the *older* item to `README-renamed 2.txt` in its replica and did
+**not** report that rename back to us - no `modifyItem`, and the server name is untouched.
+So on 26.4 a case collision does not break anything, but the user sees a name the server
+does not have, which is the argument for §5.4's `hidden = 2` rather than against it.
+
+**Returning `.filenameCollision` from `createItem` is a retry loop, not a dialog.** With
+`debug fault nas --collisions on`, a `printf > collide.txt` from the shell, a Finder "new
+folder" and a Finder `duplicate` all reported success to their caller, left the item in
+the mount, and made fileproviderd retry the create with a doubling backoff (0 s, 0.04 s,
+5 s, 15 s, …) for as long as the fault was set:
+
+```
+fileproviderd: ‼️ done executing <J1 ‼️ create-item(… n:"c{5}e.txt" …)
+               error:<NSError: FP -1001 "The file already exists in this location.">
+```
+
+No alert, no badge, and `enumeratorForPendingItems` stayed **empty** (unlike the
+`.serverUnreachable` fault of s4-3, which does populate it). Turning the fault off made
+all three creates land on the next retry. So `.filenameCollision` must only ever be
+answered when the name will *stop* being taken - §5.5's conflict-copy path, which renames
+our own file out of the way - and never as a standing refusal, or it is the `.Trash` loop
+again.
+
+### s3-5. `chmod +x` inside the mount - **arrives as `.fileSystemFlags`, and we currently drop it**
+
+```
+chmod +x <mount>/Documents/Reports/report-001.txt      # a 644 file
+-> modifyItem Documents/Reports/report-001.txt changedFields=0x100   (1 << 8 = .fileSystemFlags)
+```
+
+Exactly what §5.4 expects. Two notes:
+
+- `chmod +x` on a file that is **already** mode 755 produces no `modifyItem` at all: the
+  only bit the replica carries is the owner-execute one, and it was already set. The
+  group and other bits changed locally and went nowhere.
+- The skeleton's `modifyItem` ignores `.fileSystemFlags`, so the mode did not reach the
+  fake server and the system put the local mode straight back (`ls -l` reads `-rw-------`
+  again seconds later). That is milestone 4's work; the spike only had to prove the field
+  arrives, and it does.
+
+### s3-6. The delete confirmation without `allowsTrashing` - **Finder deletes, and its wording is fixed**
+
+AppleScript `delete` of an item in the mount schedules an `FPDeleteOperation`, not a trash
+operation, completes in milliseconds and removes the file from the replica *and* the fake
+server:
+
+```
+Finder: Scheduling FPOperation: <FPDeleteOperation: …>
+Finder: FPOperation completed:  <FPDeleteOperation: …>
+```
+
+No dialog is drawn on the AppleScript path. The dialog a person gets is Finder's own, and
+its exact wording is in `Finder.app/Contents/Resources/en.lproj/LocalizableMerged.strings`:
+
+```
+MT16_V1  Are you sure you want to delete “^1”?
+MT16_V2  Are you sure you want to delete the ^0 selected items?
+MT18_V1  This item will be deleted immediately. You can’t undo this action.
+MT18_V2  ^0 items will be deleted immediately. You can’t undo this action.
+AL7      Delete
+```
+
+So §5.4's "will be deleted immediately, are you sure?" is right in substance and can now
+be quoted exactly. `NSFileProviderItem.h` also documents a switch we did not know about:
+`NSExtensionFileProviderAllowsSystemDeleteAlerts = 0` in the appex Info.plist suppresses
+the system's own delete warnings for a provider that wants to draw its own. We want the
+system's, so we leave it alone.
+
+### s3-7. `modifyItem` returning a version that differs from the upload - **the system believes us; it neither re-fetches nor re-offers**
+
+With `debug fault nas --version-mismatch on`, one append to a materialized file gave
+exactly one `modifyItem` (`changedFields=0x81`, contents + contentModificationDate), the
+agent replied with `127-1788457968-0-fault` instead of `127-1788457968-0`, and then:
+
+```
+debug stat        blocks 8   dataless false   size 127
+evaluate          isDownloaded 1   isMostRecentVersionDownloaded 1   hasUnresolvedConflicts 0
+                  versionIdentifier = "127-1788457968-0-fault"
+debug transfers   total 0        # no fetchContents, then or later
+```
+
+No second `modifyItem`, no re-fetch when the file was read again, no conflict flag. The
+system simply records whatever version the reply carries.
+
+**This contradicts §5.5.** Its conflict policy rests on "the system re-fetches that content
+and does not re-offer the local edit"; only the second half is true. Returning the remote
+item from a conflicting `modifyItem` leaves the replica holding the *local* bytes under
+the *remote* version, and nothing will ever correct it. The fix is small and is now in
+§5.5: after returning the remote item, the agent calls
+`NSFileProviderManager.evictItem` on that identifier, which s4-1 proved works, so the next
+open downloads the remote content. The same finding makes the post-upload `lstat` of §5.5
+load-bearing for a second reason: a version we invent is a version the next sweep will not
+recognise.
+
+### s3-8. Atomic saves - **TextEdit and a shell temp+rename are both one `modifyItem` on the original identifier**
+
+TextEdit, driven by AppleScript (`open`, `set text of document 1`, `save`, `close`):
+
+```
+modifyItem Documents/Reports/report-003.txt changedFields=0x8     (lastUsedDate, on open)
+modifyItem Documents/Reports                changedFields=0x80    (the parent's mtime)
+modifyItem Documents/Reports/report-003.txt changedFields=0x289   xattrKeys=com.apple.TextEncoding
+```
+
+`0x289` = contents | lastUsedDate | contentModificationDate | extendedAttributes. The item
+identifier before and after is the same `7768EB02-…`. **No `createItem`, no `deleteItem`.**
+
+The classic shell form of the same dance - write a temp file beside the target and `mv`
+over it - behaves identically:
+
+```
+printf … > Documents/Reports/.tmp-005 ; mv .tmp-005 report-005.txt
+-> modifyItem Documents/Reports            changedFields=0x80
+   modifyItem …/report-005.txt             changedFields=0xc1
+   identifier 5284601D-… unchanged, content is the new content
+```
+
+So the no-tombstones risk of §5.3 does not bite for these two. **Xcode: not exercised.**
+Xcode 26.4 is installed and scriptable enough to open the file and set its text, but its
+`source document` does not implement `save` (`-1708`), and there is no way to send it a
+Cmd-S without Accessibility. **Pages, Numbers, Keynote and Microsoft Office are not
+installed on this VM**, so their saves remain untested.
+
+### s6-7. Which built-in menu entries Finder shows, and whether dropping `allowsEvicting` removes "Remove Download" - **partly answered, and the answer is that dropping it does nothing**
+
+What can be measured without a screen is what the system thinks the item's capabilities
+are, which is what Finder draws from. `fileproviderctl evaluate` prints them twice, as a
+number and as a letter string whose sixth slot is `allowsEvicting`:
+
+| item | row served by us | system's capabilities | letters |
+|---|---|---|---|
+| unpinned file, dataless | 111 (`e` set) | 0x2000002F | `rwdpf-t-----` |
+| unpinned file, downloaded | 111 (`e` set) | 0x2000006F | `rwdpfet-----` |
+| **pinned file, downloaded** | **47 (`e` cleared)** | **0x2000006F** | **`rwdpfet-----`** |
+| pinned folder, downloaded | 47 (`e` cleared) | 0x2400006F | `rwdpfet-----` |
+| root container, pinned | 47 (`e` cleared) | 0x2400006F | `rwdpfet-----` |
+
+The pinned rows were read back four times over forty seconds and never changed, and the
+same snapshot's `userInfo.kept` was `1`, so the system had certainly re-read the item.
+**The system puts `allowsEvicting` back.** What it does track is `isDownloaded`: a dataless
+item loses the bit, a materialized one has it, whatever we serve.
+
+So §2's "an item whose `capabilities` omit `allowsEvicting` is not offered Remove Download
+at all" and §7.2's second belt are both wrong on 26.4. The header agrees that the
+capability is the wrong lever - it is `API_DEPRECATED("use NSFileProviderContentPolicy
+instead", macos(11.0, 13.0))` - and names the one that works, per provider rather than per
+item: `NSExtensionFileProviderAllowsUserControlledEviction = false` in the appex's
+`NSExtension` dictionary, which "suppress[es] the user's ability to evict the item in the
+UI but retain[s] the ability of the OS or the provider's program to evict items". The
+neighbouring key `NSExtensionFileProviderAllowsContextualMenuDownloadEntry = 0` removes
+Finder's "Download Now" the same way. Neither is set today.
+
+The guarantee itself is unaffected: s6-5 already showed the eager `contentPolicy` is what
+refuses an eviction, and it still does.
+
+**Still needs a screen:** the actual list of entries Finder draws. Two things found in
+`LocalizableMerged.strings` make that worth doing rather than assuming, because Finder
+26.4 has a *built-in* keep-downloaded feature we did not know about:
+
+```
+N153.3    Download Now
+N153.4_V1 Remove Download        N153.4_V2 Remove Downloads
+N153.7_V1 Keep Downloaded        N153.8_V1 Keep Downloaded
+NE88.2.1  Downloaded   NE88.3.1 Not Downloaded   NE88.3.2 Kept Downloaded
+AXBADGE12 Kept downloaded
+```
+
+Our own action is also called "Keep Downloaded" (§7.2), so if Finder draws its own for a
+third-party provider the menu has two entries with one label. Note that our items report
+`isKeepDownloaded = 0` even when their effective content policy is
+`downloadEagerlyAndKeepDownloaded` (3), so that flag is the system's own and is not driven
+by our policy - which is a hint, not a proof, that the built-in entry is not offered to us.
+
+### s6-8. Do our custom actions appear at the top level or in a submenu? - **not answerable without a screen, but both rules were dead and are now fixed**
+
+The precondition turned out to be broken. `fileproviderctl evaluate` on any item printed:
+
+```
+org.shirls.sshdrive.action.pin: SUBQUERY(fileProviderItems, $item, $item.userInfo.kept == 0).@count
+  == $fileProviderItems.@count - Can't get value for 'fileProviderItems' in bindings {}.
+```
+
+Two mistakes in one string:
+
+1. **The bound key is `fileproviderItems`, lower-case p.** The object `fileproviderctl`
+   evaluates against is a dictionary whose only key is spelled that way, and
+   `fileProviderItems` with a capital P **does not occur anywhere in the dyld shared
+   cache** - `strings` over `dyld_shared_cache_arm64e.*` finds exactly one standalone
+   occurrence of the key and it is the lower-case one. Apple's own documentation uses the
+   capital spelling.
+2. **It is a key path, not a substitution variable.** `$fileProviderItems` raises
+   `NSInvalidArgumentException` out of `-[NSVariableExpression expressionValueWithObject:]`
+   because the bindings dictionary is empty, and the whole rule is dropped.
+
+Either mistake alone silently removes the entry, with nothing in any log. Rewritten to
+§7.2's "at least one" form with the right key, they evaluate:
+
+```
+unpinned item     pin YES   unpin NO
+pinned item       pin NO    unpin YES
+```
+
+Recorded while we were there, because it decides between §7.2's form and the "all selected
+items" one: `SUBQUERY(k, …).@count == k.@count` is `0 == nil-count`, i.e. **true**, when the
+key is absent or the selection is empty, so the "all" form would light up both entries on
+an empty selection. §7.2's `.@count > 0` form is false there, which is another reason to
+keep it.
+
+Where Finder puts the two entries once they are live still needs a screen.
+
+### s6-10. Do the actions appear on the window background and the sidebar entry? - **the root container matches the rule; where Finder draws it still needs a screen**
+
+`fileproviderctl evaluate <mount directory>` is exactly the "root as the selected item"
+case, and it behaves like any other item:
+
+```
+root unpinned:  kept = 0   pin YES   unpin NO
+root pinned:    kept = 1   pin NO    unpin YES   Content Policy 3
+```
+
+So nothing about the root container excludes it from the activation rules, and §7.1.2's
+"the root is not a special case" holds here too. Whether Finder offers a provider's custom
+actions on a window background with no selection, or on the sidebar row, is a drawing
+question no terminal can answer. One thing the evaluator does say about the empty case:
+with §7.2's `> 0` rules, an empty `fileproviderItems` matches neither entry.
+
+### Also recorded
+
+- **Decorations are empty** for every item, as expected: we declare no
+  `NSFileProviderDecorations`. §7.2's pin badge is still unwritten.
+- **A Finder rename** is one `modifyItem` with `changedFields=0x2` (`.filename`), which
+  finishes s3-1's rename half.
+- `fileproviderctl evaluate <action>` evaluates `NSFileProviderUserInteractions`, a
+  different Info.plist key from `NSExtensionFileProviderActions`, and one worth knowing
+  about: it is how a provider puts its own confirmation alert (title, subtitle, buttons,
+  help URL, suppression) in front of a Move, Trash, Delete, Rename or Create. Nothing in
+  milestone 1 needs it; §5.5's conflict copy and §5.4's delete might in milestone 4.
+- **S1 c2 (cancelling a large download from Finder's progress UI)** was not attempted: it
+  needs a pointer on the progress popover, so it stays a screen question.
+
+### State the VM was left in
+
+The signed Debug build at `/Applications/SSH Drive.app` (rebuilt and reinstalled twice
+during this pass), agent running from launchd, `sshdrive doctor` green apart from the two
+expected warnings, **one** fake location `nas` mounted at `~/Library/CloudStorage/SSHDrive-nas`,
+no pin markers, all four faults off (`debug fault nas` reports `writesFail false`,
+`createsCollide false`, `versionMismatch false`, `fetchDelayMilliseconds 0`). The `nas2`
+and `SSH Drive - nas2` domains from s3-2 were removed. No Finder windows left open.
+`sshtest`'s state was not touched.
+
+### What to do next on the VM
+
+1. The three drawing questions, in front of a screen: s6-7's actual entry list, s6-8's
+   top-level-versus-submenu, s6-10's window background and sidebar, and S1 c2. All four
+   need either Screen Recording added for `/usr/libexec/sshd-keygen-wrapper` in System
+   Settings (it will never prompt) or somebody looking at the screen.
+2. Decide, before milestone 8, whether to set
+   `NSExtensionFileProviderAllowsUserControlledEviction = false`; s6-7 says the capability
+   alone does nothing.
+3. Still open from the entries below: re-run s4-2 and s4-5 on macOS 14 or 15, the
+   `useReader` hook for s3-14, and a Developer ID plus `notarytool` pass for S1(d4).
+
+---
+
 ## 2026-09-04 - S4 and S6 on the headless Mac VM (eviction, atime, pinning)
 
 Every headless-feasible sub-question of S4 and S6, in runbook order. Same VM (macOS

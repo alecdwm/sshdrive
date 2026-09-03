@@ -25,6 +25,11 @@ final class ContainerEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage
     ) {
         let identifier = SSHDriveItemIdentifiers.agentIdentifier(for: container)
+        // s3-3 records which of section 6.5's two fallbacks the `viewed` reason gets, and
+        // that needs to know whether Finder re-listing a folder arrives as a fresh
+        // enumerator or as enumerateChanges on the old one.
+        Log.extensionLog.notice(
+            "enumerateItems container=\(identifier, privacy: .public)")
         guard let proxy = extensionInstance.agentProxy(observer.finishEnumeratingWithError) else {
             observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
             return
@@ -51,6 +56,8 @@ final class ContainerEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor
     ) {
         let identifier = SSHDriveItemIdentifiers.agentIdentifier(for: container)
+        Log.extensionLog.notice(
+            "enumerateChanges container=\(identifier, privacy: .public)")
         guard let proxy = extensionInstance.agentProxy(observer.finishEnumeratingWithError) else {
             observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
             return

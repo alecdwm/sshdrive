@@ -47,6 +47,17 @@ actor LocationRuntime {
     /// starts, so without a delay the concurrency S6 wants to count is always 1.
     private var fetchDelayMilliseconds = 0
 
+    /// `sshdrive debug fault <name> --version-mismatch on`: `modifyItem` returns an item
+    /// whose content and metadata versions are not the ones just written, which is the
+    /// case section 5.5's conflict path rests on (s3-7). The index keeps the true
+    /// versions; only the reply to the system is wrong.
+    private var versionMismatch = false
+
+    /// `sshdrive debug fault <name> --collisions on`: every `createItem` fails
+    /// `.filenameCollision`, which is the error section 5.5's `lstat`-after-`FAILURE`
+    /// check will raise for real in milestone 4. s3-4 needs it to see what Finder draws.
+    private var createsCollide = false
+
     private var concurrentFetches = 0
     private var peakConcurrentFetches = 0
     private var totalFetches = 0
@@ -378,6 +389,13 @@ actor LocationRuntime {
         contents: FileHandle?
     ) async throws -> SSHDriveItemSnapshot {
         try failWritesIfFaulted()
+        if createsCollide {
+            Log.agent.notice(
+                "debug fault --collisions: refusing createItem \(filename, privacy: .public) with .filenameCollision"
+            )
+            throw SSHDriveAgentError.filenameCollision.asNSError(
+                "debug fault --collisions on: the name is already taken on the server.")
+        }
         let parentRow = try index.item(identifier: parentIdentifier) ?? index.ensureRoot()
         let parentPath = try RelativePath.fromIndexBytes(parentRow.path)
         // Filenames arriving from the system pass through the RelativePath constructor
@@ -469,6 +487,15 @@ actor LocationRuntime {
                 kept: updated.kept, xattrs: updated.xattrs)
             try index.upsert(updated)
             try index.appendAnchor(identifier: updated.identifier, kind: .modified)
+            if versionMismatch {
+                var lying = updated
+                lying.contentVersion = updated.contentVersion + "-fault"
+                lying.metadataVersion = updated.metadataVersion + "-fault"
+                Log.agent.notice(
+                    "debug fault --version-mismatch: replying with \(lying.contentVersion, privacy: .public) instead of \(updated.contentVersion, privacy: .public)"
+                )
+                return LocationRuntime.snapshot(from: lying)
+            }
             return LocationRuntime.snapshot(from: updated)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
@@ -644,9 +671,14 @@ actor LocationRuntime {
         return out
     }
 
-    func setFault(writes: Bool?, fetchDelayMilliseconds delay: Int?) {
+    func setFault(
+        writes: Bool?, fetchDelayMilliseconds delay: Int?, versionMismatch mismatch: Bool?,
+        collisions: Bool?
+    ) {
         if let writes { writesFail = writes }
         if let delay { fetchDelayMilliseconds = delay }
+        if let mismatch { versionMismatch = mismatch }
+        if let collisions { createsCollide = collisions }
     }
 
     private func failWritesIfFaulted() throws {
@@ -678,6 +710,8 @@ actor LocationRuntime {
         let report: [String: Any] = [
             "writesFail": writesFail,
             "fetchDelayMilliseconds": fetchDelayMilliseconds,
+            "versionMismatch": versionMismatch,
+            "createsCollide": createsCollide,
             "inFlight": concurrentFetches,
             "peakConcurrent": peakConcurrentFetches,
             "total": totalFetches,
