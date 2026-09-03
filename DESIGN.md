@@ -599,7 +599,7 @@ answered from the index by the extension itself:
 | `enumerator(for: container)` → `enumerateChanges(from:)` | Same, diffed against the index; this is how a folder refreshes when Finder shows it (verify in S3). |
 | `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by change detection (§6.4) from the index, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
 | `item(for: identifier)` | Read the index row, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
-| `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file (§5.2); the extension then returns that URL. Partial fetches serve range requests for large media. The `Progress` the extension returns is fed by byte counts from the agent, and cancelling it cancels the transfer (§5.2). |
+| `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file (§5.2); the extension then returns that URL. Partial fetches serve range requests for large media. The `Progress` the extension returns is fed by byte counts from the agent, and cancelling it cancels the transfer (§5.2). The agent `lstat`s before and after the download; if size or mtime moved in between, the file changed under the transfer and the download is made again, once, after which a still-moving file fails the fetch as `.serverUnreachable` so the system retries later rather than keeping a torn copy. The item returned carries the version the final `lstat` read. |
 | `createItem` | `mkdir`, `symlink` (§5.7), or upload-to-temp + non-overwriting `rename` into place (§5.5). |
 | `modifyItem` | Depending on `changedFields`: rename/move (non-overwriting `rename`, with every descendant's path rewritten in the index, §5.3), content (upload + `posix-rename`, then a post-upload `lstat` that records the new version, §5.5), attributes (`setstat` mtime; execute bits from `fileSystemFlags`, §5.4), extended attributes (stored locally, §5.4). |
 | `deleteItem` | `remove`, or `rmdir` after a server-side depth-first walk when the recursive option is set (§5.5). |
@@ -805,7 +805,11 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   since the wire cannot carry it. Comparing only the `lstat` fields would
   let a save land on top of exactly the same-size, same-second remote
   change that the generation exists to catch. Metadata version = content
-  version plus mode, uid, gid, the effective `kept` state (not the
+  version plus mode, uid, gid, the derived `capabilities` and `fs_flags`
+  (a change of the `permissions` setting or of the probed identity
+  recomputes those without touching the mode, §5.4, and the system
+  re-reads an item only when its version moves), the effective `kept`
+  state (not the
   marker: a child's kept state changes when an ancestor is pinned, and
   the system re-reads an item only when its own version moves, §7.1),
   and a hash of the stored `xattrs` blob, so that accepting a tag change
@@ -848,7 +852,10 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   answers `.syncAnchorExpired`; pruning and rebuilds are the only two
   sources of that error. `enumerateItems` on the working set returns no
   items and the current sequence number as the anchor: the working set
-  is only ever a change stream, never a listing. That makes expiry
+  is only ever a change stream, never a listing. A container enumerator
+  hands out the same sequence number and its `enumerateChanges` never
+  expires it: a folder refresh is a fresh listing diffed against the
+  index (§5.1), whatever anchor the system holds. That makes expiry
   lossy on its own: whatever changed between the pruned anchor and the
   fresh one is in no listing the system will ask for, unless it re-walks
   every container, which S3 records but the design does not rely on. So
@@ -948,6 +955,9 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   makes the stall complete: the agent-side stall alone would leave the
   extension answering `item(for:)` from a half-built index, and a row
   that is not there yet reads as `.noSuchItem`, which deletes the file.
+  The flag also outlives a crash: an agent that starts and finds
+  `reconciling` set redoes the walk before serving anything, since the
+  extension is stalled on that flag and nothing else will clear it.
 
 ### 5.4 Names, permissions, attributes
 
@@ -1041,6 +1051,11 @@ index rebuild, which costs little: Finder recreates them. Finder keeps working, 
 
 **Our own temp files** (`.sshdrive-upload-*`, §5.5) are never enumerated
 and are ignored by every change-detection tier.
+
+**Only files, directories and symlinks exist.** Sockets, FIFOs and device
+nodes that a `readdir` reports are never enumerated and never get a row,
+since File Provider has no item type for them; tier 1's `find` already
+drops them with its type test.
 
 ### 5.5 Writes, conflicts, atomicity
 
@@ -1154,8 +1169,9 @@ and are ignored by every change-detection tier.
   take longer than a day over a slow link, and its own agent removes it
   the moment it lists the directory again. The ignore patterns everywhere
   else (§5.4, §6.4) match `.sshdrive-upload-*` and need no change.
-- **Deletes** of non-empty directories: refuse unless the system passed the
-  recursive option; then walk the directory on the server with `readdir`,
+- **Deletes** of non-empty directories: refuse with `.deletionRejected`
+  unless the system passed the recursive option; then walk the directory
+  on the server with `readdir`,
   depth first, re-`lstat`ing each directory before descending (§9.1). The
   walk cannot come from the index: folders Finder never opened have no
   rows, and an index-driven `rmdir` would fail with `ENOTEMPTY` on the
@@ -1754,8 +1770,9 @@ full sweep (tier 1, or tier 0 if exec is unavailable) so changes made while
 disconnected are caught, then resumes streaming. A "full sweep" is the
 tier 1 sweep with its window opened back to the last server timestamp
 the index recorded, unbounded when there is none (a fresh or rebuilt
-index), or at tier 0 a `readdir` of every root; the same sweep serves a
-fresh working-set anchor (§5.3).
+index), or at tier 0 a `readdir` of every root with the rotation of
+§6.5 suspended for that one cycle; the same sweep serves a fresh
+working-set anchor (§5.3).
 
 **Schedule for tiers 0 and 1.** Every 60 s while the user has touched the
 domain in the last 10 minutes, every 10 min otherwise, and immediately on
@@ -2916,7 +2933,8 @@ held by the system and survive.
 ## 12. Milestones
 
 1. **Skeleton** — app/agent, extension, CLI, askpass all sign and launch;
-   XPC between the three; the extension's read-only index reader;
+   XPC between the three; the extension's read-only index reader, kept
+   or dropped on S3's measurement (§5.2);
    `sshdrive doctor` green; and a **fake backend**: an in-memory tree
    behind the agent's `SFTPTransport` protocol (§6.2) that lists,
    fetches, writes, renames and deletes, and can be mutated from a test
@@ -2933,7 +2951,8 @@ held by the system and survive.
    extensions, the `RelativePath` chokepoint, `sh -s` remote scripts with
    the heartbeat wrapper. Spike S2.
 3. **Read-only** — `add` through the agent with `ssh -G` display and
-   relayed prompts, `list`, `show`, `remove`; browse and open files; capability
+   relayed prompts, `list`, `show`, `remove`; browse and open files through
+   the transfer scheduler (§6.2); capability
    probe and `status` (§8.1); permissions to capabilities; hidden-name
    handling. The deferred, real-server part of S3 (containment).
 4. **Read-write** — create/modify/delete/rename/move; temp-file + rename
