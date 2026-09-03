@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  App/agent entitlements (DESIGN.md section 3.1): hardened runtime (a build setting),
+	  the app group, and keychain sharing. Not sandboxed (section 9): the agent runs ssh,
+	  which must reach ~/.ssh, ssh-agent and ProxyCommand exactly as it does in a terminal.
+
+	  keychain-access-groups is a restricted entitlement on macOS: it needs a Developer ID
+	  provisioning profile, which only a bundle can embed. The app bundle carries one, and
+	  the agent, as the bundle's main executable, is therefore the only process with
+	  keychain access.
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>RWGDZAYBM8.org.shirls.sshdrive</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>RWGDZAYBM8.org.shirls.sshdrive</string>
+	</array>
+</dict>
+</plist>

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Registered through SMAppService.agent from the app's own bundle, which looks for it
+	  at Contents/Library/LaunchAgents/<this file's name> (DESIGN.md sections 3, 10).
+
+	  RunAtLoad so the agent runs from login rather than from the first mach lookup: the
+	  poll schedule, the eviction loop, the kept-subtree refresh and the wake handler are
+	  timers of its own and would otherwise not run until Finder touched a domain.
+
+	  KeepAlive with SuccessfulExit false, not plain true: a clean exit stays down until
+	  the next mach lookup, so `sshdrive agent stop` can stop something and an upgrade
+	  does not get the old bundle relaunched the instant it exits; a crash is restarted at
+	  once (sections 3, 10).
+
+	  The mach service is app-group prefixed so the sandboxed extension may connect
+	  (section 3.1).
+	-->
+	<key>Label</key>
+	<string>org.shirls.sshdrive.agent</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/SSH Drive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>MachServices</key>
+	<dict>
+		<key>RWGDZAYBM8.org.shirls.sshdrive.agent</key>
+		<true/>
+	</dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!--
+		  Tells the executable which of its two roles it is in. Without it the same
+		  binary, launched from the bundle by `open -g`, registers the login item, pokes
+		  the mach service and exits (Apps/Agent/main.swift).
+		-->
+		<key>SSHDRIVE_AGENT_ROLE</key>
+		<string>launchd</string>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>org.shirls.sshdrive</string>
+	</array>
+</dict>
+</plist>

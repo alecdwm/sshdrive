@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>SSH Drive</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionFileProviderDocumentGroup</key>
+		<string>RWGDZAYBM8.org.shirls.sshdrive</string>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fileprovider-nonui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
+		<!--
+		  Pin and unpin get their own Finder context-menu entries, shown conditionally on
+		  pin state (DESIGN.md sections 2, 7.2). TODO milestone 8: handle them in
+		  NSFileProviderCustomAction.performAction. They are declared now so spike S6 can
+		  record where Finder puts them.
+		-->
+		<key>NSExtensionFileProviderActions</key>
+		<array>
+			<dict>
+				<key>NSExtensionFileProviderActionIdentifier</key>
+				<string>org.shirls.sshdrive.action.pin</string>
+				<key>NSExtensionFileProviderActionName</key>
+				<string>Keep Downloaded</string>
+				<key>NSExtensionFileProviderActionActivationRule</key>
+				<string>SUBQUERY(fileProviderItems, $item, $item.userInfo.kept == 0).@count == $fileProviderItems.@count</string>
+			</dict>
+			<dict>
+				<key>NSExtensionFileProviderActionIdentifier</key>
+				<string>org.shirls.sshdrive.action.unpin</string>
+				<key>NSExtensionFileProviderActionName</key>
+				<string>Don't Keep Downloaded</string>
+				<key>NSExtensionFileProviderActionActivationRule</key>
+				<string>SUBQUERY(fileProviderItems, $item, $item.userInfo.kept == 1).@count == $fileProviderItems.@count</string>
+			</dict>
+		</array>
+	</dict>
+</dict>
+</plist>

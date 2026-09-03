@@ -1,0 +1,45 @@
+import Foundation
+import XPCProtocols
+import Logging
+
+/// The agent's XPC listener (DESIGN.md section 5.2).
+///
+/// The listener accepts a connection only from a peer that satisfies our code
+/// requirement, set with `setCodeSigningRequirement` on the connection before it is
+/// resumed. That call is the system's own audit-token check: it validates the peer's
+/// audit token against the requirement, which no pid-based check can do safely. Every
+/// process of the user can look the service up; only ours get past the delegate.
+final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
+
+    func listener(
+        _ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection
+    ) -> Bool {
+        do {
+            if SSHDriveCodeRequirement.isOverridden {
+                Log.agent.error(
+                    "a spike override is in force: the peer requirement is SSHDRIVE_PEER_REQUIREMENT or ~/.sshdrive-spike-peer-requirement, not the build's. Debug builds only.")
+            }
+            try connection.setCodeSigningRequirement(SSHDriveCodeRequirement.current)
+        } catch {
+            Log.agent.error(
+                "refusing a peer that does not satisfy the code requirement: \(error, privacy: .public)")
+            return false
+        }
+
+        connection.exportedInterface = SSHDriveXPCInterface.agent
+        connection.exportedObject = AgentService(connection: connection)
+        // The extension exports its callback object on the same connection; the CLI and
+        // askpass export nothing, and never receive a callback.
+        connection.remoteObjectInterface = SSHDriveXPCInterface.fileProviderExtension
+
+        connection.invalidationHandler = {
+            // A transfer whose extension process disappears mid-way is cancelled the same
+            // way as one the user cancelled (section 5.2).
+            Log.agent.debug("peer connection invalidated")
+        }
+
+        connection.resume()
+        Log.agent.debug("accepted a peer connection")
+        return true
+    }
+}

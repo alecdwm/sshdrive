@@ -1,0 +1,169 @@
+# XcodeGen spec for SSH Drive. Regenerate with: xcodegen generate
+#
+# Bundle tree produced by the "SSH Drive" target (DESIGN.md section 3):
+#
+#   SSH Drive.app
+#   |- Contents/MacOS/SSH Drive              host process, the background agent
+#   |- Contents/MacOS/sshdrive               the CLI
+#   |- Contents/MacOS/sshdrive-askpass       the SSH_ASKPASS program
+#   |- Contents/PlugIns/SSHDriveFileProvider.appex
+#   |- Contents/Resources/helper/            milestone 9, not built yet
+#   |- Contents/Library/LaunchAgents/org.shirls.sshdrive.agent.plist
+
+name: SSH Drive
+options:
+  bundleIdPrefix: org.shirls
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  minimumXcodeGenVersion: "2.38.0"
+
+packages:
+  SSHDriveCore:
+    path: Packages/SSHDriveCore
+  ArgumentParser:
+    url: https://github.com/apple/swift-argument-parser
+    from: 1.3.0
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: RWGDZAYBM8
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    ENABLE_HARDENED_RUNTIME: YES
+    # Keep Contents/MacOS to the four executables section 3 lists: Xcode's debug-dylib
+    # split would otherwise add "SSH Drive.debug.dylib" and "__preview.dylib" beside them,
+    # and the agent's peer requirement is written against real executables.
+    ENABLE_DEBUG_DYLIB: NO
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ALWAYS_SEARCH_USER_PATHS: NO
+    CLANG_ENABLE_MODULES: YES
+    DEAD_CODE_STRIPPING: YES
+    SWIFT_STRICT_CONCURRENCY: minimal
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+      # Debug builds are signed with an Apple Development certificate; the agent's
+      # peer requirement is widened to match (Sources/XPCProtocols/CodeRequirement.swift).
+      CODE_SIGN_IDENTITY: "Apple Development"
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+
+  SSH Drive:
+    type: application
+    platform: macOS
+    sources:
+      - path: Apps/Agent
+        excludes: ["*.entitlements", "Info.plist"]
+      # SMAppService.agent looks for the plist at Contents/Library/LaunchAgents/<label>.plist
+      # inside the calling app's own bundle (DESIGN.md section 3, section 10).
+      - path: Resources/LaunchAgents/org.shirls.sshdrive.agent.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
+    dependencies:
+      - package: SSHDriveCore
+        products: [Config, Secrets, SFTP, SSHProcess, Index, XPCProtocols, Logging]
+      - target: SSHDriveFileProvider
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+      - target: sshdrive
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: sshdrive-askpass
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.shirls.sshdrive
+        PRODUCT_NAME: SSH Drive
+        INFOPLIST_FILE: Apps/Agent/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/Agent/SSHDrive.entitlements
+        SKIP_INSTALL: NO
+        COMBINE_HIDPI_IMAGES: YES
+        ENABLE_APP_SANDBOX: NO
+  SSHDriveFileProvider:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Apps/FileProvider
+        excludes: ["*.entitlements", "Info.plist"]
+    dependencies:
+      - package: SSHDriveCore
+        products: [Config, Index, XPCProtocols, Logging]
+      - sdk: FileProvider.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.shirls.sshdrive.fileprovider
+        PRODUCT_NAME: SSHDriveFileProvider
+        INFOPLIST_FILE: Apps/FileProvider/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Apps/FileProvider/SSHDriveFileProvider.entitlements
+        SKIP_INSTALL: YES
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Apps/FileProvider/SSHDriveFileProvider.debug.entitlements
+
+  sshdrive:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Apps/CLI
+        excludes: ["*.entitlements", "Info.plist"]
+    dependencies:
+      - package: SSHDriveCore
+        products: [Config, XPCProtocols, Logging]
+      - package: ArgumentParser
+        product: ArgumentParser
+    settings:
+      base:
+        # A bare tool's default signing identifier is its product name, which the
+        # agent's peer requirement would refuse (DESIGN.md 3.1). Embedding an
+        # Info.plist section gives it the explicit identifier below.
+        PRODUCT_BUNDLE_IDENTIFIER: org.shirls.sshdrive.cli
+        PRODUCT_NAME: sshdrive
+        INFOPLIST_FILE: Apps/CLI/Info.plist
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        CODE_SIGN_ENTITLEMENTS: Apps/CLI/sshdrive.entitlements
+        SKIP_INSTALL: YES
+
+  sshdrive-askpass:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Apps/Askpass
+        excludes: ["*.entitlements", "Info.plist"]
+    dependencies:
+      - package: SSHDriveCore
+        products: [XPCProtocols, Logging]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.shirls.sshdrive.askpass
+        PRODUCT_NAME: sshdrive-askpass
+        INFOPLIST_FILE: Apps/Askpass/Info.plist
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        CODE_SIGN_ENTITLEMENTS: Apps/Askpass/sshdrive-askpass.entitlements
+        SKIP_INSTALL: YES
+
+schemes:
+  SSH Drive:
+    build:
+      targets:
+        SSH Drive: all
+    run:
+      config: Debug
+  sshdrive:
+    build:
+      targets:
+        sshdrive: all
+    run:
+      config: Debug

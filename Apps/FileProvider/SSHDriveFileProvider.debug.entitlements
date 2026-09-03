@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Extension entitlements (DESIGN.md section 3.1). The app group is what lets the
+	  sandboxed extension connect to the group-prefixed mach service and open the index
+	  read-only from the group container. No network entitlement: the extension never
+	  opens a socket.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>RWGDZAYBM8.org.shirls.sshdrive</string>
+	</array>
+	<!-- Debug builds only (section 3.1): lets the File Provider test harness drive us. -->
+	<key>com.apple.developer.fileprovider.testing-mode</key>
+	<true/>
+</dict>
+</plist>

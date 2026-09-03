@@ -1,0 +1,427 @@
+import Foundation
+import FileProvider
+import Security
+import ServiceManagement
+import Config
+import Secrets
+import Index
+import SFTP
+import SSHProcess
+import XPCProtocols
+import Logging
+
+/// Everything the CLI asks the agent to do. The CLI is a pure XPC client: every command
+/// is a request to the agent, so the CLI never touches the network, the keychain or File
+/// Provider (DESIGN.md section 3).
+///
+/// Milestone 1 implements `doctor` and the `debug` group the spikes need. Everything else
+/// in section 8 arrives with the milestone that gives it something to do.
+enum ControlCommands {
+
+    static func run(command: String, arguments: [String: String]) async throws -> Data {
+        switch command {
+        case "version":
+            return try json([
+                "agentVersion": agentVersion,
+                "interfaceVersion": sshDriveXPCInterfaceVersion,
+            ])
+
+        case "doctor":
+            return try json(["checks": await doctor()])
+
+        case "agent.stop":
+            // launchd leaves the agent down until the next mach lookup, which any CLI
+            // command or extension call causes, so stop is a pause, not a disable
+            // (section 8, section 10).
+            Log.agent.notice("exiting on request from the CLI")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
+            return try json(["stopping": true])
+
+        case "debug.fake.add":
+            return try await addFakeLocation(arguments)
+
+        case "debug.fake.remove":
+            return try await removeFakeLocation(arguments)
+
+        case "debug.fake.list", "list":
+            let file = try await DomainManager.shared.configuration()
+            return try json([
+                "macID": file.macID,
+                "locations": file.locations.map {
+                    [
+                        "id": $0.id, "name": $0.displayName, "host": $0.host,
+                        "backend": $0.backend.rawValue, "mounted": $0.mounted,
+                        "cacheTTL": $0.cacheTTL.rawValue, "permissions": $0.permissions.rawValue,
+                    ] as [String: Any]
+                },
+            ])
+
+        case "debug.tree":
+            let runtime = try await resolveRuntime(arguments)
+            let entries = try await runtime.dumpFakeTree()
+            return try json([
+                "tree": entries.map {
+                    ["path": $0.path, "type": $0.type, "size": $0.size,
+                     "mode": String($0.mode, radix: 8)] as [String: Any]
+                }
+            ])
+
+        case "debug.mutate":
+            return try await mutate(arguments)
+
+        case "debug.anchor.expire":
+            let runtime = try await resolveRuntime(arguments)
+            try await runtime.expireAnchors()
+            let location = try await resolveLocation(arguments)
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            return try json(["expired": true, "location": location.id])
+
+        case "debug.sweep":
+            let runtime = try await resolveRuntime(arguments)
+            let enabled = (arguments["enabled"] ?? "on") == "on"
+            await runtime.setCatchUpSweep(enabled: enabled)
+            return try json(["catchUpSweep": enabled ? "on" : "off"])
+
+        case "debug.policy":
+            let runtime = try await resolveRuntime(arguments)
+            guard let path = arguments["path"] else {
+                throw SSHDriveAgentError.notImplemented.asNSError("debug.policy needs a path.")
+            }
+            let marker: Int64
+            switch arguments["policy"] ?? "inherit" {
+            case "eager-keep": marker = 1
+            case "lazy": marker = -1
+            default: marker = 0
+            }
+            try await runtime.setPinState(pathString: path, marker: marker)
+            let location = try await resolveLocation(arguments)
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            return try json(["path": path, "marker": marker])
+
+        case "debug.index.dump":
+            return try await dumpIndex(arguments)
+
+        case "debug.keychain":
+            return try keychainRoundTrip(arguments)
+
+        case "debug.signal":
+            let location = try await resolveLocation(arguments)
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            return try json(["signalled": location.id])
+
+        default:
+            throw SSHDriveAgentError.notImplemented.asNSError("Unknown command \"\(command)\".")
+        }
+    }
+
+    static let agentVersion = "0.1.0-milestone1"
+
+    // MARK: doctor
+
+    /// The checks section 8 lists. Two of them, "CLI on PATH" and "agent reachable", the
+    /// CLI adds itself: the first it can only see from the terminal, and the second is
+    /// implied by this call having arrived at all.
+    private static func doctor() async -> [[String: Any]] {
+        var checks: [[String: Any]] = []
+
+        func check(_ name: String, _ ok: Bool?, _ detail: String, remedy: String? = nil) {
+            var entry: [String: Any] = [
+                "name": name,
+                "status": ok == nil ? "warn" : (ok! ? "ok" : "fail"),
+                "detail": detail,
+            ]
+            if let remedy { entry["remedy"] = remedy }
+            checks.append(entry)
+        }
+
+        // App in /Applications.
+        let bundleURL = Bundle.main.bundleURL
+        let inApplications = bundleURL.path.hasPrefix("/Applications/")
+        check(
+            "app in /Applications", inApplications, bundleURL.path,
+            remedy: inApplications
+                ? nil : "Move SSH Drive.app to /Applications, or install it with the Homebrew cask.")
+
+        // macOS version. Minimum is 14 (section 2).
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        check(
+            "macOS version", version.majorVersion >= 14,
+            "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)",
+            remedy: version.majorVersion >= 14 ? nil : "SSH Drive needs macOS 14 or newer.")
+
+        // The login item. SMAppService.agent registers it from the app's own bundle.
+        let service = SMAppService.agent(plistName: "\(SSHDriveIdentifiers.agentLabel).plist")
+        let statusText: String
+        var loginItemOK: Bool? = nil
+        switch service.status {
+        case .enabled: statusText = "enabled"; loginItemOK = true
+        case .requiresApproval: statusText = "requires approval"; loginItemOK = false
+        case .notRegistered: statusText = "not registered"; loginItemOK = false
+        case .notFound: statusText = "not found"; loginItemOK = false
+        @unknown default: statusText = "unknown"
+        }
+        check(
+            "login item", loginItemOK, statusText,
+            remedy: loginItemOK == true
+                ? nil
+                : "Enable SSH Drive in System Settings > General > Login Items, "
+                    + "or run: open -g -a \"SSH Drive\"")
+
+        // The app group container, which is where the index and config.json live.
+        if let url = GroupContainer.url {
+            let writable = FileManager.default.isWritableFile(atPath: url.path)
+            check("app group container", writable, url.path,
+                  remedy: writable ? nil : "The container exists but is not writable.")
+        } else {
+            check(
+                "app group container", false,
+                "not available (\(GroupContainer.identifier))",
+                remedy: "The agent is missing its application-groups entitlement, or is unsigned.")
+        }
+
+        // The extension, as PlugInKit sees it. `pluginkit -m -A -i <id>` prints a line
+        // when the extension is registered.
+        let pluginKit = pluginKitStatus()
+        check(
+            "extension registered", pluginKit != nil, pluginKit ?? "pluginkit reported nothing",
+            remedy: pluginKit == nil
+                ? "Launch the app once from its bundle: open -g -a \"SSH Drive\"" : nil)
+
+        // The ssh binary, always /usr/bin/ssh by absolute path (section 6.1).
+        let sshVersion = SSHProcess.sshVersion()
+        check("ssh", sshVersion != nil, sshVersion ?? "cannot run \(SSHProcess.sshBinaryPath)")
+
+        // The login shell snapshot (section 6.1). Milestone 2 takes it.
+        check(
+            "login shell snapshot", nil,
+            "not taken: the snapshot arrives in milestone 2 with the transport")
+
+        // Domains the system currently holds for us.
+        do {
+            let domains = try await DomainManager.existingDomainDescriptions()
+            check(
+                "file provider domains", true,
+                domains.joined(separator: ", ").ifEmpty("none"))
+        } catch {
+            check("file provider domains", false, error.localizedDescription)
+        }
+
+        checks.append([
+            "name": "uninstall reminder",
+            "status": "note",
+            "detail": "Run `sshdrive remove --all` before `brew uninstall --cask ssh-drive`: "
+                + "Homebrew cannot remove File Provider domains or keychain items for you.",
+        ])
+        return checks
+    }
+
+    private static func pluginKitStatus() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
+        process.arguments = ["-m", "-A", "-i", SSHDriveIdentifiers.extensionBundleID]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do { try process.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    // MARK: debug hooks
+
+    private static func resolveLocation(_ arguments: [String: String]) async throws -> Location {
+        guard let name = arguments["name"] else {
+            throw SSHDriveAgentError.unknownDomain.asNSError("This command needs a location name.")
+        }
+        return try await DomainManager.shared.location(named: name)
+    }
+
+    private static func resolveRuntime(_ arguments: [String: String]) async throws -> LocationRuntime {
+        let location = try await resolveLocation(arguments)
+        return try await DomainManager.shared.runtime(for: location)
+    }
+
+    /// Creates a location backed by the in-memory tree and adds its domain, so the File
+    /// Provider half can be exercised before a byte of SSH exists (section 12).
+    private static func addFakeLocation(_ arguments: [String: String]) async throws -> Data {
+        guard let name = arguments["name"] else {
+            throw SSHDriveAgentError.unknownDomain.asNSError("debug.fake.add needs a name.")
+        }
+        let fileCount = Int(arguments["files"] ?? "8") ?? 8
+        var location = Location(
+            nickname: name,
+            host: "fake",
+            remotePath: "/srv/fake",
+            cacheTTL: .oneHour,
+            mounted: true,
+            backend: .fake)
+        if let existing = try? await DomainManager.shared.location(named: name) {
+            location.id = existing.id
+        }
+        let created = location
+        try await DomainManager.shared.mutateConfiguration { file in
+            file.locations.removeAll { $0.id == created.id }
+            file.locations.append(created)
+        }
+        let runtime = try await DomainManager.shared.runtime(for: created)
+        try await runtime.seedFakeTree(fileCount: fileCount)
+        _ = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier)
+        try await DomainManager.shared.addDomain(for: created)
+        return try json([
+            "id": created.id, "name": created.displayName, "files": fileCount,
+            "mountHint": "~/Library/CloudStorage (the exact name is what spike S3 records)",
+        ])
+    }
+
+    private static func removeFakeLocation(_ arguments: [String: String]) async throws -> Data {
+        let location = try await resolveLocation(arguments)
+        try await DomainManager.shared.removeDomain(for: location)
+        await DomainManager.shared.dropRuntime(locationID: location.id)
+        try await DomainManager.shared.mutateConfiguration { file in
+            file.locations.removeAll { $0.id == location.id }
+        }
+        if let url = try? GroupContainer.domainURL(locationID: location.id) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        return try json(["removed": location.id])
+    }
+
+    private static func mutate(_ arguments: [String: String]) async throws -> Data {
+        let runtime = try await resolveRuntime(arguments)
+        guard let operation = arguments["op"], let path = arguments["path"] else {
+            throw SSHDriveAgentError.notImplemented.asNSError("debug.mutate needs op and path.")
+        }
+        let relative = try RelativePath(string: path)
+        let contents = Data((arguments["contents"] ?? "").utf8)
+        let mode = UInt32(arguments["mode"] ?? "644", radix: 8) ?? 0o644
+
+        let mutation: FakeMutation
+        switch operation {
+        case "create-file": mutation = .createFile(path: relative, contents: contents, mode: mode)
+        case "create-dir": mutation = .createDirectory(path: relative, mode: mode)
+        case "create-symlink":
+            mutation = .createSymlink(path: relative, target: arguments["target"] ?? "")
+        case "write": mutation = .write(path: relative, contents: contents)
+        case "touch": mutation = .touch(path: relative)
+        case "rewrite-invisibly": mutation = .rewriteInvisibly(path: relative, contents: contents)
+        case "chmod": mutation = .chmod(path: relative, mode: mode)
+        case "rename":
+            guard let to = arguments["to"] else {
+                throw SSHDriveAgentError.notImplemented.asNSError("rename needs --to.")
+            }
+            mutation = .rename(from: relative, to: try RelativePath(string: to))
+        case "delete":
+            mutation = .delete(path: relative, recursive: arguments["recursive"] == "true")
+        default:
+            throw SSHDriveAgentError.notImplemented.asNSError("Unknown mutation \"\(operation)\".")
+        }
+
+        let changes = try await runtime.applyFakeMutation(mutation)
+        let location = try await resolveLocation(arguments)
+        if changes > 0 {
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+        }
+        return try json(["applied": operation, "path": path, "changesSeenBySweep": changes])
+    }
+
+    private static func dumpIndex(_ arguments: [String: String]) async throws -> Data {
+        let runtime = try await resolveRuntime(arguments)
+        switch arguments["table"] ?? "items" {
+        case "anchors":
+            let anchors = try await runtime.dumpAnchors(limit: Int(arguments["limit"] ?? "100") ?? 100)
+            return try json([
+                "anchors": anchors.map {
+                    ["seq": $0.sequence, "identifier": $0.identifier, "kind": $0.kind.rawValue]
+                        as [String: Any]
+                }
+            ])
+        case "roots":
+            let roots = try await runtime.dumpRoots()
+            return try json([
+                "roots": roots.map {
+                    ["path": String(decoding: $0.path, as: UTF8.self), "reason": $0.reason,
+                     "lastSeen": $0.lastSeen] as [String: Any]
+                }
+            ])
+        default:
+            let items = try await runtime.dumpIndex()
+            return try json([
+                "items": items.map { row in
+                    [
+                        "identifier": row.identifier,
+                        "path": String(decoding: row.path, as: UTF8.self),
+                        "parent": row.parent ?? "",
+                        "type": row.type,
+                        "size": row.size,
+                        "mode": String(UInt32(row.mode ?? 0), radix: 8),
+                        "contentVersion": row.contentVersion,
+                        "metadataVersion": row.metadataVersion,
+                        "kept": row.kept,
+                        "pinState": row.pinState,
+                        "capabilities": row.capabilities,
+                        "fsFlags": row.fileSystemFlags,
+                        "hidden": row.hidden,
+                    ] as [String: Any]
+                }
+            ])
+        }
+    }
+
+    /// S1(d2): one `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete` round trip in
+    /// the data-protection keychain under the shared access group, from the
+    /// launchd-started agent. This is the only process that has `keychain-access-groups`
+    /// (section 3.1), and the entitlement is restricted, so it only works from a bundle
+    /// that embeds a provisioning profile. The real store arrives in milestone 2; this
+    /// hook exists so the spike can prove the entitlement is live before then.
+    private static func keychainRoundTrip(_ arguments: [String: String]) throws -> Data {
+        let account = arguments["key"] ?? "spike:s1d2"
+        let value = arguments["value"] ?? "spike-\(UUID().uuidString)"
+        let group = KeychainSecretsStore().accessGroup
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainSecretsStore.service,
+            kSecAttrAccount as String: account,
+            kSecAttrAccessGroup as String: group,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+
+        SecItemDelete(base as CFDictionary)
+
+        var add = base
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+
+        var query = base
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let readStatus = SecItemCopyMatching(query as CFDictionary, &item)
+        let readBack = (item as? Data).map { String(decoding: $0, as: UTF8.self) }
+
+        let deleteStatus = SecItemDelete(base as CFDictionary)
+
+        return try json([
+            "accessGroup": group,
+            "account": account,
+            "wrote": value,
+            "readBack": readBack ?? "",
+            "matched": readBack == value,
+            "addStatus": Int(addStatus),
+            "readStatus": Int(readStatus),
+            "deleteStatus": Int(deleteStatus),
+            "addStatusText": SecCopyErrorMessageString(addStatus, nil) as String? ?? "",
+            "readStatusText": SecCopyErrorMessageString(readStatus, nil) as String? ?? "",
+        ])
+    }
+
+    private static func json(_ object: [String: Any]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .prettyPrinted])
+    }
+}
+
+extension String {
+    func ifEmpty(_ replacement: String) -> String { isEmpty ? replacement : self }
+}

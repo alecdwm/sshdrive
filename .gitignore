@@ -1,0 +1,22 @@
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+*.xcscmblueprint
+
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Signing and local config
+*.mobileprovision
+*.provisionprofile
+*.p12
+Local.xcconfig
+
+# macOS
+.DS_Store
