@@ -137,9 +137,9 @@ Why the agent owns everything:
   opens read-only (§5.2), and translates every other system call (list,
   fetch, create, modify, delete) into one XPC call to the agent and the
   reply back. It holds no state of its own, opens no sockets and never
-  writes the index. Its only other file I/O is the temp file the system
-  gives it for fetched content, whose handle it passes to the agent to
-  fill.
+  writes the index. Its only other file I/O is the index it reads and the
+  temp file the system gives it for fetched content, whose handle it
+  passes to the agent to fill.
 - **Agent** — a `SMAppService` login agent whose plist sets `RunAtLoad`
   and `KeepAlive` with `SuccessfulExit` false, so it runs from login
   rather than from the first mach lookup, comes back after a crash, and
@@ -546,7 +546,11 @@ be unlocked, read from `CGSSessionScreenIsLocked` in
 Provider request for that domain that arrives while the presence test
 passes, evaluated at most once a minute so the test itself costs nothing.
 The domain is not disconnected for a deadline stop (§5.6), so those
-requests keep arriving. The attempt runs with the same 60 s deadline; if
+requests keep arriving. An `agentDependent` location also makes no
+attempt at all while the screen is locked, on wake included: its first
+attempt after a sleep is the one the unlock re-arms, so it never spends
+60 s prompting a key agent at a locked screen only to stop. The attempt
+runs with the same 60 s deadline; if
 it times out again the location is stopped again until the next trigger,
 so an unattended Mac never retries and the prompt appears only when the
 user is there to see it. Refused prompts (a PIN, a one-time code, a
@@ -597,7 +601,7 @@ answered from the index by the extension itself:
 |---|---|
 | `enumerator(for: container)` → `enumerateItems` | `opendir/readdir` the mapped path over SFTP, reconcile with the index, return items. Records the folder as recently viewed (§6.5). |
 | `enumerator(for: container)` → `enumerateChanges(from:)` | Same, diffed against the index; this is how a folder refreshes when Finder shows it (verify in S3). |
-| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by change detection (§6.4) from the index, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
+| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by change detection (§6.4) from the index, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2) and to say that it has answered `.syncAnchorExpired` and handed out a fresh anchor (§5.3). |
 | `item(for: identifier)` | Read the index row, in the extension (§5.2). Never touches the network, and touches the agent only on the schema-mismatch fallback (§5.2). |
 | `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file (§5.2); the extension then returns that URL. Partial fetches serve range requests for large media. The `Progress` the extension returns is fed by byte counts from the agent, and cancelling it cancels the transfer (§5.2). The agent `lstat`s before and after the download; if size or mtime moved in between, the file changed under the transfer and the download is made again, once, after which a still-moving file fails the fetch as `.serverUnreachable` so the system retries later rather than keeping a torn copy. The item returned carries the version the final `lstat` read. |
 | `createItem` | `mkdir`, `symlink` (§5.7), or upload-to-temp + non-overwriting `rename` into place (§5.5). |
@@ -754,7 +758,7 @@ items(identifier TEXT PK, path BLOB UNIQUE, parent TEXT, type, size, mtime,
       capabilities INTEGER,          -- NSFileProviderItemCapabilities bitmask, derived by the agent (§5.4)
       fs_flags INTEGER,              -- NSFileProviderFileSystemFlags bitmask, derived by the agent (§5.4)
       link_target BLOB,              -- Mac-side symlink target after the relative rewrite (§5.7); null for non-links
-      hidden INTEGER DEFAULT 0,      -- 1 symlink omitted (§5.7), 2 name collision (§5.4), 3 our temp file, 4 local-only (§5.4)
+      hidden INTEGER DEFAULT 0,      -- 1 symlink omitted (§5.7), 2 name collision (§5.4), 3 local-only (§5.4)
       xattrs BLOB,                   -- Finder tags and other extended attributes, local only (§5.4)
       local_content BLOB)            -- bytes of a local-only item such as .DS_Store (§5.4)
 anchors(seq INTEGER PK, changed_identifier TEXT, change_kind TEXT)
@@ -848,9 +852,12 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   system that was merely a few seconds behind. Anchor rows are a few
   dozen bytes, so a million of them cost less than the index they
   describe. If the system presents an anchor the index no longer knows
-  (older than the oldest kept row, or the index was rebuilt), the agent
+  (older than the oldest kept row, or the index was rebuilt), the reader
   answers `.syncAnchorExpired`; pruning and rebuilds are the only two
-  sources of that error. `enumerateItems` on the working set returns no
+  sources of that error. That reader is the extension (§5.2), which
+  sees nothing of the agent's schedule, so when it then hands out a
+  fresh anchor it tells the agent so over XPC, one call per expiry, and
+  the sweep below is the agent's response. `enumerateItems` on the working set returns no
   items and the current sequence number as the anchor: the working set
   is only ever a change stream, never a listing. A container enumerator
   hands out the same sequence number and its `enumerateChanges` never
@@ -928,7 +935,12 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   edit's, not the server's, and its version is left null and comes back
   through its own `modifyItem`, whose post-upload `lstat` sets it (S5
   records what the system does with a pending edit whose item reports a
-  version it cannot match). Leaving the
+  version it cannot match). A path whose backup row carries a different
+  identifier from the one the replica returns (the item was deleted and
+  re-created after the backup was taken) takes the replica's, since
+  that is what the user's file is keyed by, and the row's pin marker and
+  xattrs go with the old identifier as they would for any deletion.
+  Leaving the
   version null instead would move every materialized item's version on
   the next listing, make the system re-download the whole cache, and
   turn every pending edit into a conflict. The metadata version does
@@ -1003,7 +1015,8 @@ item's `fileSystemFlags`: `.userExecutable` is set when the mode has
 an execute bit the account can exercise (the owner's bit when the file
 is the account's, the group's when the account is in the group,
 otherwise the world bit, and any execute bit at all where the identity
-is unknown), `.userReadable` is always set, and `.userWritable` follows
+is unknown; a directory always carries it, since there it is the search
+bit), `.userReadable` is always set, and `.userWritable` follows
 `allowsWriting`. Without the first, a script or binary fetched from the
 server arrives non-executable, which the upload side (§5.5) would then
 faithfully send back as `0644`. The flags are stored on the row like
@@ -1040,7 +1053,7 @@ status` does not need to mention.
 
 **`.DS_Store` is swallowed.** A `createItem` or `modifyItem` for a
 `.DS_Store` succeeds locally with an item the agent records as local-only
-(`hidden = 4`) but never uploads; a `.DS_Store` on the server is never
+(`hidden = 3`) but never uploads; a `.DS_Store` on the server is never
 enumerated. Local-only items have no remote content, so the
 eviction loop (§7) skips them, and their bytes (a few KB for a
 `.DS_Store`) are kept in the row's `local_content` column so that a
@@ -1190,7 +1203,7 @@ drops them with its type test.
 | Browse a never-listed folder, network down | `.serverUnreachable` at once; Finder shows the folder as unavailable. |
 | Save a file, network down | System stores it locally, marks it "waiting to upload", calls `modifyItem` again on retry. The agent fails fast until it can connect, then the flush goes through. |
 | Network returns | Agent's `NWPathMonitor` fires → connection attempt → on success `signalErrorResolved(.serverUnreachable)` on every domain, which is the system's cue to retry pending uploads and fetches, then `signalEnumerator` for the working set, and `reconnect()` if `disconnect(reason:)` had been used. S5 confirms `signalErrorResolved` wakes the flush; `signalEnumerator` alone is the fallback. |
-| Laptop wakes from sleep | Same path as network returns, after the agent has dropped every master first (§6.1). |
+| Laptop wakes from sleep | Same path as network returns; the masters were already dropped at the will-sleep message (§6.1). |
 | Agent not running | Domain shows a disconnect message (§5.2); everything already cached keeps working. |
 
 We deliberately do not use `disconnect(reason:)` for network outages;
@@ -1477,15 +1490,15 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   leaves a 30 s window (`15 s × 2`) in which every request stalls: the
   keepalive itself; a per-request deadline in the SFTP client (§6.2), after
   which the request fails with `.serverUnreachable` and the channel is
-  killed, and after a second consecutive timeout the master too; and wake
-  from sleep, on which the agent does not wait to find out but runs
-  `-O exit` on every master and reconnects, since a connection that slept
-  through a network change is dead more often than not. Sleep and wake
-  come from IOKit (`IORegisterForSystemPower`, `kIOMessageSystemWillSleep`
-  and `kIOMessageSystemHasPoweredOn`), not from `NSWorkspace`, since the
-  agent runs no `NSApplication`; the will-sleep message is where the
-  masters are dropped, so no request is in flight on a connection the
-  Mac is about to abandon.
+  killed, and after a second consecutive timeout the master too; and
+  sleep, at whose will-sleep message the agent does not wait to find out
+  but runs `-O exit` on every master, reconnecting on wake, since a
+  connection that slept through a network change is dead more often than
+  not and dropping it before the sleep leaves no request in flight on a
+  connection the Mac is about to abandon. Sleep and wake come from IOKit
+  (`IORegisterForSystemPower`, `kIOMessageSystemWillSleep` and
+  `kIOMessageSystemHasPoweredOn`), not from `NSWorkspace`, since the
+  agent runs no `NSApplication`.
 - `ssh` exiting is classified: connection errors are `.serverUnreachable`
   and the agent reconnects with jittered backoff (§6.3); auth and host-key
   banners are `.notAuthenticated` (§4.3) and **reconnection stops** until
@@ -2426,7 +2439,9 @@ sshdrive remove <name> [--keep-files]
                                   (§4.2 keys items by user@hostname:port, so two locations on
                                   one host share one); on its last connection removes the
                                   helper binary and its directory from the server when no other
-                                  location on the same user@hostname:port still uses them;
+                                  location of this Mac on the same user@hostname:port uses them
+                                  (another Mac's helper running from there keeps its inode and
+                                  re-uploads on its next connection);
                                   refuses while uploads are pending unless
                                   --force; --keep-files uses the system's
                                   preserve-downloaded-data removal mode so cached files are
@@ -2797,8 +2812,8 @@ So:
   what registers both the extension with PlugInKit and the login item
   through `SMAppService`, and both must be done from the app's own bundle,
   which a symlinked CLI cannot do. The app, on launch, registers its login
-  item if needed, notices the launchd-managed instance already holds the
-  mach service, and exits. macOS posts a notification that a background
+  item (unconditionally, below), notices the launchd-managed instance
+  already holds the mach service, and exits. macOS posts a notification that a background
   item was added, with the item already enabled and a switch to turn it
   off under Login Items, and Gatekeeper shows its one-time "downloaded
   from the internet" dialog when the postflight opens the quarantined
@@ -2842,11 +2857,11 @@ So:
   delete the keychain items: they live in the data-protection keychain,
   which no file removal reaches and no cask directive addresses, and by
   the time `zap` runs the only executable that could delete them is
-  gone. Nor does it clear the entry under Login Items, which is the
-  system's own record and goes away once the system finds the bundle
-  missing, sometimes not before the next login. `sshdrive remove --all` is what deletes them, and a `zap`
+  gone. `sshdrive remove --all` is what deletes them, and a `zap`
   without it leaves orphaned items that a later install's `add` simply
-  overwrites. So the cask's `caveats`, the docs
+  overwrites. Nor does `zap` clear the entry under Login Items, which is
+  the system's own record and goes away once the system finds the bundle
+  missing, sometimes not before the next login. So the cask's `caveats`, the docs
   and `sshdrive doctor` all say the same thing: run `sshdrive remove
   --all` before `brew uninstall`. A user who skips it is left with sidebar
   entries for a provider that no longer exists, shown as unavailable,
