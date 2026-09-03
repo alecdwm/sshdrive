@@ -1044,6 +1044,14 @@ installed is still mode-governed.
 immediately, are you sure?" and then calls `deleteItem`, which removes the
 item on the server. This is honest for a remote filesystem and avoids
 inventing a server-side trash that other SFTP clients would not understand.
+`allowsTrashing` alone is not enough, because it governs only whether an
+*item* may be trashed: the domain is also added with
+`supportsSyncingTrash = false` (it defaults to YES), and the extension's
+`enumerator(for: .trashContainer)` answers `NSFeatureUnsupportedError` from
+`NSCocoaErrorDomain`, which is what the header prescribes for a provider
+without a trash - answering `.noSuchItem` instead tells the system its own
+trash container was deleted, and it then re-materializes and re-asks about
+once a second for ever, hanging anything that `stat`s `.Trash` in the mount.
 
 **Extended attributes stay local.** Finder tags, colours, `FinderInfo` and
 any other xattr the system sends in `modifyItem` (`changedFields` contains
@@ -2826,7 +2834,10 @@ So:
 - Homebrew runs a cask's `uninstall` directives on `brew upgrade` and
   `brew reinstall` as well as on `brew uninstall`, so nothing destructive
   may live there. The `uninstall` stanza only stops the agent, with
-  `signal: ["TERM", "org.shirls.sshdrive"]`, and deliberately **not**
+  `signal: ["TERM", "org.shirls.sshdrive.agent"]` — the launchd **label**
+  of §3.1, not the bundle id, because Homebrew matches that string
+  against `launchctl list` output and the bundle id never appears there
+  (S1 g1) — and deliberately **not**
   `launchctl:`: that directive boots the label out of launchd while
   `SMAppService` and the background-task database still consider the
   login item enabled, so an app launch that registered "only if needed"
@@ -2845,11 +2856,25 @@ So:
   the replacement and it exits cleanly again, and the next lookup starts
   the new one. The app also calls `SMAppService.register()`
   unconditionally on every launch, since it is idempotent, rather than
-  checking `status` first.
+  checking `status` first — but registering is **not** repairing, and an
+  upgrade needs more than that. Homebrew deletes the app and installs the
+  new one, and a login item whose bundle has been deleted and put back
+  keeps its enabled status while launchd can no longer resolve the
+  program: every spawn fails with `Could not find and/or execute program
+  specified by service` and `copy_bundle_path(...) error 0x6f`, on a 10 s
+  retry, for good. `register()` keeps returning success throughout,
+  because as far as `SMAppService` is concerned the item is still
+  enabled, so the unconditional register on launch does not clear it
+  (S1 f2). Only `unregister()` does. So the upgrade path is
+  **unregister, then register**: the cask's `postflight` runs the new
+  bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
+  `SMAppService.unregister()` and exits, before the `open -g` that
+  registers it again. The same two steps are what a developer replacing
+  the bundle by hand has to run.
   Locations, domains, the local replica and pending uploads all survive
   an upgrade untouched, and S1 checks that the agent is reachable after
   a `brew reinstall` and that the `signal:` stanza finds the
-  launchd-started agent at all, since Homebrew matches the bundle id
+  launchd-started agent at all, since Homebrew matches the launchd label
   against `launchctl list` output rather than asking LaunchServices.
   `zap` is where the rest of removal lives, with one limit: Homebrew runs
   the `uninstall` stanza, then deletes the app, then `zap`, so by the time
@@ -3116,6 +3141,12 @@ there, so that this list cannot drift from the body.
 - **`KeepAlive` is `SuccessfulExit` false;** the cask's `uninstall` only
   sends TERM; `remove --all` precedes `brew uninstall`; domain removal
   cannot be automated from the cask (§3, §10).
+- **The cask's `signal:` names the launchd label `org.shirls.sshdrive.agent`,
+  not the bundle id,** because Homebrew matches it against `launchctl list`
+  output, where only the label appears (2026-09-04, §10).
+- **An upgrade unregisters the login item before registering it,** since
+  `SMAppService.register()` reports success but does not repair a
+  registration whose bundle was deleted and replaced (2026-09-04, §10).
 - **The helper is built in a Linux job** and the darwin binary on the
   macOS job (§10.1).
 - **Nickname and remote-path changes re-create the domain,** refused
