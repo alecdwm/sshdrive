@@ -7,7 +7,13 @@ extension IndexItem {
     /// field-by-field copy and nothing more. Both the agent and the extension use this,
     /// so the two paths cannot drift.
     public var snapshot: SSHDriveItemSnapshot {
-        let policy: SSHDriveContentPolicy = kept ? .downloadEagerlyAndKeepDownloaded : .unset
+        // The marker decides the policy, not just the effect: a kept item is eager, an
+        // explicitly excluded one (`pin_state = -1`) is lazy, which is what overrides an
+        // eager ancestor (section 7.1.1), and everything else says nothing.
+        let policy: SSHDriveContentPolicy =
+            kept
+            ? .downloadEagerlyAndKeepDownloaded
+            : (pinState == -1 ? .downloadLazily : .unset)
         let attributes: [String: Data] =
             xattrs.flatMap { try? JSONDecoder().decode([String: Data].self, from: $0) } ?? [:]
         return SSHDriveItemSnapshot(

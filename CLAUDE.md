@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (3193 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (3298 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -28,7 +28,9 @@ spawn processes. `NSFileProviderReplicatedExtension`; one `NSFileProviderDomain`
 under `~/Library/CloudStorage/`. `item(for:)` is called constantly and must be answered from local
 state. `keychain-access-groups` is a restricted entitlement needing a provisioning profile, which only
 a bundle can embed - so the agent (the bundle's main executable) is the only process with keychain
-access. Folder eviction fails; evict files only. SFTP v3 carries nine status codes and no errno.
+access. `evictItem` evicts a directory recursively and works on the root container too
+(S4, 2026-09-04); the TTL loop still goes file by file because a TTL is per file. SFTP v3
+carries nine status codes and no errno.
 
 Processes and modules (§3):
 - **Agent** (`Contents/MacOS/SSH Drive`, the host executable): `SMAppService` login agent, not
@@ -89,46 +91,47 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 592-628 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
 | 629-742 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
 | 743-974 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, anchors, no tombstones, backup + reconcile-against-replica |
-| 975-1081 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash, local xattrs, `.DS_Store` |
-| 1082-1205 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies, stale temp files, recursive delete |
-| 1206-1228 | §5.6 Offline behaviour | situation -> behaviour table; when `disconnect(reason:)` is and is not used |
-| 1229-1340 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, hidden-link collisions |
-| 1341-1342 | §6 The background agent | (heading) |
-| 1343-1652 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, `MaxSessions` |
-| 1653-1721 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler, per-request deadlines, why not a library |
-| 1722-1757 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
-| 1758-1804 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
-| 1805-1810 | Tier 0: SFTP poll | `readdir` every root |
-| 1811-1853 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
-| 1854-1873 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
-| 1874-1958 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
-| 1959-1997 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
-| 1998-2057 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation |
-| 2058-2065 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2066-2119 | §7 Cache eviction (TTL) | the 5-minute loop, atime vs `last_fetch`, TTL values, "anything that opens files downloads them" |
-| 2120-2186 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps, `contentPolicy` |
-| 2187-2291 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2292-2332 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2333-2408 | §7.2 Finder context menu | the two custom actions, `NSPredicate` rules over `userInfo.kept`, `allowsEvicting`, the re-assert safety net, the decoration badge |
-| 2409-2523 | §8 The CLI | every command and flag, verbatim |
-| 2524-2644 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 2645-2688 | §9 Security | the security properties in one list |
-| 2689-2741 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
-| 2742-2810 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 2811-2900 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
-| 2901-2959 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 2960-2976 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 2977-3023 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3024-3160 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3161-3193 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 975-1103 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData`, `.DS_Store` |
+| 1104-1227 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies, stale temp files, recursive delete |
+| 1228-1250 | §5.6 Offline behaviour | situation -> behaviour table; when `disconnect(reason:)` is and is not used |
+| 1251-1362 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, hidden-link collisions |
+| 1363-1364 | §6 The background agent | (heading) |
+| 1365-1674 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, `MaxSessions` |
+| 1675-1745 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and the system's six-fetch ceiling, per-request deadlines, why not a library |
+| 1746-1781 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
+| 1782-1828 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
+| 1829-1834 | Tier 0: SFTP poll | `readdir` every root |
+| 1835-1877 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
+| 1878-1897 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
+| 1898-1982 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
+| 1983-2021 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
+| 2022-2081 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation |
+| 2082-2089 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2090-2162 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
+| 2163-2251 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2252-2356 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2357-2396 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2397-2490 | §7.2 Finder context menu | the two custom actions, `NSPredicate` rules over `userInfo.kept`, why the eager policy rather than `allowsEvicting` is the guarantee, the re-assert safety net, the decoration badge |
+| 2491-2605 | §8 The CLI | every command and flag, verbatim |
+| 2606-2726 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
+| 2727-2770 | §9 Security | the security properties in one list |
+| 2771-2823 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
+| 2824-2892 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
+| 2893-2982 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
+| 2983-3041 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
+| 3042-3058 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3059-3105 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3106-3265 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 3266-3298 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
 - [ ] **1. Skeleton** - all four targets sign and launch, XPC between them, the extension's read-only
       index reader (kept or dropped on S3's measurement), `sshdrive doctor` green, and a **fake
       backend** behind `SFTPTransport` that stays as the test double forever. Spikes **S1, S3
-      (fake-backend part), S4, S6**. *Scaffold written 2026-09-03; compiles Debug+Release on the VM, 24/24 package tests pass 2026-09-04.
-      Spikes started 2026-09-04, see `docs/spikes/`.*
+      (fake-backend part), S4, S6**. *Scaffold written 2026-09-03; compiles Debug+Release on the VM, 33/33 package tests pass 2026-09-04.
+      Spikes: S1 done, S3 partly (its Finder half open), **S4 and S6 done 2026-09-04 apart
+      from S6's three Finder-menu questions**; see `docs/spikes/`.*
 - [ ] **2. Transport** - `-N` master + mux clients, agent-built `ProxyJump`, login-shell snapshot,
       askpass token protocol + keychain, SFTP client, `RelativePath`, `sh -s` scripts. Spike **S2**.
 - [ ] **3. Read-only** - `add`/`list`/`show`/`remove`, browsing and fetching, capability probe and
@@ -139,9 +142,11 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       sleep/wake, agent-missing behaviour, deadline re-arm. Spike **S5**.
 - [ ] **6. Change detection tiers 0-1** - root set, anchors, poll cadence, sweep, fallback ladder,
       mass-deletion guard. Spike **S7**.
-- [ ] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1.
+- [ ] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
+      (TTL = time since last fetch or save; `evict --all` is one call on the root).
 - [ ] **8. Pinning** - `pin`/`unpin`/`pins`, content policy, kept-subtree watching, Finder actions,
-      badge. Uses S6's answers from milestone 1.
+      badge. Uses S6's answers from milestone 1 (an unseen path needs the replica lookup;
+      the eager policy is what refuses eviction).
 - [ ] **9. Remote helper (tier 2)** - Rust binary, CI cross-compilation, deploy/verify/upgrade, NDJSON.
       Until it ships, `auto` tops out at sweep.
 - [ ] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
@@ -173,9 +178,11 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 20. `allowsTrashing` is never set (no trash); xattrs and Finder tags stay local and hash into the metadata version; `.DS_Store` is swallowed as a local-only row with its bytes in `local_content` (§5.4).
 21. Symlinks are native items, **never followed**, shown only if a lexical check keeps them inside the root under either spelling (canonical `realpath` or user-typed/`$HOME`); absolute in-root targets are rewritten relative for the Mac; failures are omitted from enumeration entirely (§5.7).
 22. Pin markers (`pin_state`) live in the index, the sole authority. **Any change to a path's explicit state first deletes every explicit state beneath it**, silently from Finder too, and a pin change rewrites and anchors **every known descendant row** (§7.1, §7.1.1).
-23. Kept items are returned without `allowsEvicting` so Finder offers no "Remove Download"; an eviction that reaches one anyway is **re-asserted**, not read as an unpin (unless S6 finds a deliberate route) (§7.2).
+23. What stops a kept item being evicted is its **eager `contentPolicy`**, inherited by the system; `allowsEvicting` is deprecated since macOS 13 and is dropped only to take "Remove Download" out of Finder's menu. An eviction that reaches a kept item anyway is **re-asserted**, not read as an unpin (unless S6 finds a deliberate route) (§7.1, §7.2).
 24. The SFTP wire gives status classes, not errno: `ENOSPC`, `EEXIST`, `ENOTEMPTY`, `EXDEV` all arrive as bare `FAILURE` - ask a second question (`lstat`, `statvfs`, `readdir`). Also OpenSSH's `SSH2_FXP_SYMLINK` takes its two paths in the **opposite order from the draft** (§6.2).
-25. A corrupt index is restored **into** the live database via `sqlite3_backup_init` (never by replacing the file: the `-wal`/`-shm` sidecars and the extension's open reader belong to the old inode), then reconciled against the replica under `meta.reconciling` (§5.3).
+25. A pin on a path nothing has ever listed is not done when the rows are reported: the system ingests nothing from the working set alone, so `pin` finishes with `getUserVisibleURL` + one `lstat` of the replica, which is what makes it enumerate the chain (§7.1).
+26. Finder tags never arrive as an xattr: they are the item's `tagData`, and the system wipes them on the next re-download if the item does not return them. It also only reports xattrs it considers syncable (§5.4).
+27. A corrupt index is restored **into** the live database via `sqlite3_backup_init` (never by replacing the file: the `-wal`/`-shm` sidecars and the extension's open reader belong to the old inode), then reconciled against the replica under `meta.reconciling` (§5.3).
 
 ## Glossary
 

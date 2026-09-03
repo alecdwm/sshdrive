@@ -118,12 +118,46 @@ sshdrive debug anchor expire <name>
 sshdrive debug sweep <name> on|off
 sshdrive debug policy <name> <path> eager-keep|lazy|inherit
 sshdrive debug index dump <name> [--table items|anchors|roots] [--limit N]
-sshdrive debug signal <name>
+sshdrive debug signal <name> [--container PATH]
+sshdrive debug keychain [--key K] [--value V]
+
+# Added 2026-09-04 for S4 and S6:
+sshdrive debug evict <name> <path>
+sshdrive debug materialized <name> [--pending]
+sshdrive debug stat <name> <path> [--read]
+sshdrive debug xattr <name> <path>
+sshdrive debug fault <name> [--writes on|off] [--fetch-delay MS]
+sshdrive debug transfers <name> [--reset]
+sshdrive debug stabilize <name>
+sshdrive debug testing <name> list|run
+sshdrive debug fake add <name> [--testing-modes always,interactive]
 ```
 
 `fake add` seeds the tree, enumerates the root once and adds the domain. Every `mutate`
 runs the catch-up sweep and signals the working set afterwards, so a mutation reaches
 Finder the way a remote change would.
+
+The 2026-09-04 hooks, in one line each (`docs/skeleton-notes.md` has the detail):
+`evict` is `NSFileProviderManager.evictItem` with the error reported by domain and code,
+because which error comes back is the answer; `materialized` walks the materialized set,
+which is the enumerator the TTL loop uses and the only headless way to see what an eager
+policy downloaded, and `--pending` walks the pending set; `stat` is `getUserVisibleURL`
+plus an `lstat` from the launchd-started agent, exactly as section 7's loop will do it,
+and it is also what forces the system to ingest a chain it has never enumerated (s6-3);
+`xattr` prints what the index serves; `fault --writes on` makes every upload fail so an
+edit stays pending, and `--fetch-delay` holds each fetch open so concurrency is visible;
+`transfers` is the concurrency count and per-fetch timeline; `stabilize` is
+`waitForStabilization` plus `waitForChanges(below:)`, which is the only reliable way to
+stop measuring fileproviderd's throttling instead of its behaviour; `testing` is the
+manual scheduler the testing-mode entitlement unlocks, and needs a domain added with
+`--testing-modes interactive`. `debug policy` also readdirs any missing ancestors into
+the index before setting the marker, which is section 7.1 step 1.
+
+**`stabilize` is not a download barrier.** It returns in well under a second and says
+only that both sides have exchanged what they know; the
+`com.apple.fileproviderd.background-download` scheduler is separate and takes 8-90 s on
+an idle headless Mac. Poll `debug transfers` and `debug materialized`; do not conclude
+"nothing happened" from thirty seconds of silence.
 
 ### 0.5 The extension has to be enabled before any of S3, S4 or S6 runs
 
@@ -631,7 +665,7 @@ symlink to `/etc` and confirm nothing inside is listed, fetched or deleted (sect
 
 ## S4 - eviction and access time
 
-- [ ] **s4-1. Does `evictItem` work for files in our domain?** &mdash; **GUI**
+- [ ] **s4-1. Does `evictItem` work for files in our domain?** &mdash; **VM** (was tagged GUI; the `debug evict` hook settles it headless)
 
   Materialize a file, then call `NSFileProviderManager.evictItem` from the agent (a
   `debug` hook will be needed; milestone 7 gives it a real command).
@@ -639,9 +673,15 @@ symlink to `/etc` and confirm nothing inside is listed, fetched or deleted (sect
   Expected (section 7): yes for files. Folder eviction is known to fail and the loop skips
   directories.
 
-  Result:
+  Result: **Yes - and for directories and the root container too.** A file goes dataless keeping
+  size, xattrs and atime. `evictItem` on `Documents/Reports` evicted every file under it;
+  on `.rootContainer` it emptied the location (materialized set 11 -> 0). The header
+  documents that recursion. So the design's "folder eviction fails" is out of date on 26.4;
+  DESIGN.md section 7 and CLAUDE.md corrected, and `evict --all` becomes one call on the
+  root. An eviction also moves atime, so the loop must read atime before evicting.
+  (results.md 2026-09-04.)
 
-- [ ] **s4-2. Does atime advance on every read, only when older than mtime, or never?** &mdash; **GUI**
+- [ ] **s4-2. Does atime advance on every read, only when older than mtime, or never?** &mdash; **VM**
 
   ```
   stat -f '%a %m' ~/Library/CloudStorage/SSHDrive-nas/Documents/Reports/report-000.txt
@@ -653,21 +693,40 @@ symlink to `/etc` and confirm nothing inside is listed, fetched or deleted (sect
   three. The answer decides which of the two meanings the TTL has, and `sshdrive show` and
   the docs must state the one in force.
 
-  Result:
+  Result: **Only when older than mtime** - the relatime rule, and it is the whole macOS/APFS rule,
+  not a File Provider one (a file on /tmp behaves identically). Ten reads of a materialized
+  file over 40 s moved nothing; forcing atime one second below mtime made the next read
+  advance it to now. Materializing the file sets atime, and so does evicting it. So the TTL
+  is **time since the last fetch or save**, which is section 7's second meaning; `sshdrive
+  show` and the docs must say so. (results.md 2026-09-04.)
 
-- [ ] **s4-3. Does the system refuse to evict an item with pending changes?** &mdash; **GUI**
+- [ ] **s4-3. Does the system refuse to evict an item with pending changes?** &mdash; **VM** (`debug fault --writes on` makes an item pending without a user)
 
   Expected (section 7 step 3): yes, so the eviction loop needs no pending-upload check of
   its own. If no, milestone 7 adds one.
 
-  Result:
+  Result: **Yes**, so section 7 step 3 holds and the loop needs no check of its own. But the code is
+  `NSFileProviderErrorNonEvictable` (**-2008**), not the documented `UnsyncedEdits` (-2007),
+  and a kept item refuses with the same -2008, so the code cannot tell a pin from a pending
+  upload. Evicting the *parent directory* of a pending item fails as NSCocoaErrorDomain 4101
+  ("Couldn't communicate with a helper application", underlying
+  `libfssync.VFSFileTree.ItemNotFoundReason 5 contentVersionMismatch`), not
+  `NonEvictableChildren` (-2006): log it and move on, never interpret it.
+  (results.md 2026-09-04.)
 
-- [ ] **s4-4. Do Finder tags and other xattrs survive eviction?** &mdash; **GUI**
+- [ ] **s4-4. Do Finder tags and other xattrs survive eviction?** &mdash; **VM** for xattrs (`xattr -w` in the mount), **GUI** for a real Finder tag
 
   Tag a materialized file, evict it, look again. Expected (section 5.4): they survive. If
   not, they have to be re-applied after every evict.
 
-  Result:
+  Result: **Xattrs survive eviction; Finder tags never arrive as xattrs at all.** All three xattrs
+  written through the mount were still on the file after `evictItem` made it dataless - the
+  header calls extended attributes metadata, not content. Two corrections to section 5.4
+  came out of it: only xattrs the system considers syncable ever reach `modifyItem` (of
+  `org.sshdrive.spike`, `org.sshdrive.spike2#S` and the tags xattr, only the `#S` one did;
+  `NSExtensionFileProviderAdditionalSyncableExtendedAttributes` widens that set), and
+  **tags come through the item's `tagData`, not `extendedAttributes`, and are wiped on the
+  next re-download** unless we serve `tagData` back. (results.md 2026-09-04.)
 
 - [ ] **s4-5. Does a launchd agent's `stat` under `~/Library/CloudStorage` draw a TCC prompt?** &mdash; **VM** (to see the `EPERM`), **GUI** (to see the prompt)
 
@@ -676,15 +735,23 @@ symlink to `/etc` and confirm nothing inside is listed, fetched or deleted (sect
   the loop then runs on `last_fetch` alone and `sshdrive doctor` says so. Test on 14 and
   15, which is where the design says the behaviour is uncertain.
 
-  Result:
+  Result: **No prompt and no `EPERM`** on 26.4. Dozens of `lstat`s and `open`s from the
+  launchd-started agent, all successful. `tccd` denies the agent
+  `kTCCServiceSystemPolicyAllFiles` (it has no Full Disk Access and does not need it) and
+  then evaluates the access as `kTCCServiceFileProviderDomain` with **our own domain as the
+  indirect object**, allowing it silently: a provider reaching its own mount is not gated.
+  Section 7's silent-EPERM contingency does not arise and `doctor` needs no line for it.
+  **Not tested on 14 or 15**, which is where the design asks. (results.md 2026-09-04.)
 
 ---
 
 ## S6 - pinning through `contentPolicy`
 
-Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Finder.
+Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Finder. Every
+non-menu one turned out to be answerable headlessly with the 2026-09-04 hooks; the tags
+below were corrected to match.
 
-- [ ] **s6-1. Does an eager policy download the whole subtree after a working-set signal?** &mdash; **GUI**
+- [ ] **s6-1. Does an eager policy download the whole subtree after a working-set signal?** &mdash; **VM**
 
   ```
   sshdrive debug policy nas Documents/Reports eager-keep
@@ -694,37 +761,54 @@ Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Fin
   Expected (section 7.1 step 2): the system re-reads the rows whose metadata version moved
   and downloads the subtree through our normal `fetchContents`.
 
-  Result:
+  Result: **Yes.** `debug policy nas Documents eager-keep` plus one working-set signal brought all
+  eight files down through our own `fetchContents` in about 10 s (`materialized` 11 items,
+  `transfers` total 8, peak 5). (results.md 2026-09-04.)
 
-- [ ] **s6-2. Does it enumerate subfolders never opened in Finder?** &mdash; **GUI**
+- [ ] **s6-2. Does it enumerate subfolders never opened in Finder?** &mdash; **VM**
 
   Expected: yes. The offline claim in section 7.1 depends on it.
 
-  Result:
+  Result: **Yes.** `Documents/Reports` had no index row and had never been listed by anything when
+  the pin was set; the system asked our container enumerator for it and downloaded its eight
+  files in the same pass. The offline claim in section 7.1 stands. (results.md 2026-09-04.)
 
-- [ ] **s6-3. Does it accept a chain of never-enumerated ancestors reported through the working set?** &mdash; **GUI**
+- [ ] **s6-3. Does it accept a chain of never-enumerated ancestors reported through the working set?** &mdash; **VM**
 
   Pin a path that Finder has never shown. Expected: `sshdrive pin` on an unseen path
   depends on this (section 7.1 step 1).
 
-  Result:
+  Result: **Not on the working set alone.** Reproduced three times: creating the ancestor rows,
+  anchoring them and signalling the working set - section 7.1 step 1 as written - downloaded
+  nothing in 90 s, and neither did `signalEnumerator(for:)` on each new ancestor's own
+  container. What starts it is a **lookup of the path in the replica**, and the agent can
+  make that itself: `getUserVisibleURL` for the pinned row plus one `lstat` (0.46 s, file
+  still dataless) was enough, and the subtree came down within 90 s. s4-5 is what makes that
+  legal. Section 7.1 step 1 corrected to require it. (results.md 2026-09-04.)
 
-- [ ] **s6-4. Do new remote files under a pin get fetched on the next poll?** &mdash; **GUI**
+- [ ] **s6-4. Do new remote files under a pin get fetched on the next poll?** &mdash; **VM**
 
   ```
   sshdrive debug mutate nas create-file Documents/Reports/new.txt --contents hello
   ```
 
-  Result:
+  Result: **Yes.** The file created by `debug mutate` appeared in the materialized set and read back
+  its server contents about 8 s after the sweep and signal. Section 7.1 step 3 holds.
+  (results.md 2026-09-04.)
 
-- [ ] **s6-5. Does `evictItem` refuse a kept item?** &mdash; **GUI**
+- [ ] **s6-5. Does `evictItem` refuse a kept item?** &mdash; **VM**
 
   Expected (section 7.2): yes; and an eviction that reaches one anyway is re-asserted, not
   read as an unpin.
 
-  Result:
+  Result: **Yes**, with -2008, on the pin root *and* on a file that merely inherits the pin - even
+  though that file's row still carried `allowsEvicting`. So the **effective `contentPolicy`,
+  not the capability, is what refuses**. `allowsEvicting` is deprecated since macOS 13, and
+  the header names `NSExtensionFileProviderAllowsUserControlledEviction = false` as the way
+  to hide only the user's UI route while keeping ours. Section 7.2 corrected; whether the
+  Finder entry actually disappears is s6-7. (results.md 2026-09-04.)
 
-- [ ] **s6-6. Does an explicit `.downloadLazily` on a child override an eager ancestor?** &mdash; **GUI**
+- [ ] **s6-6. Does an explicit `.downloadLazily` on a child override an eager ancestor?** &mdash; **VM**
 
   ```
   sshdrive debug policy nas Documents/Reports/big eager-keep
@@ -733,7 +817,11 @@ Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Fin
 
   Expected (section 7.1.1): yes; exclusions depend on it.
 
-  Result:
+  Result: **Yes.** With `Documents` pinned and `Documents/Reports` excluded, exactly one fetch
+  happened - the sibling `Documents/top.txt` - and all nine files inside the excluded folder
+  stayed dataless. Needed one fix first: a row with `pin_state = -1` now serves a real
+  `.downloadLazily` instead of "no opinion", under which the eager ancestor would have won
+  (`IndexItemSnapshot.swift`, with a test). (results.md 2026-09-04.)
 
 - [ ] **s6-7. Which built-in menu items Finder shows for pinned versus unpinned items** &mdash; **GUI**
 
@@ -741,7 +829,7 @@ Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Fin
   Download" entry. Record every entry for both states, and confirm no other route evicts a
   kept item (drag out, "Optimise Storage", the Storage pane).
 
-  Result:
+  Result: **needs-Finder**, not attempted.
 
 - [ ] **s6-8. Do our custom actions appear at the top level of the context menu or in a submenu?** &mdash; **GUI**
 
@@ -750,9 +838,9 @@ Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Fin
   `fileproviderctl evaluate <item>` prints what the system thinks applies, which is worth
   recording next to what Finder actually draws.
 
-  Result:
+  Result: **needs-Finder**, not attempted.
 
-- [ ] **s6-9. Does an eager policy on `.rootContainer` download the whole location?** &mdash; **GUI**
+- [ ] **s6-9. Does an eager policy on `.rootContainer` download the whole location?** &mdash; **VM**
 
   ```
   sshdrive debug policy nas / eager-keep
@@ -760,22 +848,29 @@ Every S6 sub-question needs the domain enabled (0.5), and the menu ones need Fin
 
   Expected (section 7.1.2): the root is not a special case.
 
-  Result:
+  Result: **Yes.** `debug policy nas / eager-keep` materialized all 20 items - every directory, all
+  eight reports, `README.txt` and `run.sh`. The root is not a special case, so section 7.1.2
+  no longer has to hedge. (results.md 2026-09-04.)
 
 - [ ] **s6-10. Do the custom actions appear on the window background and the sidebar entry, with the root as the selected item?** &mdash; **GUI**
 
-  Result:
+  Result: **needs-Finder**, not attempted.
 
-- [ ] **s6-11. How many `fetchContents` calls the system keeps open at once for an eager subtree** &mdash; **GUI**
+- [ ] **s6-11. How many `fetchContents` calls the system keeps open at once for an eager subtree** &mdash; **VM** (`debug fault --fetch-delay`)
 
   Count concurrent transfers in the agent's log. Expected: this bounds the transfer
   scheduler's backlog (section 6.2).
 
-  Result:
+  Result: **Six.** With `debug fault nas --fetch-delay 5000` holding each fetch open, 38 transfers
+  over a 30-file eager subtree ran in strict batches of six, never seven (undelayed runs
+  peaked at 5). So section 6.2's scheduler limit of four sits under the system's own bound
+  and at most six XPC calls are ever held. (results.md 2026-09-04.)
 
-- [ ] **s6-12. `contentPolicy = .inherited` as the neutral value for an unpinned item** &mdash; **GUI**
+- [ ] **s6-12. `contentPolicy = .inherited` as the neutral value for an unpinned item** &mdash; **VM**
 
   Expected (skeleton-notes item 10): `.inherited` behaves as "no opinion" and does not
   force a download.
 
-  Result:
+  Result: **Yes.** Every unpinned item is served `.inherited`; a freshly added domain sits at one
+  materialized item (the root) and zero fetches indefinitely. `.inherited` forces nothing.
+  (results.md 2026-09-04.)

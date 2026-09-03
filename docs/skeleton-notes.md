@@ -11,7 +11,7 @@ on the command line only.
 
 ## What compiled and ran
 
-- `swift build` and `swift test` in `Packages/SSHDriveCore`: 24 tests, 0 failures
+- `swift build` and `swift test` in `Packages/SSHDriveCore`: **33** tests, 0 failures
   (RelativePath validation, the fake transport's non-overwriting rename and its
   invisible-rewrite case, the config store, the index writer and the read-only reader,
   anchors, anchor expiry, subtree path rewriting, `VACUUM INTO` backup).
@@ -44,7 +44,7 @@ signed build.
 | `Packages/.../Index` | The full section 5.3 schema (`items`, `anchors`, `roots`, `held`, `meta`), a small SQLite wrapper, `IndexWriter` (agent, sole writer: upsert, delete with its deletion anchor, subtree path rewrite, anchor append/prune/expire, roots, `VACUUM INTO` backup, `reconciling` and `generation`), `IndexReader` (extension, read-only WAL, meta checks, `item`, `children`, change stream with `.syncAnchorExpired`), and the row-to-snapshot conversion both sides share. |
 | `Packages/.../SFTP` | `RelativePath` (the section 9.1 chokepoint, byte components), `SFTPTransport`, the section 6.2 error classes, and `FakeTransport`: an in-memory tree with list, fetch, write, rename (non-overwriting), posix-rename, delete, symlink, statvfs, plus the mutation hook. |
 | `Packages/.../Logging` | The section 3.1 subsystem and categories. |
-| `Apps/Agent` | Two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), and `ControlCommands` (`doctor` plus the debug hooks). |
+| `Apps/Agent` | Two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
 | `Apps/FileProvider` | `NSFileProviderReplicatedExtension` with `item(for:)` answered from the read-only index reader and an XPC fallback, container and working-set enumerators, `fetchContents` over a `FileHandle` with a cancellable `Progress`, `createItem`/`modifyItem`/`deleteItem`, `disconnect(reason:)`/`reconnect()` on an unreachable agent, and the agent-error to `NSFileProviderError` mapping. |
 | `Apps/CLI` | `sshdrive` on ArgumentParser: `doctor` (fully implemented for the skeleton's checks), `agent start|stop|restart`, and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. |
 | `Apps/Askpass` | `sshdrive-askpass`: reads the token and `SSH_ASKPASS_PROMPT`, calls the agent, prints the answer. The agent side is the stub. |
@@ -78,7 +78,19 @@ sshdrive debug anchor expire <name>
 sshdrive debug sweep <name> on|off
 sshdrive debug policy <name> <path> eager-keep|lazy|inherit
 sshdrive debug index dump <name> [--table items|anchors|roots] [--limit N]
-sshdrive debug signal <name>
+sshdrive debug signal <name> [--container PATH]
+sshdrive debug keychain [--key K] [--value V]
+
+# Added 2026-09-04 for spikes S4 and S6:
+sshdrive debug evict <name> <path>
+sshdrive debug materialized <name> [--pending]
+sshdrive debug stat <name> <path> [--read]
+sshdrive debug xattr <name> <path>
+sshdrive debug fault <name> [--writes on|off] [--fetch-delay MS]
+sshdrive debug transfers <name> [--reset]
+sshdrive debug stabilize <name>
+sshdrive debug testing <name> list|run
+sshdrive debug fake add <name> [--files N] [--testing-modes always,interactive]
 ```
 
 Notes for whoever writes the runbook:
@@ -99,6 +111,64 @@ Notes for whoever writes the runbook:
 - `Apps/FileProvider/IndexReaderStore.useReader` is the switch for S3's reader-vs-XPC
   measurement. It is a stored property with no CLI hook yet; add one, or flip it in the
   debugger, when running that measurement.
+
+### The 2026-09-04 hooks (S4, S6)
+
+The File Provider half of these lives in `Apps/Agent/SpikeHooks.swift`; the fault
+injection and the transfer accounting are on `LocationRuntime`. They are in the agent
+because the agent is the process that will make the same calls for real: the TTL loop of
+section 7 evicts and stats, and the pin machinery of section 7.1 signals. `sshdrive
+evict`, `sshdrive pin` and the eviction timer replace them in milestones 7 and 8.
+
+- **`evict <name> <path>`** - `NSFileProviderManager.evictItem` on the row's identifier.
+  The reply is the error's `domain`, `code`, `underlyingErrors` and `userInfo` keys rather
+  than a sentence, because which error comes back is the whole answer, plus the row's own
+  `kept` and whether it was served `allowsEvicting`. On this OS it works on files,
+  directories (recursively) and `.rootContainer`.
+- **`materialized <name> [--pending]`** - walks `enumeratorForMaterializedItems`, or
+  `enumeratorForPendingItems`, and annotates each identifier with the path, `kept` and
+  `pin_state` from the index. The materialized set is the enumerator section 7's loop uses,
+  and it is the only headless way to see what an eager policy actually downloaded.
+- **`stat <name> <path> [--read]`** - `getUserVisibleURL` for the item, then `lstat` with
+  the errno kept: atime, mtime, ctime, birthtime, size, `st_blocks`, `st_flags` and a
+  `dataless` bit (`SF_DATALESS`, 0x40000000). `--read` opens and reads one byte first.
+  This is exactly how section 7's loop will read the replica, and it doubles as the
+  TCC probe (s4-5). It also has a side effect worth knowing: **a `getUserVisibleURL` plus
+  `lstat` of a path whose ancestors the system has never enumerated is what makes the
+  system ingest that chain** (s6-3), which is the missing half of section 7.1 step 1.
+- **`xattr <name> <path>`** - the extended attributes the index serves for the row, next to
+  the metadata version their hash feeds. Compare with `xattr -l` in the mount: they differ,
+  because the system only hands the extension xattrs it considers syncable.
+- **`fault <name> [--writes on|off] [--fetch-delay MS]`** - `--writes on` fails every
+  `createItem`/`modifyItem` with `.serverUnreachable`, so an edit made in the mount stays
+  in the system's pending set (that is the item s4-3 tries to evict). `--fetch-delay` holds
+  each `fetchContents` open for that many milliseconds; a fake-backed fetch is a memory copy
+  that finishes before the next one starts, so without it the concurrency s6-11 counts is
+  always 1. **Turn both off before leaving the VM.**
+- **`transfers <name> [--reset]`** - in-flight, peak concurrent and total `fetchContents`,
+  with a per-fetch timeline (start and end, seconds from the first) so the overlap is
+  visible rather than inferred from a peak.
+- **`stabilize <name>`** - `waitForStabilization` then `waitForChanges(below: .rootContainer)`.
+  On an idle headless Mac fileproviderd throttles its schedulers, so without this a spike
+  measures the throttle rather than the behaviour. It is **not** a download barrier: it
+  returns in under a second and the background-download scheduler still takes 8-90 s.
+- **`testing <name> list|run`** - `listAvailableTestingOperations` and `run(_:)`, which the
+  appex's `com.apple.developer.fileprovider.testing-mode` entitlement unlocks. They only
+  return anything on a domain added with `--testing-modes interactive`; on any other domain
+  the error is printed rather than thrown, because the error is the useful part. Nothing in
+  S4 or S6 needed it: interactive mode disables the system's own scheduling, which is the
+  behaviour those spikes measure, and the header says the mode cannot be removed from a
+  domain once given.
+- **`signal <name> --container PATH`** - `signalEnumerator(for:)` on one folder rather than
+  the working set. Recorded because it does *not* solve s6-3: signalling a never-enumerated
+  ancestor's own enumerator changes nothing.
+- **`fake add --testing-modes always,interactive`** - `alwaysEnabled` brings the domain up
+  without the user approving the provider, `interactive` hands the scheduler to the hook
+  above. Never set on a real location.
+- **`policy <name> <path> …`** now readdirs every missing ancestor into the index before
+  setting the marker and reports which rows it created, which is section 7.1 step 1. It
+  also serves a real `.downloadLazily` for `pin_state = -1`; it used to serve "no opinion",
+  under which an eager ancestor would simply have won and exclusions could not work.
 
 ## Verify on Mac (what the compiler could not settle)
 
@@ -137,5 +207,6 @@ Notes for whoever writes the runbook:
 9. **The NSXPC interface at runtime.** The class whitelists, the `Error?` reply
    parameters and the `FileHandle` arguments compile, but only a live connection proves
    the interface accepts them.
-10. **`contentPolicy = .inherited` as the neutral value** for an unpinned item, and
-    whether Finder's context menu shows our two actions at the top level (S6).
+10. ~~**`contentPolicy = .inherited` as the neutral value** for an unpinned item~~ -
+    confirmed 2026-09-04 (s6-12): it forces nothing. Whether Finder's context menu shows
+    our two actions at the top level is still open (s6-8) and needs a screen.

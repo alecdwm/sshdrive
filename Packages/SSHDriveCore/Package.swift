@@ -45,6 +45,6 @@ let package = Package(
         .testTarget(name: "SFTPTests", dependencies: ["SFTP"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),
-        .testTarget(name: "IndexTests", dependencies: ["Index", "Config"]),
+        .testTarget(name: "IndexTests", dependencies: ["Index", "Config", "XPCProtocols"]),
     ]
 )

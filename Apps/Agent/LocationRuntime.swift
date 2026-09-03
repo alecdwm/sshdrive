@@ -35,6 +35,25 @@ actor LocationRuntime {
     /// table exists so the cancel path is wired from the start.
     private var cancelledTransfers: Set<String> = []
 
+    // MARK: Spike faults and transfer accounting (S4, S6)
+
+    /// `sshdrive debug fault <name> --writes on`: every create/modify fails
+    /// `.serverUnreachable`, so an edit made in the mount stays in the system's pending
+    /// set. S4 needs an item with pending changes to try to evict.
+    private var writesFail = false
+
+    /// `sshdrive debug fault <name> --fetch-delay MS`: hold each `fetchContents` open for
+    /// this long. A fake-backed fetch is a memory copy and finishes before the next one
+    /// starts, so without a delay the concurrency S6 wants to count is always 1.
+    private var fetchDelayMilliseconds = 0
+
+    private var concurrentFetches = 0
+    private var peakConcurrentFetches = 0
+    private var totalFetches = 0
+    /// One entry per fetch: start, end (0 while running) and the path, as seconds since
+    /// the reference date, so S6 can see the overlap rather than infer it from a peak.
+    private var fetchTimeline: [(path: String, start: Double, end: Double)] = []
+
     init(location: Location, transport: any SFTPTransport, indexURL: URL, backupURL: URL) throws {
         self.location = location
         self.transport = transport
@@ -301,9 +320,17 @@ actor LocationRuntime {
         }
         let path = try RelativePath.fromIndexBytes(row.path)
 
+        let slot = noteFetchStarted(path: path.description)
+        defer { noteFetchFinished(slot) }
+
         do {
             let before = try await transport.lstat(path)
             let bytes = try await transport.read(path, offset: 0, length: nil)
+            if fetchDelayMilliseconds > 0 {
+                // The await is the point: the actor lets every other fetch in while this
+                // one waits, so the count is the system's concurrency, not ours.
+                try? await Task.sleep(nanoseconds: UInt64(fetchDelayMilliseconds) * 1_000_000)
+            }
             guard !cancelledTransfers.contains(transferID) else {
                 cancelledTransfers.remove(transferID)
                 throw SSHDriveAgentError.serverUnreachable.asNSError("Transfer cancelled.")
@@ -350,6 +377,7 @@ actor LocationRuntime {
         symlinkTarget: String?,
         contents: FileHandle?
     ) async throws -> SSHDriveItemSnapshot {
+        try failWritesIfFaulted()
         let parentRow = try index.item(identifier: parentIdentifier) ?? index.ensureRoot()
         let parentPath = try RelativePath.fromIndexBytes(parentRow.path)
         // Filenames arriving from the system pass through the RelativePath constructor
@@ -386,10 +414,15 @@ actor LocationRuntime {
         newExtendedAttributes: [String: Data]?,
         contents: FileHandle?
     ) async throws -> SSHDriveItemSnapshot {
+        try failWritesIfFaulted()
         guard var row = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
         }
         var path = try RelativePath.fromIndexBytes(row.path)
+        Log.agent.notice(
+            """
+            modifyItem \(path.description, privacy: .public)             changedFields=0x\(String(changedFields.rawValue, radix: 16), privacy: .public)             xattrKeys=\(newExtendedAttributes?.keys.sorted().joined(separator: ",") ?? "-", privacy: .public)
+            """)
 
         do {
             if changedFields.contains(.parentItemIdentifier) || changedFields.contains(.filename) {
@@ -516,8 +549,15 @@ actor LocationRuntime {
 
     /// The debug hook behind `sshdrive debug policy` (section 12, spike S6). Milestone 8
     /// replaces it with `pin`/`unpin`, which write the same marker.
-    func setPinState(pathString: String, marker: Int64) async throws {
+    @discardableResult
+    func setPinState(pathString: String, marker: Int64) async throws -> [String: Any] {
         let path = try RelativePath(string: pathString)
+        // Step 1 of section 7.1: a path the system has never enumerated has no chain of
+        // ancestors, and the system cannot apply a policy to an item whose ancestors it
+        // has never seen. So readdir each missing ancestor into the index from the
+        // nearest known one first; every new row gets an anchor and travels through the
+        // working set with the pinned one.
+        let createdAncestors = try await materializeAncestors(of: path)
         guard var row = try index.item(path: path.bytes) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(pathString).")
         }
@@ -542,6 +582,119 @@ actor LocationRuntime {
         } else {
             try index.removeRoot(path: path.bytes, reason: "pinned")
         }
+        return [
+            "identifier": row.identifier,
+            "kept": row.kept,
+            "capabilities": row.capabilities,
+            "metadataVersion": row.metadataVersion,
+            "ancestorRowsCreated": createdAncestors,
+        ]
+    }
+
+    /// Walks the chain to `path`, listing each directory whose child is missing, so every
+    /// ancestor has a row before the pinned one is signalled (section 7.1 step 1). Returns
+    /// the paths of the rows this call created.
+    @discardableResult
+    func materializeAncestors(of path: RelativePath) async throws -> [String] {
+        var created: [String] = []
+        var current = RelativePath.root
+        var containerRow = try index.ensureRoot()
+        for component in path.components {
+            let child = try current.appending(component: component)
+            if try index.item(path: child.bytes) == nil {
+                let result = try await reconcile(directory: current, containerRow: containerRow)
+                created.append(
+                    contentsOf: result.changed.map {
+                        String(decoding: $0.pathBytes, as: UTF8.self)
+                    })
+            }
+            guard let childRow = try index.item(path: child.bytes) else {
+                throw SSHDriveAgentError.noSuchItem.asNSError(
+                    "\(child.description) is not on the server.")
+            }
+            current = child
+            containerRow = childRow
+        }
+        return created
+    }
+
+    // MARK: Spike hooks (S4, S6)
+
+    /// The identifier the system knows an item by, given its path. Every File Provider
+    /// call the spikes make (`evictItem`, `getUserVisibleURL`) needs one.
+    func identifier(forPath pathString: String) throws -> (identifier: String, row: IndexItem) {
+        let path = try RelativePath(string: pathString)
+        guard let row = try index.item(path: path.bytes) else {
+            throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(pathString).")
+        }
+        return (row.identifier, row)
+    }
+
+    func row(identifier: String) throws -> IndexItem? { try index.item(identifier: identifier) }
+
+    /// The xattrs the index serves for a row (section 5.4). S4 compares these with what
+    /// `xattr -l` shows in the mount before and after an eviction.
+    func servedExtendedAttributes(pathString: String) throws -> [String: String] {
+        let (_, row) = try identifier(forPath: pathString)
+        var out: [String: String] = [:]
+        for (key, value) in row.snapshot.extendedAttributes {
+            let text = String(data: value, encoding: .utf8)
+            out[key] = text ?? value.map { String(format: "%02x", $0) }.joined()
+        }
+        return out
+    }
+
+    func setFault(writes: Bool?, fetchDelayMilliseconds delay: Int?) {
+        if let writes { writesFail = writes }
+        if let delay { fetchDelayMilliseconds = delay }
+    }
+
+    private func failWritesIfFaulted() throws {
+        guard writesFail else { return }
+        throw SSHDriveAgentError.serverUnreachable.asNSError(
+            "debug fault --writes on: the agent is refusing every upload.")
+    }
+
+    private func noteFetchStarted(path: String) -> Int {
+        concurrentFetches += 1
+        totalFetches += 1
+        peakConcurrentFetches = max(peakConcurrentFetches, concurrentFetches)
+        fetchTimeline.append(
+            (path: path, start: Date().timeIntervalSinceReferenceDate, end: 0))
+        return fetchTimeline.count - 1
+    }
+
+    private func noteFetchFinished(_ slot: Int) {
+        concurrentFetches -= 1
+        if fetchTimeline.indices.contains(slot) {
+            fetchTimeline[slot].end = Date().timeIntervalSinceReferenceDate
+        }
+    }
+
+    /// What S6 counts: how many `fetchContents` calls the system keeps open at once,
+    /// which bounds the transfer scheduler's backlog (section 6.2).
+    func transferStats(reset: Bool) -> [String: Any] {
+        let origin = fetchTimeline.first?.start ?? 0
+        let report: [String: Any] = [
+            "writesFail": writesFail,
+            "fetchDelayMilliseconds": fetchDelayMilliseconds,
+            "inFlight": concurrentFetches,
+            "peakConcurrent": peakConcurrentFetches,
+            "total": totalFetches,
+            "timeline": fetchTimeline.suffix(200).map {
+                [
+                    "path": $0.path,
+                    "start": ($0.start - origin).rounded(toPlaces: 3),
+                    "end": $0.end == 0 ? -1 : ($0.end - origin).rounded(toPlaces: 3),
+                ] as [String: Any]
+            },
+        ]
+        if reset {
+            peakConcurrentFetches = concurrentFetches
+            totalFetches = 0
+            fetchTimeline.removeAll()
+        }
+        return report
     }
 
     func dumpIndex() throws -> [IndexItem] { try index.allItems() }
@@ -611,5 +764,14 @@ actor LocationRuntime {
         // The conversion lives on IndexItem so the agent and the extension's own reader
         // cannot drift apart (section 5.2).
         row.snapshot
+    }
+}
+
+extension Double {
+    /// Timeline entries are printed as JSON and read by a person; three decimals is
+    /// plenty and keeps the output readable.
+    func rounded(toPlaces places: Int) -> Double {
+        let factor = pow(10.0, Double(places))
+        return (self * factor).rounded() / factor
     }
 }

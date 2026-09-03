@@ -1053,12 +1053,34 @@ without a trash - answering `.noSuchItem` instead tells the system its own
 trash container was deleted, and it then re-materializes and re-asks about
 once a second for ever, hanging anything that `stat`s `.Trash` in the mount.
 
-**Extended attributes stay local.** Finder tags, colours, `FinderInfo` and
-any other xattr the system sends in `modifyItem` (`changedFields` contains
-`.extendedAttributes`) are stored in the index row and returned on every
-item, so tagging works, and nothing is ever sent to the server. They are
-lost if the remote item is deleted or the index is rebuilt, which `sshdrive
-status` does not need to mention.
+**Extended attributes stay local.** Any xattr the system sends in
+`modifyItem` (`changedFields` contains `.extendedAttributes`) is stored in
+the index row and returned on every item, and nothing is ever sent to the
+server. They survive an eviction untouched - the framework calls extended
+attributes metadata, not content, and preserves them on a dataless file
+(S4, 2026-09-04) - and are lost if the remote item is deleted or the index
+is rebuilt, which `sshdrive status` does not need to mention.
+
+Two things about that set are not obvious, and S4 found both:
+
+- **The system chooses what we see.** It decides which xattrs are syncable,
+  largely from the name: one written with `XATTR_FLAG_SYNCABLE` arrives,
+  an ordinary name does not and stays in the replica where the extension
+  is never told about it. An extension widens the set with
+  `NSExtensionFileProviderAdditionalSyncableExtendedAttributes` in its
+  Info.plist. Whatever we do not ask for still works for the user; it is
+  simply local to this Mac and outside our index.
+- **Finder tags do not arrive as an xattr at all.**
+  `com.apple.metadata:_kMDItemUserTags` and `com.apple.FinderInfo` are
+  excluded from `extendedAttributes` deliberately, as redundant: tags reach
+  a provider as the item's own **`tagData`** property, and the syncable
+  Finder-info bits as the other `NSFileProviderItem` properties. And the
+  system rebuilds the tags xattr from `tagData` on every update, so an item
+  that returns no `tagData` **loses the user's tags on the next
+  re-download** - which S4 watched happen. Tags are therefore stored and
+  served the same way as xattrs, in the row and hashed into the metadata
+  version, but through `tagData` and `.tags` in `changedFields`, not
+  through the xattr dictionary. S10 proves the round trip.
 
 **`.DS_Store` is swallowed.** A `createItem` or `modifyItem` for a
 `.DS_Store` succeeds locally with an item the agent records as local-only
@@ -1682,9 +1704,11 @@ transfer is waiting, and a running one is never pre-empted, so a
 double-click during a 50 GB pin waits for at most one background
 transfer's share of the window rather than for the pin. At a
 `MaxSessions` of 2 (§6.1) the same scheduler runs on the metadata
-channel and metadata requests are served ahead of both classes. S6
-records how many `fetchContents` calls the system keeps open at once
-for an eager subtree, which bounds what the agent is holding.
+channel and metadata requests are served ahead of both classes. The
+system keeps at most **six** `fetchContents` calls open at once for an
+eager subtree (S6, 2026-09-04, macOS 26.4: 38 transfers ran in strict
+batches of six), so the four running plus at most two waiting is
+everything the agent ever holds.
 
 Three details worth writing down before the first bug report. OpenSSH's
 `SSH2_FXP_SYMLINK` takes its two path arguments in the opposite order from
@@ -2070,32 +2094,51 @@ TTL unless it has been used again.
 
 1. Every 5 minutes, for each mounted domain with `cacheTTL != never`:
    `NSFileProviderManager(for: domain).enumeratorForMaterializedItems()`.
-2. For each materialized **file** (skip directories; folder eviction is known
-   to fail; skip local-only items, §5.4, which have nothing to fetch back):
+2. For each materialized **file** (skip local-only items, §5.4, which have
+   nothing to fetch back; the loop works file by file because a TTL is per
+   file, not because a directory cannot be evicted - S4 found on macOS 26.4
+   that `evictItem` on a directory evicts its children recursively and then
+   the directory itself, and that it works on `.rootContainer` too, which is
+   what `evict --all` uses, 2026-09-04):
    last use = max(atime and mtime of the user-visible file, `last_fetch`
    from the index). mtime counts because a file the user saved but never
-   re-read was used. atime is read with `AT_SYMLINK_NOFOLLOW` (§9.1). Spike S4
-   verifies atime advances on read on the target macOS versions;
-   `last_fetch` is the fallback and is always present. That decides
-   which of two meanings the TTL has, and the docs and `sshdrive show`
-   state the one in force: where atime advances on every read it is
-   time since the file was last read; where it advances only when older
-   than the mtime (Linux's `relatime` rule) or not at all, atime cannot
-   see a second read, and the TTL becomes time since the last fetch or
-   save. Watching opens precisely would need Endpoint Security, which a
-   login agent cannot hold, so there is no third option. S4 also records
-   whether these `stat`s under `~/Library/CloudStorage` draw a TCC prompt
-   on 14 or 15: a prompt a launchd agent cannot answer would come back as
-   a silent `EPERM`, and the loop then runs on `last_fetch` alone and
-   `sshdrive doctor` says so. atime is not
-   filtered: Spotlight indexing, Quick Look and Finder thumbnails also read
-   files and will extend a file's life, which we accept as "used" rather
-   than try to distinguish.
+   re-read was used. atime is read with `AT_SYMLINK_NOFOLLOW` (§9.1), and
+   the loop reads it **before** it evicts, since an eviction moves it.
+   **S4 settled which of the two meanings the TTL has, and it is the
+   second** (2026-09-04, macOS 26.4): atime follows the `relatime` rule.
+   Materializing a file sets it; after that a read advances it only when
+   it is older than the mtime, so ten reads of a materialized file move
+   nothing. This is the whole APFS rule, not something File Provider
+   does - a file on `/tmp` behaves identically - so no other macOS
+   version is likely to differ, though 14 and 15 are worth one run.
+   **The TTL is therefore time since the last fetch or save**, which
+   `last_fetch` and mtime carry between them; atime adds nothing for a
+   materialized file and is kept only because it costs one field and
+   catches whatever else the system does to the replica. The docs and
+   `sshdrive show` state that meaning. Watching opens precisely would
+   need Endpoint Security, which a login agent cannot hold, so there is
+   no third option. These `stat`s draw **no TCC prompt and no `EPERM`**
+   from the launchd-started agent (S4, 2026-09-04): `tccd` denies the
+   agent `kTCCServiceSystemPolicyAllFiles`, which it does not need, and
+   then allows the access as `kTCCServiceFileProviderDomain` with our own
+   domain as the indirect object, silently. A provider reaching its own
+   mount is not gated, so `sshdrive doctor` carries no line for it. atime
+   is not filtered: Spotlight indexing, Quick Look and Finder thumbnails
+   also read files and will extend a file's life, which we accept as
+   "used" rather than try to distinguish.
 3. If `now - lastUse > TTL`, call `evictItem`. The system refuses to evict
    an item with unsynced local changes, so pending uploads need no check of
-   ours. Ignore `.nonEvictable`; log and move on.
+   ours (S4, 2026-09-04). Ignore the refusal; log and move on. **The error
+   code does not say why**: an item with pending edits and a kept item both
+   come back as `NSFileProviderErrorNonEvictable` (-2008), never the
+   documented `NSFileProviderErrorUnsyncedEdits` (-2007), so nothing may be
+   inferred from -2008 beyond "not now". A directory eviction that meets a
+   pending child fails as `NSCocoaErrorDomain` 4101 with a `contentVersionMismatch`
+   underneath rather than `NSFileProviderErrorNonEvictableChildren` (-2006);
+   that too is logged and passed over.
 4. `sshdrive evict <location> [path]` triggers the same routine on demand,
-   with `--all` to drop everything cached.
+   with `--all` to drop everything cached, which is one `evictItem` on the
+   root container rather than a walk (S4, 2026-09-04).
 
 TTL values map to seconds: `15m`, `1h`, `12h`, `1d`, `1w`, `1mo` (30 days),
 `never`. Default: `1d`.
@@ -2152,6 +2195,19 @@ framework's declarative `contentPolicy`:
    each missing ancestor into the index from the nearest known one and
    reports those rows through the working set, so that by the time the
    pinned row is signalled the system has a complete chain down to it.
+   **That is necessary and not sufficient.** S6 found (2026-09-04, macOS
+   26.4) that the system ingests none of it from the working set alone:
+   ninety seconds after the rows and their anchors were reported nothing
+   had been enumerated or downloaded, and `signalEnumerator(for:)` on each
+   new ancestor's own container changed nothing either. What starts it is a
+   **lookup of the path in the replica**, and the agent makes that itself as
+   the last step of `pin`: `NSFileProviderManager.getUserVisibleURL` for the
+   pinned identifier followed by one `lstat` of the returned path - well
+   under a second, on a still-dataless item. The system then enumerates the
+   chain and the eager download follows within about a minute. The agent is
+   allowed to read its own domain's mount (§7); without this step `pin` on a
+   path Finder has never shown would write the markers, report them, and
+   silently download nothing.
    Pins are on paths, so a re-enumeration keeps them; deleting the path
    removes them (§5.3).
 2. **Declare the policy.** Items are returned with
@@ -2173,7 +2229,16 @@ framework's declarative `contentPolicy`:
    O(subtree) rows and anchors per pin change, the same order as a
    directory rename (§5.3). The system then downloads the subtree eagerly
    (through our normal `fetchContents`), shows it as downloaded in
-   Finder, and refuses to evict it.
+   Finder, and refuses to evict it. S6 confirmed each half on macOS 26.4
+   (2026-09-04): the whole subtree comes down after one working-set signal,
+   including **folders nothing has ever listed**, which is what the offline
+   claim below rests on; files that appear remotely under the pin later are
+   fetched too; and the system holds **at most six `fetchContents` calls
+   open at once** for an eager subtree, in strict batches, which is the
+   bound §6.2's scheduler sits under. The refusal to evict comes from the
+   **inherited `contentPolicy`, not from `allowsEvicting`**: a file that
+   still carried the capability refused eviction because its ancestor was
+   eager (§7.2).
 3. **Keep it current.** Pin roots are always in the change-detection root
    set (§6.5), watched recursively. New or changed remote files show up in
    the working-set diff, the system sees the eager policy, and fetches them.
@@ -2309,12 +2374,11 @@ different are pinned down here:
   "keep everything" on a home directory or a media share is a large
   decision.
 - **It gets the policy.** `item(for: .rootContainer)` returns the root row
-  with `contentPolicy = .downloadEagerlyAndKeepDownloaded` when pinned.
-  Whether the system honours the eager policy on the root container the
-  same way it does on a folder is recorded by S6; if it does not, the agent
-  applies the pin to every top-level item instead (situation A on each,
-  written as one operation and reported as one root pin), which produces
-  the same effective state.
+  with `contentPolicy = .downloadEagerlyAndKeepDownloaded` when pinned, and
+  **the system honours it exactly as it does on a folder**: S6 pinned the
+  root of a test location and every directory and file in it was downloaded
+  (2026-09-04). The fallback this paragraph used to describe - applying the
+  pin to every top-level item instead - is not needed.
 - **It is a watch root.** A pinned root puts the whole location into the
   recursive part of the root set (§6.5): `find` from the root, the
   helper watching its own `--root`. At tier 0 that is a
@@ -2363,6 +2427,24 @@ which we leave entirely to Finder. The division of labour is:
   back chooses "Don't Keep Downloaded" first, which brings the capability
   back with the next metadata version, and then Finder's "Remove
   Download", or waits for the TTL.
+
+  **What actually enforces this is the `contentPolicy`, not the
+  capability** (S6, 2026-09-04). `evictItem` refused a file whose row still
+  carried `allowsEvicting`, purely because the folder above it was eager;
+  and `allowsEvicting` is `API_DEPRECATED("use NSFileProviderContentPolicy
+  instead", macos(11.0, 13.0))`. So the guarantee "a kept item is not
+  evicted" rests on the eager policy, which is where §7.1 puts it, and
+  dropping `allowsEvicting` is a second, deprecated belt whose only job is
+  the Finder menu entry - which is exactly what S6's remaining Finder
+  question has to confirm. If it turns out not to remove the entry, the
+  header names the lever that does:
+  `NSExtensionFileProviderAllowsUserControlledEviction = false` in the
+  appex's `NSExtension` dictionary, which "suppress[es] the user's ability
+  to evict the item in the UI but retain[s] the ability of the OS or the
+  provider's program to evict items" - i.e. it hides Finder's entry on
+  every item while leaving §7's own loop working. That is a per-provider
+  switch, not per item, so it is only right if the answer is that a
+  provider cannot hide the entry per item at all.
 
 Mixed selections show both entries, and each acts only on the items it
 applies to, so selecting a kept folder together with a plain file and
@@ -3155,6 +3237,29 @@ there, so that this list cannot drift from the body.
   one host are allowed, each with its own connection (§4, §6.1).
 - **Minimum macOS is 14** (§2).
 - **Milestone 1 has a fake backend** that stays as the test double (§12).
+- **`evictItem` works on directories and on the root container,** recursively,
+  so `evict --all` is one call and the loop skips directories only because a
+  TTL is per file (2026-09-04, S4, §7).
+- **The TTL is time since the last fetch or save.** atime follows the
+  `relatime` rule on APFS, so a read of an already-materialized file never
+  moves it; `last_fetch` and mtime carry the meaning (2026-09-04, S4, §7).
+- **An eviction refusal says nothing about why:** a pending upload and a
+  kept item both come back as `NSFileProviderErrorNonEvictable` (-2008)
+  (2026-09-04, S4, §7).
+- **The agent's `stat` of its own domain's mount draws no TCC prompt,** being
+  allowed as `kTCCServiceFileProviderDomain`, so `doctor` needs no line for it
+  (2026-09-04, S4, §7).
+- **Finder tags arrive as `tagData`, not as an xattr,** and are lost on the
+  next re-download unless the item returns them; the system also decides
+  which xattrs an extension is told about at all (2026-09-04, S4, §5.4).
+- **A pin on a never-enumerated path must end with a lookup of the replica,**
+  because reporting the ancestor rows through the working set does not make
+  the system ingest them (2026-09-04, S6, §7.1).
+- **The eager `contentPolicy`, not `allowsEvicting`, is what refuses to evict
+  a kept item;** the capability is deprecated and now only concerns Finder's
+  menu (2026-09-04, S6, §7.2).
+- **The system holds at most six `fetchContents` calls open at once** for an
+  eager subtree (2026-09-04, S6, §6.2).
 
 ---
 

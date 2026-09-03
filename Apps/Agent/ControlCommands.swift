@@ -93,21 +93,121 @@ enum ControlCommands {
             case "lazy": marker = -1
             default: marker = 0
             }
-            try await runtime.setPinState(pathString: path, marker: marker)
+            var report = try await runtime.setPinState(pathString: path, marker: marker)
             let location = try await resolveLocation(arguments)
             await DomainManager.shared.signalWorkingSet(locationID: location.id)
-            return try json(["path": path, "marker": marker])
+            report["path"] = path
+            report["marker"] = marker
+            return try json(report)
 
         case "debug.index.dump":
             return try await dumpIndex(arguments)
+
+        case "debug.evict":
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            let (identifier, row) = try await runtime.identifier(
+                forPath: arguments["path"] ?? "")
+            var report = await SpikeHooks.evict(
+                locationID: location.id, identifier: identifier)
+            report["identifier"] = identifier
+            report["path"] = arguments["path"] ?? ""
+            report["kept"] = row.kept
+            report["allowsEvictingServed"] =
+                (row.capabilities & Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue))
+                != 0
+            return try json(report)
+
+        case "debug.materialized":
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            let wantsPending = arguments["pending"] == "true"
+            let rows =
+                wantsPending
+                ? try await SpikeHooks.pendingItems(locationID: location.id)
+                : try await SpikeHooks.materializedItems(locationID: location.id)
+            // The system speaks in identifiers; the paths come from the index, so the
+            // output can be read without a second lookup.
+            let annotated = try await withPaths(rows, runtime: runtime)
+            return try json([
+                "set": wantsPending ? "pending" : "materialized",
+                "count": annotated.count,
+                "items": annotated,
+            ])
+
+        case "debug.stat":
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            let (identifier, row) = try await runtime.identifier(forPath: arguments["path"] ?? "")
+            let url = try await SpikeHooks.userVisibleURL(
+                locationID: location.id, identifier: identifier)
+            var report = SpikeHooks.stat(url: url, readFirst: arguments["read"] == "true")
+            report["identifier"] = identifier
+            report["indexLastFetch"] = row.lastFetch ?? -1
+            report["indexMtime"] = row.mtime
+            return try json(report)
+
+        case "debug.xattr":
+            let runtime = try await resolveRuntime(arguments)
+            let path = arguments["path"] ?? ""
+            let (identifier, row) = try await runtime.identifier(forPath: path)
+            return try json([
+                "path": path,
+                "identifier": identifier,
+                "metadataVersion": row.metadataVersion,
+                "servedExtendedAttributes": try await runtime.servedExtendedAttributes(
+                    pathString: path),
+            ])
+
+        case "debug.fault":
+            let runtime = try await resolveRuntime(arguments)
+            let writes = arguments["writes"].map { $0 == "on" }
+            let delay = arguments["fetchDelay"].flatMap { Int($0) }
+            await runtime.setFault(writes: writes, fetchDelayMilliseconds: delay)
+            return try json(await runtime.transferStats(reset: false))
+
+        case "debug.transfers":
+            let runtime = try await resolveRuntime(arguments)
+            return try json(await runtime.transferStats(reset: arguments["reset"] == "true"))
+
+        case "debug.stabilize":
+            let location = try await resolveLocation(arguments)
+            return try json(try await SpikeHooks.stabilize(locationID: location.id))
+
+        case "debug.testing":
+            let location = try await resolveLocation(arguments)
+            do {
+                return try json(
+                    try SpikeHooks.testingOperations(
+                        locationID: location.id, run: arguments["run"] == "true"))
+            } catch {
+                // The failure is the answer when the domain was not added with
+                // NSFileProviderDomainTestingModeInteractive.
+                return try json(SpikeHooks.describe(error: error))
+            }
 
         case "debug.keychain":
             return try keychainRoundTrip(arguments)
 
         case "debug.signal":
             let location = try await resolveLocation(arguments)
-            await DomainManager.shared.signalWorkingSet(locationID: location.id)
-            return try json(["signalled": location.id])
+            guard let container = arguments["container"] else {
+                await DomainManager.shared.signalWorkingSet(locationID: location.id)
+                return try json(["signalled": location.id, "container": "workingSet"])
+            }
+            // A container's own enumerator, which is what makes the system list a folder
+            // it has never listed (S6, s6-3).
+            let runtime = try await resolveRuntime(arguments)
+            let (identifier, _) = try await runtime.identifier(forPath: container)
+            let itemIdentifier =
+                identifier == IndexWriter.rootIdentifier
+                ? NSFileProviderItemIdentifier.rootContainer
+                : NSFileProviderItemIdentifier(identifier)
+            await DomainManager.shared.signalEnumerator(
+                locationID: location.id, container: itemIdentifier)
+            return try json([
+                "signalled": location.id, "container": container, "identifier": identifier,
+            ])
 
         default:
             throw SSHDriveAgentError.notImplemented.asNSError("Unknown command \"\(command)\".")
@@ -268,9 +368,18 @@ enum ControlCommands {
         let runtime = try await DomainManager.shared.runtime(for: created)
         try await runtime.seedFakeTree(fileCount: fileCount)
         _ = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier)
-        try await DomainManager.shared.addDomain(for: created)
+        var testingModes: NSFileProviderDomain.TestingModes = []
+        for word in (arguments["testingModes"] ?? "").split(separator: ",") {
+            switch word.trimmingCharacters(in: .whitespaces) {
+            case "always": testingModes.insert(.alwaysEnabled)
+            case "interactive": testingModes.insert(.interactive)
+            default: break
+            }
+        }
+        try await DomainManager.shared.addDomain(for: created, testingModes: testingModes)
         return try json([
             "id": created.id, "name": created.displayName, "files": fileCount,
+            "testingModes": arguments["testingModes"] ?? "",
             "mountHint": "~/Library/CloudStorage (the exact name is what spike S3 records)",
         ])
     }
@@ -324,6 +433,25 @@ enum ControlCommands {
             await DomainManager.shared.signalWorkingSet(locationID: location.id)
         }
         return try json(["applied": operation, "path": path, "changesSeenBySweep": changes])
+    }
+
+    /// Annotates identifiers the system handed back with the path the index holds for
+    /// them, so a materialized-set dump reads as paths rather than UUIDs.
+    private static func withPaths(_ rows: [[String: Any]], runtime: LocationRuntime) async throws
+        -> [[String: Any]]
+    {
+        var out: [[String: Any]] = []
+        for var row in rows {
+            if let identifier = row["identifier"] as? String,
+                let indexRow = try await runtime.row(identifier: identifier)
+            {
+                row["path"] = String(decoding: indexRow.path, as: UTF8.self)
+                row["kept"] = indexRow.kept
+                row["pinState"] = indexRow.pinState
+            }
+            out.append(row)
+        }
+        return out.sorted { ($0["path"] as? String ?? "") < ($1["path"] as? String ?? "") }
     }
 
     private static func dumpIndex(_ arguments: [String: String]) async throws -> Data {

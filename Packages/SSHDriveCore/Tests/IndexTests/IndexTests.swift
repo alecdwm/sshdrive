@@ -1,5 +1,6 @@
 import XCTest
 @testable import Index
+import XPCProtocols
 
 final class IndexTests: XCTestCase {
 
@@ -26,6 +27,27 @@ final class IndexTests: XCTestCase {
             size: 10,
             mtime: 1_700_000_000,
             contentVersion: IndexItem.contentVersion(size: 10, mtime: 1_700_000_000, generation: 0))
+    }
+
+    /// Section 7.1.1's three explicit states each have to reach the extension as a
+    /// different `contentPolicy`, and the excluded one is the whole reason S6 can check
+    /// that a lazy child overrides an eager ancestor.
+    func testPinMarkerDecidesTheContentPolicy() throws {
+        var row = item("id-p", "Projects", parent: IndexWriter.rootIdentifier)
+        XCTAssertEqual(row.snapshot.contentPolicyRawValue, SSHDriveContentPolicy.unset.rawValue)
+
+        row.pinState = 1
+        row.kept = true
+        XCTAssertEqual(
+            row.snapshot.contentPolicyRawValue,
+            SSHDriveContentPolicy.downloadEagerlyAndKeepDownloaded.rawValue)
+
+        // Excluded: the marker is on the row, the effect is not kept, and the policy has
+        // to be an explicit lazy rather than "no opinion", or the eager ancestor wins.
+        row.pinState = -1
+        row.kept = false
+        XCTAssertEqual(
+            row.snapshot.contentPolicyRawValue, SSHDriveContentPolicy.downloadLazily.rawValue)
     }
 
     func testCreatesSchemaAndRootRow() throws {

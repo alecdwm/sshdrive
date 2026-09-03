@@ -112,10 +112,19 @@ actor DomainManager {
     /// Whether the display name should be "SSH Drive - nas" or just "nas" is what spike
     /// S3 records, so that the sidebar does not read "SSH Drive - SSH Drive - nas"
     /// (section 2). Milestone 1 passes the bare name and S3 compares.
-    nonisolated func addDomain(for location: Location) async throws {
+    nonisolated func addDomain(
+        for location: Location, testingModes: NSFileProviderDomain.TestingModes = []
+    ) async throws {
         let domain = NSFileProviderDomain(
             identifier: NSFileProviderDomainIdentifier(rawValue: location.id),
             displayName: location.displayName)
+        // Only ever set by `sshdrive debug fake add --testing-modes` (spikes S4 and S6).
+        // `alwaysEnabled` skips the user's approval, `interactive` hands the scheduler to
+        // `listAvailableTestingOperations`; the appex's
+        // com.apple.developer.fileprovider.testing-mode entitlement is what allows either.
+        // A real location never asks for them, and the system does not let a domain give
+        // `interactive` back once it has it.
+        if !testingModes.isEmpty { domain.testingModes = testingModes }
         // No trash (section 5.4). This property defaults to YES, and with it the system
         // draws a `.Trash` in the mount, syncs it to the extension, and loops on
         // materializing a container we do not serve; anything that stats `.Trash`, such
@@ -141,6 +150,17 @@ actor DomainManager {
     /// Tells the system to re-ask for the working set, which is how every change the
     /// agent found reaches Finder (sections 5.3, 6.4).
     nonisolated func signalWorkingSet(locationID: String) async {
+        await signalEnumerator(locationID: locationID, container: .workingSet)
+    }
+
+    /// The same call for one container. Reporting a new row through the working set is not
+    /// enough to make the system ingest an item whose parent it has never enumerated: S6
+    /// found that a pin on such a path sits idle until something looks the chain up
+    /// (docs/spikes/results.md, 2026-09-04, s6-3). Signalling each new ancestor's own
+    /// enumerator is how the agent asks for that listing.
+    nonisolated func signalEnumerator(
+        locationID: String, container: NSFileProviderItemIdentifier
+    ) async {
         let domain = NSFileProviderDomain(
             identifier: NSFileProviderDomainIdentifier(rawValue: locationID),
             displayName: locationID)
@@ -149,8 +169,8 @@ actor DomainManager {
             return
         }
         do {
-            try await Deadline.run("signalling the working set") {
-                try await manager.signalEnumerator(for: .workingSet)
+            try await Deadline.run("signalling an enumerator") {
+                try await manager.signalEnumerator(for: container)
             }
         } catch {
             Log.agent.error("signalEnumerator failed: \(error, privacy: .public)")
