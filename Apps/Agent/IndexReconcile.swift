@@ -719,8 +719,9 @@ enum IndexReconcile {
 
     /// Pin markers are one of the two things the walk cannot recover from the replica,
     /// and `pins.json` beside the index is the copy that brings them back (section 5.3).
-    /// Milestone 8 writes it on every pin change, so until then it is simply absent: this
-    /// reads it defensively and does nothing at all if it is missing or unparseable.
+    /// Milestone 8 writes it on every pin change (`LocationRuntime.writePinsSidecar`);
+    /// this reads it defensively and does nothing at all if it is missing or unparseable,
+    /// because an index rebuilt on an older install may have no sidecar at all.
     private static func restorePins(
         locationID: String, writer: IndexWriter, report: inout Report
     ) {
@@ -734,7 +735,7 @@ enum IndexReconcile {
             return
         }
         for (pathString, marker) in markers {
-            guard marker != 0, let path = try? RelativePath(string: pathString) else { continue }
+            guard marker != 0, let path = try? LocationRuntime.pinPath(pathString) else { continue }
             do {
                 guard var row = try writer.item(path: path.bytes) else {
                     // A marker on a path that is no longer there vanishes with it
@@ -761,6 +762,37 @@ enum IndexReconcile {
                 report.errors.append(
                     "restoring the pin marker on \(pathString) failed: \(error.localizedDescription)")
             }
+        }
+        // The markers are back; the *effect* of them is not. Every row under a restored
+        // pin inherits its kept state (section 7.1.1), and a rebuilt row was written
+        // before the marker above it existed, so the whole tree is re-derived here rather
+        // than left disagreeing with the markers it now carries.
+        reapplyKept(writer: writer, report: &report)
+    }
+
+    /// Recomputes `kept` (and the `allowsEvicting` bit and metadata version that follow
+    /// from it) on every row, from the markers the index now holds. Cheap: no `lstat`, no
+    /// network, one pass over the table, and only the rows that disagree are written.
+    private static func reapplyKept(writer: IndexWriter, report: inout Report) {
+        guard let markerRows = try? writer.pinMarkerRows(), !markerRows.isEmpty else { return }
+        let markers = PinMarkerSet(rows: markerRows)
+        do {
+            try writer.batch {
+                for var row in try writer.allItems() {
+                    let kept = markers.isKept(row.path)
+                    guard kept != row.kept else { continue }
+                    row.kept = kept
+                    row.capabilities =
+                        kept
+                        ? row.capabilities & ~Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue)
+                        : row.capabilities | Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue)
+                    RowBuilder.restamp(&row)
+                    try writer.upsert(row)
+                    try writer.appendAnchor(identifier: row.identifier, kind: .modified)
+                }
+            }
+        } catch {
+            report.errors.append("re-deriving the kept state failed: \(error.localizedDescription)")
         }
     }
 

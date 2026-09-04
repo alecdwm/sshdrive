@@ -28,6 +28,10 @@ actor DomainManager {
     /// runtime because a cycle must never queue behind an `item(for:)` fallback or a
     /// three-minute sweep of a large tree.
     private var detectors: [String: ChangeDetector] = [:]
+    /// Section 6.6's other timer: section 7's TTL loop, one per location. Held here for
+    /// the same reason as the detector - an eviction pass makes a File Provider call per
+    /// file and must never queue behind the index.
+    private var evictors: [String: CacheEvictor] = [:]
     private var started = false
 
     init() {
@@ -161,7 +165,23 @@ actor DomainManager {
         detectors[location.id] = detector
         await runtime.setWatchTier(await detector.currentTier().rawValue)
         await detector.start()
+
+        // Section 6.6: the eviction loop runs on a timer of its own, from the moment the
+        // location is up. A `cacheTTL` of `never` still starts it; the pass then decides
+        // nothing and costs one enumeration every five minutes, which is what makes
+        // `sshdrive set <name> cache-ttl` take effect without a restart.
+        let evictor = CacheEvictor(
+            locationID: location.id, runtime: runtime, ttl: location.cacheTTL)
+        evictors[location.id] = evictor
+        await evictor.start()
         return runtime
+    }
+
+    func evictor(locationID: String) -> CacheEvictor? { evictors[locationID] }
+
+    /// `sshdrive set <name> cache-ttl <value>`, applied to the running loop (section 7).
+    func applyCacheTTL(locationID: String, ttl: CacheTTL) async {
+        await evictors[locationID]?.setTTL(ttl)
     }
 
     /// What the ladder of section 6.4 decides on: whether there is an exec channel at all,
@@ -207,6 +227,7 @@ actor DomainManager {
 
     func dropRuntime(locationID: String) async {
         if let detector = detectors.removeValue(forKey: locationID) { await detector.stop() }
+        if let evictor = evictors.removeValue(forKey: locationID) { await evictor.stop() }
         if let gate = gates.removeValue(forKey: locationID) { await gate.shutdown() }
         guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
         // `-O exit` on the master and the channel with it, so removing a location does
@@ -286,9 +307,23 @@ actor DomainManager {
         await detectors[domainIdentifier]?.noteTouch()
     }
 
-    /// The extension told us the system's materialized set moved (section 6.5).
+    /// The extension told us the system's materialized set moved (section 6.5) - and it is
+    /// also section 7.2's safety net, because a kept file turning dataless without our
+    /// handler having run arrives here and nowhere else.
+    ///
+    /// The enumeration is made once and handed to both: it is the system's own replica
+    /// walk and there is no reason to pay for it twice.
     func materializedItemsChanged(locationID: String) async {
-        await detectors[locationID]?.materializedChanged()
+        let identifiers = await ReplicaEnumerators.materializedIdentifiers(locationID: locationID)
+        await detectors[locationID]?.materializedChanged(identifiers: identifiers)
+        guard let runtime = runtimes[locationID] else { return }
+        let reasserted =
+            (try? await runtime.reassertKeptItems(materializedIdentifiers: identifiers)) ?? []
+        guard !reasserted.isEmpty else { return }
+        // The pin is re-asserted, not read as an unpin: the metadata versions have moved,
+        // so one working-set signal is what makes the system re-apply the eager policy and
+        // fetch the content again (section 7.2).
+        await signalWorkingSet(locationID: locationID)
     }
 
     /// The extension handed out a fresh working-set anchor, or a connection came back:

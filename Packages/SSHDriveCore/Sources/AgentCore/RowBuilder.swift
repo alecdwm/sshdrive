@@ -69,10 +69,16 @@ public struct RowBuilder: Sendable {
             size: attributes.size, mtime: attributes.mtime, generation: generation)
 
         // The effective kept state is derived by the agent from the markers at and above
-        // the path (sections 5.2, 7.1.1). Pinning is milestone 8; until then the marker
-        // on the row is the whole answer and nothing inherits.
+        // the path (sections 5.2, 7.1.1): the nearest explicit state at or above the item
+        // decides, so a row with no marker of its own inherits its parent's *effective*
+        // state, which the parent row already carries. That one line is what section 7.1
+        // means by "descendants the index has never seen need nothing: their rows are
+        // created with the right state when they are first listed" - a file appearing
+        // remotely inside a kept folder is kept, and one appearing inside an excluded
+        // subfolder is not, without any ancestor walk here.
         let pinState = existing?.pinState ?? 0
-        let kept = pinState == 1
+        let ownMarker = PinPolicy.Marker(rawMarker: pinState)
+        let kept = ownMarker.isExplicit ? ownMarker == .pinned : parent.kept
 
         // Section 5.7: the lexical check runs once per link, here, and its answer is
         // stored on the row so the extension serves the target without repeating it.

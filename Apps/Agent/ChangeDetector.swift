@@ -116,6 +116,12 @@ actor ChangeDetector {
     /// up to ten minutes from now.
     func materializedChanged() async {
         let identifiers = await ReplicaEnumerators.materializedIdentifiers(locationID: locationID)
+        await materializedChanged(identifiers: identifiers)
+    }
+
+    /// The same, with the enumeration already made. `DomainManager` walks the replica once
+    /// and gives the answer to the root set and to section 7.2's safety net together.
+    func materializedChanged(identifiers: [String]?) async {
         _ = try? await runtime.refreshRootSet(materializedIdentifiers: identifiers)
     }
 
@@ -259,8 +265,13 @@ actor ChangeDetector {
         case "busybox": flavour = .busybox
         default: flavour = .bsd
         }
+        // Section 7.1.1: "the recursive watch of kept subtrees skips excluded subtrees",
+        // which at tier 1 is `find`'s own `-path <glob> -prune`. Only exclusions that
+        // really sit inside a pinned subtree are sent: one outside a pin prunes nothing
+        // and would only lengthen the argv.
+        let excluded = (try? await runtime.excludedSweepPaths()) ?? []
         let plan = SweepPlan(
-            shallowRoots: shallow, recursiveRoots: recursive, excluded: [],
+            shallowRoots: shallow, recursiveRoots: recursive, excluded: excluded,
             flavour: flavour,
             takesCmin: probe?.findTakesCmin ?? false,
             takesPrintf: probe?.findTakesPrintf ?? false,

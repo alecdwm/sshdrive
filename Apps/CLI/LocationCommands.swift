@@ -440,6 +440,38 @@ struct Status: ParsableCommand {
                         + String(format: "%.2fs", seconds))
                 }
             }
+            // Section 8.1's Cache line: "1.2 GB materialized (312 files), 480 MB kept
+            // TTL 1d   next eviction sweep in 3m", and the Pins line under it.
+            if let cache = row["cache"] as? [String: Any] {
+                var line = "       cache "
+                    + "\(SizeRendering.bytes(cache["bytes"] as? Int64 ?? 0)) materialized "
+                    + "(\(cache["files"] as? Int ?? 0) files)"
+                let keptBytes = cache["keptBytes"] as? Int64 ?? 0
+                if keptBytes > 0 { line += ", \(SizeRendering.bytes(keptBytes)) kept" }
+                line += "   TTL \(cache["ttl"] as? String ?? "")"
+                if (cache["ttl"] as? String) != "never",
+                    let next = cache["nextPassInSeconds"] as? Double
+                {
+                    line += "   next eviction pass in \(SizeRendering.duration(next))"
+                }
+                print(line)
+                // Section 7.2's safety net, when it has had to do anything.
+                if let outside = cache["keptEvictedOutside"] as? Int, outside > 0 {
+                    print("         note: \(outside) kept file(s) were evicted outside "
+                        + "SSH Drive and re-downloaded")
+                }
+            }
+            let pins = row["pins"] as? [[String: Any]] ?? []
+            if !pins.isEmpty {
+                let names = pins.map { entry -> String in
+                    let path = entry["path"] as? String ?? ""
+                    let shown = path.isEmpty ? "/" : path
+                    return (entry["state"] as? String) == "excluded" ? "!\(shown)" : shown
+                }
+                print("       pins  \(names.joined(separator: "   "))"
+                    + "   (a leading ! is an exclusion; sshdrive pins "
+                    + "\(row["name"] as? String ?? "") shows the tree)")
+            }
             // Section 8: "0 held deletions" on the Sync line, and section 6.4's
             // "14 deletions held in Photos, re-check at 14:32" when there are any.
             let held = row["heldDeletions"] as? [[String: Any]] ?? []
@@ -562,5 +594,286 @@ struct AcceptDeletions: ParsableCommand {
         let remaining = report["stillHeld"] as? Int ?? 0
         print("Applied \(applied) held deletion(s) in \(report["location"] as? String ?? name).")
         if remaining > 0 { print("\(remaining) still held.") }
+    }
+}
+
+// MARK: evict, pin, unpin, pins
+
+/// Sizes the way section 8.1 writes them: "1.2 GB", "480 MB", "210 MB".
+enum SizeRendering {
+    static func bytes(_ value: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        formatter.allowsNonnumericFormatting = false
+        return formatter.string(fromByteCount: value)
+    }
+
+    /// "in 3m", the way `status`'s Cache line names the next eviction pass.
+    static func duration(_ seconds: Double) -> String {
+        let value = Int(seconds.rounded())
+        if value < 60 { return "\(max(value, 0))s" }
+        if value < 3600 { return "\(value / 60)m" }
+        return "\(value / 3600)h"
+    }
+}
+
+/// `sshdrive evict <name> [path] [--all] [--unpin-all]` (DESIGN.md sections 7, 8).
+///
+/// With no path this runs the TTL routine of section 7 on demand - the same pass the
+/// five-minute timer runs, so it evicts what the TTL says is stale and nothing else. With
+/// a path it evicts that item now. `--all` drops everything cached, which is one
+/// `evictItem` on the root container when nothing is pinned (S4, 2026-09-04).
+struct Evict: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Drop cached content: the TTL pass, one path, or everything.",
+        discussion: """
+            With no path this runs the TTL pass now: content whose last fetch or save is
+            older than the location's cache-ttl is dropped, kept (pinned) items are
+            skipped, and anything with an edit still waiting to upload is refused by the
+            system. With a path it drops that item now. Files come back on the next open.
+            """)
+
+    @Argument(help: "The location.")
+    var name: String
+
+    @Argument(help: "One path to drop now. The TTL pass runs when it is omitted.")
+    var path: String?
+
+    @Flag(help: "Drop everything this location has cached.")
+    var all = false
+
+    @Flag(name: .customLong("unpin-all"),
+          help: "With --all: remove every pin first, so kept content goes too.")
+    var unpinAll = false
+
+    @Flag(help: "Print the raw report as JSON.")
+    var json = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if let path { arguments["path"] = path }
+        if all { arguments["all"] = "true" }
+        if unpinAll { arguments["unpinAll"] = "true" }
+        let data = try AgentClient.send(command: "evict", arguments: arguments, timeout: 300)
+        if json { AgentClient.prettyPrint(data); return }
+        let report = AgentClient.object(data)
+        let location = report["location"] as? String ?? name
+
+        if let skipped = report["skipped"] as? String {
+            print("\(location): \(skipped).")
+            return
+        }
+        if all {
+            if let removed = report["pinsRemoved"] as? Int, removed > 0 {
+                print("Removed \(removed) pin(s) first.")
+            }
+            if report["mode"] as? String == "root container" {
+                let ok = report["evicted"] as? Bool == true
+                print(ok
+                    ? "\(location): everything cached was dropped."
+                    : "\(location): the system refused: "
+                        + "\(report["errorDescription"] as? String ?? "unknown error")")
+                if let left = report["stillMaterialized"] as? Int, left > 0 {
+                    print("  \(left) item(s) are still materialized.")
+                }
+            } else {
+                var line = "\(location): dropped \(report["evicted"] as? Int ?? 0) file(s)"
+                let kept = report["keptSkipped"] as? Int ?? 0
+                if kept > 0 {
+                    line += "; \(kept) kept file(s) were left alone "
+                        + "(pass --unpin-all to drop those too)"
+                }
+                print(line + ".")
+                if let refused = report["rootContainerError"] as? String {
+                    print("  the whole-location eviction was refused (\(refused)), so the "
+                        + "files were dropped one at a time.")
+                }
+                if let stillRefused = report["refusedCount"] as? Int, stillRefused > 0 {
+                    print("  \(stillRefused) file(s) the system would not drop; they have "
+                        + "an edit still waiting to upload, or it is still applying a "
+                        + "policy change. Try again in a moment.")
+                }
+            }
+            return
+        }
+        if path != nil {
+            let ok = report["evicted"] as? Bool == true
+            print(ok
+                ? "Dropped \(report["path"] as? String ?? "") from \(location)."
+                : "\(location): \(report["errorDescription"] as? String ?? "the system refused the eviction").")
+            if !ok { throw ExitCode.failure }
+            return
+        }
+        // The TTL pass.
+        let files = report["materializedFiles"] as? Int ?? 0
+        let bytes = report["materializedBytes"] as? Int64 ?? 0
+        print("\(location): TTL \(report["ttl"] as? String ?? "")   "
+            + "\(SizeRendering.bytes(bytes)) in \(files) file(s) cached")
+        print("  dropped \(report["evicted"] as? Int ?? 0), "
+            + "kept \(report["skippedKept"] as? Int ?? 0) pinned, "
+            + "in \(String(format: "%.2fs", report["seconds"] as? Double ?? 0))")
+        for refusal in report["refused"] as? [[String: Any]] ?? [] {
+            print("  refused \(refusal["path"] as? String ?? ""): "
+                + "\(refusal["error"] as? String ?? "")")
+        }
+    }
+}
+
+/// `sshdrive pin <name> <remote-path>` (section 7.1), and its opposite.
+struct Pin: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Keep a folder or file downloaded, offline, for good.",
+        discussion: """
+            The subtree is downloaded now and kept: the TTL never touches it, new files
+            that appear on the server inside it are fetched, and it stays readable with no
+            network. `/` or `.` pins the whole location. Any pin or exclusion inside the
+            path is cleared, which is how a complicated structure is reset.
+            """)
+
+    @Argument(help: "The location.")
+    var name: String
+
+    @Argument(help: "The remote path, relative to the location's root. `/` is the whole location.")
+    var path: String
+
+    @Flag(help: "Print the raw report as JSON.")
+    var json = false
+
+    func run() throws {
+        try PinCommands.run(command: "pin", name: name, path: path, json: json)
+    }
+}
+
+struct Unpin: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Stop keeping a path downloaded.",
+        discussion: """
+            On a pinned path this removes the pin; on a path that merely inherits a pin
+            from a folder above it, it records an exclusion, so the rest of the pinned
+            folder is untouched. Either way the content stays on disk and falls under the
+            location's cache-ttl from that moment.
+            """)
+
+    @Argument(help: "The location.")
+    var name: String
+
+    @Argument(help: "The remote path, relative to the location's root.")
+    var path: String
+
+    @Flag(help: "Print the raw report as JSON.")
+    var json = false
+
+    func run() throws {
+        try PinCommands.run(command: "unpin", name: name, path: path, json: json)
+    }
+}
+
+enum PinCommands {
+    static func run(command: String, name: String, path: String, json: Bool) throws {
+        let data = try AgentClient.send(
+            command: command, arguments: ["name": name, "path": path], timeout: 300)
+        if json { AgentClient.prettyPrint(data); return }
+        let report = AgentClient.object(data)
+        let shown = report["path"] as? String ?? path
+        let note = report["note"] as? String ?? ""
+        let location = report["location"] as? String ?? name
+
+        guard report["changed"] as? Bool == true else {
+            // Section 7.1.1: the CLI says so, and names the covering ancestor when there
+            // is one. Finder simply hides the entry.
+            var line = "\(shown) in \(location): \(note)"
+            if let covering = report["coveredBy"] as? String {
+                line += " (\(covering.isEmpty ? "the location root" : covering))"
+            }
+            print(line + ". Nothing changed.")
+            return
+        }
+
+        var line = command == "pin" ? "Pinned \(shown)" : "Unpinned \(shown)"
+        // "Both `pin` and `unpin` print how many nested states they cleared, so a reset is
+        // visible" (section 7.1.1).
+        let pins = report["clearedPins"] as? Int ?? 0
+        let exclusions = report["clearedExclusions"] as? Int ?? 0
+        if pins + exclusions > 0 {
+            var parts: [String] = []
+            if exclusions > 0 { parts.append("\(exclusions) nested exclusion(s)") }
+            if pins > 0 { parts.append("\(pins) nested pin(s)") }
+            line += " (cleared \(parts.joined(separator: " and ")))"
+        }
+        print(line + ".")
+        print("  \(note); \(report["rowsRewritten"] as? Int ?? 0) item(s) updated.")
+        if let created = report["ancestorRowsCreated"] as? Int, created > 0 {
+            print("  \(created) folder(s) on the way to it were listed for the first time.")
+        }
+        if command == "pin" {
+            print("  The download starts within about a minute and runs in the background; "
+                + "watch it with: sshdrive pins \(name)")
+        } else {
+            print("  The content stays on disk and now falls under the location's cache-ttl.")
+        }
+    }
+}
+
+/// `sshdrive pins [<name>] [--export | --import FILE]` (section 7.1).
+struct Pins: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "The pins and exclusions of a location, as a tree.")
+
+    @Argument(help: "The location.")
+    var name: String
+
+    @Flag(help: "Print the markers as JSON, for a backup or another Mac.")
+    var export = false
+
+    @Option(name: .customLong("import"), help: "Read markers back from a file written by --export.")
+    var importFile: String?
+
+    @Flag(help: "Print the raw report as JSON.")
+    var json = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if export { arguments["export"] = "true" }
+        if let importFile {
+            // The CLI reads the file: it is the process with the user's working directory
+            // and their read permission, and the agent runs as a login agent with neither.
+            guard let contents = try? String(contentsOfFile: importFile, encoding: .utf8) else {
+                throw ValidationError("Cannot read \(importFile).")
+            }
+            arguments["import"] = contents
+        }
+        let data = try AgentClient.send(command: "pins", arguments: arguments, timeout: 300)
+        if json || export { AgentClient.prettyPrint(data); return }
+        let report = AgentClient.object(data)
+
+        if let imported = report["imported"] as? [String] {
+            print("Imported \(imported.count) marker(s) into \(report["location"] as? String ?? name).")
+            for failure in report["failed"] as? [String] ?? [] { print("  failed: \(failure)") }
+            return
+        }
+
+        let pins = report["pins"] as? [[String: Any]] ?? []
+        guard !pins.isEmpty else {
+            print("No pins in \(report["location"] as? String ?? name). "
+                + "Keep a folder offline with: sshdrive pin \(name) <path>")
+            return
+        }
+        for entry in pins {
+            let depth = entry["depth"] as? Int ?? 0
+            let path = entry["path"] as? String ?? ""
+            let shown = path.isEmpty ? "/" : path
+            let indent = String(repeating: "  ", count: depth)
+            let name = (indent + shown)
+            let state = entry["state"] as? String ?? ""
+            let files = entry["files"] as? Int ?? 0
+            let bytes = entry["bytes"] as? Int64 ?? 0
+            let downloadedFiles = entry["downloadedFiles"] as? Int ?? 0
+            let downloadedBytes = entry["downloadedBytes"] as? Int64 ?? 0
+            let detail = state == "pinned"
+                ? "\(SizeRendering.bytes(downloadedBytes)), \(downloadedFiles) of \(files) file(s) downloaded"
+                : "(\(SizeRendering.bytes(bytes)) on the server, \(downloadedFiles) file(s) downloaded)"
+            print("\(name.padding(toLength: max(32, name.count), withPad: " ", startingAt: 0)) "
+                + "\(state.padding(toLength: 9, withPad: " ", startingAt: 0)) \(detail)")
+        }
     }
 }

@@ -32,6 +32,17 @@ public enum SSHDriveIdentifiers {
     /// extension is allowed to look it up.
     public static let machServiceName = "\(teamID).org.shirls.sshdrive.agent"
 
+    /// The two Finder context-menu actions of DESIGN.md section 7.2, declared in the
+    /// appex's `NSExtensionFileProviderActions` and handed back to the extension by
+    /// `performAction(identifier:onItemsWithIdentifiers:)`. The strings are in the
+    /// Info.plist as well and must be edited together.
+    public static let pinActionID = "org.shirls.sshdrive.action.pin"
+    public static let unpinActionID = "org.shirls.sshdrive.action.unpin"
+
+    /// The pin badge of section 7.2, declared under `NSFileProviderDecorations` in the
+    /// same dictionary and attached to a kept item through `NSFileProviderItemDecorating`.
+    public static let keptDecorationID = "org.shirls.sshdrive.decoration.kept"
+
     /// Every signing identifier admitted by the agent's listener.
     public static let peerSigningIdentifiers = [
         appBundleID, extensionBundleID, cliSigningID, askpassSigningID,

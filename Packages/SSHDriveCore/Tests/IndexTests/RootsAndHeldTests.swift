@@ -369,3 +369,80 @@ final class RootsAndHeldTests: XCTestCase {
         XCTAssertNoThrow(try IndexWriter.truncateDatabaseFiles(at: lonely))
     }
 }
+
+// MARK: the pin queries (DESIGN.md section 7.1)
+
+/// `pin_state` is the sole authority for markers, and the two queries the pin machinery
+/// asks of it: which paths carry a marker, and which rows a marker change has to rewrite.
+final class PinQueryTests: XCTestCase {
+
+    private var directory: URL!
+    private var writer: IndexWriter!
+
+    override func setUpWithError() throws {
+        directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sshdrive-pinq-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        writer = try IndexWriter(path: directory.appendingPathComponent("index.sqlite").path)
+        _ = try writer.ensureRoot()
+    }
+
+    override func tearDownWithError() throws {
+        writer = nil
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func add(_ path: String, pinState: Int64 = 0, type: String = "file") throws {
+        try writer.upsert(
+            IndexItem(
+                identifier: "id-\(path)", path: Data(path.utf8),
+                parent: IndexWriter.rootIdentifier, type: type, pinState: pinState))
+    }
+
+    func testOnlyExplicitMarkersAreReturned() throws {
+        try add("Projects", pinState: 1, type: "directory")
+        try add("Projects/archive", pinState: -1, type: "directory")
+        try add("Projects/src/main.swift")
+        let rows = try writer.pinMarkerRows()
+        XCTAssertEqual(rows.map { String(decoding: $0.path, as: UTF8.self) },
+                       ["Projects", "Projects/archive"])
+        XCTAssertEqual(rows.map(\.marker), [1, -1])
+    }
+
+    func testItemsUnderIsAByteRangeAndRespectsTheSeparator() throws {
+        try add("Photos", type: "directory")
+        try add("Photos/2026/a.jpg")
+        try add("Photos/2026/b.jpg")
+        // Shares the prefix but is not under it: the separator is what tells them apart.
+        try add("Photos2/c.jpg")
+        let under = try writer.items(under: Data("Photos".utf8))
+        XCTAssertEqual(under.map { String(decoding: $0.path, as: UTF8.self) },
+                       ["Photos/2026/a.jpg", "Photos/2026/b.jpg"])
+    }
+
+    func testEverythingIsUnderTheLocationRootExceptTheRootRow() throws {
+        try add("a")
+        try add("a/b")
+        let under = try writer.items(under: Data())
+        XCTAssertEqual(under.map { String(decoding: $0.path, as: UTF8.self) }, ["a", "a/b"])
+        XCTAssertFalse(under.contains { $0.identifier == IndexWriter.rootIdentifier })
+    }
+
+    func testANameThatIsNotUTF8StaysDistinct() throws {
+        // Two directories that decode alike but are different bytes: a `LIKE` on a decoded
+        // string would put one's children under the other.
+        let pin = Data([0x70, 0xFF])
+        let other = Data([0x70, 0xFE])
+        try writer.upsert(
+            IndexItem(identifier: "p", path: pin, parent: IndexWriter.rootIdentifier,
+                      type: "directory", pinState: 1))
+        try writer.upsert(
+            IndexItem(identifier: "pc", path: pin + Data([0x2F, 0x78]),
+                      parent: "p", type: "file"))
+        try writer.upsert(
+            IndexItem(identifier: "oc", path: other + Data([0x2F, 0x78]),
+                      parent: IndexWriter.rootIdentifier, type: "file"))
+        let under = try writer.items(under: pin)
+        XCTAssertEqual(under.map(\.identifier), ["pc"])
+    }
+}

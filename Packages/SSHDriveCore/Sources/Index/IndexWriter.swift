@@ -227,6 +227,50 @@ public final class IndexWriter {
         return rows
     }
 
+    /// Every path carrying an explicit pin marker, which is the whole of section 7.1's
+    /// authority: `pin_state` in the index, and nothing else. `pins.json` beside it is a
+    /// write-only copy for recovery and is never read while the index is healthy.
+    public func pinMarkerRows() throws -> [(path: Data, marker: Int64)] {
+        let statement = try connection.prepare(
+            "SELECT path, pin_state FROM items WHERE pin_state != 0 ORDER BY path")
+        defer { statement.reset() }
+        var rows: [(path: Data, marker: Int64)] = []
+        while try statement.step() {
+            guard let path = statement.data(0) else { continue }
+            rows.append((path, statement.int(1)))
+        }
+        return rows
+    }
+
+    /// Every row strictly under `path`, which is what a pin change rewrites: section 7.1
+    /// step 2 bumps "the affected row **and every known descendant row**", because
+    /// `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the
+    /// capabilities are per item and cached until that item's own metadata version moves.
+    ///
+    /// A byte range rather than a `LIKE`: paths are blobs (a server name need not be valid
+    /// UTF-8) and SQLite compares blobs with `memcmp`, so everything under "a/b" is
+    /// exactly `path >= "a/b/"` and `path < "a/b0"` - `0x30` being `0x2F + 1`. The empty
+    /// path is the location root and contains every row but itself.
+    public func items(under path: Data) throws -> [IndexItem] {
+        let statement: SQLiteStatement
+        if path.isEmpty {
+            statement = try connection.prepare(
+                "SELECT \(Self.columns) FROM items WHERE length(path) > 0 ORDER BY path")
+        } else {
+            let lower = path + Data([0x2F])
+            var upper = path
+            upper.append(0x30)
+            statement = try connection.prepare(
+                "SELECT \(Self.columns) FROM items WHERE path >= ?1 AND path < ?2 ORDER BY path")
+            statement.bind(1, lower)
+            statement.bind(2, upper)
+        }
+        defer { statement.reset() }
+        var rows: [IndexItem] = []
+        while try statement.step() { rows.append(IndexReader.decodeItem(statement)) }
+        return rows
+    }
+
     /// Deleted rows are deleted: no tombstones (section 5.3). The row goes in the same
     /// transaction that writes the deletion anchor, and its pin marker and xattrs go
     /// with it.

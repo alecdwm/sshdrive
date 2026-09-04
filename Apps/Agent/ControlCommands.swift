@@ -227,6 +227,87 @@ enum ControlCommands {
                 "stillHeld": (try? await runtime.heldReport())?.count ?? 0,
             ])
 
+        case "evict":
+            // Section 7 step 4: "`sshdrive evict <location> [path]` triggers the same
+            // routine on demand, with `--all` to drop everything cached, which is one
+            // `evictItem` on the root container rather than a walk" (S4, 2026-09-04).
+            let location = try await resolveLocation(arguments)
+            _ = try await resolveRuntime(arguments)
+            guard let evictor = await DomainManager.shared.evictor(locationID: location.id) else {
+                throw SSHDriveAgentError.unknownDomain.asNSError(
+                    "\(location.displayName) is not mounted, so it has no cache to evict.")
+            }
+            var report: [String: Any]
+            if arguments["all"] == "true" {
+                report = try await evictor.evictAll(unpinAll: arguments["unpinAll"] == "true")
+            } else if let path = arguments["path"], !path.isEmpty {
+                report = try await evictor.evictPath(path)
+            } else {
+                report = await evictor.runPass(reason: "sshdrive evict")
+            }
+            report["location"] = location.displayName
+            return try json(report)
+
+        case "debug.ttl":
+            // Section 7's shortest real TTL is 15 minutes; this is what makes the loop
+            // testable in a runbook. Nothing else about the pass changes.
+            let location = try await resolveLocation(arguments)
+            _ = try await resolveRuntime(arguments)
+            guard let evictor = await DomainManager.shared.evictor(locationID: location.id) else {
+                throw SSHDriveAgentError.unknownDomain.asNSError(
+                    "\(location.displayName) is not mounted.")
+            }
+            let seconds = arguments["seconds"].flatMap { Double($0) }
+            await evictor.setTTLOverride(seconds: arguments["off"] == "true" ? nil : seconds)
+            return try json([
+                "location": location.displayName,
+                "ttlOverrideSeconds": seconds ?? -1,
+                "cacheTTL": location.cacheTTL.rawValue,
+            ])
+
+        case "pin", "unpin":
+            // Sections 7.1 and 7.1.1. `pin` and `unpin` are statements about the effective
+            // state, never about a marker; which marker that becomes is `PinPolicy`'s.
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            let path = arguments["path"] ?? ""
+            let request: PinPolicy.Request = command == "pin" ? .keep : .dontKeep
+            var report = try await runtime.applyPin(pathString: path, request: request)
+            if report["changed"] as? Bool == true {
+                // The anchors are written; this is what makes the system read them.
+                await DomainManager.shared.signalWorkingSet(locationID: location.id)
+                if request == .keep, let identifier = report["identifier"] as? String {
+                    // Section 7.1 step 1's last step, and the one S6 found is not
+                    // optional: without a lookup of the path in the replica the system
+                    // ingests nothing and the eager download never starts.
+                    report["replicaLookup"] = await ReplicaAccess.lookUpInReplica(
+                        locationID: location.id, identifier: identifier)
+                }
+            }
+            report["location"] = location.displayName
+            return try json(report)
+
+        case "pins":
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            if arguments["export"] == "true" {
+                return try json([
+                    "location": location.displayName,
+                    "pins": try await runtime.exportPins(),
+                ])
+            }
+            if let payload = arguments["import"], !payload.isEmpty {
+                return try json(try await importPins(
+                    payload: payload, location: location, runtime: runtime))
+            }
+            let materialized = await ReplicaEnumerators.materializedIdentifiers(
+                locationID: location.id)
+            return try json([
+                "location": location.displayName,
+                "cacheTTL": location.cacheTTL.rawValue,
+                "pins": try await runtime.pinsReport(materialized: materialized.map(Set.init)),
+            ])
+
         case "debug.watch":
             // Section 6.4's change detection, driven by hand: one cycle now, a full sweep
             // now, the loop paused so a spike owns the timing, and the server-clock skew a
@@ -702,6 +783,44 @@ enum ControlCommands {
     }
 
     // MARK: debug hooks
+
+    /// `sshdrive pins --import FILE`: the CLI reads the file and sends its bytes, since it
+    /// is the process with the user's working directory and their read permission. Markers
+    /// are applied one at a time, shortest path first, so a pin above an exclusion is
+    /// written before the exclusion that invariant 2 would otherwise wipe.
+    private static func importPins(
+        payload: String, location: Location, runtime: LocationRuntime
+    ) async throws -> [String: Any] {
+        guard let data = payload.data(using: .utf8),
+            let json = try? JSONSerialization.jsonObject(with: data)
+        else {
+            throw SSHDriveAgentError.notImplemented.asNSError("That file is not JSON.")
+        }
+        var entries: [[String: Any]] = []
+        if let array = json as? [[String: Any]] { entries = array }
+        if let object = json as? [String: Any], let array = object["pins"] as? [[String: Any]] {
+            entries = array
+        }
+        var applied: [String] = []
+        var failed: [String] = []
+        for entry in entries.sorted(by: {
+            ($0["path"] as? String ?? "").count < ($1["path"] as? String ?? "").count
+        }) {
+            guard let path = entry["path"] as? String else { continue }
+            let state = entry["state"] as? String ?? ""
+            let marker: Int64 = state == "pinned" ? 1 : (state == "excluded" ? -1 : 0)
+            do {
+                _ = try await runtime.setPinState(pathString: path, marker: marker)
+                applied.append(path)
+            } catch {
+                failed.append("\(path): \(error.localizedDescription)")
+            }
+        }
+        if !applied.isEmpty {
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+        }
+        return ["location": location.displayName, "imported": applied, "failed": failed]
+    }
 
     private static func resolveLocation(_ arguments: [String: String]) async throws -> Location {
         guard let name = arguments["name"] else {

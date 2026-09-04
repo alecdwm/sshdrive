@@ -532,6 +532,12 @@ enum LocationCommands {
                 file.locations[index] = saved
             }
         }
+        // Section 7: the eviction loop reads the TTL on every pass, and a mounted location
+        // gets a fresh evictor from `runtime(for:)` below; this covers the unmounted case
+        // and makes the intent explicit rather than incidental.
+        if key == .cacheTTL {
+            await DomainManager.shared.applyCacheTTL(locationID: saved.id, ttl: saved.cacheTTL)
+        }
         if wasMounted {
             let runtime = try await DomainManager.shared.runtime(for: saved)
             _ = try await runtime.enumerateItems(
@@ -702,6 +708,28 @@ enum LocationCommands {
             }
             if let runtime {
                 row["heldDeletions"] = (try? await runtime.heldReport()) ?? []
+                // Section 8.1's Cache and Pins lines: "1.2 GB materialized (312 files),
+                // 480 MB kept   TTL 1d   next eviction sweep in 3m", and the pin tree.
+                // The materialized set is the system's own, so this is the one place
+                // `status` walks the replica; it is skipped for an unmounted location,
+                // which has no replica to walk.
+                if row["mounted"] as? Bool == true {
+                    let materialized =
+                        await ReplicaEnumerators.materializedIdentifiers(locationID: location.id)
+                        ?? []
+                    let candidates =
+                        (try? await runtime.evictionRows(identifiers: materialized)) ?? []
+                    var cache = await runtime.cacheReport(candidates: candidates)
+                    if let evictor = await DomainManager.shared.evictor(locationID: location.id) {
+                        cache["nextPassInSeconds"] = max(
+                            0, await evictor.nextRunAt() - Date().timeIntervalSince1970)
+                        let pass = await evictor.lastPass
+                        if !pass.isEmpty { cache["lastPass"] = pass }
+                    }
+                    row["cache"] = cache
+                    row["pins"] =
+                        (try? await runtime.pinsReport(materialized: Set(materialized))) ?? []
+                }
             }
             // Section 4.3: a changed host key needs no command of ours; `status` prints
             // the `ssh-keygen -R` line to run.

@@ -160,6 +160,24 @@ final class RootSetTests: XCTestCase {
         XCTAssertEqual(roots.recursive, [path("Photos"), path("Pinned2")])
     }
 
+    /// Milestone 8's half of section 6.5: a pin root is never rotated and is never
+    /// dropped from a cycle, however long ago it was listed, and it takes none of the
+    /// sixty-four rotation slots from the directories that do rotate. Times are arguments,
+    /// so "however long ago" is exact.
+    func testAPinRootIsSweptEveryCycleAndTakesNoRotationSlot() {
+        var entries = (0..<200).map { entry("m/\($0)", [.materialized], lastListed: 1_000 + Double($0)) }
+        // Listed longer ago than anything else in the set, and holding cached files too.
+        entries.append(entry("Photos", [.pinned, .materialized], lastListed: 0))
+        let set = RootSet(entries: entries)
+        let cycle = set.tier0Cycle()
+        XCTAssertTrue(cycle.contains(path("Photos")))
+        // 64 rotating roots plus the pin root: the pin does not eat a slot.
+        XCTAssertEqual(cycle.count, RootSet.materializedPerCycle + 1)
+        XCTAssertEqual(set.rotationPeriod(), 200 / RootSet.materializedPerCycle + 1)
+        // And it is still there on the next cycle, whatever the rotation did.
+        XCTAssertTrue(set.tier0Cycle().contains(path("Photos")))
+    }
+
     func testAShallowRootUnderAPinRootIsNotSentTwice() {
         // The pin-root exclusion of section 6.5 should have kept it out of the set at all;
         // if it slipped in, the recursive find already walks it.

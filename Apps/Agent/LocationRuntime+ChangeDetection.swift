@@ -307,9 +307,20 @@ extension LocationRuntime {
         -> ChangeApplication
     {
         var application = ChangeApplication()
-        let paths: [Data]
+        var paths: [Data]
         do {
             paths = try currentRootSet().tier0Cycle(fullSweep: fullSweep)
+            // A pin root is watched *recursively* (section 6.5), and at tier 0 that means
+            // what section 7.1.2 says it means: "a `readdir` of every directory in the
+            // location per cycle", which `pin` warns about along with the size. The root
+            // set holds the pin root itself; the directories under it are expanded here,
+            // with excluded subtrees skipped (section 7.1.1). Tier 1 needs none of this -
+            // the pin roots go to `find` as recursive roots.
+            let pinned = try pinnedSubtreeDirectories()
+            if !pinned.isEmpty {
+                var seen = Set(paths)
+                for path in pinned where seen.insert(path).inserted { paths.append(path) }
+            }
         } catch {
             application.errors.append("\(error)")
             return application

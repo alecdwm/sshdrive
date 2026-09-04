@@ -128,9 +128,14 @@ signed build.
   transfer under the scheduler, with the range widened to the alignment the system asks
   for. ~~The temp-file plus rename upload, conflict copies, symlink containment,
   `.DS_Store` (milestone 4)~~ - all real since 2026-09-04. ~~Still stubbed: the reconcile walk and restore-into-live, root-set rotation and the
-  mass-deletion guard (milestone 6)~~ - real since 2026-09-04. Still stubbed:
-  eviction (7), real pin/unpin and `performAction` (8), helper (9, placeholder
-  `helper/README.md`).
+  mass-deletion guard (milestone 6)~~ - real since 2026-09-04. ~~Still stubbed:
+  eviction (7), real pin/unpin and `performAction` (8)~~ - both real since
+  2026-09-05: section 7's five-minute `CacheEvictor` per location with
+  `EvictionPlan` deciding, and section 7.1's pinning in
+  `LocationRuntime+Pinning` with `PinPolicy`/`PinMarkerSet` deciding, the
+  extension's `performAction` forwarding both Finder entries to the agent, and
+  the pin badge under `NSFileProviderDecorations`. Still stubbed: the helper
+  (9, placeholder `helper/README.md`).
 - ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
   yet recorded with `hidden = 2`~~ - all three real since 2026-09-04. Listings are paged at
   2,000 items (a page token is an offset into a listing the agent already holds, so a second
@@ -148,11 +153,13 @@ signed build.
   section 8.1's capability report behind `status`, `show` and the tail of `add`.
   `CapabilityCache` now holds both the section 6.1 channel budget and section 8.1's probe,
   merged rather than overwritten, so an offline `status` prints the cached report.
-  Still missing from section 8: **`passwd`** (the collect flow is there - it is
-  `CollectConnection` plus `AddFlow`, which `set host|user|port|identity` already re-runs -
-  so `passwd` is a command, not a mechanism), **`test`**, `--password` /
-  `--password-stdin`, and everything belonging to a later milestone: `evict` (7),
-  `pin`/`unpin`/`pins` (8), `logs` (10). `accept-deletions` is real since 2026-09-04.
+  `evict` (with `--all` and `--unpin-all`), `pin`, `unpin` and `pins` (with
+  `--export` and `--import`) are real since 2026-09-05, and `set cache-ttl`
+  reaches the running eviction loop. Still missing from section 8: **`passwd`**
+  (the collect flow is there - it is `CollectConnection` plus `AddFlow`, which
+  `set host|user|port|identity` already re-runs - so `passwd` is a command, not a
+  mechanism), **`test`**, `--password` / `--password-stdin`, and `logs` (10).
+  `accept-deletions` is real since 2026-09-04.
 
 ## `sshdrive debug` hooks, exact syntax
 
@@ -168,6 +175,7 @@ sshdrive debug mutate <name> <op> <path> [--to PATH] [--contents TEXT] [--mode O
 sshdrive debug anchor expire <name>
 sshdrive debug sweep <name> on|off
 sshdrive debug policy <name> <path> eager-keep|lazy|inherit
+sshdrive debug ttl <name> [--seconds N] [--off]   # milestone 7: the cache TTL in seconds
 sshdrive debug index dump <name> [--table items|anchors|roots] [--limit N]
 sshdrive debug signal <name> [--container PATH]
 sshdrive debug keychain [--key K] [--value V]
@@ -436,6 +444,24 @@ Two existing hooks earn a note in this milestone. **`fault <name> --writes on`**
 makes an edit in the mount stay in the system's pending set, which is the input the
 mass-deletion guard's pending rule needs; and **`materialized <name> --pending`** is how to
 see that set. Turn `--writes` off again before leaving the VM.
+
+### The 2026-09-05 hook (milestones 7 and 8: `debug ttl`)
+
+- **`ttl <name> [--seconds N] [--off]`** - the cache TTL in seconds, for this agent process
+  only. Section 7's shortest real value is `15m` and a runbook that waited a quarter of an
+  hour per assertion would be run once and never again. It changes the number section 7's
+  rule is applied to and nothing else: the pass, the `stat`s, the `evictItem`s and every
+  skip are the ordinary ones, which is the same bargain `watch --clock-skew` makes for the
+  sweep window. `status` prints the override in place of the location's setting while it is
+  set, and `--off` puts the real one back.
+
+Milestone 7 also gives three existing hooks their production counterparts, and they now
+share one implementation (`ReplicaAccess`): **`evict <name> <path>`** is the same
+`evictItem` the loop makes, **`stat <name> <path>`** the same `lstat`, and
+**`policy <name> <path> eager-keep|lazy|inherit`** writes a raw marker through the same
+code `pin`/`unpin` use, so it clears the subtree and rewrites every descendant row the way
+section 7.1.1 requires. The user-facing pair is `sshdrive pin` / `sshdrive unpin`; `policy`
+stays for the one thing they cannot express, which is writing `inherit` directly.
 
 ## Verify on Mac (what the compiler could not settle)
 

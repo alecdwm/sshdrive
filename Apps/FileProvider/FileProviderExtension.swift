@@ -428,3 +428,43 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler()
     }
 }
+
+// MARK: Section 7.2's context-menu entries
+
+/// "Keep Downloaded" and "Don't Keep Downloaded", declared in the appex's Info.plist with
+/// the activation rules that read `userInfo.kept`, and handled here (section 7.2).
+///
+/// The extension does nothing of its own: it holds no state and cannot write the index
+/// (section 3), so the action is forwarded to the agent, which is where every pin change
+/// from the CLI lands too - one writer, one code path, no second store to keep in sync.
+extension FileProviderExtension: NSFileProviderCustomAction {
+    func performAction(
+        identifier actionIdentifier: NSFileProviderExtensionActionIdentifier,
+        onItemsWithIdentifiers itemIdentifiers: [NSFileProviderItemIdentifier],
+        completionHandler: @escaping (Error?) -> Void
+    ) -> Progress {
+        let progress = Progress(totalUnitCount: 1)
+        Log.extensionLog.notice(
+            "performAction \(actionIdentifier.rawValue, privacy: .public) on \(itemIdentifiers.count, privacy: .public) item(s)"
+        )
+        guard let proxy = agentProxy({ error in
+            progress.completedUnitCount = 1
+            completionHandler(error)
+        }) else {
+            progress.completedUnitCount = 1
+            completionHandler(NSFileProviderError(.serverUnreachable))
+            return progress
+        }
+        proxy.performAction(
+            domainIdentifier: domainIdentifier,
+            actionIdentifier: actionIdentifier.rawValue,
+            itemIdentifiers: itemIdentifiers.map {
+                SSHDriveItemIdentifiers.agentIdentifier(for: $0)
+            }
+        ) { error in
+            progress.completedUnitCount = 1
+            completionHandler(error.map { AgentConnection.fileProviderError(from: $0) })
+        }
+        return progress
+    }
+}

@@ -13,7 +13,7 @@ struct Debug: ParsableCommand {
         subcommands: [
             Fake.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
             IndexCommand.self, Keychain.self, Secrets.self, Signal.self,
-            Evict.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
+            DebugEvict.self, DebugTTL.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
             Stabilize.self, Testing.self, Transport.self,
             Breaker.self, Power.self, Presence.self, Rearm.self, Calls.self, Row.self,
             Watch.self, Roots.self, Held.self, Reconcile.self,
@@ -380,8 +380,9 @@ struct Secrets: ParsableCommand {
 /// rather than a sentence, because which error comes back is the answer: the header
 /// promises `NSFileProviderErrorUnsyncedEdits` for an item with pending changes and
 /// `NSFileProviderErrorNonEvictable` for one the provider marked non-purgeable.
-struct Evict: ParsableCommand {
+struct DebugEvict: ParsableCommand {
     static let configuration = CommandConfiguration(
+        commandName: "evict",
         abstract: "Ask the system to evict one item (spike S4).")
 
     @Argument var name: String
@@ -391,6 +392,30 @@ struct Evict: ParsableCommand {
     func run() throws {
         AgentClient.prettyPrint(
             try AgentClient.send(command: "debug.evict", arguments: ["name": name, "path": path]))
+    }
+}
+
+/// `sshdrive debug ttl <name> --seconds N`: the cache TTL in seconds, for this agent
+/// process only, so a runbook can watch section 7's loop work without waiting fifteen
+/// minutes per assertion. The pass itself is the ordinary one.
+struct DebugTTL: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ttl",
+        abstract: "Override the cache TTL in seconds (spike/runbook hook).")
+
+    @Argument var name: String
+
+    @Option(help: "The TTL in seconds.")
+    var seconds: Double?
+
+    @Flag(help: "Go back to the location's own cache-ttl.")
+    var off = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if let seconds { arguments["seconds"] = String(seconds) }
+        if off { arguments["off"] = "true" }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.ttl", arguments: arguments))
     }
 }
 

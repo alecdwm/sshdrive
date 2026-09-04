@@ -32,6 +32,65 @@ final class RowBuilderTests: XCTestCase {
             type: .file, size: size, mtime: mtime, mode: 0o644, uid: 501, gid: 20)
     }
 
+    // MARK: The kept state a new row is born with (sections 7.1, 7.1.1)
+
+    private func directory(kept: Bool, pinState: Int64, path: String) throws -> IndexItem {
+        IndexItem(
+            identifier: "dir-\(path)", path: Data(path.utf8), parent: IndexWriter.rootIdentifier,
+            type: "directory", uid: 501, gid: 20, mode: 0o755, pinState: pinState, kept: kept)
+    }
+
+    func testANewRowInsideAKeptFolderIsKeptWithNoAncestorWalk() throws {
+        // Section 7.1: "descendants the index has never seen need nothing: their rows are
+        // created with the right state when they are first listed". The parent row carries
+        // the *effective* state, so one comparison is the whole inheritance.
+        let folder = try directory(kept: true, pinState: 1, path: "Projects")
+        let row = builder.build(
+            path: try RelativePath(string: "Projects/new.txt"), attributes: file(),
+            parent: folder, existing: nil).row
+        XCTAssertTrue(row.kept)
+        XCTAssertEqual(row.pinState, 0)
+        // A kept item drops allowsEvicting (section 7.2); the eager policy is what actually
+        // refuses the eviction, but the bit is part of the metadata version.
+        XCTAssertEqual(
+            row.capabilities & Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue), 0)
+    }
+
+    func testANewRowInsideAnExcludedFolderIsNotKept() throws {
+        // "A new file appearing remotely inside a kept folder is downloaded; one appearing
+        // inside an excluded subfolder is not" (section 7.1.1).
+        let excluded = try directory(kept: false, pinState: -1, path: "Projects/archive")
+        let row = builder.build(
+            path: try RelativePath(string: "Projects/archive/new.txt"), attributes: file(),
+            parent: excluded, existing: nil).row
+        XCTAssertFalse(row.kept)
+        XCTAssertNotEqual(
+            row.capabilities & Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue), 0)
+    }
+
+    func testAnExplicitMarkerOnTheRowBeatsTheParent() throws {
+        let folder = try directory(kept: true, pinState: 1, path: "Projects")
+        let existing = IndexItem(
+            identifier: "x", path: Data("Projects/raw".utf8), parent: "dir-Projects",
+            type: "file", pinState: -1, kept: false)
+        let row = builder.build(
+            path: try RelativePath(string: "Projects/raw"), attributes: file(),
+            parent: folder, existing: existing).row
+        XCTAssertFalse(row.kept)
+    }
+
+    func testTheKeptStateMovesTheMetadataVersionAndNotTheContentVersion() throws {
+        let plain = try directory(kept: false, pinState: 0, path: "Projects")
+        let kept = try directory(kept: true, pinState: 1, path: "Projects")
+        let path = try RelativePath(string: "Projects/a.txt")
+        let unkeptRow = builder.build(
+            path: path, attributes: file(), parent: plain, existing: nil).row
+        let keptRow = builder.build(
+            path: path, attributes: file(), parent: kept, existing: nil).row
+        XCTAssertEqual(unkeptRow.contentVersion, keptRow.contentVersion)
+        XCTAssertNotEqual(unkeptRow.metadataVersion, keptRow.metadataVersion)
+    }
+
     // MARK: The xattr hash in the metadata version (S10)
 
     func testAnXattrChangeMovesTheMetadataVersionButNotTheContentVersion() throws {

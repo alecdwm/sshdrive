@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (3955 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4028 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -152,22 +152,22 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 2337-2390 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
 | 2391-2449 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
 | 2450-2457 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2458-2530 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
-| 2531-2619 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2620-2724 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2725-2764 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2765-2903 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
-| 2904-3024 | §8 The CLI | every command and flag, verbatim |
-| 3025-3145 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 3146-3189 | §9 Security | the security properties in one list |
-| 3190-3254 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3255-3341 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 3342-3444 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3445-3503 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 3504-3520 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3521-3567 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3568-3922 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3923-3955 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 2458-2561 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2562-2650 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2651-2755 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2756-2795 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2796-2960 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 2961-3081 | §8 The CLI | every command and flag, verbatim |
+| 3082-3202 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
+| 3203-3246 | §9 Security | the security properties in one list |
+| 3247-3311 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3312-3398 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
+| 3399-3501 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3502-3560 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
+| 3561-3577 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3578-3624 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3625-3995 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 3996-4028 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -282,11 +282,46 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       helper (milestone 9), so `auto` tops out at sweep; BSD `find`, which the testbed
       cannot provide; and a real server whose clock disagrees with ours, which a container
       cannot be.*
-- [ ] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
+- [x] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
       (TTL = time since last fetch or save; `evict --all` is one call on the root).
-- [ ] **8. Pinning** - `pin`/`unpin`/`pins`, content policy, kept-subtree watching, Finder actions,
+      *Done 2026-09-05, with milestone 8. `AgentCore` gained **`EvictionPlan`** (last use,
+      the TTL comparison, the four skips - `never`, directory, local-only, kept - and the
+      cache totals `status` prints) and the agent **`CacheEvictor`**, one actor per
+      location holding section 6.6's five-minute timer, the pass, `evict <path>` and
+      `evict --all`. Milestone 1's `SpikeHooks` were promoted to **`ReplicaAccess`**
+      (`evictItem` with and without the doubling backoff, `getUserVisibleURL`, the `lstat`,
+      the replica lookup), which the hooks now forward to, so the spikes and the product
+      make the same calls. **The one assumption that failed is atime**: it is now read,
+      logged and decided on by nobody (2026-09-05, section 7, gotcha 80). Proved on a real
+      mount of `alec@192.168.64.1:2201`: a 30 s TTL evicted a file fetched 35 s earlier and
+      spared one saved since; the five-minute timer fired with no CLI at all; a pending
+      edit was refused and passed over; `evict --all` took 9 items to 0 from one call on
+      the root container. See `docs/spikes/milestone-7-8.md` and `docs/spikes/results.md`
+      (2026-09-05).*
+- [x] **8. Pinning** - `pin`/`unpin`/`pins`, content policy, kept-subtree watching, Finder actions,
       badge. Uses S6's answers from milestone 1 (an unseen path needs the replica lookup;
       the eager policy is what refuses eviction).
+      *Done 2026-09-05. `AgentCore` gained **`PinPolicy`/`PinMarkerSet`** - section 7.1.1's
+      whole algebra as a value: the effective state from the nearest marker at or above a
+      path, the five situations, and the *smallest* marker change that produces the
+      asked-for effect (invariant 3) with what it clears beneath it (invariant 2). The
+      agent gained **`LocationRuntime+Pinning`**: the marker write, the descendant rewrite
+      in one transaction with an anchor each, the root-set bookkeeping, `pins` with
+      `--export`/`--import` and the `pins.json` sidecar, the sweep's `-prune` list, the
+      tier 0 expansion of a pin root into every known directory under it, and section 7.2's
+      re-assert net. `RowBuilder` derives `kept` from the parent row's effective state,
+      which is the whole of "descendants the index has never seen need nothing"; the
+      extension gained `performAction` and `decorations`, and the appex plist
+      `NSFileProviderDecorations`. **548/548 package tests** (was 503). Proved on the same
+      mount: a pin on a folder nothing had opened downloaded its subtree including the
+      never-enumerated subfolder; a pin on a path with no rows at all worked through the
+      replica lookup; a file created on the server under a pin was fetched and its row was
+      born kept; an exclusion under a pin stayed lazy and the TTL took it; `pin /`
+      downloaded the location and cleared every nested marker; both Finder entries toggled
+      the pin from a file and from the window background, and the badge is drawn. See
+      `docs/spikes/milestone-7-8.md` and `docs/spikes/results.md` (2026-09-05). Not in
+      milestone 8 and not claimed: section 7.2's re-assert net has no route to fire on 26.4
+      and stays dormant, and the sidebar row still offers nothing (S6).*
 - [ ] **9. Remote helper (tier 2)** - Rust binary, CI cross-compilation, deploy/verify/upgrade, NDJSON.
       Until it ships, `auto` tops out at sweep.
 - [ ] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
@@ -378,6 +413,14 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 78. **The working set must answer `.serverUnreachable` while its reader is not ready, never an empty change set.** The system launches a fresh extension instance for every working-set signal, so the first `enumerateChanges` on a signalled instance races the `indexReady` round trip; "no changes" at the anchor the system already holds tells it that it is up to date and the change is dropped until something else signals - a deleted file then sits in Finder indefinitely though it is gone from both the server and the index (2026-09-04, §5.3, §5.2).
 
 79. **The orphan control-socket sweep matches on the socket type, not the name.** `$TMPDIR` is shared and `sshdrive-` is not ours exclusively there - the package's own test databases are `sshdrive-nested-<uuid>.sqlite`, and their `-wal`/`-shm` sidecars made `sshdrive doctor` report a clean install as failing, with six "orphaned sockets" it would have deleted. Each candidate is `lstat`ed and only `S_IFSOCK` counts (2026-09-04, §6.1).
+
+80. **atime is not in the TTL's `max`.** Something in the system advances a materialized file's atime minutes after the fetch, deferred and with no read of ours near it, so with atime in the rule the TTL silently became "time since whatever last touched the replica" - a file fetched 280 s earlier survived a 60 s TTL. It is read, logged beside the age the decision used, and decided on by nobody; `last_fetch` and the later of the replica's and the row's mtime are the whole rule (2026-09-05, §7).
+
+81. **A decoration's Info.plist keys are the bare `Identifier`, `BadgeImageType`, `Label` and `Category`,** not `NSFileProviderDecoration`-prefixed spellings and not the `NSExtensionFileProviderAction*` shape beside them, and `BadgeImageType` is a **UTI conforming to `com.apple.icon-decoration.badge`** (the system ships `.badge.pinned`), never an asset name. Every mistake is silent, like `fileproviderItems`. Finder draws a `Badge` at the trailing edge of the Name column, not on the icon (2026-09-05, §7.2).
+
+82. **`evict --all` is one call on the root container only while nothing is *or has just been* pinned.** With a pin in place it meets a kept child and fails as a whole, and straight after `--unpin-all` it fails as `NSCocoaErrorDomain` "The file couldn't be opened" because the system has not re-read the rows whose policy just changed - a single file becomes evictable 5-10 s after an unpin, the container did not within a minute. Both cases fall back to walking the materialized set with §5.5's backoff per file, which leaves the directory rows materialized (2026-09-05, §7, §7.1).
+
+83. **A pin change rewrites the changed row *and every known descendant row*,** because `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the capabilities are per item and cached until that item's own metadata version moves. Invariant 2 clears every explicit state beneath first, which is what makes the rewrite one value rather than a per-row ancestor walk (§7.1, §7.1.1).
 
 ## Glossary
 

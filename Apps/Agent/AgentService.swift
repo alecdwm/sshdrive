@@ -403,12 +403,64 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         }
     }
 
+    /// Section 7.2's two context-menu entries, forwarded by the extension.
+    ///
+    /// Each acts only on the items it applies to: "Keep Downloaded" pins every selected
+    /// item that is not kept and skips the rest, "Don't Keep Downloaded" unpins every
+    /// selected item that is kept - which is exactly `pin`/`unpin` semantics per item, so
+    /// the same `applyPin` runs and `PinPolicy` decides which marker each one gets
+    /// (situations A, D, E for the first; B, C for the second). A mixed selection shows
+    /// both entries and each does its own half.
+    ///
+    /// Finder has no output channel, so nothing is reported back beyond success; the
+    /// clearing of nested markers that invariant 2 does is silent here, which section
+    /// 7.1.1 accepts and `sshdrive pins` is the way to see.
     func performAction(
         domainIdentifier: String, actionIdentifier: String, itemIdentifiers: [String],
         reply: @escaping (Error?) -> Void
     ) {
-        // TODO milestone 8: pin and unpin (section 7.2).
-        reply(SSHDriveAgentError.notImplemented.asNSError("Custom actions: milestone 8."))
+        let request: PinPolicy.Request
+        switch actionIdentifier {
+        case SSHDriveIdentifiers.pinActionID: request = .keep
+        case SSHDriveIdentifiers.unpinActionID: request = .dontKeep
+        default:
+            reply(SSHDriveAgentError.notImplemented.asNSError(
+                "Unknown action \(actionIdentifier)."))
+            return
+        }
+        DomainManager.shared.noteFileProviderRequest(
+            domainIdentifier: domainIdentifier, method: "performAction",
+            subject: actionIdentifier)
+        Task {
+            do {
+                let runtime = try await DomainManager.shared.runtime(
+                    domainIdentifier: domainIdentifier)
+                var changed = false
+                var lookUp: [String] = []
+                for identifier in itemIdentifiers {
+                    guard let row = try await runtime.row(identifier: identifier) else { continue }
+                    let path = String(decoding: row.path, as: UTF8.self)
+                    let report = try await runtime.applyPin(pathString: path, request: request)
+                    if report["changed"] as? Bool == true {
+                        changed = true
+                        if request == .keep { lookUp.append(identifier) }
+                    }
+                }
+                if changed {
+                    await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
+                    // The rows always exist here - Finder is acting on items it is showing -
+                    // but the eager download still needs the replica lookup of section 7.1
+                    // step 1 for a subtree the system has not enumerated below the pin.
+                    for identifier in lookUp {
+                        await ReplicaAccess.lookUpInReplica(
+                            locationID: domainIdentifier, identifier: identifier)
+                    }
+                }
+                reply(nil)
+            } catch {
+                reply(sshDriveXPCError(error))
+            }
+        }
     }
 
     // MARK: CLI

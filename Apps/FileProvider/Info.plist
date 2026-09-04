@@ -32,9 +32,12 @@
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
 		<!--
 		  Pin and unpin get their own Finder context-menu entries, shown conditionally on
-		  pin state (DESIGN.md sections 2, 7.2). TODO milestone 8: handle them in
-		  NSFileProviderCustomAction.performAction. They are declared now so spike S6 can
-		  record where Finder puts them.
+		  pin state (DESIGN.md sections 2, 7.2). Handled since milestone 8 in
+		  NSFileProviderCustomAction.performAction, which forwards to the agent; the
+		  identifiers are also in XPCProtocols/Identifiers.swift and must be edited
+		  together. S6 recorded where Finder puts them: at the very bottom of the
+		  contextual menu, at the top level, one of the pair at a time, and on the window
+		  background but never on the sidebar row.
 
 		  The bound key is "fileproviderItems", lower-case p, and it is a key path on the
 		  evaluated object, not a substitution variable: "$fileProviderItems" throws
@@ -63,6 +66,33 @@
 				<string>Don't Keep Downloaded</string>
 				<key>NSExtensionFileProviderActionActivationRule</key>
 				<string>SUBQUERY(fileproviderItems, $item, $item.userInfo.kept == 1).@count &gt; 0</string>
+			</dict>
+		</array>
+		<!--
+		  Section 7.2's pin badge. A decoration is declared here and attached to an item
+		  through NSFileProviderItemDecorating.decorations (Item.swift), which serves it
+		  for every *kept* item - the effect, not the marker, so an excluded folder inside
+		  a kept one shows nothing and its parent still does (section 7.1.1).
+
+		  The keys are the four NSFileProviderItemDecoration.h names, not
+		  NSFileProviderDecoration*-prefixed ones: Identifier, BadgeImageType, Label and
+		  Category. BadgeImageType is a UTI that must conform to
+		  com.apple.icon-decoration.badge; com.apple.icon-decoration.badge.pinned is a
+		  system one, so no icon asset and no exported type of ours is needed. Category
+		  "Badge" draws on top of the icon for a file or a folder alike ("FolderBadge"
+		  would emboss, and is valid for folders only).
+		-->
+		<key>NSFileProviderDecorations</key>
+		<array>
+			<dict>
+				<key>Identifier</key>
+				<string>org.shirls.sshdrive.decoration.kept</string>
+				<key>BadgeImageType</key>
+				<string>com.apple.icon-decoration.badge.pinned</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Kept downloaded by SSH Drive</string>
 			</dict>
 		</array>
 	</dict>

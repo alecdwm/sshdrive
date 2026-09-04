@@ -77,6 +77,16 @@ actor LocationRuntime {
     /// refresh would undo the seeding on the next cycle (section 6.5).
     var suppressMaterializedRefresh = false
 
+    /// Section 7.2's safety net: the kept files the agent has *seen* materialized in an
+    /// earlier `enumeratorForMaterializedItems` pass. A kept file that leaves this set has
+    /// turned dataless without our handler having run, and the pin is re-asserted rather
+    /// than read as an unpin. Kept files that are dataless because their eager download has
+    /// not reached them yet were never in it, which is what "turning" means.
+    var keptAndMaterialized: Set<String> = []
+    /// How many times that has happened, for `status` ("3 kept files were evicted outside
+    /// SSH Drive and re-downloaded").
+    var keptEvictedOutside = 0
+
     /// Section 6.4's tier ladder for this location, owned by `ChangeDetector` and kept
     /// here so `status` can answer for a location whose detector is not running.
     var watchState: ChangeDetectionLadder?
@@ -1428,50 +1438,6 @@ actor LocationRuntime {
 
     func setCatchUpSweep(enabled: Bool) {
         catchUpSweepEnabled = enabled
-    }
-
-    /// The debug hook behind `sshdrive debug policy` (section 12, spike S6). Milestone 8
-    /// replaces it with `pin`/`unpin`, which write the same marker.
-    @discardableResult
-    func setPinState(pathString: String, marker: Int64) async throws -> [String: Any] {
-        let path = try RelativePath(string: pathString)
-        // Step 1 of section 7.1: a path the system has never enumerated has no chain of
-        // ancestors, and the system cannot apply a policy to an item whose ancestors it
-        // has never seen. So readdir each missing ancestor into the index from the
-        // nearest known one first; every new row gets an anchor and travels through the
-        // working set with the pinned one.
-        let createdAncestors = try await materializeAncestors(of: path)
-        guard var row = try index.item(path: path.bytes) else {
-            throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(pathString).")
-        }
-        row.pinState = marker
-        row.kept = marker == 1
-        // A pin change rewrites every known descendant and writes an anchor for each
-        // (section 7.1). The recursive half is milestone 8; this writes the marker's own
-        // row so S6 can flip one folder's policy at runtime.
-        row.capabilities =
-            row.kept
-            ? row.capabilities & ~Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue)
-            : row.capabilities | Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue)
-        row.metadataVersion = ItemDerivation.metadataVersion(
-            contentVersion: row.contentVersion,
-            mode: row.mode, uid: row.uid, gid: row.gid,
-            capabilities: row.capabilities, fileSystemFlags: row.fileSystemFlags,
-            kept: row.kept, xattrs: row.xattrs)
-        try index.upsert(row)
-        try index.appendAnchor(identifier: row.identifier, kind: .modified)
-        if marker == 1 {
-            try index.addRoot(path: path.bytes, reason: "pinned")
-        } else {
-            try index.removeRoot(path: path.bytes, reason: "pinned")
-        }
-        return [
-            "identifier": row.identifier,
-            "kept": row.kept,
-            "capabilities": row.capabilities,
-            "metadataVersion": row.metadataVersion,
-            "ancestorRowsCreated": createdAncestors,
-        ]
     }
 
     /// Walks the chain to `path`, listing each directory whose child is missing, so every

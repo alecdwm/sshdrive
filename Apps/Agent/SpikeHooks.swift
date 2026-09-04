@@ -15,89 +15,25 @@ import Logging
 /// milestones 7 and 8; until then they exist so a headless VM can answer S4 and S6.
 enum SpikeHooks {
 
+    /// The production calls moved to `ReplicaAccess` in milestone 7; these forward, so
+    /// the `sshdrive debug` hooks the spikes are written against keep working and there is
+    /// only one copy of each call.
     private static func manager(_ locationID: String) throws -> NSFileProviderManager {
-        let domain = NSFileProviderDomain(
-            identifier: NSFileProviderDomainIdentifier(rawValue: locationID),
-            displayName: locationID)
-        guard let manager = NSFileProviderManager(for: domain) else {
-            throw SSHDriveAgentError.unknownDomain.asNSError(
-                "The system has no domain \(locationID).")
-        }
-        return manager
+        try ReplicaAccess.manager(locationID)
     }
 
-    // MARK: Eviction (S4-1, S4-3, S6-5)
-
-    /// `NSFileProviderManager.evictItem`. The error is reported field by field rather than
-    /// as a sentence, because which error comes back is the whole answer: the header names
-    /// `NSFileProviderErrorUnsyncedEdits` for an item with pending changes and
-    /// `NSFileProviderErrorNonEvictable` for one the provider marked non-purgeable.
     static func evict(locationID: String, identifier: String) async -> [String: Any] {
-        let manager: NSFileProviderManager
-        do { manager = try self.manager(locationID) } catch {
-            return describe(error: error)
-        }
-        let error: Error? = await withCheckedContinuation { continuation in
-            manager.evictItem(identifier: NSFileProviderItemIdentifier(identifier)) { error in
-                continuation.resume(returning: error)
-            }
-        }
-        guard let error else { return ["evicted": true] }
-        var report = describe(error: error)
-        report["evicted"] = false
-        return report
+        await ReplicaAccess.evict(locationID: locationID, identifier: identifier)
     }
 
-    /// Section 5.5's conflict path: the eviction that has to follow the reply.
-    ///
-    /// It cannot be done once. Measured on macOS 26.4 (2026-09-04): an `evictItem` issued
-    /// immediately after a `modifyItem` reply is refused with
-    /// `NSFileProviderErrorNonEvictable` (-2008) - the system is still finishing the
-    /// modification it was told about - while the same call a few seconds later succeeds
-    /// and the next open downloads the remote content. So the conflict path retries with
-    /// a doubling backoff and gives up after `attempts`, logging either way. Without the
-    /// retry the replica keeps the *local* bytes under the *remote* version for ever,
-    /// which is the whole reason the eviction is there (S3, 2026-09-04).
     static func evictAfterConflict(
         locationID: String, identifier: String, attempts: Int = 7
     ) async {
-        var delay: UInt64 = 250_000_000  // 0.25 s
-        for attempt in 1...max(1, attempts) {
-            try? await Task.sleep(nanoseconds: delay)
-            let report = await evict(locationID: locationID, identifier: identifier)
-            if report["evicted"] as? Bool == true {
-                Log.agent.notice(
-                    "evicted \(identifier, privacy: .public) after a conflict copy on attempt \(attempt, privacy: .public)"
-                )
-                return
-            }
-            delay = min(delay * 2, 8_000_000_000)
-        }
-        Log.agent.error(
-            "could not evict \(identifier, privacy: .public) after a conflict copy; the replica still holds the local bytes under the remote version"
-        )
+        await ReplicaAccess.evictAfterConflict(
+            locationID: locationID, identifier: identifier, attempts: attempts)
     }
 
-    static func describe(error: Error) -> [String: Any] {
-        let nsError = error as NSError
-        var report: [String: Any] = [
-            "errorDomain": nsError.domain,
-            "errorCode": nsError.code,
-            "errorDescription": nsError.localizedDescription,
-        ]
-        let underlying = nsError.underlyingErrors.map { inner -> [String: Any] in
-            let innerNS = inner as NSError
-            return [
-                "errorDomain": innerNS.domain,
-                "errorCode": innerNS.code,
-                "errorDescription": innerNS.localizedDescription,
-                "userInfo": innerNS.userInfo.keys.sorted(),
-            ]
-        }
-        if !underlying.isEmpty { report["underlyingErrors"] = underlying }
-        if !nsError.userInfo.isEmpty { report["userInfoKeys"] = nsError.userInfo.keys.sorted() }
-        return report
-    }
+    static func describe(error: Error) -> [String: Any] { ReplicaAccess.describe(error: error) }
 
     // MARK: The materialized and pending sets (S4, S6)
 
@@ -129,65 +65,12 @@ enum SpikeHooks {
 
     // MARK: The user-visible file (S4-2, S4-4, S4-5)
 
-    /// The path under `~/Library/CloudStorage` an identifier maps to. The TTL loop needs
-    /// it to `stat` the replica (section 7); asking the system for it rather than building
-    /// it from the display name is what the loop will do.
     static func userVisibleURL(locationID: String, identifier: String) async throws -> URL {
-        let manager = try manager(locationID)
-        return try await withCheckedThrowingContinuation { continuation in
-            manager.getUserVisibleURL(for: NSFileProviderItemIdentifier(identifier)) { url, error in
-                if let url {
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(
-                        throwing: error ?? SSHDriveAgentError.noSuchItem.asNSError(
-                            "No user-visible URL for \(identifier)."))
-                }
-            }
-        }
+        try await ReplicaAccess.userVisibleURL(locationID: locationID, identifier: identifier)
     }
 
-    /// `lstat` as the eviction loop does it: `AT_SYMLINK_NOFOLLOW`, from the
-    /// launchd-started agent, with the errno kept rather than turned into a sentence. A
-    /// TCC refusal a launchd agent cannot answer arrives here as a plain `EPERM`
-    /// (section 7).
     static func stat(url: URL, readFirst: Bool) -> [String: Any] {
-        var report: [String: Any] = ["path": url.path, "read": readFirst]
-
-        if readFirst {
-            // Open and read one byte, the way anything that "uses" the file does. This is
-            // the read whose effect on atime S4 is measuring, made from the agent so a
-            // TCC refusal on the open shows up too.
-            let descriptor = open(url.path, O_RDONLY)
-            if descriptor < 0 {
-                report["openErrno"] = errno
-                report["openErrnoName"] = String(cString: strerror(errno))
-            } else {
-                var byte: UInt8 = 0
-                let count = read(descriptor, &byte, 1)
-                report["bytesRead"] = count
-                close(descriptor)
-            }
-        }
-
-        var buffer = Foundation.stat()
-        guard lstat(url.path, &buffer) == 0 else {
-            report["statErrno"] = errno
-            report["statErrnoName"] = String(cString: strerror(errno))
-            return report
-        }
-        report["atime"] = buffer.st_atimespec.tv_sec
-        report["mtime"] = buffer.st_mtimespec.tv_sec
-        report["ctime"] = buffer.st_ctimespec.tv_sec
-        report["birthtime"] = buffer.st_birthtimespec.tv_sec
-        report["size"] = buffer.st_size
-        // A dataless file has no blocks and carries SF_DATALESS (0x40000000), which is how
-        // the loop can tell "materialized" from "placeholder" without asking the system.
-        report["blocks"] = buffer.st_blocks
-        report["flags"] = String(format: "0x%08x", buffer.st_flags)
-        report["dataless"] = (buffer.st_flags & 0x4000_0000) != 0
-        report["now"] = Int(Date().timeIntervalSince1970)
-        return report
+        ReplicaAccess.stat(url: url, readFirst: readFirst)
     }
 
     // MARK: Determinism (used by every S6 sub-question)

@@ -1,8 +1,189 @@
 # Spike results
 
 One entry per sub-question, newest date first. Steps and expected answers are in
-`milestone-1.md` (S1, S3, S4, S6), `milestone-2.md` (S2) and `milestone-4.md` (S8, S10 and
-the write matrix); this file records only what happened.
+`milestone-1.md` (S1, S3, S4, S6), `milestone-2.md` (S2), `milestone-4.md` (S8, S10 and the
+write matrix), `milestone-5.md` (S5), `milestone-6.md` (S7) and `milestone-7-8.md`
+(eviction and pinning); this file records only what happened.
+
+---
+
+## 2026-09-05 (milestones 7 and 8) - the TTL loop, `evict`, and pinning end to end
+
+Milestones 7 and 8 together: DESIGN.md section 7's five-minute eviction loop with
+`sshdrive evict` and `set cache-ttl`, and section 7.1's pinning - `pin`/`unpin`/`pins`, the
+per-item content policy with the inherited-kept rule and explicit lazy exclusions of
+section 7.1.1, the replica lookup that makes a pin on an unseen path work, kept-subtree
+watching folded into the root set, eviction exclusion for kept items, whole-location
+pinning from the CLI, the two Finder context-menu actions through `performAction`, and the
+pin badge. Same headless VM (macOS 26.4.1 arm64, Xcode 26.4), the signed Debug build
+installed over `/Applications/SSH Drive.app`, testbed up, one real location `m78` on
+`alec@192.168.64.1:2201`. Steps are in `milestone-7-8.md`.
+
+**548 package tests, 0 failures** (was 503; 39 skipped without the testbed). The 45 new ones
+are `PinPolicyTests` (section 7.1.1's five situations and three invariants),
+`EvictionPlanTests` (section 7's rule against an injected clock), `PinQueryTests` (the two
+index queries a pin change makes), four `RowBuilderTests` for the kept state a new row is
+born with, and one `RootSetTests` for the pin root's exemption from the tier 0 rotation.
+
+### What was built
+
+Two more pure, clock-injected types in `AgentCore`, on the same split every milestone since
+5 has used - the decision in the package, the I/O in the agent:
+
+- **`PinPolicy` + `PinMarkerSet`** - section 7.1.1's whole algebra: the effective state from
+  the nearest marker at or above a path, the five situations, and `plan(_:at:)`, which
+  returns the *smallest* marker change that produces the asked-for effect (invariant 3),
+  what it clears beneath (invariant 2) and the kept state that results. Byte-wise paths
+  throughout, because a server name need not be UTF-8.
+- **`EvictionPlan`** - last use, the TTL comparison, the four skips (`never`, directory,
+  local-only, kept) and the cache totals `status` prints.
+
+The agent gained **`CacheEvictor`** (one actor per location: section 6.6's timer, the pass,
+`evict <path>`, `evict --all`), **`LocationRuntime+Pinning`** (the marker write, the
+descendant rewrite, the root-set bookkeeping, `pins`, the sweep's prune list and section
+7.2's re-assert net) and **`ReplicaAccess`**, which is milestone 1's `SpikeHooks` promoted:
+`evictItem` with and without the doubling backoff, `getUserVisibleURL`, the `lstat`, and the
+replica lookup S6 found a pin cannot do without. `SpikeHooks` now forwards to it, so the
+spike hooks and the product make the same calls.
+
+The extension gained `NSFileProviderCustomAction.performAction`, which forwards to the
+agent, and `NSFileProviderItemDecorating.decorations`. The appex's Info.plist gained
+`NSFileProviderDecorations`. `IndexWriter` gained `pinMarkerRows()` and `items(under:)` -
+the second a byte range rather than a `LIKE`, since paths are blobs. `RowBuilder` now derives
+`kept` from the parent row's effective state, which is the whole of "descendants the index
+has never seen need nothing".
+
+### The mount proofs
+
+Every scenario from `milestone-7-8.md`, in one line each:
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | a 30 s TTL evicts a file fetched 35 s ago and not one saved since | **pass** - `stale.txt` dataless, `fresh.txt` untouched |
+| 2 | the five-minute timer fires with no CLI at all | **pass** - 11 rows to 8 at 01:05:36, five minutes after the loop started |
+| 3 | a pending edit is never evicted | **pass** - refused -2008, logged, passed over; the other file in the same pass went |
+| 4 | `evict --all` empties the materialized set | **pass** - 9 items to 0 from one call on `.rootContainer` |
+| 5 | `pin` on a folder nothing has opened downloads the subtree | **pass** - 6 files in ~60 s, including the never-enumerated `keep/sub` |
+| 5a | `pin` on a path with no rows at all, ancestors included | **pass** - ancestors listed, replica looked up, both files down |
+| 6 | a new server file under a pin is fetched | **pass** - inside a minute, and its row was born kept |
+| 7 | `unpin` of a child leaves it lazy and the TTL takes it | **pass** - 1 dropped, 8 kept skipped; still dataless a minute later |
+| 8 | `pins` lists them, and `--export`/`--import` round-trip | **pass** |
+| 9 | `pin /` downloads the whole location | **pass** - 13 files, 21 rows, ~75 s, and invariant 2 cleared the nested markers |
+| 10 | the Finder actions on a file and on the window background | **pass** - both toggle the pin; the pair follows `userInfo.kept` |
+| 11 | the badge | **pass** - drawn, but not where the header implies (below) |
+| 12 | `unpin` then the TTL takes the subtree | **pass** - 13 files dropped, the 8 directory rows left |
+| 13 | `set cache-ttl` and section 8.1's Cache and Pins lines | **pass** |
+
+### The assumption that failed: atime
+
+Section 7 had the eviction loop take `last use = max(atime, mtime, last_fetch)`, on S4's
+finding that atime follows the `relatime` rule and so "adds nothing for a materialized
+file". Milestone 7's timer proof failed on exactly that clause: the automatic pass ran at
+the right moment, considered the right ten items, and evicted **nothing**, because two files
+fetched 280 s earlier under a 60 s TTL had an atime **23 s old**.
+
+Chasing it produced two measurements S4's forty-second window could not have seen:
+
+- **The atime write is deferred.** A `stat` immediately after a materialization still shows
+  the old value; the new one appears a minute or so later. S4's "ten reads moved nothing"
+  was measured inside that window.
+- **Something advances a materialized file's atime minutes after the fetch,** with no read
+  of ours anywhere near it. It is not our `lstat` (which does not move atime) and it is not
+  the materialized enumerator (two enumerations in a row moved nothing); on the evidence it
+  is the domain's own indexer, which S4 already saw once as "one unexplained advance".
+
+So with atime in the `max` the TTL silently meant "time since whatever last touched the
+replica", which is neither what section 7 promises nor anything a user can observe or
+predict - and on a Mac with Spotlight running it would hold the whole cache open
+indefinitely. **atime is now read, logged beside the age the decision used, and decided on
+by nobody**; `last_fetch` and the later of the two mtimes are the whole rule, which is what
+section 7 says the TTL *means*. Section 7 and a 2026-09-05 §13 entry say so; the unit test
+`testAFreshAtimeDoesNotSaveAStaleFile` pins it.
+
+The replica's mtime is now consulted beside the row's, the later winning: a save in the
+mount moves the replica's before the upload finishes and the row's only afterwards.
+
+### Two smaller things that were not as written
+
+- **`evict --all` is one call on the root container only while nothing is *or has just
+  been* pinned.** With a pin in place that call meets a kept child and fails as a whole -
+  and straight after `--unpin-all` it fails too, as `NSCocoaErrorDomain` "The file couldn't
+  be opened", which names no reason: the system has not yet re-read the rows whose policy
+  the unpin just changed. Measured with `debug evict` in a loop: a single file becomes
+  evictable **5-10 s** after the unpin, and the root container did not within a minute. So
+  both cases walk the materialized set and evict the unkept files one at a time, each with
+  section 5.5's doubling backoff, and a refused root container is reported and the walk runs
+  anyway - the one call is an optimisation, not the contract. The cost is that the directory
+  rows stay materialized, since the loop is per file. Section 7 step 4 and §13 now say so.
+- **A decoration's Info.plist keys are the bare four** - `Identifier`, `BadgeImageType`,
+  `Label`, `Category` - from `NSFileProviderItemDecoration.h`, not
+  `NSFileProviderDecoration`-prefixed spellings and not the `NSExtensionFileProviderAction*`
+  shape the actions beside them use. `BadgeImageType` is a **UTI conforming to
+  `com.apple.icon-decoration.badge`**, not an asset name; the system ships `.badge.pinned`,
+  `.checkmark`, `.locked`, `.syncing`, `.warning` and a dozen more in `CoreTypes.bundle`, so
+  ours needs no icon asset and no exported type. Every one of those mistakes is silent, like
+  `fileproviderItems` before it.
+
+### What Finder draws for a kept item
+
+`Category: Badge` is documented as "on top of the icon". In list view on 26.4 it is drawn as
+an **orange disc with a white push-pin at the trailing edge of the Name column**, beside the
+date, not on the icon. Every kept row carries it, including rows that merely inherit the
+pin; an excluded folder inside a kept one carries none, which is the `kept`-not-marker rule
+being visible for once.
+
+The two custom entries behave exactly as S6 recorded on 2026-09-04, now with handlers
+behind them: at the very bottom of the contextual menu, at the top level, one of the pair at
+a time, and on the window background acting on the folder being shown. `Remove Download` is
+still offered on a kept item and still fails.
+
+### Driving Finder from a terminal, two additions to the recipe
+
+The CoreGraphics right-click of 2026-09-04 still works. Two things have changed or are new:
+
+- **The file list is `outline 1 of scroll area 1 of splitter group 1 of splitter group 1 of
+  window 1`.** `splitter group 1` alone is the sidebar, which is what the older recipe
+  addressed. A row's name is now `value of text field 1 of UI element 1 of the row`; it read
+  `missing value` in September, so rows can be matched by name again.
+- **A menu entry can be invoked without reading the menu.** Ours is always the last item, so
+  `key code 126` (up, which wraps to the bottom) then `key code 36` (return) picks it. The
+  contextual menu is still not readable through AX, so the screenshots are still how the
+  labels are confirmed.
+
+### The one hook these milestones added
+
+`sshdrive debug ttl <name> --seconds N`, the cache TTL in seconds for this agent process
+only. Section 7's shortest real value is `15m`. It changes the number the rule is applied to
+and nothing else; `--off` restores the location's own setting. Same bargain as
+`debug watch --clock-skew`.
+
+### What stayed dormant
+
+Section 7.2's re-assert net. It fires when a kept file turns dataless without our handler
+having run, and there is no route to make that happen on 26.4: Finder's "Remove Download" on
+a kept item is refused by the eager policy, and so is `evictItem` from the agent. The code
+is written, counts only files the agent has *seen* materialized in an earlier pass, and
+`status` carries the number if it ever does fire.
+
+### Noticed in passing, and not milestone 7 or 8's to fix
+
+**`sshdrive agent stop` leaves a location's `ssh -N` master running.** The agent exits
+cleanly 0.2 s after the reply and never shuts its masters down, and the next start's orphan
+sweep deletes the stale *socket* (section 6.1) but has no pid to kill: the old `ssh` then
+holds a connection open for ever with a socket that no longer exists. Four install cycles
+during this pass left one behind, and `pgrep -f "ssh -N -o ControlMaster"` is how it was
+found. `remove` does drop the runtime and does shut its transport down, so this is only the
+`agent stop` path. Worth a milestone 9/10 fix: either shut the gates down before exiting, or
+have the sweep kill the process that owns each orphaned socket rather than only unlinking
+it.
+
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no `ssh`
+masters (one orphan from the install cycles above was killed by hand) and no `sshdrive-*`
+files in `$TMPDIR`; `~/m78` and `~/m78b` removed from `deb`, `~/m78-tools` and `~/m78-shots`
+removed from the VM. `sshdrive doctor` is green apart from the expected uninstall note. The
+signed Debug build is installed at `/Applications/SSH Drive.app` and the agent is running.
 
 ---
 

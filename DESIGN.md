@@ -2468,10 +2468,11 @@ TTL unless it has been used again.
    that `evictItem` on a directory evicts its children recursively and then
    the directory itself, and that it works on `.rootContainer` too, which is
    what `evict --all` uses, 2026-09-04):
-   last use = max(atime and mtime of the user-visible file, `last_fetch`
-   from the index). mtime counts because a file the user saved but never
-   re-read was used. atime is read with `AT_SYMLINK_NOFOLLOW` (§9.1), and
-   the loop reads it **before** it evicts, since an eviction moves it.
+   last use = max(mtime of the user-visible file, `last_fetch` from the
+   index). mtime counts because a file the user saved but never re-read
+   was used, and the replica's mtime and the row's are both consulted,
+   the later winning: a save in the mount moves the replica's before the
+   upload finishes and the row's only afterwards.
    **S4 settled which of the two meanings the TTL has, and it is the
    second** (2026-09-04, macOS 26.4): atime follows the `relatime` rule.
    Materializing a file sets it; after that a read advances it only when
@@ -2480,20 +2481,34 @@ TTL unless it has been used again.
    does - a file on `/tmp` behaves identically - so no other macOS
    version is likely to differ, though 14 and 15 are worth one run.
    **The TTL is therefore time since the last fetch or save**, which
-   `last_fetch` and mtime carry between them; atime adds nothing for a
-   materialized file and is kept only because it costs one field and
-   catches whatever else the system does to the replica. The docs and
+   `last_fetch` and mtime carry between them. The docs and
    `sshdrive show` state that meaning. Watching opens precisely would
    need Endpoint Security, which a login agent cannot hold, so there is
-   no third option. These `stat`s draw **no TCC prompt and no `EPERM`**
+   no third option.
+
+   **atime is read and logged and decided on by nobody** (2026-09-05).
+   It is read with `AT_SYMLINK_NOFOLLOW` (§9.1) **before** anything is
+   evicted, since an eviction moves it, and it goes in the log line
+   beside the age the decision used - but it is not in the `max` above.
+   Milestone 7 measured what S4's forty-second window could not see:
+   something in the system advances a materialized file's atime minutes
+   after the fetch, with no read of ours anywhere near it, and the write
+   is *deferred*, so the `stat` immediately after a materialization still
+   shows the old value. With atime in the `max` the TTL silently became
+   "time since whatever last touched the replica" - a file fetched 280 s
+   earlier survived a 60 s TTL because its atime was 23 s old - which is
+   neither the meaning above nor anything a user can observe or predict.
+   Keeping it out is also what makes Spotlight indexing, Quick Look and
+   Finder thumbnails irrelevant to the TTL, which is better than the
+   "we accept it as used" this paragraph used to promise: those readers
+   touch every file in the mount and would have held the whole cache
+   open indefinitely.
+   These `stat`s draw **no TCC prompt and no `EPERM`**
    from the launchd-started agent (S4, 2026-09-04): `tccd` denies the
    agent `kTCCServiceSystemPolicyAllFiles`, which it does not need, and
    then allows the access as `kTCCServiceFileProviderDomain` with our own
    domain as the indirect object, silently. A provider reaching its own
-   mount is not gated, so `sshdrive doctor` carries no line for it. atime
-   is not filtered: Spotlight indexing, Quick Look and Finder thumbnails
-   also read files and will extend a file's life, which we accept as
-   "used" rather than try to distinguish.
+   mount is not gated, so `sshdrive doctor` carries no line for it.
 3. If `now - lastUse > TTL`, call `evictItem`. The system refuses to evict
    an item with unsynced local changes, so pending uploads need no check of
    ours (S4, 2026-09-04). Ignore the refusal; log and move on. **The error
@@ -2506,7 +2521,23 @@ TTL unless it has been used again.
    that too is logged and passed over.
 4. `sshdrive evict <location> [path]` triggers the same routine on demand,
    with `--all` to drop everything cached, which is one `evictItem` on the
-   root container rather than a walk (S4, 2026-09-04).
+   root container rather than a walk (S4, 2026-09-04) - **while nothing is
+   or has just been pinned**. With a pin in place that one call meets a kept
+   child and fails as a whole, and straight after `--unpin-all` it fails too,
+   as `NSCocoaErrorDomain` "The file couldn't be opened", which names no
+   reason: the system has not yet re-read the rows whose policy just changed.
+   A single file becomes evictable 5-10 s after an unpin and the container did
+   not within a minute (2026-09-05). So in both cases `--all` walks the
+   materialized set and evicts the unkept files one by one, each with the
+   backoff of §5.5 - which is also what "`evict --all` skips kept items"
+   (§7.1 step 5) has to mean. The cost of the walk is that the directory rows
+   stay materialized, since a directory holds no content and the loop is per
+   file. A refused root container is reported and the walk runs anyway: the
+   one call is an optimisation, not the contract. A path names one item and
+   is evicted whatever the TTL says, with the doubling backoff of §5.5,
+   since a user who has just unpinned races the same still-finishing
+   modification the conflict path races; a kept path is refused with a
+   sentence naming `unpin` rather than left to fail as -2008.
 
 TTL values map to seconds: `15m`, `1h`, `12h`, `1d`, `1w`, `1mo` (30 days),
 `never`. Default: `1d`.
@@ -2897,7 +2928,33 @@ dormant.
 Kept items also get a **decoration**: a small pin badge declared under
 `NSFileProviderDecorations` in the extension's `NSExtension` dictionary
 and attached via `decorations` on the item (`NSFileProviderItemDecorating`),
-so kept folders are visibly different in Finder.
+so kept folders are visibly different in Finder. It follows the *kept*
+state and not the marker, so an excluded folder inside a kept one shows
+nothing and its kept parent still does (§7.1.1).
+
+The declaration has three traps, all silent (2026-09-05, milestone 8):
+
+- **Its four keys are `Identifier`, `BadgeImageType`, `Label` and
+  `Category`** - the bare words from `NSFileProviderItemDecoration.h`, not
+  `NSFileProviderDecoration`-prefixed spellings of them, and not the
+  `NSExtensionFileProviderAction*` shape the actions above use. The same
+  class of mistake as `fileproviderItems`: a wrong key leaves a decoration
+  that is declared, returned by the item and drawn nowhere.
+- **`BadgeImageType` is a UTI that must conform to
+  `com.apple.icon-decoration.badge`,** not an asset name. The system ships
+  a `.badge.pinned` (also `.checkmark`, `.locked`, `.syncing`, `.warning`
+  and a dozen more, all in `CoreTypes.bundle`), so ours is
+  `com.apple.icon-decoration.badge.pinned` and the appex needs no icon
+  asset and no exported type of its own.
+- **`Category` is `Badge`**, which draws for a file and a folder alike.
+  `FolderBadge` embosses and is valid only for folders; `Sharing` draws the
+  `Label` as text instead.
+
+What Finder 26.4 actually draws for `Badge` in list view is an orange disc
+with a white push-pin at the **trailing edge of the Name column**, not on
+the item's icon (captured 2026-09-05). Every kept row in a listing carries
+it, including the ones that merely inherit the pin, which is the point:
+`kept` is what the badge reflects.
 
 ---
 
@@ -3917,6 +3974,22 @@ there, so that this list cannot drift from the body.
   `meta.reconciling`.** The alternative is a domain stalled for ever with
   nothing that would ever clear it; the cost is that unreached paths get
   fresh identifiers on their next enumeration (2026-09-04, §5.3).
+- **atime is not in the TTL's `max`.** Something in the system advances a
+  materialized file's atime minutes after the fetch, deferred, with no read of
+  ours near it, so with atime in the rule the TTL became "time since whatever
+  last touched the replica"; it is read, logged and decided on by nobody
+  (2026-09-05, §7).
+- **A decoration's Info.plist keys are the bare `Identifier`,
+  `BadgeImageType`, `Label` and `Category`,** and `BadgeImageType` is a UTI
+  conforming to `com.apple.icon-decoration.badge` - the system's own
+  `.badge.pinned` for ours - not an asset name. Finder draws a `Badge` at the
+  trailing edge of the Name column, not on the icon (2026-09-05, §7.2).
+- **`evict --all` is one call on the root container only when nothing is or
+  has just been pinned.** With a pin in place it meets a kept child and fails
+  as a whole; straight after `--unpin-all` it fails as `NSCocoaErrorDomain`
+  "The file couldn't be opened", because the system has not re-read the rows
+  whose policy just changed. Both cases fall back to the unkept files one by
+  one, each with §5.5's backoff (2026-09-05, §7, §7.1).
 
 ---
 

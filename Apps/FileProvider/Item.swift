@@ -6,7 +6,7 @@ import XPCProtocols
 /// An NSFileProviderItem built by a field-by-field copy from a finished row or from the
 /// snapshot the agent sent (DESIGN.md section 5.2). No ancestor walk, no access to
 /// capabilities.json, no second copy of the rules in sections 5.4, 5.7 or 7.
-final class Item: NSObject, NSFileProviderItem {
+final class Item: NSObject, NSFileProviderItemDecorating {
     private let snapshot: SSHDriveItemSnapshot
     /// The root's filename is the domain's display name; every other item's is its own.
     private let rootDisplayName: String
@@ -83,6 +83,18 @@ final class Item: NSObject, NSFileProviderItem {
     /// `userInfo.kept` is what the Finder action's activation rule tests (section 7.2).
     var userInfo: [AnyHashable: Any]? {
         ["kept": snapshot.kept]
+    }
+
+    /// Section 7.2's pin badge: "kept items also get a decoration ... so kept folders are
+    /// visibly different in Finder". The identifier is declared under
+    /// `NSFileProviderDecorations` in the appex's `NSExtension` dictionary; an item that
+    /// returns one that is not declared there gets no badge and no error, which is why the
+    /// spelling lives in `SSHDriveIdentifiers` and is used from both places.
+    ///
+    /// It follows the *kept* state, not the marker: an excluded folder inside a kept one
+    /// shows no badge and its kept parent still does (section 7.1.1).
+    var decorations: [NSFileProviderItemDecorationIdentifier]? {
+        snapshot.kept ? [NSFileProviderItemDecorationIdentifier(SSHDriveIdentifiers.keptDecorationID)] : nil
     }
 }
 
