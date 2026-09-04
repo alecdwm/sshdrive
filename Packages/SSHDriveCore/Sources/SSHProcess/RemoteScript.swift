@@ -17,6 +17,17 @@ public struct RemoteScript: Sendable, Equatable {
     /// When set, the body is started in the background with `</dev/null` under the
     /// heartbeat wrapper of section 6.4, so nothing we start outlives the connection.
     public let heartbeat: HeartbeatSettings?
+    /// An absolute FIFO path, for the one child that has to be *fed* as well as watched.
+    ///
+    /// Section 9.2 says background children never share the script's stdin - `find` and
+    /// the helper are started `</dev/null` so they cannot swallow the heartbeat lines -
+    /// and section 6.4 tier 2 says the helper is "fed the root set" on its stdin and
+    /// "exits after 60 s without" a ping. Both cannot be the channel's stdin, and only one
+    /// process may read a pipe. So the wrapper stays the only reader and relays every line
+    /// it reads into this FIFO, which the child is given as its stdin. Nothing else uses
+    /// it, and a server where `mkfifo` fails runs the child `</dev/null` exactly as before
+    /// (2026-09-05, section 13).
+    public let stdinRelay: String?
 
     public struct HeartbeatSettings: Sendable, Equatable {
         /// The agent writes a line this often. Keep it comfortably above one second:
@@ -34,12 +45,17 @@ public struct RemoteScript: Sendable, Equatable {
     }
 
     public init(sentinel: Sentinel = Sentinel(), arguments: [String] = [],
-                body: String, heartbeat: HeartbeatSettings? = nil) {
+                body: String, heartbeat: HeartbeatSettings? = nil, stdinRelay: String? = nil) {
         self.sentinel = sentinel
         self.arguments = arguments
         self.body = body
         self.heartbeat = heartbeat
+        self.stdinRelay = stdinRelay
     }
+
+    /// The shell variable the wrapper sets to 1 when the relay FIFO exists. A body that
+    /// asks for a relay reads it to decide whether to offer the child a stdin at all.
+    public static let relayFlagVariable = "__sd_haverelay"
 
     /// One heartbeat line. The content is ignored; only its arrival matters.
     public static let heartbeatLine = Data(".\n".utf8)
@@ -99,14 +115,17 @@ public struct RemoteScript: Sendable, Equatable {
         // whole wrapper down and left the child running (measured 2026-09-04).
         let stamp = "${TMPDIR:-/tmp}/sshdrive-hb-\(sentinel.short).$$"
         let fallback = "/tmp/sshdrive-hb-\(sentinel.short).$$"
-        return [
+        var lines: [String] = [
             "__sd_stamp=\(stamp)",
             // `touch`, never `: >`, for the same reason: a plain utility's failure is a
             // status, a special builtin's is the end of the shell.
             "touch \"$__sd_stamp\" 2>/dev/null || __sd_stamp=\(fallback)",
             "touch \"$__sd_stamp\" 2>/dev/null || true",
             "__sd_mark=\"$__sd_stamp.m\"",
-            "trap 'rm -f \"$__sd_stamp\" \"$__sd_mark\" 2>/dev/null' EXIT",
+            "trap 'rm -f \"$__sd_stamp\" \"$__sd_mark\" \"$__sd_relay\" 2>/dev/null' EXIT",
+        ]
+        lines += relaySetup()
+        lines += [
             "{",
             // Every subshell inherits that EXIT trap and runs it when *it* exits. Without
             // clearing it here and below, the one-second `read -t` probe deletes the stamp
@@ -116,12 +135,20 @@ public struct RemoteScript: Sendable, Equatable {
             // against `deb` on 2026-09-04.
             "trap - EXIT",
             body,
-            "} </dev/null &",
+            stdinRelay == nil
+                ? "} </dev/null &"
+                : "} <\"$__sd_stdin\" &",
             "__sd_child=$!",
+        ]
+        lines += relayOpen()
+        lines += [
             "__sd_readt=0",
             "if ( trap - EXIT; exec 2>/dev/null; read -t 1 __sd_probe </dev/null; [ $? -le 1 ] ); then __sd_readt=1; fi",
             "if [ \"$__sd_readt\" = 1 ]; then",
-            "  while :; do read -t \(settings.timeoutSeconds) __sd_line || break; done",
+            // `relayWrite` already ends in its own `;`, so there is none after it here:
+            // `…>&8 2>/dev/null;; done` is a syntax error and the channel dies on the
+            // spot with `Syntax error: ";;" unexpected` (measured on `deb`, 2026-09-05).
+            "  while :; do IFS= read -r -t \(settings.timeoutSeconds) __sd_line || break; \(relayWrite) done",
             "else",
             // The heartbeat reader has to be handed the channel's stdin on a descriptor
             // of its own. With job control off - which it always is for a script on stdin
@@ -133,7 +160,7 @@ public struct RemoteScript: Sendable, Equatable {
             // killing the thing it exists to protect. Duplicating stdin in the *parent*
             // is what survives the fork. Measured against `deb` on 2026-09-04.
             "  exec 7<&0",
-            "  ( trap - EXIT; while read __sd_line; do touch \"$__sd_stamp\" 2>/dev/null; done <&7; rm -f \"$__sd_stamp\" ) &",
+            "  ( trap - EXIT; while IFS= read -r __sd_line; do touch \"$__sd_stamp\" 2>/dev/null; \(relayWrite) done <&7; rm -f \"$__sd_stamp\" ) &",
             "  __sd_misses=0",
             "  while :; do",
             "    sleep \(settings.intervalSeconds)",
@@ -148,12 +175,50 @@ public struct RemoteScript: Sendable, Equatable {
             "  done",
             "fi",
             "trap '' TERM",
+            stdinRelay == nil ? "" : "exec 8>&- 2>/dev/null",
             "kill -TERM \"$__sd_child\" 2>/dev/null",
             "kill -TERM 0 2>/dev/null",
             "sleep 2",
-            "rm -f \"$__sd_stamp\" \"$__sd_mark\" 2>/dev/null",
+            "rm -f \"$__sd_stamp\" \"$__sd_mark\" \"$__sd_relay\" 2>/dev/null",
             "kill -KILL 0 2>/dev/null",
             "exit 0",
         ]
+        return lines.filter { !$0.isEmpty }
+    }
+
+    /// Makes the relay FIFO, or records that it could not be made. `$__sd_relay` is always
+    /// defined so the cleanup trap can name it unconditionally.
+    private func relaySetup() -> [String] {
+        guard let stdinRelay else { return ["__sd_relay=", "\(RemoteScript.relayFlagVariable)=0"] }
+        return [
+            "__sd_relay=\(ShellQuoting.singleQuoted(stdinRelay))",
+            "rm -f \"$__sd_relay\" 2>/dev/null",
+            "\(RemoteScript.relayFlagVariable)=0",
+            "__sd_stdin=/dev/null",
+            // A server whose helper directory cannot hold a FIFO - some NAS filesystems,
+            // and any of them mounted oddly - is not a failure: the child then runs with
+            // no stdin at all and the wrapper is its only kill switch, which is what
+            // section 9.2 gives every other remote command.
+            "if mkfifo \"$__sd_relay\" 2>/dev/null; then",
+            "  \(RemoteScript.relayFlagVariable)=1",
+            "  __sd_stdin=\"$__sd_relay\"",
+            "fi",
+        ]
+    }
+
+    /// Opens the write end *after* the child has been started with the read end. Both
+    /// opens block until the other side appears, which is the rendezvous; doing it in the
+    /// other order would deadlock the wrapper against a child that never starts.
+    private func relayOpen() -> [String] {
+        guard stdinRelay != nil else { return [] }
+        return [
+            "if [ \"$\(RemoteScript.relayFlagVariable)\" = 1 ]; then exec 8>\"$__sd_relay\" 2>/dev/null; fi"
+        ]
+    }
+
+    /// One relayed line, written only when there is somewhere to write it.
+    private var relayWrite: String {
+        guard stdinRelay != nil else { return "" }
+        return "[ \"$\(RemoteScript.relayFlagVariable)\" = 1 ] && printf '%s\\n' \"$__sd_line\" >&8 2>/dev/null;"
     }
 }

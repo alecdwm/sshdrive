@@ -45,6 +45,22 @@ actor ChangeDetector {
     /// spike can drive single cycles by hand.
     private var paused = false
 
+    // MARK: Tier 2 (section 6.4)
+
+    /// The live stream, or nil while the location is not at tier 2. Owned here rather than
+    /// by `LocationRuntime` for the same reason the detector is: the runtime serialises
+    /// behind the index, and a stream that lived there would hold it open.
+    private var helper: HelperStream?
+    /// What the last deployment did, for `status`.
+    private var helperDeployment: HelperDeployer.Deployment?
+    /// Why the helper is not running, when the ladder needs to say so.
+    private var helperNote: String?
+    /// Set by an `overflow` event: section 6.4 answers one with a sweep.
+    private var helperOverflowPending = false
+    /// Serialises `ensureHelper` against itself, since a cycle and a reconnect can both
+    /// ask for it.
+    private var helperStarting = false
+
     init(locationID: String, runtime: LocationRuntime, location: Location,
          capabilities: ChangeDetectionLadder.ServerCapabilities,
          now: Double = Date().timeIntervalSince1970) {
@@ -78,6 +94,9 @@ actor ChangeDetector {
     func stop() {
         loop?.cancel()
         loop = nil
+        let stream = helper
+        helper = nil
+        Task { await stream?.stop() }
     }
 
     private func secondsUntilNextCycle(now: Double = Date().timeIntervalSince1970) -> Double {
@@ -158,7 +177,40 @@ actor ChangeDetector {
         var tierUsed = ladder.tier
         var sweepNote: String?
 
-        if ladder.tier == .sweep {
+        var handledByHelper = false
+        if ladder.tier == .helper {
+            await ensureHelper()
+            // Section 6.4: "The helper replaces the schedule with events; a sweep still
+            // runs every 30 min as insurance against missed events." So an ordinary cycle
+            // at tier 2 costs one root-set refresh and nothing on the wire; only a full
+            // pass - reconnect, a fresh anchor, the insurance timer, or an `overflow` the
+            // helper reported - runs a sweep.
+            if helperOverflowPending {
+                helperOverflowPending = false
+                full = true
+                reason = "the helper reported an overflow"
+            }
+            if let helper, await helper.state == .running {
+                await pushRootsToHelper()
+                if full {
+                    do {
+                        application = try await runSweep(full: true)
+                    } catch {
+                        sweepNote = "the insurance sweep could not run: \(error)"
+                        application = await runtime.runPollCycle(fullSweep: true, now: now)
+                    }
+                }
+                tierUsed = .helper
+                handledByHelper = true
+            }
+        }
+
+        // A location whose tier is `helper` but whose stream is not up right now - the
+        // connection dropped a moment ago, or the deployment is being retried - still gets
+        // a cycle. Without this the minute between the stream dying and the next cycle
+        // starting it is a minute with no change detection at all, which is worse than the
+        // tier it is nominally running (2026-09-05).
+        if !handledByHelper, ladder.tier >= .sweep, ladder.capabilities.hasFind {
             do {
                 application = try await runSweep(full: full)
             } catch {
@@ -180,7 +232,7 @@ actor ChangeDetector {
                 application = await runtime.runPollCycle(fullSweep: full, now: now)
                 tierUsed = .poll
             }
-        } else {
+        } else if !handledByHelper {
             application = await runtime.runPollCycle(fullSweep: full, now: now)
             tierUsed = .poll
         }
@@ -220,6 +272,161 @@ actor ChangeDetector {
         lastOutcome = outcome
         await runtime.recordWatchCycle(outcome)
         return application
+    }
+
+    // MARK: Tier 2
+
+    /// Deploys the helper if it is not there, and starts the stream if it is not running.
+    ///
+    /// Called from every cycle rather than once, because the stream dies with the
+    /// connection and section 6.3 brings the connection back on its own schedule: the
+    /// cheapest correct rule is "if the tier is helper and nothing is streaming, start
+    /// one", and it costs a comparison on a cycle where it is already up.
+    private func ensureHelper() async {
+        if let helper, await helper.state == .running { return }
+        guard !helperStarting else { return }
+        guard await runtime.allowsExecChannel(), let connection = await runtime.liveConnection()
+        else { return }
+        helperStarting = true
+        defer { helperStarting = false }
+
+        let deployment: HelperDeployer.Deployment
+        do {
+            deployment = try await HelperDeployer.ensureDeployed(
+                connection: connection, locationID: locationID)
+        } catch {
+            // "Deployment failures are never fatal: the location silently continues at the
+            // next tier and the status report says why the helper is not running."
+            let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            helperNote = reason
+            var capabilities = ladder.capabilities
+            capabilities.helperAvailable = false
+            capabilities.helperBlockReason = reason
+            ladder.applyCapabilities(capabilities, watchMode: watchMode, now: Date().timeIntervalSince1970)
+            await runtime.setWatchTier(ladder.tier.rawValue)
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): the helper is not available - \(reason, privacy: .public)"
+            )
+            return
+        }
+        helperDeployment = deployment
+        helperNote = nil
+
+        guard let root = try? await runtime.canonicalRoot() else { return }
+        let stream = HelperStream(
+            locationID: locationID, helperPath: deployment.path, canonicalRoot: root,
+            directory: deployment.directory,
+            onEvents: { [weak self] events in await self?.handleHelperEvents(events) },
+            onDeath: { [weak self] reason in await self?.helperDied(reason) })
+        do {
+            try await stream.start(master: connection.master, roots: await currentHelperRoots())
+            helper = stream
+            await runtime.setWatchTier(ladder.tier.rawValue)
+            // The stream starts watching *now*, and everything that changed on the server
+            // before it did is invisible to it. That is exactly the case section 6.4's
+            // reconnect sweep exists for, so one is asked for here rather than assumed.
+            requestFullSweep(reason: "the helper stream started")
+        } catch {
+            let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            helperNote = reason
+            // A stream that would not start on a shell that answered is a runtime failure
+            // of the tier, and section 6.4 drops the location one tier down for the rest of
+            // the session when that happens.
+            if ladder.recordRuntimeFailure(reason: reason, now: Date().timeIntervalSince1970) {
+                await runtime.setWatchTier(ladder.tier.rawValue)
+                Log.agent.error(
+                    "\(self.locationID, privacy: .public): the helper would not start (\(reason, privacy: .public)); dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
+                )
+            }
+        }
+    }
+
+    private func currentHelperRoots() async -> HelperStream.Roots {
+        guard let set = try? await runtime.currentRootSet() else { return HelperStream.Roots() }
+        let split = set.sweepRoots()
+        let excluded = (try? await runtime.excludedSweepPaths()) ?? []
+        return HelperStream.Roots(
+            shallow: split.shallow, recursive: split.recursive,
+            excluded: excluded.map { Data($0.utf8) })
+    }
+
+    private func pushRootsToHelper() async {
+        guard let helper else { return }
+        await helper.updateRoots(await currentHelperRoots())
+    }
+
+    /// One batch of NDJSON events, applied to the index and signalled to the system.
+    private func handleHelperEvents(_ events: [HelperEvent]) async {
+        if events.contains(where: { $0.kind == .overflow }) {
+            helperOverflowPending = true
+            // An overflow means events were lost, and waiting up to a minute for the next
+            // cycle to notice is exactly the window the sweep exists to close.
+            requestFullSweep(reason: "the helper reported an overflow")
+        }
+        let application = await runtime.applyHelperEvents(events)
+        guard !application.isEmpty else { return }
+        await DomainManager.shared.signalWorkingSet(locationID: locationID)
+        var outcome: [String: Any] = [
+            "at": Date().timeIntervalSince1970,
+            "tier": "helper",
+            "full": false,
+            "reason": "helper events",
+            "seconds": 0,
+            "changed": application.changed,
+            "deleted": application.deleted,
+            "held": application.held,
+            "released": application.released,
+            "directoriesListed": application.listedDirectories,
+        ]
+        if !application.errors.isEmpty { outcome["errors"] = application.errors }
+        lastOutcome = outcome
+        await runtime.recordWatchCycle(outcome)
+    }
+
+    /// The stream ended. A connection that simply went is not a tier failure - the breaker
+    /// brings it back and the next cycle starts a new stream - but a helper that died with
+    /// the connection up is, and section 6.4 costs the location a tier for the session.
+    private func helperDied(_ reason: String) async {
+        helper = nil
+        helperNote = reason
+        let connected = await runtime.isConnected()
+        guard connected else {
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): the helper stream ended with the connection; it restarts on the next cycle"
+            )
+            return
+        }
+        if ladder.recordRuntimeFailure(reason: reason, now: Date().timeIntervalSince1970) {
+            await runtime.setWatchTier(ladder.tier.rawValue)
+            requestFullSweep(reason: "the helper stream died")
+            Log.agent.error(
+                "\(self.locationID, privacy: .public): dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
+            )
+        }
+    }
+
+    /// `sshdrive set <name> helper off`, and `sshdrive remove`: stop the stream and take
+    /// the binary off the server (sections 6.4, 8).
+    func shutDownHelper(removeFromServer: Bool) async -> [String] {
+        let stream = helper
+        helper = nil
+        await stream?.stop()
+        guard removeFromServer, let connection = await runtime.liveConnection() else { return [] }
+        return await HelperDeployer.remove(connection: connection, locationID: locationID)
+    }
+
+    func helperReport() async -> [String: Any]? {
+        guard let helper else {
+            guard let note = helperNote else { return nil }
+            return ["state": "not running", "reason": note]
+        }
+        var out = await helper.report()
+        if let deployment = helperDeployment {
+            out["verifiedBy"] = deployment.verifiedBy
+            out["uploadedThisConnection"] = deployment.uploaded
+            if !deployment.removedStale.isEmpty { out["removedStale"] = deployment.removedStale }
+        }
+        return out
     }
 
     /// A connection that is simply down is not a tier failure: the breaker will bring it
@@ -297,7 +504,7 @@ actor ChangeDetector {
 
     // MARK: Status (section 8.1)
 
-    func status() -> [String: Any] {
+    func status() async -> [String: Any] {
         var out: [String: Any] = [
             "tier": ladder.tier.rawValue,
             "watchMode": watchMode.rawValue,
@@ -309,6 +516,7 @@ actor ChangeDetector {
             "paused": paused,
         ]
         if let note = ladder.note { out["note"] = note }
+        if let note = helperNote, ladder.note == nil { out["note"] = note }
         if clockSkewSeconds != 0 { out["clockSkewSeconds"] = clockSkewSeconds }
         if !ladder.downgrades.isEmpty {
             out["downgrades"] = ladder.downgrades.map {
@@ -317,6 +525,7 @@ actor ChangeDetector {
             }
         }
         if !lastOutcome.isEmpty { out["lastCycle"] = lastOutcome }
+        if let helper = await helperReport() { out["helper"] = helper }
         return out
     }
 

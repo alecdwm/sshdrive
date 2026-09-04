@@ -185,20 +185,50 @@ actor DomainManager {
     }
 
     /// What the ladder of section 6.4 decides on: whether there is an exec channel at all,
-    /// what `find` the probe found there, and whether the helper is available (it is not:
-    /// the helper is milestone 9, so `auto` tops out at sweep).
+    /// what `find` the probe found there, and whether the server looks able to run the
+    /// helper.
+    ///
+    /// "Looks able" is the honest word. `auto` "tries the tiers from the top", so the
+    /// helper is offered whenever the probe leaves it possible - a supported `uname`, a
+    /// writable executable directory, a channel that can be held open, a binary in this
+    /// build - and the deployment is what refutes it, with the real sentence, on the first
+    /// cycle. Deciding it here from the probe alone would either refuse servers that work
+    /// or claim the tier before anything had been uploaded.
     static func capabilities(of runtime: LocationRuntime, location: Location) async
         -> ChangeDetectionLadder.ServerCapabilities
     {
         let probe = await runtime.probeForSweep()
         let exec = await runtime.allowsExecChannel() && (probe?.hasShellAccess ?? false)
-        return ChangeDetectionLadder.ServerCapabilities(
+        var capabilities = ChangeDetectionLadder.ServerCapabilities(
             hasExecChannel: exec,
             hasFind: exec && !(probe?.findFlavour ?? "").isEmpty,
             takesCmin: probe?.findTakesCmin ?? false,
             takesPrintf: probe?.findTakesPrintf ?? false,
             helperAvailable: false,
             helperEnabledForLocation: location.helper)
+        guard exec, let probe else { return capabilities }
+        let persistent = await runtime.allowsPersistentExecChannel()
+        guard persistent else {
+            capabilities.helperBlockReason =
+                "the server will not give the helper a channel of its own (MaxSessions 2)"
+            return capabilities
+        }
+        guard !probe.cacheDirectory.isEmpty else {
+            capabilities.helperBlockReason =
+                probe.cacheNote.isEmpty ? "no writable directory for helper" : probe.cacheNote
+            return capabilities
+        }
+        guard let manifest = HelperDeployer.manifest() else {
+            capabilities.helperBlockReason = "this build ships no helper binaries"
+            return capabilities
+        }
+        guard manifest.binary(forUname: probe.uname) != nil else {
+            capabilities.helperBlockReason =
+                "helper unsupported: \(probe.uname.isEmpty ? "unknown" : probe.uname)"
+            return capabilities
+        }
+        capabilities.helperAvailable = true
+        return capabilities
     }
 
     func detector(locationID: String) -> ChangeDetector? { detectors[locationID] }

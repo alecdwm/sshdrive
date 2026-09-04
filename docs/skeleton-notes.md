@@ -37,6 +37,18 @@ matrix, local xattrs and Finder tags through `tagData` (section 5.4),
 **S8 and S10 are answered**; the runbook is `docs/spikes/milestone-4.md` and the
 results entry is 2026-09-04, "milestone 4".
 
+**Milestone 9**, the remote helper, landed on 2026-09-05 and is the first milestone with
+code outside Swift: the Rust crate under `helper/`, `sshdrive-helper`, one static binary
+with `libc` as its only dependency, cross-compiled for the five targets section 6.4 names.
+The Swift side is `HelperManifest`, `HelperDeployment`, `HelperEvent`/`HelperEventDecoder`
+and `HelperControl` in `AgentCore`; `HelperDeployer`, `HelperStream` and `HelperCleanup`
+in the agent; the tier 2 rung in `ChangeDetectionLadder` and `ChangeDetector`;
+`applyHelperEvents` on `LocationRuntime`; and `HelperDirectory`/`HelperFile` in `SFTP`,
+which is the one deliberate exception to section 9.1's `RelativePath` chokepoint. The
+runbook is `docs/spikes/milestone-9.md` and the results entry is 2026-09-05,
+"milestone 9". **S7's helper half is answered; its FreeBSD kqueue and armv7 rows are not,
+and cannot be from here.**
+
 Built and tested on macOS 26.4.1 arm64, Xcode 26.4, Swift 6.3 (Swift 5 language mode),
 xcodegen 2.46. `scripts/mac-build.sh` does the sync, generate, `swift test` and
 `xcodebuild` loop; the Mac used for it has no signing identities, so it builds ad-hoc
@@ -135,7 +147,8 @@ signed build.
   `LocationRuntime+Pinning` with `PinPolicy`/`PinMarkerSet` deciding, the
   extension's `performAction` forwarding both Finder entries to the agent, and
   the pin badge under `NSFileProviderDecorations`. Still stubbed: the helper
-  (9, placeholder `helper/README.md`).
+  (9) - **real since 2026-09-05**; `helper/README.md` describes the crate, and
+  `scripts/build-helper.sh` plus `.github/workflows/helper.yml` build it.
 - ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
   yet recorded with `hidden = 2`~~ - all three real since 2026-09-04. Listings are paged at
   2,000 items (a page token is an offset into a listing the agent already holds, so a second
@@ -145,9 +158,11 @@ signed build.
   our own `.sshdrive-upload-*` temp files get no row at all, which is what tells them apart
   from a hidden name.
 - ~~The reconcile walk and restore-into-live, root-set rotation and the mass-deletion guard
-  (milestone 6)~~ - all real since 2026-09-04. What is deliberately **not** here: tier 2,
+  (milestone 6)~~ - all real since 2026-09-04. ~~What is deliberately **not** here: tier 2,
   the remote helper, which is milestone 9, so `auto` tops out at sweep and `status` says
-  so on every location with a shell.
+  so on every location with a shell.~~ - **tier 2 is real since 2026-09-05**: `auto` now
+  climbs to helper wherever the server can run one, and a location that cannot says which
+  of section 6.4's reasons applies.
 - ~~Every section 8 command other than `doctor`, `agent` and `debug`~~ - `add`, `list`,
   `show`, `remove`, `set`, `mount`, `unmount` and `status` are real since 2026-09-04, with
   section 8.1's capability report behind `status`, `show` and the tail of `add`.
@@ -159,7 +174,10 @@ signed build.
   (the collect flow is there - it is `CollectConnection` plus `AddFlow`, which
   `set host|user|port|identity` already re-runs - so `passwd` is a command, not a
   mechanism), **`test`**, `--password` / `--password-stdin`, and `logs` (10).
-  `accept-deletions` is real since 2026-09-04.
+  `accept-deletions` is real since 2026-09-04, and `set <name> helper on|off`
+  and `set <name> watch-mode helper` reach the running detector since
+  2026-09-05: `off` stops the stream and takes the binary off the server on the
+  spot, `on` re-uploads and climbs back.
 
 ## `sshdrive debug` hooks, exact syntax
 

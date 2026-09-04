@@ -2,8 +2,178 @@
 
 One entry per sub-question, newest date first. Steps and expected answers are in
 `milestone-1.md` (S1, S3, S4, S6), `milestone-2.md` (S2), `milestone-4.md` (S8, S10 and the
-write matrix), `milestone-5.md` (S5), `milestone-6.md` (S7) and `milestone-7-8.md`
-(eviction and pinning); this file records only what happened.
+write matrix), `milestone-5.md` (S5), `milestone-6.md` (S7, tiers 0 and 1),
+`milestone-7-8.md` (eviction and pinning) and `milestone-9.md` (S7's helper half, tier 2);
+this file records only what happened.
+
+---
+
+## 2026-09-05 (milestone 9) - tier 2: the Rust helper, deploy and verify, NDJSON, `helper on|off`
+
+Milestone 9 end to end: DESIGN.md section 6.4's tier 2 as a real static Rust binary we
+upload to the server and stream NDJSON from, section 10.1's cross-compilation and sha256
+manifest, and the helper half of **S7**, which milestone 6 explicitly left open. Same
+headless VM (macOS 26.4.1 arm64, Xcode 26.4, `OpenSSH_10.2p1`), the signed Debug build
+installed over `/Applications/SSH Drive.app` with `ditto`, the Docker testbed on the Mac
+that hosts it. Steps are in `milestone-9.md`.
+
+**`auto` now climbs to helper.** Every location with a shell, a writable executable
+directory, a supported `uname -sm` and a channel it can hold open runs at tier 2, and
+`sshdrive status` prints the first **8/8 optimal** any milestone has produced.
+
+**592 package tests, 0 failures** (was 548; 40 skipped without the testbed, and 5 of 5 in
+`TestbedHeartbeatTests` with `SSHDRIVE_TESTBED=1`) and **54 crate tests, 0 failures**, with `cargo clippy -D warnings` clean.
+
+### What was built
+
+**The crate, `helper/`** - `sshdrive-helper`, one binary, one dependency (`libc`), no
+`serde` and no JSON crate, because every target in section 10.1 has to cross-compile from
+a Linux box with no C toolchain and the thing is uploaded over the user's own link.
+`opt-level="z"`, `lto`, `panic="abort"`, stripped: **443 KB** for `linux/aarch64`.
+
+- `json` - the NDJSON writer and a small parser for the control lines. The only hard part
+  is that a server filename is bytes and a JSON string is UTF-8: a name that is text
+  travels as `"path"`, one that is not as `"path_b64"`.
+- `proto` - the event shapes and the **coalescer**, which is section 6.4's "server-side
+  batching and filtering" as a merge table.
+- `paths` - the fixed ignore list, byte-wise containment, and the rule that `..` never
+  passes.
+- `walk` - the `sweep` subcommand: tier 1's job with size, ns-mtime, inode and mode
+  included so no follow-up `stat` is needed, over a **ctime** window.
+- `watch_inotify` - inotify read directly rather than through `inotifywait` (section 14),
+  which is not installed on a NAS and cannot report a rename at all because it does not
+  expose the cookie. `IN_DONT_FOLLOW` for containment, `IN_EXCL_UNLINK`, and `IN_MODIFY`
+  deliberately left out because `IN_CLOSE_WRITE` reports the finished write.
+- `watch_kqueue` - the FreeBSD/macOS build: kqueue on directories with a name/inode
+  snapshot diff, plus its own 60-second sweep for content changes, exactly as section 6.4
+  describes. **Compiled and exercised by nothing** (below).
+- `control` - the ping deadline and the root-set line, on a thread of its own.
+- `sha256` - so `--version` can print the digest of the running executable.
+
+**The Swift side.** `AgentCore` took the decisions: `HelperManifest` (the `uname -sm`
+table and the manifest CI writes), `HelperDeployment` (the upload verdict from whatever
+evidence the server could give, the seven-day rule for another Mac's version, the
+`--version` line), `HelperEvent`/`HelperEventDecoder`/`HelperControl` (the protocol, its
+framing and its backpressure). The agent took the I/O: **`HelperDeployer`** (mkdir 700 and
+the ownership check, the hash comparison, the temp-name-and-rename upload, the re-verify,
+the stale sweep, and the removal `helper off` and `remove` need) and **`HelperStream`**
+(the exec channel, the `ready` handshake, the NDJSON reader, the 15-second ping, live
+root-set updates, and death reported to the ladder). `ChangeDetector` grew the tier 2 rung;
+`LocationRuntime+ChangeDetection` grew `applyHelperEvents`. `SFTP` grew `HelperDirectory`
+and `HelperFile` - the one deliberate exception to section 9.1's `RelativePath`
+chokepoint, because the helper lives outside every location root by design.
+
+### The mount proofs
+
+Two locations, `m9` on `deb` (Debian, glibc, GNU `find`) and `m9a` on `alp` (Alpine,
+**musl**, busybox). Every change is made by a **separate** ssh.
+
+**Latency, against milestone 6's tier 1 on the same steps:**
+
+| Step | `m9` (glibc) | `m9a` (musl) | milestone 6, tier 1 |
+|---|---|---|---|
+| create -> visible | **260 ms** | **129 ms** | 59,743 ms |
+| modify -> new content | **903 ms** | **308 ms** | 104 ms* |
+| rename -> new name visible | **82 ms** | **106 ms** | 59,923 ms |
+| rename -> old name gone | **85 ms** | **79 ms** | 7 ms* |
+| delete -> gone | **78 ms** | **82 ms** | 59,647 ms |
+| **chmod -> mode changes** | **76 ms** | **78 ms** | never, on busybox |
+
+\* milestone 6's millisecond rows are the cadence, not the mechanism: everything one
+60-second cycle finds arrives together. At tier 2 every row is independent and **every one
+is under a second**. The last row is the case S7 measured tier 1 losing - a `chmod` on a
+file with an old mtime moves ctime and not mtime, so a busybox `-mmin` sweep provably
+misses it. The helper watches `IN_ATTRIB` and reports it on both servers in under 80 ms.
+
+**One static aarch64 binary, two libcs.** The same file runs on Debian 12 (glibc) and on
+Alpine (musl), and on both it reports its own digest back:
+`sshdrive-helper 0.1.0 linux/aarch64 sha256=bb786789…dbe962`, matching the manifest.
+
+**Beside two SFTP channels.** A 48 MiB file fetched twice concurrently through the mount
+while the helper streamed, and a file created on the server during the transfers appeared
+in **1,215 ms**. The Mac's side is exactly section 6.1's budget: one `-N` master, two
+`ssh -s sftp` mux clients, one `ssh … sh -s` carrying the helper.
+
+**An abrupt client kill.** `kill -9` on the master and all three mux clients at once: the
+helper was **gone from the server within 10 s**, well inside the 60-second window - and by
+its *own* rule, not the wrapper's, since its stdin is the relay FIFO whose only writer was
+the wrapper. The agent reconnected on the breaker's schedule and the next cycle started a
+new stream: killed 02:37:55, streaming again 02:39:30, with a full sweep in between.
+
+**A corrupted binary.** Seven bytes overwritten in place, same size, so only a hash can see
+it; the agent re-uploaded on its next connection and the file matched the build again.
+Writing over the *running* helper failed first with `Text file busy` - `ETXTBSY`, which is
+exactly why section 6.4 uploads to a temp name and renames.
+
+**`helper off`/`on`.** Off removes the binary on the spot and the ladder drops to sweep
+with `note: the helper is off for this location`; on re-uploads and climbs back.
+
+**`deb-maxsess` (2205)** reports `the server will not give the helper a channel of its own
+(MaxSessions 2)` and uploads nothing. **`forcesftp` on `deb-shells` (2202)** reports `the
+account has no shell access` and sits at poll.
+
+### Four assumptions that failed
+
+**Section 6.4 asks for two incompatible things about the helper's stdin.** Section 9.2:
+"Background children never share the script's stdin. `find` and the helper are started with
+`</dev/null`, so the wrapper is the only reader of the heartbeat lines and a child cannot
+swallow them." Section 6.4 tier 2: "feed it the root set, and read NDJSON events … The
+agent sends a ping line every 15 s in return and the helper exits after 60 s without one."
+Both cannot be the channel's stdin, and only one process may read a pipe. The wrapper now
+**relays** every line it reads into a FIFO in the helper's own directory, which the helper
+is given as its stdin; a server where `mkfifo` fails runs the helper `</dev/null` with its
+initial root set on its own argv, and the wrapper is then its only kill switch. Section 6.4
+and section 13 record it.
+
+**A hash embedded in the binary cannot be the hash of the binary.** Section 6.4's fallback
+for a server with neither `sha256sum` nor `shasum` is "the remote file's size against the
+embedded binary plus running it with `--version`, which prints its version and its own
+embedded build hash". A constant compiled in is a hash of something else. `--version`
+computes the digest of **its own executable** at startup instead, which makes the fallback
+the same check as the good path rather than a weaker one - and it is what caught the
+deliberate corruption above on a server where `sha256sum` was also available.
+
+**Tier 2 needs a channel it can *hold*, and the `MaxSessions` budget did not model that.**
+A sweep opens an exec channel, spends half a second on it and gives it back; the helper's
+stream holds one for the life of the connection. At `MaxSessions 2` the single spare
+channel is shared by the probe, `sshdrive test` and section 6.4's own 30-minute insurance
+sweep, so a helper that never gave it back would cost the location all three.
+`ChannelBudget` grew `allowsPersistentExecChannel`, the ladder grew the reason, and 2205
+now says so in one sentence.
+
+**`aarch64-unknown-freebsd` cannot be built or even checked.** It is a tier 3 Rust target
+with no prebuilt `rust-std`; `rustup target add` refuses it outright. Section 6.4's own
+target list stops at `freebsd/x86_64`, so nothing is owed - but section 10.1's release flow
+had to say which FreeBSD it means, and the CI workflow now does.
+
+### Three smaller things found on the way
+
+- **A `;` after a relayed line is a `;;`.** The first wrapper wrote
+  `… || break; <relay>; done` where the relay fragment already ended in its own `;`. dash
+  answered `Syntax error: ";;" unexpected` at line 31, the channel died on the spot, and
+  the ladder read it as "the helper would not start" and dropped the location to sweep for
+  the session - a correct response to a self-inflicted wound. `RemoteScriptTests` pins the
+  shape and `TestbedHeartbeatTests` now runs the relay against **real** `sh` on Debian's
+  dash and Alpine's busybox ash, because the shape assertions did not catch it and the
+  testbed test would have.
+- **The wrapper's EXIT trap does not run when the wrapper is SIGKILLed**, which is every
+  abrupt client kill - the case the wrapper exists for - so a relay FIFO is left behind
+  each time. `helper off` then removed the binary and could not remove the directory. The
+  deployment now sweeps `.sshdrive-helper-in-*` with no age rule; a FIFO with no writer is
+  inert.
+- **The ladder offers a tier the deployment has not yet earned.** `auto` "tries the tiers
+  from the top", so the capability report was written while the tier said `helper` and no
+  stream existed, and printed `helper ? at ?` and `● rename detection helper move events`
+  from a helper that had not started. The report now requires the stream's own report, and
+  a cycle at tier 2 with no stream running falls back to a sweep for that cycle rather than
+  doing nothing at all.
+
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no `ssh`
+masters and no `sshdrive-*` control sockets; `~/.cache/sshdrive` and `~/m9` removed from
+2201, 2202, 2205 and 2206, and no `sshdrive-helper` process anywhere. The signed Debug
+build is installed at `/Applications/SSH Drive.app` and the agent is running.
 
 ---
 

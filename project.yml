@@ -7,7 +7,14 @@
 #   |- Contents/MacOS/sshdrive               the CLI
 #   |- Contents/MacOS/sshdrive-askpass       the SSH_ASKPASS program
 #   |- Contents/PlugIns/SSHDriveFileProvider.appex
-#   |- Contents/Resources/helper/            milestone 9, not built yet
+#   |- Contents/Resources/helper/            the remote helper binaries + manifest.json
+#   |                                        (section 6.4 tier 2). NOT a build phase: the
+#   |                                        directory is not in git, and xcodegen fails on
+#   |                                        a source path that does not exist. It is
+#   |                                        copied in by scripts/mac-build.sh after
+#   |                                        xcodebuild and before signing, from
+#   |                                        Resources/helper/ (scripts/build-helper.sh
+#   |                                        locally, .github/workflows/helper.yml in CI).
 #   |- Contents/Library/LaunchAgents/org.shirls.sshdrive.agent.plist
 
 name: SSH Drive

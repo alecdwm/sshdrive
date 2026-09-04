@@ -5,7 +5,8 @@
 # build happens over ssh. Nothing here mutates git on either side.
 #
 # Usage:
-#   scripts/mac-build.sh              sync, generate, swift test, xcodebuild, ad-hoc sign
+#   scripts/mac-build.sh              sync, generate, swift test, xcodebuild, embed helper,
+#                                     ad-hoc sign
 #   scripts/mac-build.sh test         sync, generate, swift build + swift test only
 #   scripts/mac-build.sh app          sync, generate, xcodebuild, then ad-hoc sign
 #   scripts/mac-build.sh sign         sync, generate, ad-hoc sign only
@@ -48,7 +49,10 @@ KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 WHAT="${1:-all}"
 
 echo "==> syncing $REPO_ROOT to $MAC_HOST:$MAC_DIR"
-rsync -a --delete --exclude .git "$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
+# helper/target is the Rust crate's build directory on the Linux side: hundreds of
+# megabytes of object files for targets the Mac cannot use. Resources/helper - the
+# binaries themselves - is NOT excluded: that is what gets embedded in the bundle.
+rsync -a --delete --exclude .git --exclude helper/target "$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
 
 echo "==> generating the Xcode project"
 ssh -o BatchMode=yes "$MAC_HOST" "cd $MAC_DIR && $XCODEGEN generate"
@@ -77,6 +81,31 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "signed" ]; then
 		DEVELOPMENT_TEAM= \
 		CODE_SIGN_STYLE=Manual \
 		build"
+fi
+
+if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "signed" ]; then
+	# The remote helper (DESIGN.md section 6.4 tier 2) goes into
+	# Contents/Resources/helper/ *before* the signature is applied, because signing the
+	# app seals whatever is inside it.
+	#
+	# CI builds every target section 10.1 names and ships them in the release; a
+	# developer build takes whatever `scripts/build-helper.sh` left in Resources/helper
+	# on the Linux side, which rsync brought over with the rest of the tree. An absent
+	# directory is not an error: the app then has no helper, `HelperDeployer.manifest()`
+	# answers nil, and every location reports the sweep tier with "this build ships no
+	# helper binaries" as the reason.
+	echo "==> embedding the helper, if one was built"
+	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+		cd $MAC_DIR
+		APP=\"build/Build/Products/$CONFIGURATION/SSH Drive.app\"
+		if [ -f Resources/helper/manifest.json ]; then
+			mkdir -p \"\$APP/Contents/Resources/helper\"
+			ditto Resources/helper \"\$APP/Contents/Resources/helper\"
+			ls -l \"\$APP/Contents/Resources/helper\"
+		else
+			echo \"(no Resources/helper/manifest.json; the app ships no helper)\"
+		fi
+	'"
 fi
 
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "sign" ]; then

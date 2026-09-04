@@ -1,0 +1,20 @@
+# Cross-compiling from the Linux development box with no cross C toolchain.
+#
+# `rust-lld` plus `-C link-self-contained=yes` makes rustc link the musl targets with its
+# own bundled linker and its own bundled `self-contained` objects (crt1.o, libc.a from
+# rust-std), so `cargo build --target aarch64-unknown-linux-musl` needs nothing installed
+# beyond `rustup target add`. Without this it looks for `cc` and fails on the host's
+# x86_64 toolchain.
+#
+# The Apple and FreeBSD targets are NOT linkable here (they need Apple's linker and
+# FreeBSD's libc respectively) and are only `cargo check`ed on this box; CI links them on
+# the runners section 10.1 names.
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]
+
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]

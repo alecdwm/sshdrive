@@ -1,0 +1,34 @@
+# The remote helper of DESIGN.md section 6.4 tier 2: one static binary we upload to the
+# server, which watches the served tree and streams NDJSON events back over an exec
+# channel.
+#
+# Two rules shape this manifest. It has to cross-compile to every target in section 10.1
+# from a Linux box with no C toolchain, so the only dependency is `libc` (pure Rust
+# bindings; nothing to compile in C). And it is uploaded over a link the user is also
+# using for their files, so it is built small.
+
+[package]
+name = "sshdrive-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "SSH Drive remote change-detection helper (DESIGN.md section 6.4 tier 2)"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "sshdrive-helper"
+path = "src/main.rs"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+# Section 9: nothing we place on a server may do anything but exit when it is unhappy.
+# `abort` also drops the unwinder, which is most of what is left of the binary at opt-level z.
+panic = "abort"
+strip = true
+overflow-checks = true

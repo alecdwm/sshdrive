@@ -416,6 +416,171 @@ extension LocationRuntime {
         return application
     }
 
+    // MARK: Tier 2 - the remote helper (section 6.4)
+
+    /// Turns one batch of NDJSON events into index changes.
+    ///
+    /// The same job `applySweepHits` does, with three differences that are the whole of
+    /// what tier 2 buys:
+    ///
+    /// - a **delete** applies at once. Section 6.4's mass-deletion guard exists because "a
+    ///   poll that finds a directory empty is not always a directory that was emptied" -
+    ///   an absence in a listing is ambiguous. A delete event is not: the kernel watched it
+    ///   happen. "Helper delete events apply at once" is the design's own sentence.
+    /// - a **rename** keeps the identifier. Every other tier sees a delete and a create and
+    ///   mints a new item, losing the pin, the tags and the cached content with it.
+    /// - a hit carries ns-mtime and inode on every platform, not only where `find` is GNU.
+    func applyHelperEvents(_ events: [HelperEvent], now: Double = Date().timeIntervalSince1970)
+        async -> ChangeApplication
+    {
+        var application = ChangeApplication()
+        var dirty: Set<Data> = []
+        let inFlight = await writerInFlightPaths()
+
+        for event in events {
+            switch event.kind {
+            case .heartbeat, .ready, .sweepStart, .sweepEnd:
+                continue
+            case .error:
+                if let message = event.message { application.errors.append(message) }
+            case .overflow:
+                // "an `overflow` event that makes the agent run a sweep rather than
+                // silently missing changes" (section 6.4). The detector reads this back.
+                application.errors.append(
+                    "helper overflow: \(event.message ?? "the event queue overflowed")")
+            case .rename:
+                guard let from = event.from, let to = event.path,
+                    let source = try? RelativePath.fromIndexBytes(from),
+                    let destination = try? RelativePath.fromIndexBytes(to),
+                    !inFlight.contains(source.bytes), !inFlight.contains(destination.bytes)
+                else { continue }
+                applyRename(from: source, to: destination, event: event, into: &application, dirty: &dirty)
+            case .create, .modify, .delete:
+                guard let raw = event.path, let path = try? RelativePath.fromIndexBytes(raw),
+                    !path.isRoot
+                else {
+                    if event.path != nil { dirty.insert(Data()) }
+                    continue
+                }
+                // Our own uploads come back as remote changes without this (section 5.5).
+                if inFlight.contains(path.bytes) { continue }
+                if event.kind == .delete {
+                    applyHelperDeletion(path, into: &application)
+                    continue
+                }
+                if !applyHelperChange(path, event: event, into: &application) {
+                    dirty.insert((path.parent ?? .root).bytes)
+                }
+            }
+        }
+
+        for path in dirty.sorted(by: { $0.count < $1.count }) {
+            application.absorb(await listOne(path))
+        }
+        return application
+    }
+
+    /// A row rewritten straight from the event. Returns false when the event did not carry
+    /// enough, or the path has no row yet, in which case the parent is listed instead -
+    /// which is also what mints a new item.
+    private func applyHelperChange(
+        _ path: RelativePath, event: HelperEvent, into application: inout ChangeApplication
+    ) -> Bool {
+        guard event.isSelfSufficient, event.type != "d" else { return false }
+        guard let existing = try? index.item(path: path.bytes),
+            let parentRow = try? index.item(identifier: existing.parent ?? IndexWriter.rootIdentifier)
+        else { return false }
+        let attributes = SFTPFileAttributes(
+            type: .file,
+            size: event.size ?? 0,
+            mtime: event.mtimeSeconds ?? 0,
+            mode: UInt32(truncatingIfNeeded: event.mode ?? 0o644),
+            uid: UInt32(truncatingIfNeeded: event.uid ?? 0),
+            gid: UInt32(truncatingIfNeeded: event.gid ?? 0),
+            mtimeNanoseconds: event.mtimeNanoseconds,
+            inode: event.inode.map { UInt64(bitPattern: $0) })
+        do {
+            let updated = try makeRow(
+                path: path, attributes: attributes, parent: parentRow, existing: existing,
+                hidden: existing.hidden,
+                localAttributes: LocalAttributes.decode(existing.xattrs))
+            if updated.metadataVersion != existing.metadataVersion {
+                try index.upsert(updated)
+                try index.appendAnchor(identifier: updated.identifier, kind: .modified)
+                application.changed += 1
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// A delete the kernel watched happen. It goes through the guard's *bookkeeping* -
+    /// a held path that has just been deleted for real is released - but not through its
+    /// thresholds.
+    private func applyHelperDeletion(_ path: RelativePath, into application: inout ChangeApplication) {
+        guard let existing = try? index.item(path: path.bytes) else { return }
+        do {
+            try index.batch {
+                for descendant in try index.allItems()
+                where descendant.path != existing.path
+                    && (try? RelativePath.fromIndexBytes(descendant.path))?.isUnder(path) == true
+                {
+                    try index.delete(identifier: descendant.identifier)
+                    application.deleted += 1
+                }
+                try index.delete(identifier: existing.identifier)
+                try index.releaseHolds(under: existing.path)
+                application.deleted += 1
+            }
+        } catch {
+            application.errors.append("could not apply a helper delete: \(error)")
+        }
+    }
+
+    /// Section 5.3: "a rename onto an existing path is applied as a modify of that path".
+    /// Otherwise the row moves and keeps its identifier, which no other tier can do.
+    private func applyRename(
+        from source: RelativePath, to destination: RelativePath, event: HelperEvent,
+        into application: inout ChangeApplication, dirty: inout Set<Data>
+    ) {
+        guard let row = try? index.item(path: source.bytes) else {
+            // Nothing of ours moved; the destination is simply new.
+            dirty.insert((destination.parent ?? .root).bytes)
+            return
+        }
+        if (try? index.item(path: destination.bytes)) != nil {
+            // The destination already exists in the index: whatever was there is gone and
+            // the source is gone too. Both parents are listed and the identifiers fall
+            // where section 5.3 says they fall.
+            dirty.insert((source.parent ?? .root).bytes)
+            dirty.insert((destination.parent ?? .root).bytes)
+            return
+        }
+        do {
+            var moved = row
+            try index.batch {
+                try index.rewritePaths(from: source.bytes, to: destination.bytes)
+                if let parent = try index.item(path: (destination.parent ?? .root).bytes) {
+                    moved.parent = parent.identifier
+                } else if destination.parent == nil || destination.parent?.isRoot == true {
+                    moved.parent = IndexWriter.rootIdentifier
+                }
+                moved.path = destination.bytes
+                try index.upsert(moved)
+                try index.appendAnchor(identifier: moved.identifier, kind: .modified)
+            }
+            application.changed += 1
+            // Both parents change: one lost a name, one gained it, and their own rows are
+            // what Finder redraws.
+            dirty.insert((source.parent ?? .root).bytes)
+            dirty.insert((destination.parent ?? .root).bytes)
+        } catch {
+            application.errors.append("could not apply a helper rename: \(error)")
+            dirty.insert((destination.parent ?? .root).bytes)
+        }
+    }
+
     /// The hit's own evidence where the sweep carried it (GNU `-printf`), and one `lstat`
     /// where it did not (`-print0` on busybox and BSD).
     private func attributesFor(_ path: RelativePath, hit: SweepHit) async throws
@@ -500,6 +665,10 @@ extension LocationRuntime {
     /// `MaxSessions` of 2 the exec channel is the one that is kept, so this is normally
     /// true wherever there is a shell.
     func allowsExecChannel() -> Bool { channelBudget.allowsExecChannel }
+
+    /// Whether a channel can be *held* for the life of the connection, which is what tier
+    /// 2 needs and tier 1 does not (section 6.1's budget, section 6.4 tier 2).
+    func allowsPersistentExecChannel() -> Bool { channelBudget.allowsPersistentExecChannel }
 
     /// The canonical absolute root the sweep's `cd` uses (section 9.1). Resolved on the
     /// live connection so a root that moved is caught by the same rule as everything else.

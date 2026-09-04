@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4028 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4111 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -49,9 +49,11 @@ Processes and modules (§3):
 `Packages/SSHDriveCore/` · `Apps/Agent/` (host exe `SSH Drive`) · `Apps/FileProvider/` (appex) ·
 `Apps/CLI/` (`sshdrive`) · `Apps/Askpass/` (`sshdrive-askpass`) ·
 `Resources/LaunchAgents/org.shirls.sshdrive.agent.plist` (must land at
-`Contents/Library/LaunchAgents/` in the bundle) · `docs/` (spike runbooks and results; also the Pages
-site) · `scripts/` (build/sign/notarize, later milestones). A Rust crate for `sshdrive-helper` is
-needed by milestone 9.
+`Contents/Library/LaunchAgents/` in the bundle) · `helper/` (the `sshdrive-helper` Rust crate, §6.4
+tier 2; `cargo test` runs on this Linux box, `scripts/build-helper.sh` emits
+`Resources/helper/` which `mac-build.sh` copies into the bundle, and neither is in git) ·
+`.github/workflows/helper.yml` (the cross-compile job of §10.1) · `docs/` (spike runbooks and
+results; also the Pages site) · `scripts/` (build/sign/notarize, later milestones).
 
 ## Working rules
 
@@ -74,7 +76,8 @@ needed by milestone 9.
 
 ## The spike testbed (`testbed/`)
 
-Eleven real SSH servers for the milestone 2 (S2) and milestone 6 (S7) work: Debian and Alpine
+Eleven real SSH servers for the milestone 2 (S2), milestone 6 (S7 tiers 0-1) and milestone 9
+(S7 tier 2) work: Debian and Alpine
 targets, every login-shell shape, an external `sftp-server`, keyboard-interactive, `MaxSessions 2`,
 a busybox `find` without `-cmin`, and a two-hop `ProxyJump` chain. `docker compose up -d` in
 `testbed/`, **on the Mac that hosts the build VM** (OrbStack), never on this Linux box. The account
@@ -144,30 +147,30 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 1555-1918 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
 | 1919-2007 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
 | 2008-2074 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2075-2121 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
-| 2122-2127 | Tier 0: SFTP poll | `readdir` every root |
-| 2128-2201 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2202-2251 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
-| 2252-2336 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
-| 2337-2390 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2391-2449 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2450-2457 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2458-2561 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2562-2650 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2651-2755 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2756-2795 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2796-2960 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 2961-3081 | §8 The CLI | every command and flag, verbatim |
-| 3082-3202 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 3203-3246 | §9 Security | the security properties in one list |
-| 3247-3311 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3312-3398 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 3399-3501 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3502-3560 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 3561-3577 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3578-3624 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3625-3995 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3996-4028 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 2075-2129 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
+| 2130-2135 | Tier 0: SFTP poll | `readdir` every root |
+| 2136-2209 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
+| 2210-2259 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
+| 2260-2375 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
+| 2376-2429 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2430-2488 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2489-2496 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2497-2600 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2601-2689 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2690-2794 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2795-2834 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2835-2999 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 3000-3120 | §8 The CLI | every command and flag, verbatim |
+| 3121-3244 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
+| 3245-3288 | §9 Security | the security properties in one list |
+| 3289-3353 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3354-3447 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
+| 3448-3550 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3551-3616 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming |
+| 3617-3633 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3634-3682 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3683-4078 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4079-4111 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -279,7 +282,7 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       was held and released by `accept-deletions`; a 30-of-40 deletion was held and
       reported in `status`. See `docs/spikes/milestone-6.md` and `docs/spikes/results.md`
       (2026-09-04, "milestone 6"). Not in milestone 6 and not claimed: tier 2, the remote
-      helper (milestone 9), so `auto` tops out at sweep; BSD `find`, which the testbed
+      helper - **done in milestone 9 on 2026-09-05**, so `auto` no longer tops out at sweep; BSD `find`, which the testbed
       cannot provide; and a real server whose clock disagrees with ours, which a container
       cannot be.*
 - [x] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
@@ -322,12 +325,37 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       `docs/spikes/milestone-7-8.md` and `docs/spikes/results.md` (2026-09-05). Not in
       milestone 8 and not claimed: section 7.2's re-assert net has no route to fire on 26.4
       and stays dormant, and the sidebar row still offers nothing (S6).*
-- [ ] **9. Remote helper (tier 2)** - Rust binary, CI cross-compilation, deploy/verify/upgrade, NDJSON.
-      Until it ships, `auto` tops out at sweep.
+- [x] **9. Remote helper (tier 2)** - Rust binary, CI cross-compilation, deploy/verify/upgrade, NDJSON.
+      *Done 2026-09-05. The Rust crate `helper/` (`sshdrive-helper`, one static
+      binary, `libc` its only dependency, 443 KB for `linux/aarch64`): inotify read
+      directly on Linux, kqueue plus a 60 s sweep on the BSDs and macOS, a `sweep`
+      subcommand carrying size/ns-mtime/inode/mode, server-side coalescing, the
+      fixed ignore list, and `--version` printing the SHA-256 of its own executable.
+      `AgentCore` gained **`HelperManifest`** (the `uname -sm` table),
+      **`HelperDeployment`** (the upload verdict, the seven-day rule, the version
+      line) and **`HelperEvent`/`HelperEventDecoder`/`HelperControl`** (the NDJSON
+      protocol, its framing and its backpressure); the agent gained
+      **`HelperDeployer`** (mkdir 700 and the ownership check, the hash comparison,
+      temp-name-and-rename upload, re-verify, the stale sweep, removal) and
+      **`HelperStream`** (the exec channel, the `ready` handshake, the reader, the
+      15 s ping, live root-set updates, death reported to the ladder); `SFTP` gained
+      **`HelperDirectory`/`HelperFile`**, the one deliberate exception to §9.1's
+      chokepoint. **592 package tests** (was 548) and **54 crate tests**. Proved on
+      real mounts of `deb` (glibc) and `alp` (musl + busybox): create 260/129 ms,
+      modify 903/308 ms, rename 82/106 ms, delete 78/82 ms, **chmod 76/78 ms** -
+      against 60 s at tier 1, and a `chmod` a busybox `-mmin` sweep never sees at
+      all. The stream coexisted with two 48 MiB fetches; a `kill -9` of the client
+      took the helper off the server in under 10 s; a corrupted binary of the right
+      size was re-uploaded; `helper off` removed it and dropped to sweep;
+      `deb-maxsess` refused it a channel and said so; `forcesftp` reported no shell.
+      **S7's helper half is answered.** See `docs/spikes/milestone-9.md` and
+      `docs/spikes/results.md` (2026-09-05, "milestone 9"). Not answered and not
+      claimable from here: **FreeBSD kqueue** (no BSD in the testbed) and **armv7**
+      (links only, no hardware).*
 - [ ] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
 
 Spike-to-milestone summary: S1/S3/S4/S6 -> M1 (S3's containment half -> M3), S2 -> M2, S8/S10 -> M4,
-S5 -> M5, S7 -> M6, S9 -> M10.
+S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
 
 ## Things a coder gets wrong without the doc
 
@@ -422,6 +450,22 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 
 83. **A pin change rewrites the changed row *and every known descendant row*,** because `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the capabilities are per item and cached until that item's own metadata version moves. Invariant 2 clears every explicit state beneath first, which is what makes the rewrite one value rather than a per-row ancestor walk (§7.1, §7.1.1).
 
+84. **The helper cannot be started `</dev/null` *and* fed on its stdin.** §9.2 starts every background child with no stdin so it cannot swallow the heartbeat lines; §6.4 feeds the helper its root set and its pings on stdin. Only one process may read a pipe, so the wrapper stays the only reader and **relays** each line into a FIFO the helper is given instead (`RemoteScript.stdinRelay`). A server where `mkfifo` fails runs it `</dev/null` with its roots on its argv. And the relay fragment already ends in a `;`: writing `… || break; <relay>; done` makes `;;`, which dash answers with `Syntax error` and the channel dies at once (2026-09-05, §6.4, §9.2).
+
+85. **A hash the build embeds in a binary is not the hash of that binary.** `--version` prints the SHA-256 the helper computes of **its own executable** at startup, which is what makes §6.4's "size plus `--version`" fallback the same check as the `sha256sum` path rather than a weaker one (2026-09-05, §6.4, §9).
+
+86. **Tier 2 needs an exec channel it can *hold*, not merely open.** A sweep spends half a second on one and gives it back; the helper's stream keeps one for the life of the connection. At `MaxSessions 2` the single spare channel is shared with the probe and the 30-minute insurance sweep, so the helper is refused there - `ChannelBudget.allowsPersistentExecChannel` (2026-09-05, §6.1, §6.4).
+
+87. **The helper's `ready` line is what the ladder settles on.** "The first tier that starts successfully" cannot be decided from the channel opening: `sh` may print anything. `ready` (and `error`) are part of the NDJSON protocol, and a non-UTF-8 path travels as `path_b64` because a JSON string is UTF-8 by definition (2026-09-05, §6.4).
+
+88. **The helper's deployment is the one exception to the `RelativePath` chokepoint.** It writes to `~/.cache/sshdrive`, outside every location root by design, so `SFTP` exposes `HelperDirectory`/`HelperFile` - a probe-chosen absolute directory plus one filename component, no `..`, no nesting - and nothing on the File Provider path can build one (2026-09-05, §9.1, §6.4).
+
+89. **Writing over a running helper fails `ETXTBSY`,** which is why §6.4 uploads to a temp name and renames; and **the wrapper's `EXIT` trap does not run when the wrapper is `SIGKILL`ed**, which is every abrupt client kill, so its relay FIFO is swept by the next deployment instead (2026-09-05, §6.4, §5.5).
+
+90. **`aarch64-unknown-freebsd` has no prebuilt `rust-std`** - `rustup target add` refuses it - so it cannot be built or even `cargo check`ed, and the helper's FreeBSD target is x86_64 only. The three musl targets need no `cross` and no C toolchain: `rust-lld` with `-C link-self-contained=yes` (2026-09-05, §10.1).
+
+91. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
+
 ## Glossary
 
 - **root set** - the bounded directory set every tier watches: `materialized` + `pinned` (recursive) + `viewed` (30 min, capped at 256). Nothing else is polled (§6.5).
@@ -429,7 +473,8 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 - **anchor** - an `anchors` row (sequence number + changed identifier + kind) replayed by the working-set enumerator; expiry answers `.syncAnchorExpired` and triggers a full sweep (§5.3).
 - **reconcile** - rebuilding the index from the system's replica by walking the mount and calling `getIdentifierForUserVisibleFile(at:)`, under `meta.reconciling`, which stalls all service (§5.3).
 - **pin / excluded / kept** - `pinned`/`excluded` are markers on a path; **kept** is the effect at an item (nearest marker at or above it is a pin). Kept is what everything acts on (§7.1, §7.1.1).
-- **tier 0 / 1 / 2** - poll (SFTP `readdir`) / sweep (`find` over exec) / helper (our Rust binary, push ~1 s, real renames). `watchMode: auto` tries top down and degrades (§6.4).
+- **tier 0 / 1 / 2** - poll (SFTP `readdir`) / sweep (`find` over exec) / helper (our Rust binary, push ~1 s, real renames). `watchMode: auto` tries top down and degrades (§6.4). Tier 2 is real since 2026-09-05; measured 76-903 ms against tier 1's 60 s.
+- **helper** - `sshdrive-helper`, the Rust crate in `helper/`. Uploaded to `~/.cache/sshdrive` over SFTP, hash-verified against `Contents/Resources/helper/manifest.json`, run on one held exec channel under the heartbeat wrapper, and speaking NDJSON back. `helper on|off` per location; `HelperDeployer` puts it there, `HelperStream` reads it (§6.4 tier 2).
 - **sweep** - one exec-channel `find` pass over the root set within a window from the **server's** clock; also the 30-min insurance pass. **full sweep** = window opened to the last recorded server timestamp, run on reconnect and on fresh anchors (§6.4, §5.3).
 - **metadata version** - content version + mode/uid/gid + derived `capabilities`/`fs_flags` + effective `kept` + xattr hash. The system re-reads an item only when this moves (§5.3).
 - **generation** - per-row counter bumped when ns-mtime or inode evidence shows a change size+second-mtime cannot; it is what moves the content version (§5.3).

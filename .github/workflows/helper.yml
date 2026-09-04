@@ -1,0 +1,174 @@
+# Builds the remote helper (DESIGN.md section 6.4 tier 2) for every target section 6.4
+# names, and emits the layout section 3 and section 10.1 specify:
+#
+#   Resources/helper/sshdrive-helper-<version>-<os>-<arch>
+#   Resources/helper/manifest.json          version + sha256 + size for each binary
+#
+# Section 10.1's release flow is "a Linux job feeding a macOS job": the Linux and FreeBSD
+# targets are cross-compiled in a Linux job, "since `cross` needs Docker and GitHub's macOS
+# runners do not provide it"; the macOS job builds `darwin/arm64` natively with `cargo`,
+# ad-hoc signs it - "arm64 macOS refuses to run unsigned code even over ssh" - collects the
+# Linux job's artifacts, and records every hash into the app's manifest.
+#
+# Two departures from the letter of section 10.1, both recorded in section 13 (2026-09-05):
+#
+#   * `cross` is used for FreeBSD only. The four musl targets link with rustc's own
+#     `rust-lld` and its bundled self-contained objects (helper/.cargo/config.toml), which
+#     needs no Docker and no cross C toolchain, so they build in seconds on a plain runner.
+#   * `freebsd/aarch64` is not built. `aarch64-unknown-freebsd` is a tier 3 Rust target with
+#     no prebuilt `rust-std`, so it cannot be built - or even `cargo check`ed - without
+#     `-Z build-std` on nightly. Section 6.4's own list stops at `freebsd/x86_64`; this file
+#     is the place that would have to change if that stops being true.
+#
+# This workflow is not the release workflow. It builds and publishes the helper artifacts;
+# section 10.1's step 2 onwards (xcodebuild, notarize, DMG, cask) is milestone 10 and will
+# consume `helper-bundle` from here.
+
+name: helper
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "helper/**"
+      - "scripts/build-helper.sh"
+      - ".github/workflows/helper.yml"
+  pull_request:
+    paths:
+      - "helper/**"
+      - "scripts/build-helper.sh"
+      - ".github/workflows/helper.yml"
+  workflow_dispatch:
+  # Section 10.1's release flow is triggered by a `v*` tag and runs this first. Exposed as
+  # a callable workflow rather than a second `push:` trigger, because one `on.push` cannot
+  # carry both a path filter (what the branch builds want) and a tag filter (what a release
+  # wants) without the paths silently applying to the tag too.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy
+      - name: cargo test
+        working-directory: helper
+        run: cargo test --all-targets
+      - name: cargo clippy
+        working-directory: helper
+        run: cargo clippy --all-targets -- -D warnings
+
+  linux:
+    name: linux and freebsd
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      # The musl targets: no Docker, no cross C toolchain. helper/.cargo/config.toml points
+      # them at rust-lld with self-contained linking, so `rustup target add` is all the
+      # setup there is.
+      - name: Install the musl targets
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            armv7-unknown-linux-musleabihf
+
+      - name: Build the Linux targets
+        run: |
+          scripts/build-helper.sh \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            armv7-unknown-linux-musleabihf
+
+      # FreeBSD is the one target that needs `cross`: it has no rust-lld path and its libc
+      # objects are not bundled with rust-std.
+      - name: Install cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build freebsd/x86_64
+        run: |
+          rustup target add x86_64-unknown-freebsd
+          CARGO=cross scripts/build-helper.sh x86_64-unknown-freebsd
+
+      # The manifest written here is provisional: the macOS job rewrites it once the darwin
+      # binary is beside these, because `scripts/build-helper.sh` builds it from whatever is
+      # in the directory.
+      - name: Check what was built
+        run: |
+          ls -l Resources/helper
+          cat Resources/helper/manifest.json
+          for f in Resources/helper/sshdrive-helper-*; do
+            file "$f"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux
+          path: Resources/helper/sshdrive-helper-*
+          if-no-files-found: error
+
+  macos:
+    name: darwin/arm64 and the manifest
+    runs-on: macos-14
+    needs: linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      # Native, not cross: the runner is arm64 already.
+      - name: Build darwin/arm64
+        run: scripts/build-helper.sh aarch64-apple-darwin
+
+      # Section 10.1: the macOS job "collects the Linux job's artifacts, and records every
+      # hash into the app's manifest". Downloading them into the same directory and
+      # re-running the script is what does both, since the manifest is derived from the
+      # directory's contents.
+      - uses: actions/download-artifact@v4
+        with:
+          name: helper-linux
+          path: Resources/helper
+
+      - name: Rebuild the manifest over every binary
+        run: |
+          chmod 755 Resources/helper/sshdrive-helper-*
+          scripts/build-helper.sh aarch64-apple-darwin
+
+      - name: The helper must answer for itself
+        run: |
+          # `--version` prints the digest of its own executable, which is what section
+          # 6.4's "size plus its own --version output" fallback verifies against on a
+          # server with no sha256sum. It has to agree with the manifest.
+          BIN=$(ls Resources/helper/sshdrive-helper-*-darwin-aarch64)
+          LINE=$("$BIN" --version)
+          echo "$LINE"
+          DIGEST=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
+          case "$LINE" in
+            *"sha256=$DIGEST") echo "the binary agrees with its own file" ;;
+            *) echo "the --version digest does not match the file"; exit 1 ;;
+          esac
+          grep -q "$DIGEST" Resources/helper/manifest.json
+
+      - name: Every target section 6.4 names is present
+        run: |
+          cat Resources/helper/manifest.json
+          for target in linux-x86_64 linux-aarch64 linux-armv7 darwin-aarch64 freebsd-x86_64; do
+            ls Resources/helper/sshdrive-helper-*-"$target" >/dev/null \
+              || { echo "missing $target"; exit 1; }
+          done
+
+      # This is what `SSH Drive.app/Contents/Resources/helper/` is copied from (section 3).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-bundle
+          path: Resources/helper
+          if-no-files-found: error

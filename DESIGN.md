@@ -2098,8 +2098,16 @@ read it at the start of every cycle.
 helper first, then sweep, then poll, settling on the first one
 that starts successfully. The helper is enabled by default and is skipped only
 when the server cannot run it (no exec, no writable directory, directory
-mounted `noexec`, unsupported OS/arch, upload or hash check failed) or the
-user has set `helper off` for the location. A tier that fails at runtime
+mounted `noexec`, unsupported OS/arch, upload or hash check failed, or a
+server that will not give it a channel it can *hold*) or the
+user has set `helper off` for the location. That last condition is tier
+2's alone and is easy to miss: a sweep opens an exec channel, spends half
+a second on it and gives it back, while the helper's stream holds one for
+the life of the connection. At a `MaxSessions` of 2 there is exactly one
+spare channel and the probe, `sshdrive test` and the 30-minute insurance
+sweep below all want it, so a helper that never gave it back would cost
+the location all three; the channel budget of §6.1 therefore answers "may
+I hold one open", not only "may I open one" (2026-09-05). A tier that fails at runtime
 (the helper's stream dies with a non-network error, `find` is missing)
 drops the location one tier down for the
 rest of the session and records why, which `sshdrive status` shows. Setting
@@ -2271,8 +2279,12 @@ is cheaper than any other push mechanism. Deployment happens over the existing c
    `sha256sum`/`shasum` of the remote copy does not match the hash embedded in
    the app. Where the server has neither tool, verification is the remote
    file's size against the embedded binary plus running it with
-   `--version`, which prints its version and its own embedded build hash;
-   any mismatch re-uploads. The upload goes to a temp name and is renamed
+   `--version`; any mismatch re-uploads. What `--version` prints is the
+   SHA-256 the binary computes of **its own executable** at startup, not a
+   constant the build embedded: a hash compiled into a file cannot be the
+   hash of that file, and the digest it computes is the same claim
+   `sha256sum` would have made, so the fallback is the good path's check
+   rather than a weaker one (2026-09-05). The upload goes to a temp name and is renamed
    into place like every other upload (§5.5), never written over the
    existing file: a helper of the same version may be running from that
    path for another Mac, writing over a running executable fails with
@@ -2287,10 +2299,37 @@ is cheaper than any other push mechanism. Deployment happens over the existing c
    (§9.2), its path and root single-quoted into the script and never on
    the command line, feed it the root set, and read NDJSON events:
    `{"op":"create|modify|delete|rename|overflow","path":…,"from":…,
-   "size":…,"mtime_ns":…,"inode":…}` plus a heartbeat every 15 s. The
+   "size":…,"mtime_ns":…,"inode":…}` plus a heartbeat every 15 s. Two
+   lines beyond that list are part of the protocol: a `ready` line first,
+   carrying the version, the `uname` halves and which facility is
+   watching, because the ladder settles on "the first tier that starts
+   successfully" and the agent needs one byte that says the *binary* is
+   running rather than that `sh` printed something; and an `error` line,
+   so a helper that cannot establish a watch says why instead of dying
+   quietly. A path that is valid UTF-8 travels as `path`; one that is not
+   travels as `path_b64`, base64 of the raw server bytes, because a JSON
+   string is UTF-8 by definition and a filename need not be (§5.4) - which
+   is the one thing tier 1 cannot do at all, since `set --` is a String
+   pipeline end to end (§9.2). The
    agent sends a ping line every 15 s in return and the helper exits after
    60 s without one, so it never outlives the connection (see the
    lifetime rule above on why sshd cannot be relied on for that).
+
+   **How that stdin reaches it.** §9.2 says background children never
+   share the script's stdin - `find` and the helper are started
+   `</dev/null` so they cannot swallow the heartbeat lines - and this
+   step says the helper is *fed* on its stdin. Both cannot be the
+   channel's stdin, and only one process may read a pipe. So the wrapper
+   stays the only reader and **relays** every line it reads into a FIFO it
+   makes in the helper's own directory, which the child is given as its
+   stdin. A server where `mkfifo` fails is not a failure: the helper is
+   then started `</dev/null` with the root set of that moment on its own
+   argv, watches what it was given, and the wrapper is its only kill
+   switch, exactly as for every other remote command. The FIFO is swept on
+   every deployment rather than trusted to clean itself up: the wrapper's
+   `EXIT` trap removes its own, and the trap does not run when the wrapper
+   is `SIGKILL`ed, which is every abrupt client kill and the case the
+   wrapper exists for (2026-09-05).
 
 What it adds over the polling tiers: inotify/FSEvents/kqueue used
 directly, so a change arrives in about a second instead of a poll
@@ -3183,7 +3222,10 @@ Rules that keep the format stable across permutations:
 - When the helper is not the active tier on a server with shell access, the
   change-detection line carries a `note:` saying why: `helper off (user
   setting)`, `helper unsupported: <os>/<arch>`, `no writable directory for
-  helper`, `cache directory is noexec`, or `helper upload failed: <reason>`.
+  helper`, `cache directory is noexec`, `helper upload failed: <reason>`,
+  or `the server will not give the helper a channel of its own
+  (MaxSessions 2)`. Whatever the deployment actually said is what is
+  printed, verbatim, rather than the category it falls into.
   The `upgrade:` line then names the fix, so a user who turned it off sees
   `sshdrive set nas helper on` and a user on an unsupported platform sees
   the request to file an issue with the `uname -sm` output.
@@ -3392,7 +3434,14 @@ So:
   NDJSON from the helper) and parsed as
   bytes, never split on newlines.
 - **Every path coming back** is checked for the root prefix and built into a
-  `RelativePath` (§9.1) before use.
+  `RelativePath` (§9.1) before use. The helper's own deployment is the one
+  exception, and it is a narrow one: the binary lives in
+  `$XDG_CACHE_HOME/sshdrive`, `~/.cache/sshdrive` or `/tmp/sshdrive-<uid>`
+  (§6.4), which are outside every location root by design, so the SFTP
+  layer admits a second kind of path - an absolute directory the *probe*
+  chose, plus one filename component under it, with no `..` and no
+  nesting. Nothing on the File Provider path can construct one
+  (2026-09-05).
 
 ---
 
@@ -3524,12 +3573,19 @@ Release flow (GitHub Actions, a Linux job feeding a macOS job, triggered
 by a `v*` tag):
 
 1. Build the helper. The Linux and FreeBSD targets are cross-compiled
-   with `cross` (musl for Linux, its FreeBSD image for `freebsd/x86_64`)
    in a **Linux job**, since `cross` needs Docker and GitHub's macOS
    runners do not provide it; the macOS job builds `darwin/arm64`
    natively with `cargo`, ad-hoc signs it (`codesign`; arm64 macOS
    refuses to run unsigned code even over `ssh`), collects the Linux
    job's artifacts, and records every hash into the app's manifest.
+   Only `freebsd/x86_64` actually needs `cross`: the three musl targets
+   link with rustc's own `rust-lld` and its bundled self-contained
+   objects (`helper/.cargo/config.toml`), so they build on a plain runner
+   with nothing but `rustup target add` and no cross C toolchain at all.
+   `freebsd/aarch64` is **not** built: it is a tier 3 Rust target with no
+   prebuilt `rust-std`, so it cannot be built - or even `cargo check`ed -
+   without `-Z build-std` on nightly, and the target list above stops at
+   `freebsd/x86_64` for that reason (2026-09-05).
 2. `xcodebuild archive` → Developer ID sign (certificate and App Store Connect
    API key stored as repository secrets) → `notarytool submit --wait` → staple
    → DMG.
@@ -3568,7 +3624,7 @@ held by the system and survive.
 | S4 | Does `evictItem` work for files in our domain, does atime on materialized files advance on every read, only when older than the mtime, or never (§7), does the system refuse to evict an item with pending changes, do Finder tags and other xattrs served from our index survive eviction, which §5.4 assumes, and does a launchd agent's `stat` under `~/Library/CloudStorage` draw a TCC prompt on 14 or 15 (§7)? | Determines whether TTL eviction can use real last-access, whether it needs a pending-upload check of its own, and whether local xattrs need re-applying after an evict. |
 | S5 | Behaviour when throwing `.serverUnreachable` for writes: how long the system retries, whether `signalErrorResolved(.serverUnreachable)` reliably wakes the flush, and whether `signalEnumerator` alone does (§5.6). Whether requests still reach the extension while the domain is connected but every call fails fast, which the deadline re-arm depends on (§4.2). How long the system waits after `.serverUnreachable` from `fetchContents` before calling again, since that, not our breaker, bounds the spinner Finder shows when a fetch arrives during a reconnect (§6.3). What the extension sees when the agent's mach service is unavailable (login item disabled), and whether `disconnect(reason:)` can be called from inside the extension at all; if not, the extension answers `.serverUnreachable` and the message lives only in `sshdrive doctor` (§5.2). Whether the system times out an `enumerateItems` that takes the full 60 s the breaker may hold a call during a reconnect (§6.3), and what it does to the extension if so. What the system does with a pending local edit when the extension reports that item, or its parent, deleted through the working set, and when the item comes back with a content version the system cannot match, which the reconcile walk produces for pending items (§5.3). What the system does with an item whose `fetchContents` fails with `.noSuchItem` versus `.cannotSynchronize`, since the mass-deletion guard (§6.4) needs the second to leave the item in place. Whether a `readdir` and `lstat` walk of the mount is served from the replica while every enumeration returns `.serverUnreachable`, which the reconcile stall (§5.3) depends on. | The "no fuss across network drops" requirement rests on this, and so does the agent-missing message (§5.2). The last question decides whether the mass-deletion guard (§6.4) must also hold deletions of pending items. |
 | S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, does it enumerate subfolders that have never been opened in Finder (the offline claim in §7.1 depends on it), does it accept a chain of never-enumerated ancestors reported through the working set, which `sshdrive pin` on an unseen path depends on (§7.1), do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, that an item returned without `allowsEvicting` gets no "Remove Download" entry and that no other route evicts it (§7.2), and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. Also: does the eager policy on the item returned for `.rootContainer` download the whole location, and do custom actions appear when right-clicking the background of the location's top-level window or its sidebar entry, with the root as the selected item (§7.1.2)? How many `fetchContents` calls the system keeps open at once for an eager subtree, which bounds the transfer scheduler's backlog (§6.2). | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
-| S7 | Run tier 1 and the helper (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running helper stream coexist with two SFTP channels on one connection, and how long does the `find -cmin` sweep take on a 1M-file tree with 200 roots? Check `-cmin` and `-printf` across GNU, BSD and busybox `find`, including the busybox on a real Synology DSM box and the `-mmin` fallback (§6.4), the server-clock sweep window against a server whose clock is five minutes behind, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells, each with an rc file that prints to stdout, confirming the sentinel discards it, plus the `env -0` shell snapshot (§6.1) under fish and the `-ic` form under tcsh, and an rc file that leaves a background child holding stdout, confirming the closing sentinel returns the snapshot before the timeout. Kill the client abruptly with `ClientAliveInterval` unset on the server and record whether a bare background process survives, and whether the heartbeat wrapper (§6.4) kills it within a minute under dash, busybox and bash. Run the probe against an account whose login shell prints on startup and whose sshd uses an external `sftp-server`, confirming the exec-channel `sftp-server` fallback (§9.2), and against a `ForceCommand internal-sftp` account, confirming it is reported as no shell rather than unusable output. On FreeBSD, measure the helper's kqueue directory watch plus 60 s sweep on a 100,000-file tree (§6.4 tier 2). Measure a tier 0 cycle with 5,000 `materialized`-only roots under the rotation (§6.5). | Decides whether tier 1 and the helper are practical on one connection, sets the default poll interval, proves the quoting design, and proves that nothing we start outlives the connection. |
+| S7 | **Tiers 0-1 answered in milestone 6, the helper's half in milestone 9; the FreeBSD kqueue row is still open, and so is armv7 - the testbed is Linux containers on an arm64 Mac and there is no BSD or 32-bit ARM to run either on (2026-09-05).** Run tier 1 and the helper (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running helper stream coexist with two SFTP channels on one connection, and how long does the `find -cmin` sweep take on a 1M-file tree with 200 roots? Check `-cmin` and `-printf` across GNU, BSD and busybox `find`, including the busybox on a real Synology DSM box and the `-mmin` fallback (§6.4), the server-clock sweep window against a server whose clock is five minutes behind, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells, each with an rc file that prints to stdout, confirming the sentinel discards it, plus the `env -0` shell snapshot (§6.1) under fish and the `-ic` form under tcsh, and an rc file that leaves a background child holding stdout, confirming the closing sentinel returns the snapshot before the timeout. Kill the client abruptly with `ClientAliveInterval` unset on the server and record whether a bare background process survives, and whether the heartbeat wrapper (§6.4) kills it within a minute under dash, busybox and bash. Run the probe against an account whose login shell prints on startup and whose sshd uses an external `sftp-server`, confirming the exec-channel `sftp-server` fallback (§9.2), and against a `ForceCommand internal-sftp` account, confirming it is reported as no shell rather than unusable output. On FreeBSD, measure the helper's kqueue directory watch plus 60 s sweep on a 100,000-file tree (§6.4 tier 2). Measure a tier 0 cycle with 5,000 `materialized`-only roots under the rotation (§6.5). | Decides whether tier 1 and the helper are practical on one connection, sets the default poll interval, proves the quoting design, and proves that nothing we start outlives the connection. |
 | S8 | Return an item with `contentType = .symbolicLink` and `symlinkTargetPath`: does the system create a real symlink under CloudStorage, does Finder badge it, does a relative target resolve inside the mount, how does Finder present a dangling one, does `ln -s` inside the mount reach `createItem` with the target intact so escaping targets can be refused? | Confirms §5.7 end to end. |
 | S9 | Does calling `NSFileProviderManager.add(domain)` with an existing identifier and a new `displayName` rename the domain in place, keeping cache and pending uploads? | If yes, `set nickname` stops re-creating the domain and the §13 data-loss caveat goes away. |
 | S10 | Finder tags on an item whose extension returns `extendedAttributes` from local storage: does tagging round-trip, and does the xattr hash in the metadata version (§5.3) stop the system re-offering the `modifyItem`? Also check what happens if the version is deliberately left unchanged, to know what the hash is protecting against. | Confirms the local-xattr policy (§5.4) does not produce a retry loop. |
@@ -3615,8 +3671,10 @@ held by the system and survive.
    eviction exclusion, Finder "Keep Downloaded"/"Don't Keep Downloaded" actions
    and the pin badge. Built on S6's answers from milestone 1.
 9. **Remote helper (tier 2)** — Rust helper binary, cross-compiled in CI,
-   deploy/verify/upgrade over SFTP, NDJSON protocol, `helper on|off`. Until
-   this ships, `auto` tops out at sweep.
+   deploy/verify/upgrade over SFTP, NDJSON protocol, `helper on|off`. The
+   helper half of S7 - the stream beside two SFTP channels, and the
+   abrupt client kill - is answered here rather than in milestone 6,
+   which had no tier 2 to answer it with.
 10. **Ship** — notarized DMG, Homebrew cask with postflight and uninstall,
     `logs`, docs. Spike S9 applied to `set nickname` if it passed.
 
@@ -3990,6 +4048,31 @@ there, so that this list cannot drift from the body.
   "The file couldn't be opened", because the system has not re-read the rows
   whose policy just changed. Both cases fall back to the unkept files one by
   one, each with §5.5's backoff (2026-09-05, §7, §7.1).
+- **The helper cannot be started `</dev/null` and fed on its stdin at the
+  same time,** so the wrapper relays the lines it reads into a FIFO the
+  helper is given instead; a server where `mkfifo` fails runs it with no
+  stdin and its roots on its argv (2026-09-05, §6.4, §9.2).
+- **A hash the build embeds in the binary is not the hash of that binary,**
+  so `--version` prints the digest the helper computes of its own
+  executable, which makes the no-`sha256sum` fallback the same check as
+  the good path (2026-09-05, §6.4, §9).
+- **Tier 2 needs an exec channel it can *hold*, which the `MaxSessions`
+  budget did not model:** at 2 the one spare channel is shared with the
+  probe and the insurance sweep, so the helper is refused there and
+  `status` says so (2026-09-05, §6.1, §6.4).
+- **The helper's `ready` and `error` lines are part of the NDJSON
+  protocol,** because the ladder settles on the first tier that *starts*
+  and needs proof the binary is running; a non-UTF-8 path travels as
+  `path_b64` (2026-09-05, §6.4).
+- **The helper's deployment is the one exception to the `RelativePath`
+  chokepoint,** and admits only a probe-chosen absolute directory plus one
+  filename component (2026-09-05, §9.1, §6.4).
+- **`aarch64-unknown-freebsd` has no prebuilt `rust-std`,** so it cannot be
+  built or checked at all and the helper's FreeBSD target is x86_64 only;
+  the musl targets need no `cross` and no C toolchain (2026-09-05, §10.1).
+- **The wrapper's `EXIT` trap does not run when the wrapper is
+  `SIGKILL`ed,** which is every abrupt client kill, so its relay FIFO is
+  swept by the next deployment rather than by itself (2026-09-05, §6.4).
 
 ---
 

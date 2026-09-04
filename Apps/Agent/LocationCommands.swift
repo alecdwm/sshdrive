@@ -191,6 +191,13 @@ enum LocationCommands {
             {
                 report["capabilities"] = capability.asJSON
             }
+            // Section 6.4: `add` "states this plainly in its output, after the probe has
+            // chosen the directory so the message names the real one". It is placed here,
+            // after the probe and before the report, for that reason and no other.
+            if let sentence = await helperNotice(runtime: runtime, location: created) {
+                report["helperNotice"] = sentence
+                relay?.note(sentence)
+            }
             return try ControlCommands.json(report)
         } catch {
             // "`add` must fail cleanly … without leaving a half-added location."
@@ -410,6 +417,7 @@ enum LocationCommands {
 
         var removed: [String] = []
         var secretsRemoved: [String] = []
+        var helperRemoved: [String] = []
         for location in targets {
             // Section 8: "refuses while uploads are pending unless --force".
             if arguments["force"] != "true",
@@ -418,6 +426,22 @@ enum LocationCommands {
             {
                 throw SSHDriveAgentError.notImplemented.asNSError(
                     "\(location.displayName) has uploads in flight. Wait, or pass --force.")
+            }
+            // Section 8: "on its last connection removes the helper binary and its
+            // directory from the server when no other location of this Mac on the same
+            // user@hostname:port uses them". The stream has to stop before the file goes,
+            // and both need the connection that is about to be dropped.
+            // Everything this command is about to remove counts as gone, or `remove --all`
+            // over two locations on one host would leave the binary behind for a sibling
+            // that is being removed in the same breath.
+            let targetIDs = Set(targets.map(\.id))
+            let remainingAfter = file.locations.filter {
+                !targetIDs.contains($0.id) && HelperCleanup.sharesHelperDirectory($0, with: location)
+            }
+            if remainingAfter.isEmpty,
+                let detector = await DomainManager.shared.detector(locationID: location.id)
+            {
+                helperRemoved += await detector.shutDownHelper(removeFromServer: true)
             }
             try? await DomainManager.shared.removeDomain(for: location)
             await DomainManager.shared.dropRuntime(locationID: location.id)
@@ -452,9 +476,7 @@ enum LocationCommands {
             "removed": removed,
             "secretsRemoved": secretsRemoved,
             "keepFiles": arguments["keepFiles"] == "true",
-            // The helper's own removal is section 6.4 tier 2, milestone 9; there is
-            // nothing on the server for milestone 3 to take away.
-            "helperRemoved": false,
+            "helperRemoved": helperRemoved,
         ])
     }
 
@@ -515,6 +537,17 @@ enum LocationCommands {
             }
             updated.agentDependent = outcome.agentDependent
             updated.secrets = Array(Set(updated.secrets + outcome.storedKeys)).sorted()
+        }
+
+        // `helper off` "stops it and removes the binary on the next connection" (section
+        // 6.4). The connection is still up right now, so it happens now.
+        if key == .helper, !updated.helper,
+            let detector = await DomainManager.shared.detector(locationID: location.id)
+        {
+            let taken = await detector.shutDownHelper(removeFromServer: true)
+            if !taken.isEmpty {
+                notes.append("removed \(taken.count) helper file(s) from the server.")
+            }
         }
 
         let wasMounted = location.mounted
@@ -739,6 +772,25 @@ enum LocationCommands {
         return try ControlCommands.json(["locations": rows])
     }
 
+    /// Section 6.4: "Since it does place our code on the remote machine, `sshdrive add`
+    /// states this plainly in its output, after the probe has chosen the directory so the
+    /// message names the real one."
+    ///
+    /// Nil where no helper will be deployed - no shell, no directory, an unsupported
+    /// platform, a build with no binaries - because a promise about a binary that is never
+    /// uploaded is worse than silence.
+    static func helperNotice(runtime: LocationRuntime, location: Location) async -> String? {
+        guard location.helper else { return nil }
+        let capabilities = await DomainManager.capabilities(of: runtime, location: location)
+        guard capabilities.helperAvailable else { return nil }
+        guard let probe = await runtime.probeForSweep(), !probe.cacheDirectory.isEmpty else {
+            return nil
+        }
+        return "SSH Drive will upload a small helper binary to \(probe.cacheDirectory) on this "
+            + "server to watch for changes; disable with "
+            + "`sshdrive set \(location.displayName) helper off`"
+    }
+
     /// Section 8.1's report for a live location, re-probing when asked.
     private static func capabilityReport(
         location: Location, runtime: LocationRuntime, forceProbe: Bool
@@ -758,16 +810,31 @@ enum LocationCommands {
         // it fell (section 6.4).
         var activeTier: String?
         var downgradeNote: String?
+        var helperReport: [String: Any]?
         if let detector = await DomainManager.shared.detector(locationID: location.id) {
             let status = await detector.status()
             activeTier = status["tier"] as? String
+            // Only a *running* stream describes the change-detection line. The ladder
+            // offers the tier from the probe before anything is deployed, and a report
+            // taken in that window would print `helper ? at ?` and claim rename events
+            // from a helper that has not started (2026-09-05).
+            if let helper = status["helper"] as? [String: Any] {
+                if helper["state"] as? String == "running" {
+                    helperReport = helper
+                } else if activeTier == "helper" {
+                    // The tier is offered and the stream is not up yet. Say that, rather
+                    // than the note the sweep branch would otherwise reach for.
+                    downgradeNote = (helper["reason"] as? String)
+                        ?? "the helper is starting on this connection"
+                }
+            }
             if let downgrades = status["downgrades"] as? [[String: Any]], let last = downgrades.last {
                 downgradeNote = "dropped from \(last["from"] as? String ?? "") to "
                     + "\(last["to"] as? String ?? "") at "
                     + "\(Date(timeIntervalSince1970: last["at"] as? Double ?? 0)): "
                     + "\(last["reason"] as? String ?? "")"
-            } else {
-                downgradeNote = status["note"] as? String
+            } else if let note = status["note"] as? String {
+                downgradeNote = note
             }
         }
         return CapabilityReport.make(
@@ -775,7 +842,8 @@ enum LocationCommands {
             budget: await runtime.channelBudgetValue(),
             probedAt: CapabilityCache.probe(locationID: location.id)?.probedAt ?? Date(),
             cached: false, freeSpace: freeSpace,
-            activeTier: activeTier, downgradeNote: downgradeNote)
+            activeTier: activeTier, downgradeNote: downgradeNote,
+            helper: helperReport)
     }
 
     /// "A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`

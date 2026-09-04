@@ -53,11 +53,21 @@ struct ChannelBudget: Sendable, Equatable {
     var hasBulkChannel: Bool
     /// Whether an exec channel can be afforded at all (tier 1, the `id` probe, the helper).
     var allowsExecChannel: Bool
+    /// Whether one can be *held open for the life of the connection*, which is what tier 2
+    /// needs and tier 1 does not: a sweep opens a channel, spends half a second on it and
+    /// closes it, while the helper's stream lives as long as the location does. At a
+    /// `MaxSessions` of 2 the one spare channel is shared by the probe and the sweep - and
+    /// section 6.4 still runs a sweep every 30 minutes as insurance even at tier 2 - so a
+    /// helper that never gave it back would cost the location the insurance sweep, the
+    /// re-probe and `sshdrive test`. It is refused there and `status` says why
+    /// (2026-09-05, section 13).
+    var allowsPersistentExecChannel: Bool
     /// The sentence `sshdrive status` shows. Empty when nothing was forced.
     var note: String
 
     static let unrestricted = ChannelBudget(
-        concurrentChannels: 3, hasBulkChannel: true, allowsExecChannel: true, note: "")
+        concurrentChannels: 3, hasBulkChannel: true, allowsExecChannel: true,
+        allowsPersistentExecChannel: true, note: "")
 
     /// The three cases section 6.1 names.
     static func forConcurrentChannels(_ channels: Int) -> ChannelBudget {
@@ -65,16 +75,19 @@ struct ChannelBudget: Sendable, Equatable {
         case ...1:
             return ChannelBudget(
                 concurrentChannels: 1, hasBulkChannel: false, allowsExecChannel: false,
+                allowsPersistentExecChannel: false,
                 note: "the server allows one channel at a time (MaxSessions 1): no bulk "
                     + "transfer channel and no shell access, so this location is SFTP-only "
                     + "(watch mode poll, no remote identity, no helper)")
         case 2:
             return ChannelBudget(
                 concurrentChannels: 2, hasBulkChannel: false, allowsExecChannel: true,
+                allowsPersistentExecChannel: false,
                 note: "the server allows two channels at a time (MaxSessions 2): the bulk "
                     + "transfer channel is dropped and transfers share the metadata "
                     + "channel, so a large download slows listings; the second channel is "
-                    + "kept for shell access (sweep, probe, helper)")
+                    + "kept for shell access, and is shared - the sweep and the probe take "
+                    + "it in turns, and the helper cannot hold one open (watch mode sweep)")
         default:
             return .unrestricted
         }
@@ -85,6 +98,7 @@ struct ChannelBudget: Sendable, Equatable {
             "concurrentChannels": concurrentChannels,
             "bulkChannel": hasBulkChannel,
             "execChannel": allowsExecChannel,
+            "persistentExecChannel": allowsPersistentExecChannel,
             "note": note,
         ]
     }
@@ -219,6 +233,8 @@ enum CapabilityCache {
             concurrentChannels: channels,
             hasBulkChannel: (stored["bulkChannel"] as? Bool) ?? (channels >= 3),
             allowsExecChannel: (stored["execChannel"] as? Bool) ?? (channels >= 2),
+            allowsPersistentExecChannel:
+                (stored["persistentExecChannel"] as? Bool) ?? (channels >= 3),
             note: (stored["note"] as? String) ?? "")
     }
 

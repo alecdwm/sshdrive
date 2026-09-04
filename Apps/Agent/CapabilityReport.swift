@@ -60,13 +60,17 @@ struct CapabilityReport {
         return out
     }
 
+    /// The fixed, short ignore list of section 6.4, printed under the change-detection
+    /// line whenever the helper is the running tier ("the list is printed on the
+    /// change-detection line of `sshdrive status`").
+    static let helperIgnores = [".sshdrive-upload-*", ".*.swp", "*~", ".#*", "4913"]
+
     /// Builds the catalogue from one probe and the location's settings.
     ///
-    /// - Parameter helperAvailable: false for the whole of v1 so far - the remote helper is
-    ///   milestone 9, and until it ships `auto` tops out at sweep (section 6.4, section 12).
-    ///   Change detection therefore reports `◐ sweep` with a `note:` saying why, which is
-    ///   exactly section 8.1's rule for "the helper is not the active tier on a server with
-    ///   shell access".
+    /// - Parameter helper: the running helper's own report, when there is one: its
+    ///   version, the path it runs from and the mechanism it is using. That last one is
+    ///   why the level is a sentence rather than a constant - section 6.4 requires
+    ///   `helper (kqueue + 60s sweep)` on FreeBSD "rather than claiming push latency".
     static func make(
         probe: ServerProbe.Result,
         extensions: SFTPServerExtensions,
@@ -77,26 +81,33 @@ struct CapabilityReport {
         helperAvailable: Bool = false,
         freeSpace: String? = nil,
         activeTier: String? = nil,
-        downgradeNote: String? = nil
+        downgradeNote: String? = nil,
+        helper: [String: Any]? = nil
     ) -> CapabilityReport {
         let shell = probe.hasShellAccess && budget.allowsExecChannel
         var features: [Feature] = []
 
         // 1. Change detection: helper · sweep · poll.
+        // Not `activeTier == "helper"` alone: the ladder offers the tier from the probe
+        // before anything has been deployed, and a report written in that window would
+        // claim rename events from a helper that has not started. The helper's own report
+        // is what makes it true.
+        let helperRunning = activeTier == "helper" && helper != nil
         features.append(changeDetection(
             probe: probe, location: location, shell: shell, helperAvailable: helperAvailable,
-            activeTier: activeTier, downgradeNote: downgradeNote))
+            activeTier: activeTier, downgradeNote: downgradeNote, helper: helper))
 
         // 2. Rename detection: rename events (helper) · delete+create.
         features.append(Feature(
             name: "rename detection",
-            level: "delete + create (identifiers not preserved on remote renames)",
-            best: "helper move events", glyph: "◐",
-            upgrade: "the helper, which needs shell access",
-            note: shell ? "the remote helper is not in this release" : nil))
+            level: helperRunning
+                ? "helper move events"
+                : "delete + create (identifiers not preserved on remote renames)",
+            best: "helper move events", glyph: helperRunning ? "●" : "◐",
+            upgrade: helperRunning ? nil : "the helper, which needs shell access"))
 
         // 3. Change evidence: ns-mtime + inode (helper or GNU sweep) · size + mtime.
-        let gnuSweep = shell && probe.findTakesPrintf
+        let gnuSweep = helperRunning || (shell && probe.findTakesPrintf)
         features.append(Feature(
             name: "change evidence",
             level: gnuSweep ? "ns-mtime + inode" : "size + mtime (same-second rewrites of equal size are missed)",
@@ -161,9 +172,23 @@ struct CapabilityReport {
 
     private static func changeDetection(
         probe: ServerProbe.Result, location: Location, shell: Bool, helperAvailable: Bool,
-        activeTier: String? = nil, downgradeNote: String? = nil
+        activeTier: String? = nil, downgradeNote: String? = nil, helper: [String: Any]? = nil
     ) -> Feature {
         let best = "helper (push, ~1s)"
+        // The running tier, at its own best level. Section 8.1's example line is
+        // `helper 1.2.0 at ~/.cache/sshdrive (push, ~1s)`; the mechanism comes from the
+        // helper's own `ready` line, so a kqueue build says what it really does.
+        if activeTier == "helper", let helper {
+            let version = helper["version"] as? String ?? "?"
+            let directory = helper["directory"] as? String ?? "?"
+            let mechanism = helper["mechanism"] as? String ?? "inotify"
+            let shape = mechanism.contains("kqueue") ? "kqueue + 60s sweep" : "push, ~1s"
+            return Feature(
+                name: "change detection",
+                level: "helper \(version) at \(directory) (\(shape))",
+                best: best, glyph: "●",
+                note: "ignores: " + helperIgnores.joined(separator: "  "))
+        }
         // Section 8.1: "A runtime downgrade ... shows the level in use with ◐ and a
         // `note:` line giving the reason and time, in addition to the `upgrade:` line."
         // The ladder, not the probe, is the authority on which tier is running once the
@@ -200,8 +225,10 @@ struct CapabilityReport {
         var note: String
         if !location.helper {
             note = "helper off (user setting); `sshdrive set \(location.displayName) helper on` turns it back on"
+        } else if let reason = downgradeNote, !reason.isEmpty {
+            note = reason
         } else if !helperAvailable {
-            note = "the remote helper ships in a later release, so auto tops out at sweep"
+            note = "the server cannot run the remote helper"
         } else if probe.cacheDirectory.isEmpty {
             note = probe.cacheNote.isEmpty ? "no writable directory for helper" : probe.cacheNote
         } else {

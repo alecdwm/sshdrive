@@ -105,6 +105,16 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
     /// metadata channel" means.
     private var transferTransport: RealSFTPTransport { bulk ?? inner }
 
+    /// The metadata channel's client, for the one caller that needs to address a path
+    /// outside every location root: the helper's deployment into the cache directory the
+    /// probe chose (section 6.4 tier 2, and `HelperLocation.swift` on why that door is
+    /// narrow). Nothing on the File Provider path uses it.
+    var metadataTransport: RealSFTPTransport { inner }
+
+    /// The `<mac8>` of section 5.5, kept so the helper's upload can use the same temp-file
+    /// shape as every other upload.
+    let uploadTag: String
+
     /// True when transfers share the metadata channel, which the scheduler needs to know
     /// so it leaves request slots free for the metadata calls served ahead of them.
     var transfersShareMetadataChannel: Bool { bulk == nil }
@@ -112,8 +122,9 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
     private init(
         locationID: String, master: SSHMaster, channel: SFTPChannel, inner: RealSFTPTransport,
         bulkChannel: SFTPChannel?, bulk: RealSFTPTransport?,
-        budget: ChannelBudget, probe: ServerProbe.Result
+        budget: ChannelBudget, probe: ServerProbe.Result, uploadTag: String
     ) {
+        self.uploadTag = uploadTag
         self.locationID = locationID
         self.master = master
         self.channel = channel
@@ -231,7 +242,7 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
             return SSHBackedTransport(
                 locationID: location.id, master: master, channel: channel, inner: transport,
                 bulkChannel: bulk?.channel, bulk: bulk?.transport,
-                budget: budget, probe: probe)
+                budget: budget, probe: probe, uploadTag: uploadTag)
         } catch {
             let diagnostics = channel.stderrText
             channel.close()

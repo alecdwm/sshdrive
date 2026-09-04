@@ -7,8 +7,9 @@ final class ChangeDetectionLadderTests: XCTestCase {
 
     private typealias Capabilities = ChangeDetectionLadder.ServerCapabilities
 
-    /// An ordinary Linux server in v1: shell, GNU find, and no helper - the helper is
-    /// milestone 9, so `helperAvailable` is false for the whole of v1.
+    /// An ordinary Linux server: shell and GNU find. `helperAvailable` defaults to false
+    /// here because most of these cases are about what happens without tier 2; the tier 2
+    /// rung has its own section at the end.
     private func gnuServer(helperAvailable: Bool = false, helperEnabled: Bool = true,
                            takesCmin: Bool = true) -> Capabilities {
         Capabilities(hasExecChannel: true, hasFind: true, takesCmin: takesCmin, takesPrintf: true,
@@ -32,16 +33,15 @@ final class ChangeDetectionLadderTests: XCTestCase {
     func testAutoWithShellAndFindSettlesAtSweepAndSaysWhyItIsNotHigher() {
         let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(), now: 0)
         XCTAssertEqual(ladder.tier, .sweep)
-        // Section 8.1's note: line. The helper is milestone 9, so this is the v1 answer on
-        // every server that has a shell.
-        XCTAssertEqual(ladder.note, "the remote helper is not available in this version")
+        // Section 8.1's note: line, on a server whose probe left the helper out.
+        XCTAssertEqual(ladder.note, "the server cannot run the remote helper")
     }
 
     func testAutoWithShellButNoFindSettlesAtPoll() {
         let capabilities = Capabilities(hasExecChannel: true, hasFind: false)
         let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: capabilities, now: 0)
         XCTAssertEqual(ladder.tier, .poll)
-        XCTAssertEqual(ladder.note, "the remote helper is not available in this version; the server has no usable find")
+        XCTAssertEqual(ladder.note, "the server cannot run the remote helper; the server has no usable find")
     }
 
     func testAutoTakesTheHelperWhenItIsAvailableAndHasNoNote() {
@@ -87,7 +87,7 @@ final class ChangeDetectionLadderTests: XCTestCase {
         let ladder = ChangeDetectionLadder(watchMode: .helper, capabilities: gnuServer(), now: 0)
         XCTAssertEqual(ladder.tier, .poll)
         XCTAssertEqual(ladder.note,
-                       "watchMode is set to helper, but the remote helper is not available in this version")
+                       "watchMode is set to helper, but the server cannot run the remote helper")
     }
 
     func testWatchModePollStaysPollOnTheBestServerThereIs() {
@@ -184,5 +184,113 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertLessThan(ChangeDetectionLadder.Tier.sweep, .helper)
         XCTAssertEqual(ChangeDetectionLadder.Tier.allCases, [.poll, .sweep, .helper])
         XCTAssertNil(ChangeDetectionLadder.Tier.poll.oneLower)
+    }
+
+    // MARK: The tier 2 rung (milestone 9)
+
+    /// `auto` "tries the tiers from the top: helper first". On a server that can run it,
+    /// that is where a location settles, with no note at all - the best level has nothing
+    /// to explain.
+    func testAutoClimbsToHelperWhereTheServerCanRunIt() {
+        let ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.note)
+    }
+
+    /// The location's own `helper off` (section 8). Named first in the note, because it is
+    /// the one thing the user changed.
+    func testHelperOffKeepsTheLocationAtSweepAndSaysSo() {
+        let ladder = ChangeDetectionLadder(
+            watchMode: .auto,
+            capabilities: gnuServer(helperAvailable: true, helperEnabled: false), now: 0)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.note, "the helper is off for this location")
+    }
+
+    /// Section 8.1: the note has to name the real reason - `cache directory is noexec`,
+    /// `helper unsupported: <os>/<arch>`, `helper upload failed: …` - not a category.
+    func testTheDeploymentsOwnReasonIsWhatStatusPrints() {
+        for reason in [
+            "cache directory is noexec",
+            "helper unsupported: Linux mips64",
+            "helper upload failed: the copy on the server does not match this build",
+            "the server will not give the helper a channel of its own (MaxSessions 2)",
+        ] {
+            var capabilities = gnuServer()
+            capabilities.helperBlockReason = reason
+            let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: capabilities, now: 0)
+            XCTAssertEqual(ladder.tier, .sweep)
+            XCTAssertEqual(ladder.note, reason)
+        }
+    }
+
+    /// "A tier that fails at runtime (the helper's stream dies with a non-network error)
+    /// drops the location one tier down for the rest of the session and records why."
+    func testAHelperStreamThatDiesDropsToSweepForTheSession() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertTrue(ladder.recordRuntimeFailure(reason: "the helper exited", now: 100))
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.downgrades.count, 1)
+        XCTAssertEqual(ladder.downgrades[0].from, .helper)
+        XCTAssertEqual(ladder.downgrades[0].to, .sweep)
+        XCTAssertEqual(ladder.note, "helper failed: the helper exited")
+
+        // "for the rest of the session": a later probe that still says the helper is
+        // available must not put the location back on the tier that just failed.
+        ladder.applyCapabilities(gnuServer(helperAvailable: true), watchMode: .auto, now: 200)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.note, "helper failed: the helper exited")
+    }
+
+    /// Two failures walk the location all the way to the floor, and the floor holds.
+    func testHelperThenSweepEndsAtPollAndStaysThere() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertTrue(ladder.recordRuntimeFailure(reason: "the helper exited", now: 1))
+        XCTAssertTrue(ladder.recordRuntimeFailure(reason: "find is missing", now: 2))
+        XCTAssertEqual(ladder.tier, .poll)
+        XCTAssertFalse(ladder.recordRuntimeFailure(reason: "readdir failed", now: 3))
+        XCTAssertEqual(ladder.tier, .poll)
+    }
+
+    /// "Setting `watchMode` to a specific tier disables the fallback ladder except to
+    /// `poll`": `watch-mode helper` on a server that cannot run it goes to poll, not to
+    /// sweep, because asking for the helper and silently getting a sweep is not what that
+    /// setting means.
+    func testWatchModeHelperOnAServerWithoutOneFallsStraightToPoll() {
+        var capabilities = gnuServer()
+        capabilities.helperBlockReason = "cache directory is noexec"
+        let ladder = ChangeDetectionLadder(watchMode: .helper, capabilities: capabilities, now: 0)
+        XCTAssertEqual(ladder.tier, .poll)
+        XCTAssertEqual(ladder.note, "watchMode is set to helper, but cache directory is noexec")
+    }
+
+    func testWatchModeHelperOnAServerWithOneRunsIt() {
+        let ladder = ChangeDetectionLadder(
+            watchMode: .helper, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.note)
+    }
+
+    /// `watch-mode sweep` on a server that could run the helper is the user's choice, and
+    /// section 8.1 says it shows a note and *no* `upgrade:` line.
+    func testWatchModeSweepIsRecordedAsTheUsersChoiceEvenWithAHelperAvailable() {
+        let ladder = ChangeDetectionLadder(
+            watchMode: .sweep, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.note, "watchMode is set to sweep")
+    }
+
+    /// Section 6.4 still runs a sweep every 30 minutes at tier 2, so the busybox `-mmin`
+    /// note belongs on a helper location too: that sweep has the same blind spot.
+    func testTheMminNoteSurvivesAtTierTwoBecauseTheInsuranceSweepStillRuns() {
+        let ladder = ChangeDetectionLadder(
+            watchMode: .auto,
+            capabilities: gnuServer(helperAvailable: true, takesCmin: false), now: 0)
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertTrue(ladder.sweepUsesMmin)
     }
 }

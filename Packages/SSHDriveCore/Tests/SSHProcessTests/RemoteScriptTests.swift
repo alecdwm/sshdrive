@@ -62,7 +62,11 @@ final class RemoteScriptTests: XCTestCase {
         let text = script.text
         XCTAssertTrue(text.contains("} </dev/null &"), "the child never shares the script's stdin")
         XCTAssertTrue(text.contains("__sd_child=$!"))
-        XCTAssertTrue(text.contains("read -t 60 __sd_line || break"))
+        // `IFS= read -r`, not a bare `read`: since milestone 9 the wrapper may relay the
+        // line it read to the helper, and `read` without -r eats backslashes while the
+        // default IFS strips leading and trailing spaces - both of which a JSON control
+        // line and a filename inside one need kept.
+        XCTAssertTrue(text.contains("IFS= read -r -t 60 __sd_line || break"))
         XCTAssertTrue(text.contains("sleep 15"), "the dash branch's watchdog tick")
         XCTAssertTrue(text.contains("exec 7<&0") && text.contains("done <&7"),
                       "a background child's fd 0 is /dev/null; stdin must be duplicated in the parent")
@@ -81,7 +85,7 @@ final class RemoteScriptTests: XCTestCase {
             sentinel: sentinel, body: "true",
             heartbeat: .init(intervalSeconds: 5, timeoutSeconds: 20)
         )
-        XCTAssertTrue(script.text.contains("read -t 20 __sd_line || break"))
+        XCTAssertTrue(script.text.contains("IFS= read -r -t 20 __sd_line || break"))
         XCTAssertTrue(script.text.contains("sleep 5"))
         XCTAssertTrue(script.text.contains("-ge 4"))
     }
@@ -97,5 +101,70 @@ final class RemoteScriptTests: XCTestCase {
         XCTAssertTrue(script.text.contains(
             "if ( trap - EXIT; exec 2>/dev/null; read -t 1 __sd_probe </dev/null; [ $? -le 1 ] ); then"
         ), script.text)
+    }
+
+    // MARK: The helper's stdin relay (section 6.4 tier 2)
+
+    /// Section 9.2 says background children never share the script's stdin, and section
+    /// 6.4 says the helper is fed its root set and its pings on stdin. Both cannot be the
+    /// channel's stdin. The wrapper stays the only reader and relays what it reads into a
+    /// FIFO the child is given instead.
+    func testTheRelayMakesAFifoAndFeedsTheChildFromIt() {
+        let script = RemoteScript(
+            sentinel: sentinel, body: "exec helper", heartbeat: .standard,
+            stdinRelay: "/home/a/.cache/sshdrive/.sshdrive-helper-in-7")
+        let text = script.text
+        XCTAssertTrue(text.contains("mkfifo \"$__sd_relay\""), text)
+        XCTAssertTrue(text.contains("__sd_relay='/home/a/.cache/sshdrive/.sshdrive-helper-in-7'"), text)
+        // The child reads the FIFO, never the channel: `</dev/null` is what it falls back
+        // to, and `$__sd_stdin` is one or the other.
+        XCTAssertTrue(text.contains("} <\"$__sd_stdin\" &"), text)
+        XCTAssertFalse(text.contains("} </dev/null &"), text)
+        // The write end is opened *after* the child was started with the read end. Both
+        // opens block until the other appears; the other order deadlocks the wrapper.
+        let child = text.range(of: "__sd_child=$!")!
+        let open = text.range(of: "exec 8>\"$__sd_relay\"")!
+        XCTAssertTrue(child.upperBound < open.lowerBound, text)
+    }
+
+    /// A server where `mkfifo` fails is not a failure: the child runs with no stdin, which
+    /// is what every other remote command gets, and the wrapper is its only kill switch.
+    func testAFailedMkfifoLeavesTheChildWithNoStdin() {
+        let script = RemoteScript(
+            sentinel: sentinel, body: "exec helper", heartbeat: .standard, stdinRelay: "/tmp/r")
+        XCTAssertTrue(script.text.contains("__sd_stdin=/dev/null"), script.text)
+        XCTAssertTrue(script.text.contains("\(RemoteScript.relayFlagVariable)=0"), script.text)
+    }
+
+    /// Without a relay the wrapper is byte for byte what milestone 6 measured against
+    /// `deb`, `alp` and `bashbg`: `</dev/null`, no FIFO, no fd 8.
+    func testAScriptWithNoRelayIsUnchanged() {
+        let script = RemoteScript(sentinel: sentinel, body: "find .", heartbeat: .standard)
+        let text = script.text
+        XCTAssertTrue(text.contains("} </dev/null &"), text)
+        XCTAssertFalse(text.contains("mkfifo"), text)
+        XCTAssertFalse(text.contains(">&8"), text)
+    }
+
+    /// Both heartbeat branches relay - the `read -t` one that bash and busybox take and
+    /// the `sleep`-and-mtime watchdog that dash takes, which is the ordinary Linux path.
+    func testBothHeartbeatBranchesRelayTheLine() {
+        let script = RemoteScript(
+            sentinel: sentinel, body: "exec helper", heartbeat: .standard, stdinRelay: "/tmp/r")
+        let relays = script.text.components(separatedBy: "printf '%s\\n' \"$__sd_line\" >&8").count - 1
+        XCTAssertEqual(relays, 2, script.text)
+        // `IFS= read -r`, because a control line is JSON: an unescaped `read` would eat
+        // backslashes and strip leading spaces out of a filename.
+        XCTAssertTrue(script.text.contains("IFS= read -r"), script.text)
+    }
+
+    /// The relay FIFO is cleaned up on every exit path, like the stamp files.
+    func testTheRelayIsRemovedOnTheWayOut() {
+        let script = RemoteScript(
+            sentinel: sentinel, body: "exec helper", heartbeat: .standard, stdinRelay: "/tmp/r")
+        XCTAssertTrue(
+            script.text.contains("trap 'rm -f \"$__sd_stamp\" \"$__sd_mark\" \"$__sd_relay\" 2>/dev/null' EXIT"),
+            script.text)
+        XCTAssertTrue(script.text.contains("exec 8>&- 2>/dev/null"), script.text)
     }
 }

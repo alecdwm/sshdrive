@@ -20,3 +20,8 @@ Local.xcconfig
 
 # macOS
 .DS_Store
+
+# The helper crate builds here (DESIGN.md section 10.1 ships them from CI)
+helper/target/
+# A locally built helper embedded into the bundle by scripts/mac-build.sh
+Resources/helper/

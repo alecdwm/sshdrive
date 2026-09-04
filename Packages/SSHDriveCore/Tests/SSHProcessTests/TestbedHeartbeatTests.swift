@@ -130,4 +130,48 @@ final class TestbedHeartbeatTests: XCTestCase {
         }
         XCTAssertEqual(remaining, 0, "silence alone must kill the child")
     }
+
+    /// Milestone 9: the wrapper's stdin relay, under a **real** `sh`.
+    ///
+    /// The shape assertions in `RemoteScriptTests` are not enough here, and this test
+    /// exists because they were not: the first relay wrapper put a `;` after
+    /// `relayWrite`, which already ends in one, and dash answered
+    /// `Syntax error: ";;" unexpected` at line 31 - the channel died on the spot and the
+    /// ladder read it as a helper that would not start (2026-09-05, `deb`).
+    ///
+    /// So this runs the wrapper on Debian's dash and on Alpine's busybox ash, feeds a
+    /// line down the channel exactly as the agent feeds the root set, and requires the
+    /// child on the far side of the FIFO to have received it.
+    func testTheStdinRelayReachesTheChildOnARealShell() async throws {
+        try Testbed.skipUnlessEnabled()
+        for host in ["spike-deb", "spike-alp"] {
+            let master = try await master(host: host)
+            let relay = "/tmp/sshdrive-relay-test-\(Int.random(in: 100_000...999_999))"
+            // The child copies whatever reaches its stdin straight back out, so anything
+            // the wrapper relays appears in the channel's own output.
+            let script = RemoteScript(
+                body: "exec cat", heartbeat: .standard, stdinRelay: relay)
+            let channel = try await master.openExecChannel(script: script, readinessDeadline: 30)
+            defer { channel.close() }
+
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            let line = Data("{\"op\":\"roots\",\"shallow\":[\"a b\"]}\n".utf8)
+            try await channel.stream.write(line)
+
+            var seen = Data()
+            let deadline = Date().addingTimeInterval(20)
+            while Date() < deadline, !seen.contains(0x0A) {
+                let chunk = try await channel.stream.read(upTo: 4096, deadline: deadline)
+                if chunk.isEmpty { break }
+                seen.append(chunk)
+            }
+            let text = String(decoding: seen, as: UTF8.self)
+            XCTAssertTrue(
+                text.contains("{\"op\":\"roots\",\"shallow\":[\"a b\"]}"),
+                "\(host): the wrapper did not relay the line; got \(text.debugDescription), "
+                    + "stderr \(channel.stderrText.debugDescription)")
+            // And nothing the shell itself said: a syntax error would land here.
+            XCTAssertFalse(channel.stderrText.contains("Syntax error"), host)
+        }
+    }
 }

@@ -54,22 +54,27 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         /// `find: unrecognized: -cmin` (section 6.4).
         public var takesCmin: Bool
         public var takesPrintf: Bool
-        /// False for the whole of v1: the helper is milestone 9. It is also false for a
-        /// server that cannot run it - no writable executable directory, a `noexec` mount,
-        /// an unsupported OS or arch, a failed upload or hash check.
+        /// False for a server that cannot run the helper: no writable executable
+        /// directory, a `noexec` mount, an unsupported OS or arch, no channel to spare, a
+        /// failed upload or a failed hash check.
         public var helperAvailable: Bool
         /// The user's own `helper off` for this location.
         public var helperEnabledForLocation: Bool
+        /// What the deployment said when it refused, verbatim, so `status` prints the real
+        /// reason - `cache directory is noexec`, `helper unsupported: Linux mips`, `helper
+        /// upload failed: …` - rather than a category (section 8.1).
+        public var helperBlockReason: String?
 
         public init(hasExecChannel: Bool = false, hasFind: Bool = false, takesCmin: Bool = false,
                     takesPrintf: Bool = false, helperAvailable: Bool = false,
-                    helperEnabledForLocation: Bool = true) {
+                    helperEnabledForLocation: Bool = true, helperBlockReason: String? = nil) {
             self.hasExecChannel = hasExecChannel
             self.hasFind = hasFind
             self.takesCmin = takesCmin
             self.takesPrintf = takesPrintf
             self.helperAvailable = helperAvailable
             self.helperEnabledForLocation = helperEnabledForLocation
+            self.helperBlockReason = helperBlockReason
         }
     }
 
@@ -143,7 +148,8 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     private static func helperBlocked(_ capabilities: ServerCapabilities) -> String {
         if !capabilities.helperEnabledForLocation { return "the helper is off for this location" }
         if !capabilities.hasExecChannel { return "the account has no shell access" }
-        if !capabilities.helperAvailable { return "the remote helper is not available in this version" }
+        if let reason = capabilities.helperBlockReason { return reason }
+        if !capabilities.helperAvailable { return "the server cannot run the remote helper" }
         return "the helper did not start"
     }
 
