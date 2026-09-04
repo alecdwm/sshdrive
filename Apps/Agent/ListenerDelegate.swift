@@ -33,9 +33,15 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 
         connection.exportedInterface = SSHDriveXPCInterface.agent
         connection.exportedObject = AgentService(connection: connection)
-        // The extension exports its callback object on the same connection; the CLI and
-        // askpass export nothing, and never receive a callback.
-        connection.remoteObjectInterface = SSHDriveXPCInterface.fileProviderExtension
+        // Both remaining peers export a callback object of their own, and which one they
+        // export follows from which of our executables they are - the same rule that gives
+        // askpass its one-method interface (section 5.2). The extension takes progress and
+        // reopen callbacks; the CLI takes the collect connection's relayed prompts
+        // (section 4.2), which is the only thing the agent ever asks a terminal.
+        connection.remoteObjectInterface =
+            PeerExecutable.isCLI(pid: connection.processIdentifier)
+            ? SSHDriveXPCInterface.cli
+            : SSHDriveXPCInterface.fileProviderExtension
 
         connection.invalidationHandler = {
             // A transfer whose extension process disappears mid-way is cancelled the same

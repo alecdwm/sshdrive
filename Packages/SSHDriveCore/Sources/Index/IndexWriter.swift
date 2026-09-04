@@ -151,6 +151,15 @@ public final class IndexWriter {
         return IndexReader.decodeItem(statement)
     }
 
+    /// Runs `body` inside one transaction. A directory listing writes a row per entry
+    /// and an anchor per change, and a `data/many` with 10,000 entries is 10,000
+    /// autocommits without this - each its own WAL frame and fsync, which is most of the
+    /// time an enumeration of a large directory spends (measured against the testbed,
+    /// 2026-09-04).
+    public func batch<T>(_ body: () throws -> T) throws -> T {
+        try connection.transaction(body)
+    }
+
     public func children(ofParent identifier: String) throws -> [IndexItem] {
         let statement = try connection.prepare(
             "SELECT \(Self.columns) FROM items WHERE parent = ?1 ORDER BY path")

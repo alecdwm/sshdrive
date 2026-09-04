@@ -11,10 +11,10 @@ struct Debug: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Test hooks for the fake backend and the index.",
         subcommands: [
-            Fake.self, SSHLocation.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
+            Fake.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
             IndexCommand.self, Keychain.self, Secrets.self, Signal.self,
             Evict.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
-            Stabilize.self, Testing.self,
+            Stabilize.self, Testing.self, Transport.self,
         ])
 }
 
@@ -76,64 +76,10 @@ struct FakeList: ParsableCommand {
     }
 }
 
-// MARK: ssh-backed locations (milestone 2)
-
-/// `sshdrive debug ssh add|remove`. Not `sshdrive add`: the real one shows the `ssh -G`
-/// resolution and relays every prompt of the two-pass collect connection to the terminal,
-/// and it arrives in milestone 3 (section 8, section 4.2). This one writes an ssh-backed
-/// location from what it is given and connects with whatever the keychain already holds,
-/// which is what proves the milestone 2 transport end to end. Store the secrets first
-/// with `sshdrive debug secrets store`.
-struct SSHLocation: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "ssh",
-        abstract: "Create and remove ssh-backed locations (milestone 2 hook).",
-        subcommands: [SSHAdd.self, SSHRemove.self])
-}
-
-struct SSHAdd: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "add",
-        abstract: "Create an ssh-backed location and add its domain.")
-
-    @Argument(help: "Name for the location; becomes its nickname and the domain's display name.")
-    var name: String
-
-    @Argument(help: "Destination as [user@]host[:port]. The host may be a ~/.ssh/config alias.")
-    var destination: String
-
-    @Option(
-        name: .customLong("remote-path"),
-        help: "Directory on the server to mount. Default: the account's home.")
-    var remotePath: String?
-
-    @Option(help: "IdentityFile for this location.")
-    var identity: String?
-
-    @Option(help: "ProxyJump chain: one or more [user@]host[:port], comma separated.")
-    var jump: String?
-
-    func run() throws {
-        var arguments = ["name": name, "destination": destination]
-        if let remotePath { arguments["remotePath"] = remotePath }
-        if let identity { arguments["identity"] = identity }
-        if let jump { arguments["jump"] = jump }
-        AgentClient.prettyPrint(try AgentClient.send(command: "debug.ssh.add", arguments: arguments))
-    }
-}
-
-struct SSHRemove: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "remove",
-        abstract: "Remove a location, its domain, its index and its ssh master.")
-
-    @Argument var name: String
-
-    func run() throws {
-        AgentClient.prettyPrint(
-            try AgentClient.send(command: "debug.ssh.remove", arguments: ["name": name]))
-    }
-}
+// `sshdrive debug ssh add` was milestone 2's stand-in for `sshdrive add`, and milestone 3
+// replaced it: the real command does the `ssh -G` display, the two-pass collect connection
+// and the relayed prompts it never had (sections 4.1, 4.2, 8). Nothing depended on it, so
+// it is gone rather than kept as a second, worse way to make a location.
 
 // MARK: the fake tree
 

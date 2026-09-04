@@ -54,13 +54,7 @@ final class AskpassService: NSObject, SSHDriveAskpassProtocol {
     /// that it is one of our four signed executables (section 5.2); this only says which,
     /// so the wrong one cannot be handed the secrets interface.
     private static func isAskpass(pid: Int32) -> Bool {
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 2)
-        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
-        guard length > 0 else {
-            Log.ssh.error("could not read the path of peer pid \(pid, privacy: .public)")
-            return false
-        }
-        let path = String(cString: buffer)
+        guard let path = PeerExecutable.path(pid: pid) else { return false }
         if let expected = AgentSecrets.askpassPath { return path == expected }
         return (path as NSString).lastPathComponent == "sshdrive-askpass"
     }

@@ -6,6 +6,430 @@ happened.
 
 ---
 
+## 2026-09-04 (milestone 3, part 2) - the CLI: `add` with relayed prompts, `list`/`show`/`remove`/`set`, and the section 8.1 capability report
+
+Section 8's user-facing half, section 4.2's collect connection driven from a terminal, and
+section 8.1's report. Same headless VM (macOS 26.4.1 arm64, `OpenSSH_10.2p1`), the signed
+Debug build from `scripts/mac-build.sh signed` installed over `/Applications/SSH Drive.app`
+with `ditto`. Testbed up on the Mac; seven services were used (`deb` 2201, `deb-kbdint`
+2204, `deb-maxsess` 2205, `alp` 2206, `bastion-a` 2210 and, behind it, `bastion-b` and
+`inner`). Every `add` was driven over ssh with its answers on stdin, which is a pipe, so
+the hidden-tty read falls back to a line read - that path is what a script and a CI run
+take too.
+
+**295 package tests, 0 failures** (was 246; 31 skipped without the testbed). The 49 new
+ones are the destination and `set`-key parser (`ConfigTests`), the `ssh -G` attribution
+diff and its display (`SSHProcessTests`), the add-flow state machine and the broker driven
+through `AskpassHarness` (`AgentCoreTests`), and three for the nested-transaction fix
+below (`IndexTests`).
+
+### What `add` does, in order
+
+The whole of section 8's paragraph, on one screen:
+
+```
+$ sshdrive add deb alec@192.168.64.1:2201 --identity ~/.ssh/sshdrive-spike
+192.168.64.1 resolves to:
+  user alec (from this location)
+  hostname 192.168.64.1 (ssh default)
+  port 2201 (from this location)
+  identityfile /Users/alec/.ssh/sshdrive-spike (from this location)
+  identitiesonly yes (from this location)
+  …
+Your terminal's PATH differs from the login shell snapshot SSH Drive will use.
+  terminal:  /Applications/SSH Drive.app/Contents/MacOS:/usr/bin:/bin:/usr/sbin:/sbin
+  SSH Drive: /opt/homebrew/opt/openjdk@17/bin:…:/Library/Apple/usr/bin
+Your terminal's SSH_AUTH_SOCK differs from the one SSH Drive will use.
+  terminal:  (unset)
+  SSH Drive: /var/run/com.apple.launchd.be1Nf5Ktqm/Listeners
+Connecting once to check, with the command SSH Drive will use later.
+Connecting for real, from the stored answers.
+
+Added deb (1EF434B3-164B-4F1B-B5B8-6C96451C9B5A)
+  server     alec@192.168.64.1:2201
+  root       /home/alec  (7 entries)
+  mount      ~/Library/CloudStorage/SSHDrive-deb
+  Capabilities  6/8 optimal   probed 0s ago
+```
+
+The attribution is the section 4.1 diff, and it earns its keep: every line above says
+which of the three precedence levels it came from, and an `--identity` shows up as *from
+this location* rather than being confused with a config file's `IdentityFile`. Against the
+`spike-*` aliases the same display credits the config instead.
+
+**"Connecting once to check" and "Connecting for real" are two different connections and
+that is the point.** The collect connection is an `SSHMaster` on a scratch control path -
+the same `ssh` command line the location's own master runs, differing only in
+`StrictHostKeyChecking` (`ask` rather than `yes`, so section 4.3's question can be raised)
+and in the socket it binds. It needs no remote command, because the control socket
+appearing *is* authentication having succeeded, which is also why it would work against a
+`ForceCommand internal-sftp` account. It is then shut down and the location connects
+again, unattended, from the stored answers. Section 4.2's "a location that passes `add`
+works from the agent" is therefore demonstrated on every `add` rather than asserted.
+
+### The seven scenarios
+
+| Scenario | Server | Result |
+|---|---|---|
+| key auth, no prompts | `alec@192.168.64.1:2201` | added; 7 entries; `6/8 optimal` |
+| password relayed and stored | `pw@192.168.64.1:2201` | one prompt, answered on the terminal, `password:pw@192.168.64.1:2201` written **after** the connection authenticated |
+| second location, same host | `pw@192.168.64.1:2201 --path /home/pw/.cache` | **no prompt at all**; the shared item answered it |
+| one-hop chain | `alec@inner --jump hop@192.168.64.1:2210` | two prompts, keyed `password:hop@192.168.64.1:2210` and `password:alec@inner:22` |
+| two-hop chain | `alec@inner --jump hop@192.168.64.1:2210,hop@bastion-b` | three prompts, three items, **a different password on each hop** |
+| keyboard-interactive | `kbd@192.168.64.1:2204` | one prompt, stored as `password:kbd@192.168.64.1:2204` |
+| fresh `known_hosts`, answered **no** | `alec@192.168.64.1:2206` | exit 1, "The server's host key was not accepted, so nothing was added", `known_hosts` untouched, no location |
+| the same question, answered **yes** | `alec@192.168.64.1:2206` | added; `known_hosts` gained one entry; `5/8 optimal` (busybox) |
+| wrong password | `keypass@192.168.64.1:2201` | exit 1, `ssh said: Permission denied (publickey,password)`, **nothing stored and no location** |
+| a remote path that does not exist | `pw@…:2201 --path /home/pw/nope` | exit 1, "The server has no /home/pw/nope …", no location left behind |
+
+The two-hop transcript, trimmed, is the one worth keeping:
+
+```
+  jump chain hop@192.168.64.1:2210 -> hop@bastion-b (rebuilt as SSH Drive's own
+      ProxyCommand; never handed to ssh)
+It will be stored in your keychain as password stored for hop@192.168.64.1.
+hop@192.168.64.1's password:
+It will be stored in your keychain as password stored for hop@bastion-b.
+hop@bastion-b's password:
+It will be stored in your keychain as password stored for alec@inner.
+alec@inner's password:
+Connecting for real, from the stored answers.
+Added inner …
+  jump       192.168.64.1 -> bastion-b
+  auth       password stored for alec@inner
+  auth       password stored for hop@192.168.64.1
+  auth       password stored for hop@bastion-b
+```
+
+Section 4.2's reason for keying on `user@hostname:port` rather than on the location is
+visible in three lines: the two bastions have deliberately different passwords and each
+hop's prompt named its own host. The hops are told apart from the master by the argv the
+askpass sends, exactly as milestone 2 established; nothing here parses the prompt text.
+
+**Rollback is real.** Every failure above left `config.json`, the domain list and the
+keychain as they were. Three of them fail before anything is written at all (the location
+is created only after the collect connection succeeds), and the fourth - a bad
+`--remote-path`, which is only discovered by the *second* connection - removes the domain,
+the runtime, the config entry and the domain directory before it reports.
+
+### `list`, `show`, `status`, `set`, `remove`
+
+- **`list`** is the section 8 table: name, destination, mounted, state, TTL, and the
+  secrets by kind. It connects nothing: state comes from runtimes that are already up, so
+  a `list` on a laptop with no network is instant. `status --probe` is the way to ask for
+  a connection on purpose.
+- **`show`** prints the `ssh` binary and version, the whole `ssh -G` resolution with its
+  attribution, the keywords section 6.1 overrode, the environment snapshot, whether the
+  location runs `IdentityAgent=none` or through the key agent, the rebuilt `ProxyCommand`,
+  the mount path, the last error, the stored secrets **by kind and never their values**,
+  and the capability report.
+- **`status`** carries section 8.1's report with the glyphs and the `upgrade:`/`note:`
+  lines. Against `deb-maxsess` it also carries the part-1 channel budget:
+
+```
+maxsess   alec@192.168.64.1:2205   mounted   online   TTL 1h
+       channels 2 at a time, no bulk channel, shell
+         note: the server allows two channels at a time (MaxSessions 2): the bulk transfer
+         channel is dropped and transfers share the metadata channel, …
+       server sees us as uid=2401(alec) gid=2401 groups=2401
+```
+
+  and against `alp` the busybox `find` shows up twice, which is the report doing real work
+  rather than printing a constant:
+
+```
+alp   5/8 optimal
+  ◐ change detection  sweep (find -mmin over the root set; a rename or chmod moves ctime,
+                      not mtime, so those are missed until the next full sweep)
+  ◐ change evidence   size + mtime (same-second rewrites of equal size are missed)
+        upgrade: a `find` that takes -printf (GNU findutils), or the helper
+```
+
+  `--json` emits the same objects (`{feature, level, best, glyph, upgrade, note}`), so the
+  text and the machine-readable form cannot disagree - the agent computes both and the CLI
+  only lays out.
+- **`set`** applied `nickname` (domain re-created, `SSHDrive-alp` became
+  `SSHDrive-alpine`, with the warning section 8 asks for - S9 is still unanswered, so the
+  documented behaviour is what runs), `cache-ttl 1d`, and `option add|remove`. A bad value
+  is refused and changes nothing (`"2h" is not a valid cache-ttl; expected
+  15m|1h|12h|1d|1w|1mo|never`). `host|user|port|identity` re-run the collect connection
+  before saving, as section 8 requires.
+- **`remove`** asks section 8's confirmation (`n` leaves everything and exits 1), takes the
+  domain, the index directory and the location, and applies the shared-item rule exactly:
+  removing `debpw` while `debpw2` still named `password:pw@192.168.64.1:2201` left the item
+  alone, and removing `debpw2` deleted it. `remove --all` cleared four locations and the two
+  chain passwords in one go.
+- **`doctor`** grew the four transport checks: `ssh -V`, `~/.ssh/config` parse warnings from
+  a `ssh -G` of a name nothing can match, orphan control sockets (reported, never swept -
+  `doctor` is a diagnosis), and keychain reachability under the access group. The
+  login-shell snapshot summary was already there.
+
+### Two assumptions that failed
+
+**Section 5.3's "a listing is one transaction" could not be applied as written.** The first
+real `add` died with `SQLite error 1: cannot start a transaction within a transaction`. The
+listing's own body calls two things that are each a transaction in their own right -
+`appendAnchor` for every changed row, and `delete`, which section 5.3 requires to write the
+row and its deletion anchor together - and SQLite has no nested `BEGIN`. Both rules are
+right; the helper was wrong. `SQLiteConnection.transaction` now nests, with `SAVEPOINT` for
+every level below the outermost, so an inner failure its caller catches undoes only its own
+writes and one that propagates still rolls the whole listing back. Three tests cover it.
+Section 5.3 and section 13 say so now. (Part 1 measured the one-transaction listing before
+the anchor calls moved inside it, which is why this was not seen then.)
+
+**Section 4.2's 60 s authentication deadline cannot cover the collect connection.** It is
+written as "every connection", and it exists because nothing may sit waiting for a human on
+an unattended reconnect. But the collect connection is the one where somebody *is* at the
+keyboard: reading a fingerprint off the screen and typing a password for each of three hops
+took well over a minute in the two-hop run, and a 60 s kill lands in the middle of it. The
+collect connection now runs to 300 s (the broker's token expiry moves with it), and the
+master `add` brings up immediately afterwards carries the ordinary 60 s - which is the
+connection that has to work unattended and therefore the one worth bounding. Section 4.2
+and section 13 corrected.
+
+### Three smaller things worth writing down
+
+- **The CLI has to export an XPC object.** Section 4.2 has the agent "call back to the CLI
+  over the same XPC connection", which the listener did not allow for: it set the
+  extension's interface as `remoteObjectInterface` for every non-askpass peer. It now picks
+  by executable, the same rule that gives `sshdrive-askpass` its one-method interface, so a
+  `sshdrive` peer gets `SSHDriveCLIProtocol` (one prompt method, one note method) and
+  everyone else the extension's.
+- **The CLI's stdout must be unbuffered.** stdout is *fully* buffered when it is a pipe -
+  which every transcript, `script -q` run and CI invocation is. The agent writes a relayed
+  prompt through the file descriptor so it reaches the terminal before the read blocks on
+  it; a buffered `print` from the CLI's own report then lands behind it, and the transcript
+  stops matching what happened. `setvbuf(stdout, nil, _IONBF, 0)` once, in the client.
+  Related: on a pipe nothing supplies the newline the user's Return would, so the CLI writes
+  one itself after a piped read.
+- **Reinstalling the app with `rm -rf` first loses the domains.** `NSFileProviderManager.domains()`
+  then answers "The application cannot be used right now" until the extension is
+  re-registered and the app relaunched. `ditto` **over** the existing bundle keeps
+  everything, and `open -g "/Applications/SSH Drive.app"` by path rather than
+  `open -g -a "SSH Drive"` by name is what stops LaunchServices registering the copy in
+  the build directory instead - `sshdrive doctor`'s "app in /Applications" line is what
+  catches that, and it caught it here. Worth knowing before blaming the code; nothing in
+  the design depends on either.
+
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no
+`sshdrive-*` control sockets, and **an empty keychain** - the five items milestone 2 left
+were deleted at the start of this pass so the prompt relay was genuinely exercised, and
+everything this pass stored was removed with its location. `known_hosts` differs from the
+backup by exactly the `[192.168.64.1]:2206` entry the host-key test removed and re-added.
+Three `ssh -N -M … cm-hop@192.168.64.1-2210` and one `cm-hb4` process from the milestone-2
+pass (15:17-15:41) are still running; they use the testbed config's own `ControlPath`, not
+ours, which is itself the evidence for section 6.1's claim that our rebuilt hop touches
+neither.
+
+---
+
+## 2026-09-04 (milestone 3, part 1) - the transfer scheduler, permissions to capabilities, and S3's deferred containment test
+
+The §6.2 transfer scheduler on a second bulk channel, §5.4's permissions and hidden names,
+and the containment half of S3 that milestone 1 deferred to a real server. Same headless VM
+(macOS 26.4.1 arm64, `OpenSSH_10.2p1`), the signed Debug build from
+`scripts/mac-build.sh signed` (`MAC_DIR=~/sshdrive`) installed over `/Applications/SSH Drive.app`
+with `ditto` and restarted with `open -g`. Testbed up on the Mac; `deb` (2201) and
+`deb-maxsess` (2205) were the two servers used.
+
+**246 package tests, 0 failures** (was 214; 31 skipped without the testbed). The 32 new ones
+are a new `AgentCore` module - `ItemDerivation`, `NameVisibility` and `TransferScheduler`
+moved out of `Apps/Agent` so they can be unit-tested without an app bundle.
+
+### The scheduler, on a real mount
+
+Two SFTP mux clients on one master, visible in `ps`:
+
+```
+/usr/bin/ssh -N -o ControlMaster=yes -o ControlPath=$TMPDIR/sshdrive-159bb6b1 … 192.168.64.1
+/usr/bin/ssh -F /dev/null -S $TMPDIR/sshdrive-159bb6b1 … -s 192.168.64.1 sftp   <- metadata
+/usr/bin/ssh -F /dev/null -S $TMPDIR/sshdrive-159bb6b1 … -s 192.168.64.1 sftp   <- bulk
+```
+
+Eight 32 MiB files opened at once from a shell loop through
+`~/Library/CloudStorage/SSHDrive-deb`, and the agent's own log:
+
+```
+159BB6B1…: transfer queued (4 running, 1 waiting)
+159BB6B1…: transfer queued (4 running, 2 waiting)
+159BB6B1…: 6 transfers held, above the six-fetch ceiling
+159BB6B1…: transfer queued (4 running, 3 waiting)
+159BB6B1…: 7 transfers held, above the six-fetch ceiling
+159BB6B1…: transfer queued (4 running, 4 waiting)
+```
+
+`peakRunning 4`, `peakHeld 8`, every one of the eight delivering its full 33,554,432 bytes,
+and the window share visibly splitting (16, 8, 5, 4 as the four filled up).
+
+- **A 64 MiB upload** through the same scheduler and the same temp-file-plus-rename path:
+  0.73 s, 87 MiB/s, on the bulk channel, streamed a megabyte at a time so it never sits in
+  the agent's memory.
+- **A cancel mid-fetch**: a 512 MiB file cancelled 300 ms in stopped at 52,485,120 bytes and
+  answered "The transfer was cancelled."; cancelled 30 ms in, at 45,173,760. Uncancelled the
+  same file takes 2.9 s. A queued transfer that is cancelled never starts.
+- **A partial fetch**, 1 MiB at offset 16 MiB, returned exactly 1,048,576 bytes.
+
+### The §6.2 assumption that failed
+
+**The six-fetch ceiling bounds an eager subtree and nothing else.** S6 measured 38 transfers
+running in strict batches of six and §6.2 concluded "the four running plus at most two
+waiting is everything the agent ever holds". Eight `cat`s from a shell reached the extension
+as **eight simultaneous foreground `fetchContents` calls**, so the agent held eight. The
+scheduler now treats six as a size, not a cap: a seventh arrival is admitted and counted
+(`overCeilingAdmissions`, which `status` shows) rather than refused, because refusing a
+`fetchContents` the system did make fails a user's open for the sake of a measurement.
+§6.2 and §13 corrected.
+
+### `MaxSessions`: what the design wants at 2, and how the probe asks
+
+`deb-maxsess` has `MaxSessions 2`. The `-N` master carries no session of its own, so two is
+two *channels*, and master + metadata + bulk is exactly at the limit - with nothing left for
+an exec channel. §6.1 already decides it: at 2 the bulk channel is dropped, transfers share
+the metadata channel under the scheduler, and the second channel is kept for the shell,
+because tier 1's sweep, the capability probe and the `id` identity all need exec and nothing
+can share an exec channel, while transfers can share an SFTP one. So the probe's real
+question is **"may I hold three at once"**, and two opens answer it: the second *is* the bulk
+channel, and the third stands in for the exec channel and is closed again. Against 2205:
+
+```
+"channels": { "concurrentChannels": 2, "bulkChannel": false, "execChannel": true,
+  "note": "the server allows two channels at a time (MaxSessions 2): the bulk transfer
+   channel is dropped and transfers share the metadata channel, so a large download slows
+   listings; the second channel is kept for shell access (sweep, probe, helper)" }
+```
+
+One `sftp` mux client in `ps`, the `id` probe still answering (`uid=2401(alec)`), the
+scheduler's window share halved to 8 so the shared channel keeps request slots free for the
+metadata calls served ahead of transfers, and uploads and fetches both working on it.
+
+Two things worth writing down. **A channel is proved open by completing the SFTP handshake on
+it**: `ssh` spawns successfully whether or not the session was granted, and only the refusal
+on stderr, or a handshake that never lands, tells the two apart. And **the agent never sees a
+server banner**, so §6.1's "cached once per server banner, re-probed when the banner changes"
+cannot be implemented as written: its `ssh` runs at `LogLevel=ERROR`, which prints no remote
+version, and a mux client speaks to the master's socket rather than to the server. The cache
+in `domains/<id>/capabilities.json` is keyed by the location and invalidated only by an
+explicit re-probe; a cached budget that has stopped holding is noticed anyway, because
+opening the bulk channel is what the cached answer is used for. §6.1 and §13 say so now.
+
+### Permissions to capabilities (§5.4), against a real `id`
+
+The identity comes from one `id -u; id -g; id -G; id -un` exec channel through `RemoteScript`
+at connect: `uid=2001(alec) gid=2001 groups=2001` on `deb`, `uid=2401(alec)` on
+`deb-maxsess`. Where there is no shell - a `ForceCommand` account, or a `MaxSessions 1`
+server with no channel to spare - the identity stays unknown and §5.4's SFTP-only rule
+applies. The derived rows, read back out of the index:
+
+| Path | mode | `capabilities` | `fs_flags` |
+|---|---|---|---|
+| `data/perm` (dir) | 0755 | 111 | 7 (exec, read, write) |
+| `data/perm/script.sh` | 0755 | 111 | 7 |
+| `data/perm/plain.txt` | 0644 | 111 | 6 (read, write; **no** exec) |
+| `data/perm/rootowned.txt` | 0444 | 109 (no writing) | 2 (read only) |
+| `data/perm/ro` (dir) | 0555 | 109 (no adding sub-items) | 3 (search, read) |
+| `data/perm/ro/locked.txt` | **0666** | **65** (reading + evicting only) | 2 |
+
+The last row is the paragraph §5.4 spends the most words on: a writable file in a read-only
+directory is shown **locked**, because replacing content goes through a temp file in that
+directory, and renaming and deleting follow the parent's write bit. It is derived, not
+guessed - and it is the row, not the extension, that says so.
+
+### Hidden names (§5.4)
+
+`data/weird` seeded with `Makefile`/`makefile`, an NFC and an NFD `é.txt`, and a `.DS_Store`,
+on top of the testbed's own ten weird names. Through the mount, ten entries; and:
+
+```
+"notShown": [
+  { "path": "data/weird/latin1-caf\xff", "reason": "the name is not valid UTF-8, which macOS cannot represent" },
+  { "path": "data/weird/makefile",  "reason": "the local filesystem cannot tell it from \"Makefile\"; rename one on the server" },
+  { "path": "data/weird/é.txt",     "reason": "the local filesystem cannot tell it from \"é.txt\"; rename one on the server" }
+]
+```
+
+`Makefile` wins on the byte-wise rule (`M` is 0x4D, `m` is 0x6D) and an incumbent keeps its
+slot regardless of `readdir` order. The server-side `.DS_Store` is not listed at all and is
+not in "not shown" either: §5.4 says it is never enumerated, so it gets no row, which is what
+tells it apart from a hidden name. Sockets and FIFOs, `.`/`..`, and our own
+`.sshdrive-upload-*` temp files are dropped the same way. A create or rename onto a hidden
+name fails `.filenameCollision`.
+
+### S3's deferred containment test, on a real server
+
+Everything below was done over ssh as `alec@deb`, inside that account's own home.
+`data/swap/` was created with an `inside.txt`, listed and read through the mount, then
+replaced: `mv data/swap data/swap.real && ln -s /etc data/swap`.
+
+**The §9.1 assumption that failed.** §9.1's "never descend through a link" was written as a
+rule for recursive delete. It has to hold for enumeration too, because **SFTP `opendir`
+follows a symlink**: with the swap in place, forcing the agent to list `data/swap` returned
+`/etc` and put `passwd`, `shadow`, `skel`, `ld.so.cache` and eighty other names into the
+index as rows under the mount root. Nothing outside the account's own tree was ever written
+or deleted, and Finder never showed them - the replica had already cached the pre-swap
+listing, and §6.5's "a folder is enumerated once, ever" meant nothing re-asked - but the
+index is exactly where they must not be, and a pin or a sweep would have acted on them.
+
+Fixed: every listing re-`lstat`s its own directory before `readdir` and refuses to descend
+when the answer is no longer `directory`; the row is rewritten from that `lstat`, every row
+beneath it is deleted, and the container answers `.noSuchItem`. §9.1 and §13 corrected.
+With the check in place, and the swap still in place on the server:
+
+| Question | Answer |
+|---|---|
+| Rows anywhere under `data/swap` | **0** |
+| `ls -la <mount>/data` | `swap` appears as `lrwx------ … swap -> ` (a link, empty target: §5.7's target rewrite is milestone 4) |
+| `ls <mount>/data/swap` | the link itself, no contents |
+| `cat <mount>/data/swap/passwd` | `No such file or directory` |
+| `rm <mount>/data/swap/hostname` | nothing to remove; `/etc/hostname` untouched |
+| `/etc` on the server afterwards | intact, 82 entries |
+
+Restored afterwards: `rm data/swap && mv data/swap.real data/swap`, and `inside.txt` reads
+back.
+
+**`RelativePath` escape attempts**, handed straight to `createItem` with no shell and no
+string path in between (`sshdrive debug transport escape`):
+
+| `createItem` filename | Result |
+|---|---|
+| `..` | refused: `A path component may not be ".."` |
+| `../escaped.txt` | refused: `A path component may not contain "/"` |
+| `/etc/escaped.txt` | refused: `A path component may not contain "/"` |
+| `.` | refused: `A path component may not be "."` |
+| upload to `../escaped.bin` | refused: `A path component may not be ".."` |
+
+**An absolute symlink target in `createItem`** is the one case that is not refused yet:
+`createItem(filename: "escape-link", symlinkTarget: "/etc")` creates the link on the server,
+at a path the chokepoint validated. That is §5.7's lexical inside-the-root check, which is
+milestone 4 and is still a `TODO` in `LocationRuntime.createItem`. §9.1 holds regardless: the
+target string is never joined to a remote path, and through the mount `ls escape-link` and
+`cat escape-link-passwd` both answer `No such file or directory`, with zero index rows under
+either. Both links were removed afterwards.
+
+### Two more things a large directory taught us
+
+- **A directory listing must be one transaction.** `ls` of the testbed's 10,000-entry
+  `data/many` through the mount answered `ls: fts_read: Operation timed out` - with paging on
+  *and* with paging off, so it was never the paging. Row by row, the listing is 10,000
+  autocommits, each its own WAL frame; wrapped in one `BEGIN IMMEDIATE` the same `ls` returns
+  all 10,000 names in 70 s cold and instantly warm. §5.3 and §13 say so now.
+- **Paging works and the system follows it.** 2,000 items a page; the extension logs
+  `enumerateItems container=41AC454A… page=E113FC6D…` for the continuations and the agent
+  logs `paging 10000 entries of data/many in 2000s`. A page token is an offset into a listing
+  the agent already holds, so a second page never re-lists the directory.
+
+### State the VM was left in
+
+The signed build is installed at `/Applications/SSH Drive.app` and the agent is running, for
+whoever picks milestone 3 up. **No File Provider domains and no locations in `config.json`**;
+`sshdrive doctor` reports "file provider domains: none" and no `sshdrive-*` control sockets
+are left. The testbed trees are back to what `testbed/README.md` documents: `data/{many,tree,weird}`
+on `deb` with the original ten weird names, nothing extra in `~alec`, and `deb-maxsess`
+clean. The keychain items the milestone 2 pass left in place are still there.
+
+---
+
 ## 2026-09-04 (assembled stack) - S2: the transport end to end, three real mounts, and what is left for a real Mac
 
 The three milestone 2 modules (`SFTP`, `SSHProcess`, `Secrets`) merged into one stack, wired

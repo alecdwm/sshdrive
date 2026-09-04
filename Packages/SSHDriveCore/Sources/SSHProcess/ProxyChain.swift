@@ -85,9 +85,11 @@ public enum ProxyChainBuilder {
     /// it `ssh` still attaches to an existing socket at whatever `ControlPath` the config
     /// names for the bastion, and `ssh -G` prints the config's `controlpath` unchanged
     /// under `-o ControlMaster=no`. Only `ControlPath=none` clears it.
-    static func hopOptions(identityAgentNone: Bool) -> [(String, String)] {
+    static func hopOptions(identityAgentNone: Bool, hostKeyChecking: String = "yes")
+        -> [(String, String)]
+    {
         var pairs: [(String, String)] = [("ControlMaster", "no"), ("ControlPath", "none")]
-        pairs += SSHCommandBuilder.commonOptions()
+        pairs += SSHCommandBuilder.commonOptions(hostKeyChecking: hostKeyChecking)
         if identityAgentNone { pairs.append(("IdentityAgent", "none")) }
         return pairs
     }
@@ -100,10 +102,12 @@ public enum ProxyChainBuilder {
     public static func hopArguments(
         _ hop: JumpHop,
         identityAgentNone: Bool,
-        innerProxyCommand: String?
+        innerProxyCommand: String?,
+        hostKeyChecking: String = "yes"
     ) -> [String] {
         var arguments = [SSHProcess.sshBinaryPath, "-W", "%h:%p"]
-        arguments += SSHCommandBuilder.flatten(hopOptions(identityAgentNone: identityAgentNone))
+        arguments += SSHCommandBuilder.flatten(
+            hopOptions(identityAgentNone: identityAgentNone, hostKeyChecking: hostKeyChecking))
         if let innerProxyCommand {
             // This hop is reached through the one before it. Cancel any ProxyJump its own
             // host block may carry, since we are supplying the route - and put the
@@ -139,12 +143,16 @@ public enum ProxyChainBuilder {
     /// is quoted again as it is embedded — which is what makes an identity path
     /// containing a space and a quote survive two levels of shell — and percent-escaped
     /// once more for each level it descends.
-    public static func proxyCommand(for hops: [JumpHop], identityAgentNone: Bool) -> String? {
+    public static func proxyCommand(
+        for hops: [JumpHop], identityAgentNone: Bool, hostKeyChecking: String = "yes"
+    ) -> String? {
         guard !hops.isEmpty else { return nil }
         var inner: String?
         for hop in hops {
             let nested = inner.map(escapingPercentsForOneExpansion)
-            let arguments = hopArguments(hop, identityAgentNone: identityAgentNone, innerProxyCommand: nested)
+            let arguments = hopArguments(
+                hop, identityAgentNone: identityAgentNone, innerProxyCommand: nested,
+                hostKeyChecking: hostKeyChecking)
             inner = ShellQuoting.commandLine(arguments)
         }
         return inner

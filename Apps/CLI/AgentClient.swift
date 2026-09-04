@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XPCProtocols
 import Logging
 
@@ -67,23 +68,45 @@ enum AgentClient {
     /// whose postflight did not run) the CLI launches the bundle it lives in with
     /// `open -g` once, as the postflight does, waits for the service, and retries
     /// (section 8).
+    /// stdout is *fully* buffered when it is a pipe, which is what a transcript, a
+    /// `script -q` run and every CI invocation are. The agent writes the collect
+    /// connection's prompts through the file handle so `ssh`'s question reaches the
+    /// terminal before the read blocks on it, and a buffered `print` from a command's own
+    /// report would then land out of order behind it. Unbuffered costs nothing here:
+    /// the CLI prints tens of lines, not thousands.
+    private static let unbufferedStdout: Void = { setvbuf(stdout, nil, _IONBF, 0) }()
+
     static func send(
-        command: String, arguments: [String: String] = [:], allowRelaunch: Bool = true
+        command: String, arguments: [String: String] = [:], allowRelaunch: Bool = true,
+        timeout: Double = AgentClient.timeoutSeconds
     ) throws -> Data {
+        _ = unbufferedStdout
         do {
-            return try sendOnce(command: command, arguments: arguments)
+            return try sendOnce(command: command, arguments: arguments, timeout: timeout)
         } catch let error as AgentUnavailable {
             // Only an unreachable agent is worth relaunching the bundle for; a command
             // that timed out reached an agent that is already running.
             guard allowRelaunch, launchOwnBundle() else { throw error }
-            return try sendOnce(command: command, arguments: arguments)
+            return try sendOnce(command: command, arguments: arguments, timeout: timeout)
         }
     }
 
-    private static func sendOnce(command: String, arguments: [String: String]) throws -> Data {
+    /// `add`, `passwd` and a `set` that re-keys the secrets run a collect connection with
+    /// prompts relayed to this terminal (section 4.2), so the reply can legitimately be
+    /// minutes away: the agent is waiting on a person, and the person is waiting on the
+    /// server. The broker's own collect deadline (300 s) is what actually bounds it.
+    static let interactiveTimeoutSeconds: Double = 900
+
+    private static func sendOnce(
+        command: String, arguments: [String: String], timeout: Double
+    ) throws -> Data {
         let connection = NSXPCConnection(
             machServiceName: SSHDriveIdentifiers.machServiceName, options: [])
         connection.remoteObjectInterface = SSHDriveXPCInterface.agent
+        // The terminal, for the length of this command and no longer. The agent calls back
+        // on it only while a command of ours is in flight (section 4.2).
+        connection.exportedInterface = SSHDriveXPCInterface.cli
+        connection.exportedObject = PromptService()
         connection.resume()
         defer { connection.invalidate() }
 
@@ -118,9 +141,9 @@ enum AgentClient {
         // Long enough for a cold launchd start, short enough that a wedged agent does not
         // hang a terminal forever. Running out of it is *not* an unreachable agent: the
         // connection was made and the message was delivered, so say so instead.
-        if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             if answered { return try result.get() }
-            throw CommandTimedOut(command: command, seconds: Int(timeoutSeconds))
+            throw CommandTimedOut(command: command, seconds: Int(timeout))
         }
         return try result.get()
     }

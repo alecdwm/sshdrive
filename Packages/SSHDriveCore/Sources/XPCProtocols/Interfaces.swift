@@ -41,7 +41,7 @@ public enum SSHDriveXPCInterface {
             argumentIndex: 0, ofReply: true)
         interface.setClasses(
             itemClassSet,
-            for: #selector(SSHDriveAgentProtocol.fetchContents(domainIdentifier:itemIdentifier:requestedVersion:into:transferID:reply:)),
+            for: #selector(SSHDriveAgentProtocol.fetchContents(domainIdentifier:itemIdentifier:requestedVersion:isFileViewerRequest:isSystemRequest:into:transferID:reply:)),
             argumentIndex: 0, ofReply: true)
         interface.setClasses(
             itemClassSet,

@@ -116,5 +116,9 @@ public enum SFTPError: Error, Equatable, Sendable {
     case connectionLost
     /// The request missed its deadline (20 s for metadata, scaled by size for transfers).
     case deadlineExceeded
+    /// The caller's Task was cancelled: the extension's `Progress` was cancelled, or the
+    /// transfer's XPC connection went away, and the agent abandoned the SFTP requests in
+    /// flight (sections 5.2, 6.2).
+    case cancelled
     case eof
 }

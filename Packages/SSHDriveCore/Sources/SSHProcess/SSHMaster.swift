@@ -38,6 +38,17 @@ public actor SSHMaster {
         /// prompts it raises (section 4.2). `SSHProcess` never sees a secret: it puts the
         /// token in the child's environment and retires it when the master exits.
         public var askpass: (any AskpassTokenProviding)?
+        /// `yes` for every runtime connection. The collect connection of section 4.2 runs
+        /// `ask`, so the fingerprint question of section 4.3 is raised and can be relayed
+        /// to the terminal, or `accept-new` under `--trust-first`.
+        public var hostKeyChecking: String
+        /// True for the collect connection: its token is minted `collect`, so a prompt the
+        /// keychain cannot answer is relayed to the CLI instead of skipped (section 4.2).
+        public var isCollectConnection: Bool
+        /// Stored items masked for this spawn, so a stale password reaches the terminal
+        /// rather than being answered from the keychain and refused by the server
+        /// (section 4.2).
+        public var maskedAccounts: Set<String>
 
         public init(
             locationID: String,
@@ -49,7 +60,10 @@ public actor SSHMaster {
             authenticationDeadline: TimeInterval = 60,
             controlPath: String? = nil,
             askpassPath: String? = nil,
-            askpass: (any AskpassTokenProviding)? = nil
+            askpass: (any AskpassTokenProviding)? = nil,
+            hostKeyChecking: String = "yes",
+            isCollectConnection: Bool = false,
+            maskedAccounts: Set<String> = []
         ) {
             self.locationID = locationID
             self.target = target
@@ -61,6 +75,9 @@ public actor SSHMaster {
             self.controlPath = controlPath ?? ControlSocket.path(forLocationID: locationID)
             self.askpassPath = askpassPath
             self.askpass = askpass
+            self.hostKeyChecking = hostKeyChecking
+            self.isCollectConnection = isCollectConnection
+            self.maskedAccounts = maskedAccounts
         }
     }
 
@@ -84,7 +101,8 @@ public actor SSHMaster {
         SSHCommandBuilder.master(
             target: configuration.target,
             controlPath: configuration.controlPath,
-            proxyCommand: configuration.proxyCommand
+            proxyCommand: configuration.proxyCommand,
+            hostKeyChecking: configuration.hostKeyChecking
         )
     }
 
@@ -218,7 +236,11 @@ public actor SSHMaster {
             askpassToken = nil
             return configuration.environment
         }
-        let token = askpass.mintToken(locationID: configuration.locationID, argv: argv)
+        let token = configuration.isCollectConnection
+            ? askpass.mintCollectToken(
+                locationID: configuration.locationID, argv: argv,
+                maskedAccounts: configuration.maskedAccounts)
+            : askpass.mintToken(locationID: configuration.locationID, argv: argv)
         askpassToken = token
         return AskpassEnvironment.environment(
             base: configuration.environment, askpassPath: path, token: token)

@@ -1,6 +1,7 @@
 import Foundation
 import FileProvider
 import Index
+import AgentCore
 import SFTP
 import XPCProtocols
 import Logging
@@ -51,11 +52,16 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         Task {
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
-                let items = try await runtime.enumerateItems(container: containerIdentifier)
+                // Section 5.2: paged for directories with tens of thousands of entries.
+                // A page token is an offset into a listing the agent already holds, so a
+                // second page never re-lists the directory.
+                let page = try await runtime.enumerateItems(
+                    container: containerIdentifier, pageToken: pageToken)
                 let anchor = try await runtime.currentSequence()
-                // TODO milestone 3: page directories with tens of thousands of entries
-                // (section 5.2). The fake backend's trees are small.
-                reply(SSHDriveItemPage(items: items, anchor: String(anchor)), nil)
+                reply(
+                    SSHDriveItemPage(
+                        items: page.items, nextPageToken: page.nextPageToken,
+                        anchor: String(anchor)), nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))
             }
@@ -99,6 +105,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
 
     func fetchContents(
         domainIdentifier: String, itemIdentifier: String, requestedVersion: String?,
+        isFileViewerRequest: Bool, isSystemRequest: Bool,
         into destination: FileHandle, transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
@@ -106,7 +113,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchContents(
-                    identifier: itemIdentifier, into: destination, transferID: transferID)
+                    identifier: itemIdentifier, into: destination, transferID: transferID,
+                    kind: AgentService.transferClass(
+                        isFileViewerRequest: isFileViewerRequest, isSystemRequest: isSystemRequest),
+                    progress: progressReporter(transferID: transferID))
                 peer?.transferProgress(
                     transferID: transferID, bytesCompleted: snapshot.size, bytesTotal: snapshot.size)
                 reply(snapshot, nil)
@@ -116,14 +126,43 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         }
     }
 
+    /// Section 6.2: "foreground transfers come first: a `fetchContents` whose
+    /// `NSFileProviderRequest` is a file-viewer request or is not a system request (an app
+    /// or the user opening the file...)". Everything else - the eager downloads of a kept
+    /// subtree (section 7.1) and anything the system issues on its own - is background.
+    static func transferClass(isFileViewerRequest: Bool, isSystemRequest: Bool)
+        -> TransferScheduler.Kind
+    {
+        (isFileViewerRequest || !isSystemRequest) ? .foreground : .background
+    }
+
+    /// Byte counts through the callback on the extension's exported object, which the
+    /// extension forwards to the `Progress` it returned to the system (section 5.2).
+    private func progressReporter(transferID: String) -> @Sendable (Int64, Int64) -> Void {
+        let peer = self.peer
+        return { completed, total in
+            peer?.transferProgress(
+                transferID: transferID, bytesCompleted: completed, bytesTotal: total)
+        }
+    }
+
     func fetchPartialContents(
         domainIdentifier: String, itemIdentifier: String, offset: Int64, length: Int64,
         into destination: FileHandle, transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
-        // TODO milestone 3: range requests for large media (section 5.1). Until then the
-        // extension does not offer fetchPartialContents at all, so this is unreachable.
-        reply(nil, SSHDriveAgentError.notImplemented.asNSError("Partial fetches: milestone 3."))
+        Task {
+            do {
+                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let snapshot = try await runtime.fetchPartialContents(
+                    identifier: itemIdentifier, offset: offset, length: length,
+                    into: destination, transferID: transferID,
+                    progress: progressReporter(transferID: transferID))
+                reply(snapshot, nil)
+            } catch {
+                reply(nil, sshDriveXPCError(error))
+            }
+        }
     }
 
     func createItem(
@@ -139,7 +178,9 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     filename: filename,
                     isDirectory: isDirectory,
                     symlinkTarget: symlinkTarget,
-                    contents: contents)
+                    contents: contents,
+                    transferID: transferID,
+                    progress: progressReporter(transferID: transferID))
                 reply(snapshot, nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))
@@ -163,7 +204,9 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     newParentIdentifier: newParentIdentifier,
                     newFilename: newFilename,
                     newExtendedAttributes: newExtendedAttributes,
-                    contents: contents)
+                    contents: contents,
+                    transferID: transferID,
+                    progress: progressReporter(transferID: transferID))
                 reply(snapshot, nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))
@@ -188,11 +231,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
 
     func cancelTransfer(transferID: String) {
         Task {
-            // The transfer id is unique per domain, so the cancel is broadcast; milestone
-            // 3's scheduler keeps a table and this becomes a direct lookup (section 6.2).
-            guard let file = try? await DomainManager.shared.configuration() else { return }
-            for location in file.locations {
-                guard let runtime = try? await DomainManager.shared.runtime(for: location) else { continue }
+            // A transfer id is a fresh UUID per call and the XPC method carries no domain,
+            // so the cancel goes to every started runtime; each scheduler ignores an id it
+            // does not hold. Only runtimes that are already up are asked, so a cancel
+            // never connects a location (section 5.2).
+            for runtime in await DomainManager.shared.startedRuntimes() {
                 await runtime.cancel(transferID: transferID)
             }
         }
@@ -236,9 +279,15 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     func control(
         command: String, arguments: [String: String], reply: @escaping (Data?, Error?) -> Void
     ) {
+        // The terminal, captured while the method is still on the connection: `add` and
+        // `passwd` relay the collect connection's prompts back along it (section 4.2).
+        let relay = CLIRelay(connection: connection)
         Task {
             do {
-                reply(try await ControlCommands.run(command: command, arguments: arguments), nil)
+                reply(
+                    try await ControlCommands.run(
+                        command: command, arguments: arguments, relay: relay),
+                    nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))
             }

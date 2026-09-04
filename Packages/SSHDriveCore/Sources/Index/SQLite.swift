@@ -71,16 +71,38 @@ public final class SQLiteConnection {
         return SQLiteStatement(handle: prepared, connection: self)
     }
 
-    /// Runs `body` inside one transaction, rolling back on any error. Every multi-row
-    /// change in section 5.3 is one of these.
+    /// How deep the nesting is. SQLite has no nested `BEGIN`, and every multi-row change
+    /// in section 5.3 wraps itself in a transaction of its own, so the moment section
+    /// 5.3's "a directory listing is written in one transaction" rule put a `batch`
+    /// around a loop that calls `appendAnchor` and `delete`, the inner `BEGIN IMMEDIATE`
+    /// failed with "cannot start a transaction within a transaction" and took the whole
+    /// listing with it (2026-09-04).
+    private var transactionDepth = 0
+
+    /// Runs `body` inside one transaction, rolling back on any error, and nests.
+    ///
+    /// The outermost call is the real transaction; an inner one is a `SAVEPOINT`, so an
+    /// inner failure that its caller catches undoes only its own writes and an inner
+    /// failure that propagates still rolls the whole thing back. Every multi-row change
+    /// in section 5.3 is one of these, and several of them legitimately contain others.
     public func transaction<T>(_ body: () throws -> T) throws -> T {
-        try execute("BEGIN IMMEDIATE")
+        let nested = transactionDepth > 0
+        let savepoint = "sshdrive_\(transactionDepth)"
+        try execute(nested ? "SAVEPOINT \(savepoint)" : "BEGIN IMMEDIATE")
+        transactionDepth += 1
         do {
             let value = try body()
-            try execute("COMMIT")
+            try execute(nested ? "RELEASE \(savepoint)" : "COMMIT")
+            transactionDepth -= 1
             return value
         } catch {
-            try? execute("ROLLBACK")
+            if nested {
+                try? execute("ROLLBACK TO \(savepoint)")
+                try? execute("RELEASE \(savepoint)")
+            } else {
+                try? execute("ROLLBACK")
+            }
+            transactionDepth -= 1
             throw error
         }
     }

@@ -9,24 +9,30 @@ import XPCProtocols
 /// not available. SFTP-only accounts, where the identity is unknown, get full
 /// capabilities and learn about permission errors from the sync error list
 /// (DESIGN.md section 5.4).
-struct ServerIdentity {
-    var uid: UInt32?
-    var gid: UInt32?
-    var supplementaryGroups: Set<UInt32>
+public struct ServerIdentity {
+    public var uid: UInt32?
+    public var gid: UInt32?
+    public var supplementaryGroups: Set<UInt32>
 
-    static let unknown = ServerIdentity(uid: nil, gid: nil, supplementaryGroups: [])
+    public init(uid: UInt32?, gid: UInt32?, supplementaryGroups: Set<UInt32>) {
+        self.uid = uid
+        self.gid = gid
+        self.supplementaryGroups = supplementaryGroups
+    }
 
-    var isKnown: Bool { uid != nil }
+    public static let unknown = ServerIdentity(uid: nil, gid: nil, supplementaryGroups: [])
 
-    func canRead(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
+    public var isKnown: Bool { uid != nil }
+
+    public func canRead(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
         permits(bit: 0o4, mode: mode, uid: uid, gid: gid)
     }
 
-    func canWrite(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
+    public func canWrite(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
         permits(bit: 0o2, mode: mode, uid: uid, gid: gid)
     }
 
-    func canExecute(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
+    public func canExecute(mode: UInt32, uid: UInt32, gid: UInt32) -> Bool {
         permits(bit: 0o1, mode: mode, uid: uid, gid: gid)
     }
 
@@ -47,12 +53,12 @@ struct ServerIdentity {
 /// Turns an lstat plus the location's `permissions` setting into the two bitmasks the
 /// index stores on the row, so that `item(for:)` in the extension is a row read and a
 /// field-by-field copy with no second copy of these rules (DESIGN.md sections 5.2, 5.4).
-enum ItemDerivation {
+public enum ItemDerivation {
 
     /// `capabilities`, from the item's own mode and its parent's write bit. A file loses
     /// allowsWriting when the account cannot write it or cannot write its directory,
     /// because replacing content goes through a temp file in that directory (section 5.5).
-    static func capabilities(
+    public static func capabilities(
         type: SFTPFileType,
         mode: UInt32,
         uid: UInt32,
@@ -113,7 +119,7 @@ enum ItemDerivation {
     /// `fileSystemFlags`. userReadable is always set; userWritable follows allowsWriting;
     /// userExecutable is set when the mode has an execute bit the account can exercise,
     /// and a directory always carries it, since there it is the search bit (section 5.4).
-    static func fileSystemFlags(
+    public static func fileSystemFlags(
         type: SFTPFileType,
         mode: UInt32,
         uid: UInt32,
@@ -138,7 +144,7 @@ enum ItemDerivation {
 
     /// Metadata version = content version plus mode, uid, gid, the derived bitmasks, the
     /// effective kept state and a hash of the stored xattrs blob (section 5.3).
-    static func metadataVersion(
+    public static func metadataVersion(
         contentVersion: String,
         mode: Int64?,
         uid: Int64?,
@@ -162,7 +168,7 @@ enum ItemDerivation {
     }
 
     /// FNV-1a, 64 bit. Small, stable across processes and builds, and no dependency.
-    static func fnv1a(_ data: Data) -> UInt64 {
+    public static func fnv1a(_ data: Data) -> UInt64 {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in data {
             hash ^= UInt64(byte)

@@ -1,5 +1,6 @@
 import Foundation
 import FileProvider
+import AgentCore
 import Config
 import Index
 import SFTP
@@ -30,10 +31,20 @@ actor LocationRuntime {
     /// `.syncAnchorExpired` is visible; `sshdrive debug sweep off` is that switch.
     var catchUpSweepEnabled = true
 
-    /// Transfers in flight, by transfer id, so `cancelTransfer` can reach them
-    /// (section 5.2). Milestone 1 transfers are memory copies and finish at once; the
-    /// table exists so the cancel path is wired from the start.
-    private var cancelledTransfers: Set<String> = []
+    /// Section 6.2's transfer scheduler: four transfers at once on the bulk channel,
+    /// foreground before background, the pipelined window split between them, and the
+    /// backlog bounded by the six-fetch ceiling S6 measured. It is also what a cancel
+    /// reaches: cancelling the extension's `Progress` cancels the transfer's Task and
+    /// every SFTP request it has not sent yet (section 5.2).
+    let scheduler: TransferScheduler
+
+    /// What the server let us hold at once (section 6.1), and the sentence `status`
+    /// shows for it. `.unrestricted` for a fake location, which has no channels at all.
+    private(set) var channelBudget: ChannelBudget = .unrestricted
+
+    /// Names in the tree that are recorded but never shown, with the reason, for
+    /// `status`'s "not shown" list (section 5.4). Keyed by the path bytes.
+    private var hiddenReasons: [Data: String] = [:]
 
     // MARK: Spike faults and transfer accounting (S4, S6)
 
@@ -58,6 +69,9 @@ actor LocationRuntime {
     /// check will raise for real in milestone 4. s3-4 needs it to see what Finder draws.
     private var createsCollide = false
 
+    /// The last transport error, for `show` and `status` (section 8).
+    private var lastTransportError: String?
+
     private var concurrentFetches = 0
     private var peakConcurrentFetches = 0
     private var totalFetches = 0
@@ -72,12 +86,21 @@ actor LocationRuntime {
         self.backupURL = backupURL
         self.index = try IndexWriter(path: indexURL.path)
         self.identity = .unknown
+        self.scheduler = TransferScheduler(locationID: location.id)
     }
 
     func start() async throws {
         if let fake = transport as? FakeTransport {
             identity = ServerIdentity(
                 uid: await fake.serverUID, gid: await fake.serverGID, supplementaryGroups: [])
+        }
+        if let ssh = transport as? SSHBackedTransport {
+            // Section 5.4: the identity comes from one `id` exec channel at connect, and
+            // an SFTP-only account - no shell, or no channel to spare for one - keeps
+            // `.unknown`, which is what gives every item full capabilities.
+            identity = ssh.probe.identity
+            channelBudget = ssh.budget
+            await scheduler.setSharesMetadataChannel(ssh.transfersShareMetadataChannel)
         }
         // An agent that starts and finds `reconciling` set redoes the walk before serving
         // anything (section 5.3). Milestone 1 has no reconcile walk to redo, so it clears
@@ -122,15 +145,65 @@ actor LocationRuntime {
         return LocationRuntime.snapshot(from: row)
     }
 
+    /// Section 5.2: "directory listings travel as XPC values, paged for directories with
+    /// tens of thousands of entries". One `readdir` and one reconcile produce the whole
+    /// listing; the pages are cut from it, so a page token is an offset into a listing the
+    /// agent already holds and a second page never re-lists the directory.
+    static let enumerationPageSize = 2_000
+
+    private struct PendingListing {
+        let items: [SSHDriveItemSnapshot]
+        var deliveredThrough: Int
+        let takenAt: Date
+    }
+
+    /// Cut listings, by token. Dropped as soon as their last page is handed over, and
+    /// after five minutes in case the system abandons an enumeration half way.
+    private var pendingListings: [String: PendingListing] = [:]
+
     /// readdir the mapped path, reconcile with the index, return items (section 5.1).
     /// Records the folder as recently viewed (section 6.5).
-    func enumerateItems(container identifier: String) async throws -> [SSHDriveItemSnapshot] {
+    func enumerateItems(container identifier: String, pageToken: String?) async throws
+        -> (items: [SSHDriveItemSnapshot], nextPageToken: String?)
+    {
+        if let pageToken {
+            return continueListing(token: pageToken)
+        }
         guard let containerRow = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
         }
         let path = try RelativePath.fromIndexBytes(containerRow.path)
         try index.addRoot(path: path.bytes, reason: "viewed")
-        return try await reconcile(directory: path, containerRow: containerRow).items
+        let items = try await reconcile(directory: path, containerRow: containerRow).items
+        guard items.count > LocationRuntime.enumerationPageSize else { return (items, nil) }
+
+        let token = UUID().uuidString
+        expireStaleListings()
+        pendingListings[token] = PendingListing(
+            items: items, deliveredThrough: 0, takenAt: Date())
+        Log.agent.notice(
+            "paging \(items.count, privacy: .public) entries of \(path.description, privacy: .public) in \(LocationRuntime.enumerationPageSize, privacy: .public)s"
+        )
+        return continueListing(token: token)
+    }
+
+    private func continueListing(token: String) -> (items: [SSHDriveItemSnapshot], nextPageToken: String?) {
+        guard var listing = pendingListings[token] else { return ([], nil) }
+        let start = listing.deliveredThrough
+        let end = min(start + LocationRuntime.enumerationPageSize, listing.items.count)
+        let page = Array(listing.items[start..<end])
+        listing.deliveredThrough = end
+        if end >= listing.items.count {
+            pendingListings.removeValue(forKey: token)
+            return (page, nil)
+        }
+        pendingListings[token] = listing
+        return (page, token)
+    }
+
+    private func expireStaleListings() {
+        let cutoff = Date().addingTimeInterval(-300)
+        pendingListings = pendingListings.filter { $0.value.takenAt > cutoff }
     }
 
     /// The same listing, diffed against the index, which is how a folder refreshes when
@@ -158,38 +231,98 @@ actor LocationRuntime {
     private func reconcile(directory: RelativePath, containerRow: IndexItem) async throws
         -> ReconcileResult
     {
+        // Section 9.1, "never descend through a link": the container is re-`lstat`ed
+        // before anything is done inside it, because SFTP `opendir` **follows** a symlink.
+        // Without this, a directory replaced on the server by a link to `/etc` after it
+        // was enumerated is read straight through and every name under it gets a row -
+        // measured against the testbed on 2026-09-04, which is what the deferred half of
+        // S3 was for. `lstat` semantics are what keep the index free of any path with a
+        // link as an intermediate component.
         let entries: [SFTPDirectoryEntry]
         do {
+            if !directory.isRoot {
+                let attributes = try await transport.lstat(directory)
+                guard attributes.type == .directory else {
+                    Log.agent.error(
+                        "\(directory.description, privacy: .public) is no longer a directory (\(attributes.type.rawValue, privacy: .public)); refusing to descend"
+                    )
+                    try replaceDirectoryRow(
+                        directory, attributes: attributes, containerRow: containerRow)
+                    throw SSHDriveAgentError.noSuchItem.asNSError(
+                        "\(directory.description) is no longer a directory on the server.")
+                }
+            }
             entries = try await transport.readdir(directory)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
 
         var result = ReconcileResult()
         var seenPaths: Set<Data> = []
 
-        // Case and normalisation collisions (section 5.4) are milestone 3; milestone 1
-        // hides nothing and records the reason it would have.
-        for entry in entries {
-            guard entry.attributes.type != .other else { continue }
-            guard let name = String(data: entry.name, encoding: .utf8), !name.isEmpty else {
-                // Names that are not valid UTF-8 are hidden the same way collisions are.
-                continue
+        // Section 5.4's name rules. "The one already visible in the index keeps its slot",
+        // so the incumbents go in first: without them the shown name would flip every time
+        // a hash-ordered readdir came back in a different order.
+        var visibleNames: Set<Data> = []
+        for child in try index.children(ofParent: containerRow.identifier) where child.hidden == 0 {
+            if let last = (try? RelativePath.fromIndexBytes(child.path))?.lastComponent {
+                visibleNames.insert(last)
             }
+        }
+        let classified = NameVisibility.classify(entries: entries, visibleNames: visibleNames)
+        for skipped in classified.skipped {
+            Log.agent.debug(
+                "not enumerated: \(String(decoding: skipped.name, as: UTF8.self), privacy: .public) - \(skipped.reason, privacy: .public)"
+            )
+        }
+
+        // One transaction for the whole listing: a directory with 10,000 entries is
+        // 10,000 autocommits otherwise, and that, not the wire, is what a large
+        // enumeration spends its time on (section 5.3).
+        try index.batch {
+        for classifiedEntry in classified.entries {
+            let entry = classifiedEntry.entry
             guard let childPath = try? directory.appending(component: entry.name) else { continue }
             seenPaths.insert(childPath.bytes)
+
+            if classifiedEntry.hidden == 0 {
+                hiddenReasons.removeValue(forKey: childPath.bytes)
+            } else {
+                hiddenReasons[childPath.bytes] = classifiedEntry.reason
+            }
 
             let existing = try index.item(path: childPath.bytes)
             let row = try makeRow(
                 path: childPath,
                 attributes: entry.attributes,
                 parent: containerRow,
-                existing: existing)
+                existing: existing,
+                hidden: classifiedEntry.hidden)
             try index.upsert(row)
+
+            // A hidden row holds its name and nothing else: it is never enumerated, and a
+            // create or rename onto it fails `.filenameCollision` (section 5.4).
+            guard classifiedEntry.hidden == 0 else {
+                // A name that was shown and is now hidden - a newcomer took the slot, or
+                // the incumbent was renamed away - has to reach the system as a deletion,
+                // or the replica keeps a file no enumeration will ever mention again.
+                if let existing, existing.hidden == 0 {
+                    try index.appendAnchor(identifier: row.identifier, kind: .deleted)
+                    result.deleted.append(row.identifier)
+                }
+                continue
+            }
 
             let snapshot = LocationRuntime.snapshot(from: row)
             result.items.append(snapshot)
-            if existing == nil || existing?.metadataVersion != row.metadataVersion {
+            if existing == nil || existing?.metadataVersion != row.metadataVersion
+                || existing?.hidden != row.hidden
+            {
                 try index.appendAnchor(identifier: row.identifier, kind: .modified)
                 result.changed.append(snapshot)
             }
@@ -201,8 +334,33 @@ actor LocationRuntime {
             try index.delete(identifier: child.identifier)
             result.deleted.append(child.identifier)
         }
+        }
 
         return result
+    }
+
+    /// A directory that is no longer a directory. Every row beneath it is deleted - those
+    /// paths are gone, whatever now sits at the name - and the row itself is rewritten
+    /// from the fresh `lstat`, so the item the system next asks about is the link (or the
+    /// file) that is really there. Section 5.7 decides whether that link is shown at all;
+    /// until milestone 4 it is recorded and the enumeration of it fails.
+    private func replaceDirectoryRow(
+        _ directory: RelativePath, attributes: SFTPFileAttributes, containerRow: IndexItem
+    ) throws {
+        for row in try index.allItems()
+        where row.path != directory.bytes
+            && (try? RelativePath.fromIndexBytes(row.path))?.isUnder(directory) == true
+        {
+            try index.delete(identifier: row.identifier)
+        }
+        guard let parentIdentifier = containerRow.parent,
+            let parentRow = try index.item(identifier: parentIdentifier)
+        else { return }
+        var replaced = try makeRow(
+            path: directory, attributes: attributes, parent: parentRow, existing: containerRow)
+        replaced.identifier = containerRow.identifier
+        try index.upsert(replaced)
+        try index.appendAnchor(identifier: replaced.identifier, kind: .modified)
     }
 
     /// Builds a finished row: every derived field computed here, none in the extension
@@ -211,7 +369,8 @@ actor LocationRuntime {
         path: RelativePath,
         attributes: SFTPFileAttributes,
         parent: IndexItem,
-        existing: IndexItem?
+        existing: IndexItem?,
+        hidden: Int64? = nil
     ) throws -> IndexItem {
         // ns-mtime and inode feed change detection only. When either differs from the
         // stored value while size and second-mtime do not, the generation is bumped,
@@ -294,7 +453,7 @@ actor LocationRuntime {
             capabilities: Int64(capabilities.rawValue),
             fileSystemFlags: Int64(flags.rawValue),
             linkTarget: attributes.symlinkTarget.map { Data($0.utf8) },
-            hidden: existing?.hidden ?? 0,
+            hidden: hidden ?? existing?.hidden ?? 0,
             xattrs: xattrs,
             localContent: existing?.localContent)
     }
@@ -333,10 +492,41 @@ actor LocationRuntime {
     // MARK: Transfers
 
     /// Download through the file handle the extension opened on its temp file
-    /// (section 5.2). The agent lstats before and after; if size or mtime moved in
-    /// between, the file changed under the transfer.
+    /// (section 5.2), on the bulk channel, under the transfer scheduler of section 6.2.
+    ///
+    /// The agent `lstat`s before and after the download; if size or mtime moved in
+    /// between, the file changed under the transfer and the download is made again, once,
+    /// after which a still-moving file fails the fetch as `.serverUnreachable` so the
+    /// system retries later rather than keeping a torn copy (section 5.1). The item
+    /// returned carries the version the final `lstat` read.
     func fetchContents(
-        identifier: String, into handle: FileHandle, transferID: String
+        identifier: String, into handle: FileHandle, transferID: String,
+        kind: TransferScheduler.Kind = .foreground,
+        progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
+    ) async throws -> SSHDriveItemSnapshot {
+        try await fetch(
+            identifier: identifier, into: handle, transferID: transferID, kind: kind,
+            range: nil, progress: progress)
+    }
+
+    /// `fetchPartialContents`: a range request, for large media (section 5.1). Always a
+    /// foreground transfer (section 6.2), and never re-tried on a moving file: the caller
+    /// asked for a window of a file it is streaming, and a fresh window is one call away.
+    func fetchPartialContents(
+        identifier: String, offset: Int64, length: Int64, into handle: FileHandle,
+        transferID: String,
+        progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
+    ) async throws -> SSHDriveItemSnapshot {
+        try await fetch(
+            identifier: identifier, into: handle, transferID: transferID, kind: .foreground,
+            range: (UInt64(max(0, offset)), UInt64(max(0, length))), progress: progress)
+    }
+
+    private func fetch(
+        identifier: String, into handle: FileHandle, transferID: String,
+        kind: TransferScheduler.Kind,
+        range: (offset: UInt64, length: UInt64)?,
+        progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws -> SSHDriveItemSnapshot {
         guard let row = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
@@ -346,28 +536,46 @@ actor LocationRuntime {
         let slot = noteFetchStarted(path: path.description)
         defer { noteFetchFinished(slot) }
 
+        let transport = self.transport
+        let delay = fetchDelayMilliseconds
         do {
-            let before = try await transport.lstat(path)
-            let bytes = try await transport.read(path, offset: 0, length: nil)
-            if fetchDelayMilliseconds > 0 {
-                // The await is the point: the actor lets every other fetch in while this
-                // one waits, so the count is the system's concurrency, not ours.
-                try? await Task.sleep(nanoseconds: UInt64(fetchDelayMilliseconds) * 1_000_000)
+            // Section 6.2: the transfer waits here, with its XPC call open, until one of
+            // the four slots is free, and is handed its share of the pipelined window.
+            let after = try await scheduler.run(transferID: transferID, kind: kind) { window in
+                var attempt = 0
+                while true {
+                    attempt += 1
+                    let before = try await transport.lstat(path)
+                    let total = range.map { Int64($0.length) } ?? before.size
+                    let sink = HandleSink(handle: handle)
+                    try sink.truncate()
+                    progress(0, max(total, 1))
+                    _ = try await transport.readStreaming(
+                        path, offset: range?.offset ?? 0,
+                        length: range.map { $0.length },
+                        window: window
+                    ) { chunkOffset, data in
+                        sink.write(at: chunkOffset - (range?.offset ?? 0), data: data)
+                        progress(sink.written, max(total, 1))
+                    }
+                    if delay > 0 {
+                        // The await is the point: the actor lets every other fetch in
+                        // while this one waits, so the count is the system's concurrency
+                        // rather than ours (S6).
+                        try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+                    }
+                    try sink.finish()
+                    let after = try await transport.lstat(path)
+                    if before.size == after.size, before.mtime == after.mtime { return after }
+                    if range != nil { return after }
+                    Log.agent.notice(
+                        "file moved under a fetch: \(path.description, privacy: .public) (attempt \(attempt, privacy: .public))"
+                    )
+                    // Once, then give up: a still-moving file fails as serverUnreachable
+                    // so the system retries later rather than keeping a torn copy.
+                    if attempt >= 2 { throw SFTPError.connectionLost }
+                }
             }
-            guard !cancelledTransfers.contains(transferID) else {
-                cancelledTransfers.remove(transferID)
-                throw SSHDriveAgentError.serverUnreachable.asNSError("Transfer cancelled.")
-            }
-            let after = try await transport.lstat(path)
-            // TODO milestone 3: retry once, then fail as serverUnreachable, when size or
-            // mtime moved under the transfer (section 5.1). Milestone 1's fetch is a
-            // memory copy and cannot be torn.
-            if before.size != after.size || before.mtime != after.mtime {
-                Log.agent.notice("file moved under a fetch: \(path.description, privacy: .public)")
-            }
-            try handle.truncate(atOffset: 0)
-            try handle.write(contentsOf: bytes)
-            try handle.synchronize()
 
             var updated = try makeRow(
                 path: path,
@@ -380,11 +588,23 @@ actor LocationRuntime {
             return LocationRuntime.snapshot(from: updated)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
     }
 
-    func cancel(transferID: String) {
-        cancelledTransfers.insert(transferID)
+    /// Cancelling the extension's `Progress`, or its connection invalidating (section
+    /// 5.2). A queued transfer is dropped; a running one's Task is cancelled, and every
+    /// SFTP request it has not sent yet throws `.cancelled`.
+    func cancel(transferID: String) async {
+        await scheduler.cancel(transferID: transferID)
+    }
+
+    func schedulerStatistics() async -> TransferScheduler.Statistics {
+        await scheduler.stats()
     }
 
     // MARK: Writing
@@ -398,7 +618,9 @@ actor LocationRuntime {
         filename: String,
         isDirectory: Bool,
         symlinkTarget: String?,
-        contents: FileHandle?
+        contents: FileHandle?,
+        transferID: String = UUID().uuidString,
+        progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
     ) async throws -> SSHDriveItemSnapshot {
         try failWritesIfFaulted()
         if createsCollide {
@@ -413,16 +635,26 @@ actor LocationRuntime {
         // Filenames arriving from the system pass through the RelativePath constructor
         // before anything else sees them (section 9.1).
         let path = try parentPath.appending(component: filename)
+        try refuseHiddenName(at: path)
 
+        let transport = self.transport
         do {
             if isDirectory {
                 try await transport.mkdir(path, mode: 0o755)
             } else if let symlinkTarget {
                 // TODO milestone 4: refuse a target that escapes the root (section 5.7).
                 try await transport.symlink(target: symlinkTarget, at: path)
+            } else if let contents {
+                // Section 6.2: every `createItem` and `modifyItem` upload is a foreground
+                // transfer, and runs on the bulk channel under the scheduler.
+                let source = HandleSource(handle: contents)
+                try await scheduler.run(transferID: transferID, kind: .foreground) { window in
+                    try await transport.writeStreaming(
+                        path, mode: 0o644, window: window, source: { try source.next() }
+                    ) { written in progress(written, max(written, 1)) }
+                }
             } else {
-                let data = contents.map { $0.readDataToEndOfFile() } ?? Data()
-                try await transport.write(path, contents: data, mode: 0o644)
+                try await transport.write(path, contents: Data(), mode: 0o644)
             }
             let attributes = try await transport.lstat(path)
             let row = try makeRow(
@@ -432,6 +664,11 @@ actor LocationRuntime {
             return LocationRuntime.snapshot(from: row)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
     }
 
@@ -442,7 +679,9 @@ actor LocationRuntime {
         newParentIdentifier: String?,
         newFilename: String?,
         newExtendedAttributes: [String: Data]?,
-        contents: FileHandle?
+        contents: FileHandle?,
+        transferID: String = UUID().uuidString,
+        progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
     ) async throws -> SSHDriveItemSnapshot {
         try failWritesIfFaulted()
         guard var row = try index.item(identifier: identifier) else {
@@ -462,6 +701,7 @@ actor LocationRuntime {
                 let parentPath = try RelativePath.fromIndexBytes(parentRow.path)
                 let name = newFilename ?? row.filename
                 let destination = try parentPath.appending(component: name)
+                try refuseHiddenName(at: destination)
                 // A plain, non-overwriting rename (section 5.5).
                 try await transport.rename(path, to: destination)
                 try index.rewritePaths(from: path.bytes, to: destination.bytes)
@@ -471,11 +711,18 @@ actor LocationRuntime {
             }
 
             if changedFields.contains(.contents), let contents {
-                let data = contents.readDataToEndOfFile()
                 // TODO milestone 4: the conflict check compares size, mtime and
                 // generation before the write, and a conflict copy is named after this
                 // Mac (section 5.5).
-                try await transport.write(path, contents: data, mode: UInt32(row.mode ?? 0o644))
+                let transport = self.transport
+                let mode = UInt32(row.mode ?? 0o644)
+                let uploadPath = path
+                let source = HandleSource(handle: contents)
+                try await scheduler.run(transferID: transferID, kind: .foreground) { window in
+                    try await transport.writeStreaming(
+                        uploadPath, mode: mode, window: window, source: { try source.next() }
+                    ) { written in progress(written, max(written, 1)) }
+                }
             }
 
             if changedFields.contains(.extendedAttributes), let newExtendedAttributes {
@@ -511,7 +758,116 @@ actor LocationRuntime {
             return LocationRuntime.snapshot(from: updated)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
+    }
+
+    /// "Hidden names hold their slot: a create or rename to one of them fails with
+    /// `.filenameCollision`" (section 5.4). Without this the create would succeed on the
+    /// server and the next listing would hide one of the two names again, which reads to
+    /// the user as a file that saved and then vanished.
+    private func refuseHiddenName(at path: RelativePath) throws {
+        guard let existing = try index.item(path: path.bytes), existing.hidden != 0 else { return }
+        throw SSHDriveAgentError.filenameCollision.asNSError(
+            hiddenReasons[path.bytes]
+                ?? "That name already exists on the server under a spelling macOS cannot tell apart.")
+    }
+
+    /// Section 5.4: "`sshdrive status` lists hidden names under \"not shown\" with the
+    /// reason, so the user can rename them server-side."
+    func notShown() throws -> [(path: String, reason: String)] {
+        try index.allItems().filter { $0.hidden != 0 }.map { row in
+            (
+                path: String(decoding: row.path, as: UTF8.self),
+                reason: hiddenReasons[row.path]
+                    ?? (row.hidden == 3
+                        ? "kept on this Mac only" : "a name macOS cannot tell from another here")
+            )
+        }
+    }
+
+    /// What the server let us hold at once, and what it cost (section 6.1). `status`
+    /// shows the note.
+    func channelReport() -> [String: Any] { channelBudget.asJSON }
+
+    func channelBudgetValue() -> ChannelBudget { channelBudget }
+
+    /// Section 8.1's probe as the live connection found it, plus the SFTP `extensions`
+    /// list from the init reply. Nil for a fake location, which has no server to probe.
+    func serverProbe() async -> (probe: ServerProbe.Result, extensions: SFTPServerExtensions)? {
+        guard let ssh = transport as? SSHBackedTransport else { return nil }
+        return (ssh.probe, await ssh.extensions)
+    }
+
+    /// `status --probe`: "re-runs the server probe instead of using the cached result"
+    /// (section 8). The channel budget's own cache is left alone - that is what
+    /// `debug transport reprobe` invalidates, and section 6.1 gives it different rules.
+    func reprobeServer() async {
+        guard let ssh = transport as? SSHBackedTransport else { return }
+        let probe = await ServerProbe.run(master: ssh.master)
+        CapabilityCache.storeProbe(
+            probe, extensions: await ssh.extensions, locationID: location.id)
+        if probe.identity.isKnown, location.permissions == .mode { identity = probe.identity }
+    }
+
+    /// `-O check` on our own child. False for a location whose master has gone, which is
+    /// what `list` and `status` print as "offline".
+    func isConnected() async -> Bool {
+        guard let ssh = transport as? SSHBackedTransport else { return true }
+        return await ssh.isMasterAlive()
+    }
+
+    /// The last error this location saw, for `show` and `status`'s "last error" line, and
+    /// the input to section 4.3's `ssh-keygen -R` advice.
+    ///
+    /// `ssh`'s own stderr comes first when there is any: a changed host key, a refused
+    /// password and a dead key agent are all reported there and nowhere else, and the
+    /// classifier has already read it (section 6.1).
+    func lastErrorText() async -> String? {
+        if let ssh = transport as? SSHBackedTransport {
+            let stderr = await ssh.master.lastStderr
+            if !stderr.isEmpty { return stderr }
+        }
+        return lastTransportError
+    }
+
+    /// Recorded wherever a transport error is turned into an `NSError` for the extension,
+    /// so `status` can name the last thing that went wrong without keeping a log.
+    func recordTransportError(_ text: String) { lastTransportError = text }
+
+    /// Uploads the agent has in flight. `remove` and a domain-recreating `set` refuse
+    /// while this is non-zero unless `--force` (section 8).
+    func pendingUploadCount() async -> Int {
+        await scheduler.stats().running
+    }
+
+    /// `statvfs@openssh.com`, shown in `status` as "server free space" (section 8.1). Not
+    /// a capability level: Finder has no way to display it for a third-party domain.
+    func freeSpaceDescription() async -> String? {
+        guard transport is SSHBackedTransport else { return nil }
+        guard let stats = try? await transport.statvfs(.root) else { return nil }
+        let free = stats.availableBlocks &* stats.blockSize
+        let total = stats.totalBlocks &* stats.blockSize
+        guard total > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .file)
+            + " of " + ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+    }
+
+    /// The identity section 5.4 maps modes against, and how it was found. Nil for a fake
+    /// location, which has no server to ask.
+    func identityReport() -> [String: Any]? {
+        guard let ssh = transport as? SSHBackedTransport else { return nil }
+        return [
+            "known": ssh.probe.identity.isKnown,
+            "description": ssh.probe.description,
+            "failure": ssh.probe.failure,
+            "shellPrefix": ssh.probe.shellPrefix,
+            "permissionsSetting": location.permissions.rawValue,
+        ]
     }
 
     func deleteItem(identifier: String, recursive: Bool) async throws {
@@ -530,6 +886,11 @@ actor LocationRuntime {
             try index.delete(identifier: identifier)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
     }
 
@@ -763,6 +1124,11 @@ actor LocationRuntime {
             try await fake.apply(mutation)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
+        } catch is CancellationError {
+            // The transfer's own Task was cancelled (section 5.2). Reported as the
+            // transport's `.cancelled` rather than Swift's error, so the extension maps
+            // it like any other.
+            throw LocationRuntime.mapped(.cancelled)
         }
         return try await runCatchUpSweep()
     }
@@ -795,6 +1161,11 @@ actor LocationRuntime {
             return SSHDriveAgentError.permissionDenied.asNSError("Permission denied.")
         case .noConnection, .connectionLost, .deadlineExceeded, .eof:
             return SSHDriveAgentError.serverUnreachable.asNSError("The server is unreachable.")
+        case .cancelled:
+            // The system cancelled its own `Progress`, so nothing is wrong with the
+            // server; anything but a retryable error here would show the user an alert
+            // for a transfer they abandoned themselves.
+            return SSHDriveAgentError.serverUnreachable.asNSError("The transfer was cancelled.")
         case .operationUnsupported:
             return SSHDriveAgentError.notImplemented.asNSError("The server does not support that.")
         case .badMessage:

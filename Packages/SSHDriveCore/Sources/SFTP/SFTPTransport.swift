@@ -25,6 +25,24 @@ public protocol SFTPTransport: AnyObject, Sendable {
     /// Reads a byte range. `length` of nil means "to EOF".
     func read(_ path: RelativePath, offset: UInt64, length: Int?) async throws -> Data
 
+    /// Streams a byte range to `receiver` without ever holding the whole file, at
+    /// `window` requests in flight - the scheduler's share of the pipelined window
+    /// (section 6.2). Returns the number of bytes delivered.
+    func readStreaming(
+        _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int,
+        receiver: @escaping @Sendable (UInt64, Data) async -> Void
+    ) async throws -> UInt64
+
+    /// Streams to `path`, pulling at most `chunk` bytes at a time from `source` until it
+    /// returns an empty `Data`. `progress` is called with the running total. The upload
+    /// still goes through a temp file and a rename (section 5.5); what this adds over
+    /// `write` is that a 64 MiB upload never sits in the agent's memory.
+    func writeStreaming(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws
+
     /// Writes whole contents, through the temp-file plus rename dance of section 5.5 in
     /// the real client. `mode` is the permission bits the temp file is opened with.
     func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws
@@ -55,4 +73,49 @@ public protocol SFTPTransport: AnyObject, Sendable {
 
     /// statvfs@openssh.com, where the server offers it.
     func statvfs(_ path: RelativePath) async throws -> SFTPFilesystemStats
+}
+
+
+/// Defaults, so a transport that has nothing better to offer than whole-file reads and
+/// writes - `FakeTransport`, and anything a test stands in with - satisfies the protocol
+/// without pretending to stream. The real client overrides both.
+extension SFTPTransport {
+    public func readStreaming(
+        _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int,
+        receiver: @escaping @Sendable (UInt64, Data) async -> Void
+    ) async throws -> UInt64 {
+        let data = try await read(path, offset: offset, length: length.map { Int($0) })
+        guard !data.isEmpty else { return 0 }
+        // Handed over in chunks even here, so a scheduler test sees more than one
+        // progress report and a cancel has somewhere to land.
+        let chunk = 64 * 1024
+        var delivered: UInt64 = 0
+        var cursor = 0
+        while cursor < data.count {
+            if Task.isCancelled { throw SFTPError.cancelled }
+            let size = min(chunk, data.count - cursor)
+            let start = data.index(data.startIndex, offsetBy: cursor)
+            let piece = Data(data[start..<data.index(start, offsetBy: size)])
+            await receiver(offset + UInt64(cursor), piece)
+            delivered += UInt64(size)
+            cursor += size
+        }
+        return delivered
+    }
+
+    public func writeStreaming(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        var contents = Data()
+        while true {
+            if Task.isCancelled { throw SFTPError.cancelled }
+            let piece = try source()
+            if piece.isEmpty { break }
+            contents.append(piece)
+            progress(Int64(contents.count))
+        }
+        try await write(path, contents: contents, mode: mode)
+    }
 }

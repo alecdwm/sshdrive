@@ -2,7 +2,7 @@ import Foundation
 
 /// Version of the XPC interface. A mismatched agent and extension (mid upgrade) is
 /// reported as `.serverUnreachable` until the agent restarts (DESIGN.md section 5.2).
-public let sshDriveXPCInterfaceVersion = 1
+public let sshDriveXPCInterfaceVersion = 2
 
 /// The agent's interface, exported to the extension, the CLI and askpass alike. One
 /// interface rather than three keeps the peer check in one place; what a peer may
@@ -60,11 +60,19 @@ public let sshDriveXPCInterfaceVersion = 1
 
     /// The extension creates the target file in its own temp directory, opens it for
     /// writing and sends the handle; the agent writes through it (section 5.2).
-    @objc(fetchContentsInDomain:identifier:requestedVersion:into:transferID:reply:)
+    ///
+    /// `isFileViewerRequest` and `isSystemRequest` come straight off the call's
+    /// `NSFileProviderRequest`: section 6.2's transfer scheduler puts a fetch that is a
+    /// file-viewer request, or is not a system request, in the foreground class - that is
+    /// an app or the user opening the file - and everything else, the eager downloads of a
+    /// kept subtree included, in the background class.
+    @objc(fetchContentsInDomain:identifier:requestedVersion:fileViewer:systemRequest:into:transferID:reply:)
     func fetchContents(
         domainIdentifier: String,
         itemIdentifier: String,
         requestedVersion: String?,
+        isFileViewerRequest: Bool,
+        isSystemRequest: Bool,
         into destination: FileHandle,
         transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void

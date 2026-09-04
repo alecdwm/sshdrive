@@ -25,11 +25,15 @@ final class ContainerEnumerator: NSObject, NSFileProviderEnumerator {
         for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage
     ) {
         let identifier = SSHDriveItemIdentifiers.agentIdentifier(for: container)
+        // Section 5.2: directory listings are paged for directories with tens of
+        // thousands of entries. The system hands back the page it was given, and the two
+        // constants it uses to ask for a first page are not tokens of ours.
+        let token = ContainerEnumerator.token(from: page)
         // s3-3 records which of section 6.5's two fallbacks the `viewed` reason gets, and
         // that needs to know whether Finder re-listing a folder arrives as a fresh
         // enumerator or as enumerateChanges on the old one.
         Log.extensionLog.notice(
-            "enumerateItems container=\(identifier, privacy: .public)")
+            "enumerateItems container=\(identifier, privacy: .public) page=\(token ?? "first", privacy: .public)")
         guard let proxy = extensionInstance.agentProxy(observer.finishEnumeratingWithError) else {
             observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
             return
@@ -37,7 +41,7 @@ final class ContainerEnumerator: NSObject, NSFileProviderEnumerator {
         proxy.enumerateItems(
             domainIdentifier: extensionInstance.domainIdentifier,
             containerIdentifier: identifier,
-            pageToken: nil
+            pageToken: token
         ) { [weak self] page, error in
             guard let self else { return }
             if let error {
@@ -48,8 +52,18 @@ final class ContainerEnumerator: NSObject, NSFileProviderEnumerator {
                 (page?.items ?? []).map {
                     Item(snapshot: $0, rootDisplayName: self.extensionInstance.displayName)
                 })
-            observer.finishEnumerating(upTo: nil)
+            observer.finishEnumerating(
+                upTo: (page?.nextPageToken).map { NSFileProviderPage(Data($0.utf8)) })
         }
+    }
+
+    /// The system's two well-known first-page constants are not tokens of ours; anything
+    /// else is a token we handed out.
+    static func token(from page: NSFileProviderPage) -> String? {
+        if page.rawValue == NSFileProviderPage.initialPageSortedByName as Data { return nil }
+        if page.rawValue == NSFileProviderPage.initialPageSortedByDate as Data { return nil }
+        let text = String(decoding: page.rawValue, as: UTF8.self)
+        return text.isEmpty ? nil : text
     }
 
     func enumerateChanges(

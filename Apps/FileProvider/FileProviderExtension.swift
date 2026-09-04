@@ -141,6 +141,37 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
+        fetch(
+            itemIdentifier, version: requestedVersion, range: nil, request: request,
+            completionHandler: { url, item, error in completionHandler(url, item, error) })
+    }
+
+    /// Range requests, for large media (section 5.1). Always a foreground transfer under
+    /// the scheduler of section 6.2.
+    func fetchPartialContents(
+        for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion,
+        request: NSFileProviderRequest, minimalRange: NSRange, aligningTo alignment: Int,
+        options: NSFileProviderFetchContentsOptions = [],
+        completionHandler: @escaping (URL?, NSFileProviderItem?, NSRange, NSFileProviderMaterializationFlags, Error?) -> Void
+    ) -> Progress {
+        // The range is widened to the alignment the system asked for, which is what lets
+        // it stitch neighbouring windows together rather than re-fetching them.
+        let stride = max(alignment, 1)
+        let start = (minimalRange.location / stride) * stride
+        let end = ((minimalRange.location + minimalRange.length + stride - 1) / stride) * stride
+        let aligned = NSRange(location: start, length: max(end - start, stride))
+        return fetch(
+            itemIdentifier, version: requestedVersion, range: aligned, request: request
+        ) { url, item, error in
+            completionHandler(url, item, aligned, [], error)
+        }
+    }
+
+    private func fetch(
+        _ itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?,
+        range: NSRange?, request: NSFileProviderRequest,
+        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
+    ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
         let transferID = UUID().uuidString
 
@@ -181,13 +212,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             self?.agentProxy({ _ in })?.cancelTransfer(transferID: transferID)
         }
 
-        proxy.fetchContents(
-            domainIdentifier: domainIdentifier,
-            itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemIdentifier),
-            requestedVersion: requestedVersion.map { String(decoding: $0.contentVersion, as: UTF8.self) },
-            into: handle,
-            transferID: transferID
-        ) { [weak self] snapshot, error in
+        let done: @Sendable (SSHDriveItemSnapshot?, Error?) -> Void = { [weak self] snapshot, error in
             guard let self else { return }
             try? handle.close()
             self.callbacks.unregister(transferID: transferID)
@@ -201,6 +226,31 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     AgentConnection.fileProviderError(from: error ?? NSFileProviderError(.serverUnreachable)))
             }
         }
+
+        if let range {
+            proxy.fetchPartialContents(
+                domainIdentifier: domainIdentifier,
+                itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemIdentifier),
+                offset: Int64(range.location),
+                length: Int64(range.length),
+                into: handle,
+                transferID: transferID,
+                reply: done)
+            return progress
+        }
+
+        // Section 6.2's two classes, read straight off the request: a file-viewer request,
+        // or anything that is not a system request, is the user or an app opening the
+        // file and goes in the foreground.
+        proxy.fetchContents(
+            domainIdentifier: domainIdentifier,
+            itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemIdentifier),
+            requestedVersion: requestedVersion.map { String(decoding: $0.contentVersion, as: UTF8.self) },
+            isFileViewerRequest: request.isFileViewerRequest,
+            isSystemRequest: request.isSystemRequest,
+            into: handle,
+            transferID: transferID,
+            reply: done)
         return progress
     }
 

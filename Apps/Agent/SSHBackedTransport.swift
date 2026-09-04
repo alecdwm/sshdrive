@@ -1,4 +1,5 @@
 import Foundation
+import AgentCore
 import Config
 import Logging
 import SFTP
@@ -51,8 +52,9 @@ actor AgentSSHEnvironment {
     }
 }
 
-/// One location's live transport: the `-N` master, the SFTP channel opened on its mux
-/// socket, and the wire client on that channel's stdio (DESIGN.md sections 6.1 and 6.2).
+/// One location's live transport: the `-N` master, the **two** SFTP channels opened on
+/// its mux socket, and a wire client on each channel's stdio (DESIGN.md sections 6.1
+/// and 6.2).
 ///
 /// It is an `SFTPTransport` like `FakeTransport`, so nothing in `LocationRuntime` or the
 /// File Provider paths changes when a location is real rather than fake. What it adds
@@ -80,17 +82,46 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
     static let transferDeadlineSeconds: Double = 3600
 
     let locationID: String
-    private let master: SSHMaster
+    let master: SSHMaster
+    /// What the server let us hold at once, and what that cost (section 6.1).
+    let budget: ChannelBudget
+    /// What section 8.1's probe found on one exec channel at connect: the account the
+    /// server sees us as (section 5.4), `uname`, the `find` flavour, a checksum tool and a
+    /// cache directory for the helper. Everything below `uname` is unknown where there is
+    /// no shell, or no channel to spare for one.
+    let probe: ServerProbe.Result
+
+    /// Channel 1: `stat`, `readdir`, `rename`, small files. Never carries a transfer
+    /// unless the budget dropped the bulk channel.
     private let channel: SFTPChannel
     private let inner: RealSFTPTransport
+    /// Channel 2: fetches and uploads, so a long transfer never blocks a listing. Nil on
+    /// a `MaxSessions 2` server, where transfers share channel 1 under the scheduler.
+    private let bulkChannel: SFTPChannel?
+    private let bulk: RealSFTPTransport?
+
+    /// Where a transfer runs. The same object on a degraded location, which is exactly
+    /// what section 6.2's "at a `MaxSessions` of 2 the same scheduler runs on the
+    /// metadata channel" means.
+    private var transferTransport: RealSFTPTransport { bulk ?? inner }
+
+    /// True when transfers share the metadata channel, which the scheduler needs to know
+    /// so it leaves request slots free for the metadata calls served ahead of them.
+    var transfersShareMetadataChannel: Bool { bulk == nil }
 
     private init(
-        locationID: String, master: SSHMaster, channel: SFTPChannel, inner: RealSFTPTransport
+        locationID: String, master: SSHMaster, channel: SFTPChannel, inner: RealSFTPTransport,
+        bulkChannel: SFTPChannel?, bulk: RealSFTPTransport?,
+        budget: ChannelBudget, probe: ServerProbe.Result
     ) {
         self.locationID = locationID
         self.master = master
         self.channel = channel
         self.inner = inner
+        self.bulkChannel = bulkChannel
+        self.bulk = bulk
+        self.budget = budget
+        self.probe = probe
     }
 
     /// Snapshot, spawn, open, verify. In that order, because each step needs the one
@@ -101,7 +132,8 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
         location: Location,
         askpassPath: String?,
         askpass: (any AskpassTokenProviding)?,
-        uploadTag: String
+        uploadTag: String,
+        reprobeChannels: Bool = false
     ) async throws -> SSHBackedTransport {
         let environment = await AgentSSHEnvironment.shared.environment()
         let snapshot = await AgentSSHEnvironment.shared.current()
@@ -128,9 +160,9 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
         }
 
         do {
-            // The metadata channel. A second, bulk channel is what section 6.1 wants next
-            // to it; the transfer scheduler that would use it is milestone 3's, so this
-            // one carries everything for now.
+            // Channel 1, the metadata channel, and the canonical root every other channel
+            // is opened against (section 9.1: the root is resolved again on every
+            // connection and the location refuses to operate if it moved).
             let transport = try await RealSFTPTransport.connect(
                 stream: channel.stream,
                 root: location.remotePath ?? ".",
@@ -139,8 +171,67 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
             let root = await transport.root
             Log.sftp.notice(
                 "location \(location.id, privacy: .public) rooted at \(root, privacy: .public)")
+
+            // Channel 2, the bulk channel, and with it the answer to "may I hold three
+            // channels at once" that section 6.1 turns into the whole channel budget.
+            if reprobeChannels { CapabilityCache.forgetChannelBudget(locationID: location.id) }
+            var budget: ChannelBudget
+            var bulk: ChannelProbe.Opened?
+            if let cached = CapabilityCache.channelBudget(locationID: location.id) {
+                budget = cached
+                if cached.hasBulkChannel {
+                    switch await ChannelProbe.openVerifiedChannel(
+                        master: master, root: root, uploadTag: uploadTag)
+                    {
+                    case .success(let opened): bulk = opened
+                    case .failure(let refusal):
+                        // The cache said three were affordable and two are not. Believe
+                        // the server, not the cache, and re-probe from scratch.
+                        Log.ssh.notice(
+                            "\(location.id, privacy: .public): cached budget no longer holds (\(refusal.diagnostics, privacy: .public)); re-probing"
+                        )
+                        let probed = await ChannelProbe.probe(
+                            master: master, root: root, uploadTag: uploadTag,
+                            locationID: location.id)
+                        budget = probed.budget
+                        bulk = probed.bulk
+                        CapabilityCache.store(budget, locationID: location.id)
+                    }
+                }
+            } else {
+                let probed = await ChannelProbe.probe(
+                    master: master, root: root, uploadTag: uploadTag, locationID: location.id)
+                budget = probed.budget
+                bulk = probed.bulk
+                CapabilityCache.store(budget, locationID: location.id)
+            }
+            if !budget.note.isEmpty {
+                Log.ssh.notice("\(location.id, privacy: .public): \(budget.note, privacy: .public)")
+            }
+
+            // Section 5.4's identity, from one `id` exec channel. At a budget of 1 there
+            // is no channel to spare and the location is SFTP-only in every respect.
+            var probe = ServerProbe.Result()
+            if budget.allowsExecChannel {
+                probe = await ServerProbe.run(master: master)
+                if !probe.failure.isEmpty {
+                    Log.agent.notice(
+                        "\(location.id, privacy: .public): no remote identity (\(probe.failure, privacy: .public)); every item gets full capabilities"
+                    )
+                }
+            } else {
+                probe.failure = "the server allows only one channel at a time"
+            }
+            // Section 8.1: the probe's result is cached in
+            // `domains/<id>/capabilities.json` with a timestamp, beside the channel budget
+            // that `CapabilityCache` already owns.
+            CapabilityCache.storeProbe(
+                probe, extensions: await transport.extensions, locationID: location.id)
+
             return SSHBackedTransport(
-                locationID: location.id, master: master, channel: channel, inner: transport)
+                locationID: location.id, master: master, channel: channel, inner: transport,
+                bulkChannel: bulk?.channel, bulk: bulk?.transport,
+                budget: budget, probe: probe)
         } catch {
             let diagnostics = channel.stderrText
             channel.close()
@@ -154,8 +245,11 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
         }
     }
 
-    /// `-O exit` and the channel with it. Called when a location is unmounted or removed.
+    /// `-O exit` and both channels with it. Called when a location is unmounted or
+    /// removed.
     func shutdown() async {
+        if let bulk { await bulk.shutdown() }
+        bulkChannel?.close()
         await inner.shutdown()
         channel.close()
         await master.shutdown()
@@ -187,6 +281,13 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
             // whatever the dying channel managed to say on the way out (section 6.1).
             if await !master.isRunning { throw SFTPError.connectionLost }
             throw error
+        } catch is CancellationError {
+            // The deadline of `Deadline.run` is a second child task on a `Task.sleep`,
+            // and a cancelled sleep throws `CancellationError` before the body notices
+            // its own cancellation - so without this the caller sees Swift's error rather
+            // than the transport's, and a user who cancelled a download in Finder gets an
+            // unmapped one (measured against the testbed, 2026-09-04).
+            throw SFTPError.cancelled
         } catch {
             if await !master.isRunning { throw SFTPError.connectionLost }
             throw error
@@ -215,16 +316,41 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
     }
 
     func read(_ path: RelativePath, offset: UInt64, length: Int?) async throws -> Data {
-        let inner = self.inner
+        let transport = transferTransport
         return try await guarded("read", seconds: SSHBackedTransport.transferDeadlineSeconds) {
-            try await inner.read(path, offset: offset, length: length)
+            try await transport.read(path, offset: offset, length: length)
+        }
+    }
+
+    func readStreaming(
+        _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int,
+        receiver: @escaping @Sendable (UInt64, Data) async -> Void
+    ) async throws -> UInt64 {
+        // On the bulk channel, at the scheduler's share of the pipelined window
+        // (section 6.2).
+        let transport = transferTransport
+        return try await guarded("read", seconds: SSHBackedTransport.transferDeadlineSeconds) {
+            try await transport.readStreaming(
+                path, offset: offset, length: length, window: window, receiver: receiver)
         }
     }
 
     func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws {
-        let inner = self.inner
+        let transport = transferTransport
         try await guarded("write", seconds: SSHBackedTransport.transferDeadlineSeconds) {
-            try await inner.write(path, contents: contents, mode: mode)
+            try await transport.write(path, contents: contents, mode: mode)
+        }
+    }
+
+    func writeStreaming(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        let transport = transferTransport
+        try await guarded("write", seconds: SSHBackedTransport.transferDeadlineSeconds) {
+            try await transport.writeStreaming(
+                path, mode: mode, window: window, source: source, progress: progress)
         }
     }
 

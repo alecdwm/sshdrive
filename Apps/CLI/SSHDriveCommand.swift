@@ -5,10 +5,11 @@ import Logging
 
 /// `sshdrive`, the only user interface (DESIGN.md section 8).
 ///
-/// Milestone 1 ships `doctor`, `agent`, `version` and the `debug` group the spikes need.
-/// The rest of section 8 (`add`, `list`, `show`, `remove`, `mount`, `set`, `passwd`,
-/// `test`, `status`, `evict`, `pin`, `pins`, `logs`, `accept-deletions`) arrives with the
-/// milestone that gives each something to do, starting at milestone 3.
+/// Milestone 3 adds section 8's user-facing half: `add` with the `ssh -G` display and the
+/// relayed prompts of section 4.2, `list`, `show`, `remove`, `set`, `mount`, `unmount` and
+/// `status` with section 8.1's capability report. `passwd`, `test`, `evict`, `pin`,
+/// `pins`, `logs` and `accept-deletions` arrive with the milestone that gives each
+/// something to do.
 @main
 struct SSHDrive: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -18,8 +19,12 @@ struct SSHDrive: ParsableCommand {
             Docs: https://github.com/alecdwm/sshdrive
             Run `sshdrive doctor` if a location does not appear in Finder.
             """,
-        version: "0.1.0 (milestone 1, skeleton)",
-        subcommands: [Doctor.self, Agent.self, Debug.self])
+        version: "0.1.0 (milestone 3)",
+        subcommands: [
+            Add.self, ListCommand.self, Show.self, Status.self, SetCommand.self,
+            Mount.self, Unmount.self, Remove.self,
+            Doctor.self, Agent.self, Debug.self,
+        ])
 }
 
 // MARK: doctor

@@ -15,6 +15,7 @@ let package = Package(
         .library(name: "SFTP", targets: ["SFTP"]),
         .library(name: "Secrets", targets: ["Secrets"]),
         .library(name: "SSHProcess", targets: ["SSHProcess"]),
+        .library(name: "AgentCore", targets: ["AgentCore"]),
     ],
     targets: [
         // os.Logger subsystems, shared by all processes.
@@ -47,6 +48,12 @@ let package = Package(
         // (DESIGN.md sections 6.1 and 9.2).
         .target(name: "SSHProcess", dependencies: ["Logging", "Config", "XPCProtocols"]),
 
+        // The agent's own derivations, kept in the package so they are unit-testable
+        // without an app bundle: section 5.4's mode-to-capabilities mapping and name
+        // rules, and section 6.2's transfer scheduler.
+        .target(name: "AgentCore", dependencies: ["Logging", "Config", "SFTP", "Secrets", "SSHProcess"]),
+
+        .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "SFTP", "Secrets", "SSHProcess"]),
         .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),

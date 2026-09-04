@@ -107,22 +107,89 @@ public actor RealSFTPTransport: SFTPTransport {
         }
     }
 
-    /// Streams a byte range to `receiver` without ever holding the whole file. The
-    /// transfer scheduler of section 6.2 and the `fetchContents` FileHandle of section
-    /// 5.2 both want this rather than `read`.
+    /// Streams a byte range to `receiver` without ever holding the whole file, at
+    /// `window` requests in flight. The transfer scheduler of section 6.2 and the
+    /// `fetchContents` FileHandle of section 5.2 both want this rather than `read`.
     public func readStreaming(
-        _ path: RelativePath, offset: UInt64, length: UInt64?,
-        receiver: (UInt64, Data) async -> Void
+        _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int = 16,
+        receiver: @escaping @Sendable (UInt64, Data) async -> Void
     ) async throws -> UInt64 {
         let handle = try await client.open(serverPath(path), flags: .read)
         do {
             let count = try await client.read(
-                handle: handle, offset: offset, length: length, receiver: receiver)
+                handle: handle, offset: offset, length: length, window: window,
+                receiver: receiver)
             try? await client.close(handle)
             return count
         } catch {
             try? await client.close(handle)
             throw error
+        }
+    }
+
+    /// Section 5.5's temp file plus rename, fed a chunk at a time so that a large upload
+    /// never sits in the agent's memory, and section 6.2's window share while it does it.
+    ///
+    /// A cancel (the extension's `Progress`, or its connection going away) removes the
+    /// temp file it had started on the server, which is what section 5.2 requires.
+    public func writeStreaming(
+        _ path: RelativePath, mode: UInt32, window: Int = 16,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        guard let parent = path.parent else {
+            throw SFTPError.failure("Cannot write to the location root")
+        }
+        let temporaryName = ".sshdrive-upload-\(uploadTag)-\(UUID().uuidString.lowercased())"
+        let temporary = try parent.appending(component: temporaryName)
+        let temporaryPath = serverPath(temporary)
+
+        let handle = try await client.open(
+            temporaryPath,
+            flags: [.write, .create, .exclusive],
+            attributes: SFTPSettableAttributes(permissions: mode))
+        var written: Int64 = 0
+        do {
+            while true {
+                if Task.isCancelled { throw SFTPError.cancelled }
+                let piece = try source()
+                if piece.isEmpty { break }
+                try await client.write(
+                    handle: handle, offset: UInt64(written), data: piece, window: window)
+                written += Int64(piece.count)
+                progress(written)
+            }
+            if await client.extensions.contains(.fsync) {
+                try? await client.fsync(handle)
+            }
+            try await client.close(handle)
+        } catch {
+            try? await client.close(handle)
+            try? await client.remove(temporaryPath)
+            throw error
+        }
+
+        do {
+            try await rename(temporary, into: path)
+        } catch {
+            try? await client.remove(temporaryPath)
+            throw error
+        }
+        try? await client.setstat(serverPath(path), SFTPSettableAttributes(permissions: mode))
+    }
+
+    /// The create-versus-overwrite choice of section 5.5, shared by both write paths.
+    private func rename(_ temporary: RelativePath, into path: RelativePath) async throws {
+        let temporaryPath = serverPath(temporary)
+        if await client.extensions.contains(.posixRename) {
+            try await client.posixRename(temporaryPath, to: serverPath(path))
+            return
+        }
+        do {
+            try await client.rename(temporaryPath, to: serverPath(path))
+        } catch {
+            try await client.remove(serverPath(path))
+            try await client.rename(temporaryPath, to: serverPath(path))
         }
     }
 

@@ -99,7 +99,7 @@ and run with `swift test --filter <name>`.
 `docs/skeleton-notes.md` has the full syntax. The two that drive this spike:
 
 ```
-sshdrive debug ssh add <name> <[user@]host[:port]> [--remote-path P]
+sshdrive add <name> <[user@]host[:port]> [--remote-path P]
                                                   [--identity FILE] [--jump CHAIN]
 sshdrive debug ssh remove <name>
 
@@ -110,7 +110,7 @@ sshdrive debug secrets [store|lookup|delete|list|classify|connect]
         [--purpose master|collect] [--with-key-agent]
 ```
 
-`debug ssh add` writes an ssh-backed location and adds its File Provider domain, so the
+`sshdrive add` writes a location and adds its File Provider domain, so the
 transport can be driven through `~/Library/CloudStorage/SSHDrive-<name>` before milestone 3
 exists. It connects with whatever the keychain already holds, so put the secrets in place
 with `debug secrets store` first, and it is all-or-nothing: a location that cannot connect
@@ -137,7 +137,7 @@ Two things that look like S2 and are not.
 - **`sshdrive add` is milestone 3.** The `ssh -G` display that tells the user what the
   config resolved to, the two-pass collect connection driven from a terminal, and the
   prompts relayed to that terminal are the three things the real command adds over
-  `debug ssh add`. The agent-side halves of all three are measured here (s2-13, s2-9);
+  `sshdrive add`. The agent-side halves of all three are measured here (s2-13, s2-9);
   the CLI half is not, and has unit coverage only.
 - **The breaker and reconnection are milestone 5.** Jittered backoff, the raised cap for a
   key agent that is not ready, the reconnect after `-O exit` at will-sleep and what the
@@ -254,7 +254,7 @@ Section 6.1. The chain is `spike-inner`, whose config carries
   sshdrive debug secrets store --destination hop@192.168.64.1 --port 2210 --value spike-password-a
   sshdrive debug secrets store --destination hop@bastion-b   --port 22   --value spike-password-b
   sshdrive debug secrets store --destination alec@inner      --port 22   --value spike-password
-  sshdrive debug ssh add inner spike-inner
+  sshdrive add inner spike-inner
   ps -Ao command= | grep 'ssh -N' | grep -v grep          # read the whole chain off argv
   ls -R ~/Library/CloudStorage/SSHDrive-inner/data
   ```
@@ -311,7 +311,7 @@ Section 6.1. The chain is `spike-inner`, whose config carries
   cd ~/sshdrive/Packages/SSHDriveCore
   swift test --filter ProxyCommandQuotingTests
   # end to end, not yet run:
-  sshdrive debug ssh add space spike-deb-spacekey --jump hop@192.168.64.1:2210
+  sshdrive add space spike-deb-spacekey --jump hop@192.168.64.1:2210
   ls ~/Library/CloudStorage/SSHDrive-space/
   ```
 
@@ -523,7 +523,7 @@ Sections 4.2 and 6.1.
 
   ```
   tailscale up --ssh                                   # on both ends
-  sshdrive debug ssh add ts <user>@<host>.tail1234.ts.net
+  sshdrive add ts <user>@<host>.tail1234.ts.net
   ls ~/Library/CloudStorage/SSHDrive-ts/
   ```
 
@@ -603,7 +603,7 @@ Sections 4.2 and 6.1.
   ```
   grep -n IdentityAgent ~/.ssh/config
   ssh -G <host> | grep '^identityagent'
-  sshdrive add <host>            # milestone 3; until then: debug ssh add + debug secrets
+  sshdrive add <host>            # real since milestone 3 (2026-09-04)
   sshdrive show <host> | grep -i 'agent'
   sshdrive agent restart         # then watch 1Password for an approval prompt
   ```

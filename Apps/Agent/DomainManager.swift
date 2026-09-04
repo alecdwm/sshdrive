@@ -116,6 +116,16 @@ actor DomainManager {
         return try await runtime(for: location)
     }
 
+    /// Every runtime that is already up. A cancel goes to all of them (section 5.2) and
+    /// must never be the thing that connects a location.
+    func startedRuntimes() -> [LocationRuntime] { Array(runtimes.values) }
+
+    /// The runtime for a location **only if it is already up**. `list`, `show` and
+    /// `status` use this rather than `runtime(for:)`: a status command that dialled every
+    /// server would take a minute on a laptop with no network, and section 8 gives
+    /// `status --probe` as the way to ask for a connection on purpose.
+    func startedRuntime(locationID: String) -> LocationRuntime? { runtimes[locationID] }
+
     func dropRuntime(locationID: String) async {
         guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
         // `-O exit` on the master and the channel with it, so removing a location does

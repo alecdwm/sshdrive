@@ -18,8 +18,16 @@ import Logging
 /// in section 8 arrives with the milestone that gives it something to do.
 enum ControlCommands {
 
-    static func run(command: String, arguments: [String: String]) async throws -> Data {
+    static func run(
+        command: String, arguments: [String: String], relay: CLIRelay? = nil
+    ) async throws -> Data {
         switch command {
+        case "add", "show", "remove", "set", "mount", "unmount", "status":
+            // Section 8's user-facing half. `add` and a `set` that re-keys the secrets are
+            // the two that need a terminal, which is what `relay` is (section 4.2).
+            return try await LocationCommands.run(
+                command: command, arguments: arguments, relay: relay)
+
         case "version":
             return try json([
                 "agentVersion": agentVersion,
@@ -40,13 +48,14 @@ enum ControlCommands {
         case "debug.fake.add":
             return try await addFakeLocation(arguments)
 
-        case "debug.fake.remove", "debug.ssh.remove":
+        case "debug.fake.remove":
             return try await removeLocation(arguments)
 
-        case "debug.ssh.add":
-            return try await addSSHLocation(arguments)
+        case "list":
+            return try await LocationCommands.run(
+                command: "list", arguments: arguments, relay: relay)
 
-        case "debug.fake.list", "list":
+        case "debug.fake.list":
             let file = try await DomainManager.shared.configuration()
             return try json([
                 "macID": file.macID,
@@ -219,6 +228,9 @@ enum ControlCommands {
                 "signalled": location.id, "container": container, "identifier": identifier,
             ])
 
+        case let transport where transport.hasPrefix("debug.transport"):
+            return try await TransportDebug.run(command: transport, arguments: arguments)
+
         default:
             throw SSHDriveAgentError.notImplemented.asNSError("Unknown command \"\(command)\".")
         }
@@ -301,6 +313,45 @@ enum ControlCommands {
         let sshVersion = SSHProcess.sshVersion()
         check("ssh", sshVersion != nil, sshVersion ?? "cannot run \(SSHProcess.sshBinaryPath)")
 
+        // Section 4.1: a config written for a newer Homebrew OpenSSH may use a keyword
+        // Apple's build rejects, and `ssh -G` then fails with `Bad configuration option`.
+        // Resolving a name nothing can match exercises every `Host *` and `Include` block
+        // without naming anybody's server.
+        let configCheck = sshConfigParse()
+        check(
+            "~/.ssh/config parses", configCheck.ok, configCheck.detail,
+            remedy: configCheck.ok
+                ? nil
+                : "/usr/bin/ssh is Apple's build; a keyword only a newer OpenSSH understands "
+                    + "will do this. Guard it with `Match exec` or remove it.")
+
+        // Section 6.1's orphan sweep, reported rather than run: `doctor` is a diagnosis,
+        // and adopting or killing a master while a location is mounted would be a repair
+        // nobody asked for.
+        let sockets = ControlSocket.existingSockets()
+        let live = await liveLocationSockets()
+        let orphans = sockets.filter { !live.contains($0) }
+        check(
+            "control sockets", orphans.isEmpty,
+            sockets.isEmpty
+                ? "none in \(ControlSocket.temporaryDirectory())"
+                : "\(sockets.count) socket(s), \(orphans.count) with no location: "
+                    + orphans.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "),
+            remedy: orphans.isEmpty
+                ? nil
+                : "A crashed agent leaves its `ssh -N` children behind. "
+                    + "`sshdrive agent restart` sweeps them (section 6.1).")
+
+        // The keychain, from the only process that has `keychain-access-groups`
+        // (section 3.1). Reachability, not contents: nothing here reads a secret.
+        let keychain = keychainReachable()
+        check(
+            "keychain", keychain.ok, keychain.detail,
+            remedy: keychain.ok
+                ? nil
+                : "The agent needs its embedded provisioning profile for "
+                    + "keychain-access-groups; an ad-hoc signed build cannot have one.")
+
         // The login shell snapshot (section 6.1): `PATH` and `SSH_AUTH_SOCK` as a fresh
         // login shell has them, which is what makes a key agent socket exported from
         // `.zshrc` and a `ProxyCommand` in /opt/homebrew/bin work from launchd.
@@ -335,6 +386,68 @@ enum ControlCommands {
                 + "Homebrew cannot remove File Provider domains or keychain items for you.",
         ])
         return checks
+    }
+
+    /// `ssh -G` against a name no config can match, so every `Host *` block and every
+    /// `Include` is parsed but nothing is resolved to a real server (section 4.1).
+    private static func sshConfigParse() -> (ok: Bool, detail: String) {
+        let probe = "sshdrive-doctor-nonexistent.invalid"
+        guard let result = try? Spawn.capture(
+            executable: SSHProcess.sshBinaryPath,
+            argv: [SSHProcess.sshBinaryPath, "-G", probe],
+            environment: ProcessInfo.processInfo.environment, timeout: 10)
+        else { return (false, "could not run \(SSHProcess.sshBinaryPath) -G") }
+        // `ssh -G` also prints notes about the session shape it would have used, which
+        // say nothing about the config parsing and which the agent overrides anyway
+        // (section 6.1). Only the parse diagnostics are a `doctor` finding.
+        let stderr = String(decoding: result.stderr, as: UTF8.self)
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("Pseudo-terminal will not be allocated") }
+            .joined(separator: "; ")
+        if result.exit.isClean {
+            return (true, stderr.isEmpty ? "no warnings" : "warnings: \(stderr)")
+        }
+        return (false, stderr.isEmpty ? "ssh -G exited \(result.exit.status)" : stderr)
+    }
+
+    /// The control sockets of locations that are actually up, so the orphan count in
+    /// `doctor` does not accuse a healthy mount.
+    private static func liveLocationSockets() async -> Set<String> {
+        guard let file = try? await DomainManager.shared.configuration() else { return [] }
+        var out: Set<String> = []
+        for location in file.locations {
+            guard await DomainManager.shared.startedRuntime(locationID: location.id) != nil
+            else { continue }
+            out.insert(ControlSocket.path(forLocationID: location.id))
+        }
+        return out
+    }
+
+    /// One `SecItemCopyMatching` under our access group. A `errSecItemNotFound` is a pass:
+    /// it means the query was accepted and the group is reachable.
+    private static func keychainReachable() -> (ok: Bool, detail: String) {
+        let group = SSHDriveIdentifiers.keychainAccessGroup
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainSecretsStore.service,
+            kSecAttrAccessGroup as String: group,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            let count = (item as? [Any])?.count ?? 0
+            return (true, "\(group): reachable, \(count) item(s)")
+        case errSecItemNotFound:
+            return (true, "\(group): reachable, no items yet")
+        default:
+            let text = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+            return (false, "\(group): \(text)")
+        }
     }
 
     private static func pluginKitStatus() -> String? {
@@ -389,7 +502,7 @@ enum ControlCommands {
         }
         let runtime = try await DomainManager.shared.runtime(for: created)
         try await runtime.seedFakeTree(fileCount: fileCount)
-        _ = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier)
+        _ = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier, pageToken: nil)
         var testingModes: NSFileProviderDomain.TestingModes = []
         for word in (arguments["testingModes"] ?? "").split(separator: ",") {
             switch word.trimmingCharacters(in: .whitespaces) {
@@ -404,95 +517,6 @@ enum ControlCommands {
             "testingModes": arguments["testingModes"] ?? "",
             "mountHint": "~/Library/CloudStorage (the exact name is what spike S3 records)",
         ])
-    }
-
-    /// `sshdrive debug ssh add <name> <user@host[:port]>`: an ssh-backed location and its
-    /// domain, with no `ssh -G` display and no relayed prompts.
-    ///
-    /// This is not `sshdrive add`. The real one (milestone 3, section 8) shows the
-    /// resolved configuration, runs the two-pass collect connection and relays every
-    /// prompt to the terminal; this writes the location from what it was given and
-    /// connects with whatever the keychain already holds, which is what milestone 2 needs
-    /// to prove the transport end to end. Put the secrets in place with
-    /// `sshdrive debug secrets store` first.
-    private static func addSSHLocation(_ arguments: [String: String]) async throws -> Data {
-        guard let name = arguments["name"], let destination = arguments["destination"] else {
-            throw SSHDriveAgentError.notImplemented.asNSError(
-                "debug ssh add needs a name and user@host[:port].")
-        }
-        // `user@host:port` is our own sugar; `ssh` does not parse it (section 6.1), so it
-        // is split here and passed as `-o User=` and `-o Port=`.
-        var body = destination
-        var user: String?
-        if let at = body.lastIndex(of: "@") {
-            user = String(body[body.startIndex ..< at])
-            body = String(body[body.index(after: at)...])
-        }
-        var port: Int?
-        if let colon = body.lastIndex(of: ":"), let parsed = Int(body[body.index(after: colon)...]) {
-            port = parsed
-            body = String(body[body.startIndex ..< colon])
-        }
-        guard !body.isEmpty else {
-            throw SSHDriveAgentError.notImplemented.asNSError(
-                "debug ssh add: the destination must be [user@]host[:port].")
-        }
-        var sshOptions: [String] = []
-        if let identity = arguments["identity"], !identity.isEmpty {
-            // Section 4: `--identity` stores the override with `IdentitiesOnly=yes`, so
-            // the named key is the only one offered and a touch key sitting in `~/.ssh`
-            // never gets its turn ahead of it (section 4.2).
-            sshOptions += ["-o", "IdentitiesOnly=yes"]
-        }
-        if let jump = arguments["jump"], !jump.isEmpty {
-            // Stored the way a `~/.ssh/config` ProxyJump would resolve: `ssh -G` reports
-            // it and the agent rebuilds every hop as its own ProxyCommand. It is never
-            // handed to `ssh` as an option (section 6.1, SSHCommandBuilder.master).
-            _ = try JumpHop.parseChain(jump)
-            sshOptions += ["-o", "ProxyJump=\(jump)"]
-        }
-        var location = Location(
-            nickname: name,
-            host: body,
-            user: user,
-            port: port,
-            identityFile: (arguments["identity"] as NSString?)?.expandingTildeInPath,
-            sshOptions: sshOptions,
-            remotePath: arguments["remotePath"],
-            mounted: true,
-            backend: .sftp)
-        if let existing = try? await DomainManager.shared.location(named: name) {
-            location.id = existing.id
-        }
-        let created = location
-        try await DomainManager.shared.mutateConfiguration { file in
-            file.locations.removeAll { $0.id == created.id }
-            file.locations.append(created)
-        }
-        do {
-            let runtime = try await DomainManager.shared.runtime(for: created)
-            let root = try await runtime.rootDescription()
-            // One listing before the domain exists, so the mount is not empty the first
-            // time Finder looks at it.
-            let items = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier)
-            try await DomainManager.shared.addDomain(for: created)
-            return try json([
-                "id": created.id, "name": created.displayName, "host": created.host,
-                "user": created.user ?? "", "port": created.port ?? 22,
-                "remotePath": root, "entries": items.count,
-                "jump": arguments["jump"] ?? "",
-                "mount": "~/Library/CloudStorage/SSHDrive-\(created.displayName)",
-            ])
-        } catch {
-            // A location that cannot connect is not left in config.json pretending to be
-            // mounted: `debug ssh add` is all-or-nothing, unlike the real `add`, which has
-            // a terminal to explain itself to.
-            await DomainManager.shared.dropRuntime(locationID: created.id)
-            try? await DomainManager.shared.mutateConfiguration { file in
-                file.locations.removeAll { $0.id == created.id }
-            }
-            throw error
-        }
     }
 
     private static func removeLocation(_ arguments: [String: String]) async throws -> Data {
@@ -656,7 +680,7 @@ enum ControlCommands {
         ])
     }
 
-    private static func json(_ object: [String: Any]) throws -> Data {
+    static func json(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .prettyPrinted])
     }
 }

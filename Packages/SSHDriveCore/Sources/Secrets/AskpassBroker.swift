@@ -123,6 +123,14 @@ public final class AskpassBroker: @unchecked Sendable {
     /// agent has killed the `ssh` anyway, so an invocation arriving later is not ours.
     public var authenticationDeadline: TimeInterval = 60
 
+    /// The collect connection's own deadline. Section 4.2's 60 s exists because nothing
+    /// may be waiting for a human on an unattended reconnect; a collect connection is the
+    /// one case where somebody *is* at the keyboard, reading a fingerprint off the screen
+    /// and typing a password, so its token lives longer. The 60 s still bounds the master
+    /// that `add` brings up afterwards, which is the connection that has to work
+    /// unattended.
+    public var collectDeadline: TimeInterval = 300
+
     /// A bound on how many prompts one spawn may raise. A token is not single-*prompt* -
     /// section 4.2 has a master's `ProxyJump` hops share it, and one connection can be
     /// asked for a passphrase and then a password - but it is single-*spawn*, and a
@@ -163,7 +171,8 @@ public final class AskpassBroker: @unchecked Sendable {
         let session = Session(
             token: token, locationID: locationID, purpose: purpose, resolution: resolution,
             argv: argv, mintedAt: minted,
-            expiresAt: minted.addingTimeInterval(authenticationDeadline),
+            expiresAt: minted.addingTimeInterval(
+                purpose == .collect ? collectDeadline : authenticationDeadline),
             maskedAccounts: maskedAccounts)
         lock.lock()
         // A token is per spawn, so a location that respawns drops what it had retired.
@@ -528,6 +537,14 @@ public struct AskpassHarness {
 extension AskpassBroker: AskpassTokenProviding {
     public func mintToken(locationID: String, argv: [String]) -> String {
         mint(locationID: locationID, purpose: .master, argv: argv)
+    }
+
+    public func mintCollectToken(
+        locationID: String, argv: [String], maskedAccounts: Set<String>
+    ) -> String {
+        mint(
+            locationID: locationID, purpose: .collect, argv: argv,
+            maskedAccounts: maskedAccounts)
     }
 
     public func attachToken(_ token: String, pid: Int32, argv: [String]) {

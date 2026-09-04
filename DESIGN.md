@@ -530,7 +530,17 @@ only once authentication has succeeded (§6.1), the agent kills it. The
 60 s run from the spawn and contain the 15 s `ConnectTimeout` of the TCP
 and banner phase (§6.3), because the agent has no signal for when that
 phase ended; a `ProxyCommand` that takes ten seconds to hand over a
-connection leaves fifty for authentication. For
+connection leaves fifty for authentication. **The collect connection of
+`add` and `passwd` is the one exception**, and it has to be: its prompts
+go to a terminal, so a user reading a fingerprint off the screen and
+typing a password for each hop of a chain routinely spends longer than
+that, and a 60 s kill lands in the middle of their typing. Somebody
+being at the keyboard is the whole premise of that connection, and the
+whole reason the 60 s exists is that nothing may wait for a human on an
+unattended one; so the collect connection runs to 300 s and the master
+`add` brings up **afterwards** carries the ordinary 60 s, which is the
+connection that has to work unattended and the one worth measuring
+(2026-09-04, §13). For
 an `agentDependent` location that is treated as an authentication
 failure for the purpose of the reconnect loop; for any other location
 nothing on the Mac can be waiting for a human, since it runs with
@@ -864,6 +874,22 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   with it, so `sshdrive pins` never shows a dangling pin; the only pin
   that outlives its item is one on a directory whose deletion the guard
   is currently holding.
+- **A listing is one transaction.** Every row and every anchor a
+  `readdir` produces is written inside a single `BEGIN IMMEDIATE`, not
+  row by row. A directory with 10,000 entries is 10,000 autocommits
+  otherwise, each its own WAL frame, and that - not the wire, which
+  reads the same directory in a tenth of a second - is what a large
+  enumeration spends its time on: `ls` of the testbed's 10,000-entry
+  `data/many` through the mount timed out (`fts_read: Operation timed
+  out`) row by row and completed in one transaction (2026-09-04).
+  That listing's own body calls two things that are each a transaction in
+  their own right - the deletion above, which writes the row and its
+  anchor together, and the anchor appended for every changed row - and
+  SQLite has no nested `BEGIN`: the first real `sshdrive add` failed with
+  `cannot start a transaction within a transaction` and lost the listing.
+  So the index's transaction helper **nests**, with `SAVEPOINT` for every
+  level below the outermost, which is what lets a rule about the whole
+  listing and a rule about one row's atomicity both hold (2026-09-04).
 - `anchors` is pruned to the newest 30 days and to the newest 1,000,000
   rows, both limits applying. The row cap is deliberately generous: a pin change writes
   an anchor per known descendant (§7.1), so a cap in the tens of
@@ -1524,11 +1550,25 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   SFTP, the helper stream, a sweep, a probe or delete walk).
   Hardened servers set `MaxSessions` to 1 or 2, and the probe finds the
   limit by opening channels until one is refused
-  (`mux_client_request_session: session request failed`), once per
-  server banner: the result is cached in `capabilities.json` and
-  re-probed only when the banner changes or on `status --probe`, since
-  ten channel opens on every wake would be a poor trade for a limit that
-  never changes. At 2 the bulk
+  (`mux_client_request_session: session request failed`). The `-N` master
+  carries no session of its own, so the count is exactly the mux clients,
+  and the question the probe has to answer is not "what is `MaxSessions`"
+  but **"may I hold three at once"** - metadata, bulk, and one exec -
+  because three is the smallest budget under which the bulk channel is
+  affordable. Two channel opens answer it, and the second of them *is*
+  the bulk channel, so nothing is opened twice and nothing is opened that
+  is thrown away except the third. A channel is proved open by completing
+  the SFTP handshake on it: `ssh` spawns successfully whether or not the
+  session was granted, and only the refusal on stderr, or a handshake
+  that never lands, tells the two apart. The result is cached in
+  `capabilities.json` and re-probed on `status --probe`. §6.1 used to say
+  "once per server banner", re-probing when the banner changes: the agent
+  never sees one. Its `ssh` runs at `LogLevel=ERROR`, which prints no
+  remote version, and a mux client speaks to the master's socket rather
+  than to the server, so the cache is keyed by the location and an
+  explicit re-probe is its only invalidation (2026-09-04). A cached
+  budget that no longer holds is noticed anyway, because opening the bulk
+  channel is what the cached answer is used for. At 2 the bulk
   SFTP channel is dropped, transfers share the metadata channel under the
   scheduler of §6.2, and the helper gets the one exec channel: the
   30-minute insurance sweep at that tier stops it, sweeps on the same
@@ -1788,11 +1828,22 @@ transfer is waiting, and a running one is never pre-empted, so a
 double-click during a 50 GB pin waits for at most one background
 transfer's share of the window rather than for the pin. At a
 `MaxSessions` of 2 (§6.1) the same scheduler runs on the metadata
-channel and metadata requests are served ahead of both classes. The
-system keeps at most **six** `fetchContents` calls open at once for an
+channel and metadata requests are served ahead of both classes, and each
+transfer takes half the pipelined window so the channel keeps request
+slots free for them.
+
+The system keeps at most **six** `fetchContents` calls open at once for an
 eager subtree (S6, 2026-09-04, macOS 26.4: 38 transfers ran in strict
-batches of six), so the four running plus at most two waiting is
-everything the agent ever holds.
+batches of six). That bounds the *background* class and nothing else:
+eight files opened at once from a shell loop reached the extension as
+eight simultaneous foreground `fetchContents` calls (measured on macOS
+26.4, 2026-09-04), so "four running plus at most two waiting" is what the
+agent holds for an eager subtree, not a limit on what it may be asked
+for. The queue is therefore sized to six but not capped there: a seventh
+arrival is admitted and counted rather than refused, because refusing a
+`fetchContents` the system did make fails a user's open for the sake of a
+measurement, and `sshdrive status` reports the count so the measurement
+can be revisited if it moves.
 
 Three details worth writing down before the first bug report. OpenSSH's
 `SSH2_FXP_SYMLINK` takes its two path arguments in the opposite order from
@@ -2662,8 +2713,14 @@ stdin.
 ```
 sshdrive add [user@]host-or-alias[:port] [--nickname NAME] [--remote-path PATH]
              [--user USER] [--port N] [--identity PATH] [-o SSHOPTION]…
+             [--jump HOP[,HOP]…] [--permissions mode|none]
              [--password | --password-stdin | --no-password]
              [--cache-ttl 1h] [--trust-first]
+sshdrive add <nickname> [user@]host-or-alias[:port] [same flags]
+        The same command. A second positional argument makes the first the
+        nickname, because `sshdrive add nas alec@nas` is what people write
+        and what a script reads better as; `--nickname` still works and
+        `--remote-path` is also spelled `--path`.
         Asks the agent to run `ssh -G` and shows what the host resolves to,
         warns when the terminal's `PATH` or `SSH_AUTH_SOCK` differs from the
         login shell snapshot the agent will use (§4.2) and when the resolved
@@ -2957,9 +3014,21 @@ intermediate component. Recursive operations walk the server with
 `readdir`, since the index holds only what Finder has opened (§5.5),
 and re-`lstat` each directory before descending, so a directory replaced
 by a symlink after it was enumerated is noticed before anything is done
-inside it. That check is mandatory for recursive delete, the one operation where
-following a link would be destructive, and is one extra round trip per
-directory, which is acceptable for a delete.
+inside it.
+
+**That check belongs to enumeration too, not only to recursive delete.**
+SFTP's `opendir` **follows** a symlink: `readdir` on a path that was a
+directory yesterday and is a link to `/etc` today returns `/etc`, and
+every name in it gets a row. Measured against the testbed on 2026-09-04,
+which is what the deferred half of S3 was for: before the check, forcing
+a listing of a swapped directory put `passwd`, `shadow` and eighty other
+names into the index. So every listing re-`lstat`s its own directory
+first and refuses to descend when the answer is no longer `directory`;
+the row is rewritten from that `lstat`, every row beneath it is deleted,
+and the container answers `.noSuchItem`, because as a container it no
+longer exists. That is one extra round trip per listing, which is the
+same trade the delete already makes and is cheap beside the `readdir` it
+guards.
 
 **Server-side tools are told the same root.** The sweep runs `find` without
 `-L` (physical walk); the helper takes `--root` and refuses any watch or sweep root
@@ -3356,8 +3425,23 @@ there, so that this list cannot drift from the body.
   off the same stdin (2026-09-04, §9.2).
 - **`MaxSessions` is probed;** 2 drops the bulk channel, 1 makes the
   location SFTP-only (§6.1).
+- **The probe asks "may I hold three channels at once", not "what is
+  `MaxSessions`",** in two opens whose first is the bulk channel itself,
+  and the answer is cached per location because the agent never sees a
+  server banner to key it on (2026-09-04, §6.1).
 - **Transfers interleave under a scheduler,** four at a time, foreground
   before background (§6.2).
+- **The six-fetch ceiling bounds an eager subtree, not the agent's
+  queue** — eight files opened at once from a shell arrived as eight
+  simultaneous foreground fetches, so a transfer past the ceiling is
+  admitted and counted rather than refused (2026-09-04, §6.2).
+- **Enumeration re-`lstat`s its own directory before `readdir`,** because
+  SFTP `opendir` follows a symlink and a directory swapped for a link to
+  `/etc` is otherwise read straight through into the index (2026-09-04,
+  S3, §9.1).
+- **A directory listing is written in one transaction,** which is the
+  difference between an `ls` of a 10,000-entry directory timing out and
+  completing (2026-09-04, §5.3).
 - **Calls wait for an in-flight connection attempt,** bounded by its
   deadline; only an open breaker fails fast (§6.3).
 - **Reconnection stops on auth and host-key failures;** host keys are the
@@ -3512,6 +3596,16 @@ there, so that this list cannot drift from the body.
 - **No busybox has `find -cmin`,** so the sweep's `-mmin` fallback is the
   ordinary busybox path, not an old-build case; the ladder itself is unchanged
   (2026-09-04, testbed, §6.4).
+- **The collect connection runs to 300 s, not the unattended 60 s,** because a
+  person is at the keyboard for exactly that one connection; the master `add`
+  brings up afterwards carries the 60 s and is what proves the location works
+  unattended (2026-09-04, §4.2).
+- **The index's transaction helper nests,** with `SAVEPOINT` below the
+  outermost level: §5.3's "a listing is one transaction" wraps calls that are
+  each a transaction of their own, and SQLite has no nested `BEGIN`
+  (2026-09-04, §5.3).
+- **`sshdrive add` also takes the nickname as a first positional argument,**
+  which is what people write; `--nickname` is unchanged (2026-09-04, §8).
 
 ---
 

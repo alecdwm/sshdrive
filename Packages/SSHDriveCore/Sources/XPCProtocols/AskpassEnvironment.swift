@@ -85,9 +85,25 @@ public protocol AskpassTokenProviding: AnyObject, Sendable {
     /// One token for one `ssh` about to be spawned. `argv` is the command line the agent
     /// built, which is how a `ProxyJump` hop's own argv is later told apart from it.
     func mintToken(locationID: String, argv: [String]) -> String
+    /// The same, for a connection that is not a master: the collect connection of
+    /// `sshdrive add` and `sshdrive passwd`, whose token is marked `collect` so a prompt
+    /// with no stored answer is relayed to the CLI rather than skipped, and which may mask
+    /// stored items so a stale password reaches the terminal (section 4.2). Defaulted, so
+    /// a test double only ever has to implement the three methods above.
+    func mintCollectToken(
+        locationID: String, argv: [String], maskedAccounts: Set<String>
+    ) -> String
     /// The pid of the `ssh` the token was issued to, once it has one. Until this is set
     /// the descendant check the broker makes cannot run.
     func attachToken(_ token: String, pid: Int32, argv: [String])
     /// Retire the token when the master exits, which ends every hop with it.
     func retireToken(_ token: String)
+}
+
+extension AskpassTokenProviding {
+    public func mintCollectToken(
+        locationID: String, argv: [String], maskedAccounts: Set<String>
+    ) -> String {
+        mintToken(locationID: locationID, argv: argv)
+    }
 }

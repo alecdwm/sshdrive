@@ -715,8 +715,35 @@ debugger.
 
   Result:
 
-Deferred to milestone 3 against a real server: replace an enumerated directory with a
-symlink to `/etc` and confirm nothing inside is listed, fetched or deleted (section 9.1).
+- [x] **s3-15. Containment against a real server** &mdash; **VM** (was deferred to milestone 3)
+
+  On the testbed's `deb`, over ssh as the same account and inside its own home: enumerate
+  `data/swap/` through the mount, then `mv data/swap data/swap.real && ln -s /etc data/swap`.
+  Confirm nothing inside it is listed, fetched or deletable, then restore. Also hand
+  `createItem` a filename of `..`, `../escaped.txt`, `/etc/escaped.txt` and `.`
+  (`sshdrive debug transport escape <name> --filename X`), and a symlink whose target is
+  absolute and outside the root.
+
+  Expected (section 9.1): every path goes through the `RelativePath` chokepoint, the index
+  never contains a path with a link as an intermediate component, and a symlink target is
+  opaque and never joined to a remote path.
+
+  Result: **Passed, after a fix the test itself found.** SFTP `opendir` **follows** a
+  symlink, and section 9.1 had written "never descend through a link" as a rule for
+  recursive delete only: listing the swapped `data/swap` returned `/etc` and put `passwd`,
+  `shadow` and eighty other names into the index as rows under the mount root. Nothing
+  outside the account's tree was written or deleted and Finder never showed them, but the
+  index is exactly where they must not be. Every listing now re-`lstat`s its own directory
+  before `readdir`, refuses to descend when the answer is no longer `directory`, rewrites
+  the row from that `lstat`, deletes every row beneath it, and answers `.noSuchItem`.
+  With the check in place and the swap still on the server: zero rows under `data/swap`,
+  the mount shows it as a link, `cat <mount>/data/swap/passwd` answers "No such file or
+  directory", `rm` inside it removes nothing, and `/etc` is intact at 82 entries.
+  All four escape filenames are refused by the `RelativePath` constructor with its own
+  message. The **absolute symlink target is the one case not refused yet**: the link is
+  created at a validated path, which is section 5.7's lexical check and is milestone 4;
+  section 9.1 holds regardless, since nothing under the link is listed or fetched.
+  Section 9.1, section 13 and CLAUDE.md corrected. (results.md 2026-09-04.)
 
 ---
 

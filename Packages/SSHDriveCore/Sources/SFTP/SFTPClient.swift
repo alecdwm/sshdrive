@@ -420,8 +420,15 @@ public actor SFTPClient {
         _ writer: SFTPPacketWriter, id: UInt32, deadline: Duration
     ) async throws -> SFTPReply {
         if let deathError { throw deathError }
+        // Section 5.2: cancelling the extension's `Progress` cancels the transfer's Task,
+        // and the agent abandons the SFTP requests in flight. A request already on the
+        // wire is answered and dropped - the channel is shared and the wire has no
+        // cancel - but nothing new is sent, which for a pipelined transfer means the
+        // cancel takes effect within one chunk.
+        if Task.isCancelled { throw SFTPError.cancelled }
         await acquireSlot()
         if let deathError { throw deathError }
+        if Task.isCancelled { throw SFTPError.cancelled }
         let packet = writer.finish()
         let instant = ContinuousClock.now.advanced(by: deadline)
         return try await withCheckedThrowingContinuation { continuation in
@@ -741,10 +748,14 @@ public actor SFTPClient {
         handle: SFTPFileHandle,
         offset: UInt64,
         length: UInt64?,
+        window requestedWindow: Int? = nil,
         receiver: (UInt64, Data) async -> Void
     ) async throws -> UInt64 {
         let chunk = readChunkSize
-        let window = max(1, configuration.windowRequests)
+        // Section 6.2: transfers interleave on the bulk channel and the scheduler splits
+        // the pipelined window between them, so a running transfer is told its share
+        // rather than taking all sixteen.
+        let window = max(1, min(requestedWindow ?? configuration.windowRequests, configuration.windowRequests))
         let end: UInt64? = length.map { offset + $0 }
         var nextOffset = offset
         var endOfFileAt: UInt64?
@@ -773,6 +784,7 @@ public actor SFTPClient {
             while inFlight > 0 {
                 guard let result = try await group.next() else { break }
                 inFlight -= 1
+                if Task.isCancelled { throw SFTPError.cancelled }
                 if result.atEnd {
                     endOfFileAt = min(endOfFileAt ?? UInt64.max, result.offset)
                 }
@@ -805,10 +817,12 @@ public actor SFTPClient {
     }
 
     /// Pipelined read into one `Data`, in offset order.
-    public func readAll(handle: SFTPFileHandle, offset: UInt64, length: UInt64?) async throws -> Data
-    {
+    public func readAll(
+        handle: SFTPFileHandle, offset: UInt64, length: UInt64?, window: Int? = nil
+    ) async throws -> Data {
         let box = ChunkBox()
-        try await read(handle: handle, offset: offset, length: length) { chunkOffset, data in
+        try await read(handle: handle, offset: offset, length: length, window: window) {
+            chunkOffset, data in
             box.add(offset: chunkOffset, data: data)
         }
         return box.assembled()
@@ -825,10 +839,13 @@ public actor SFTPClient {
         try reply.expectOK()
     }
 
-    /// Pipelined write, `windowRequests` chunks in flight.
-    public func write(handle: SFTPFileHandle, offset: UInt64, data: Data) async throws {
+    /// Pipelined write, `windowRequests` chunks in flight, or the scheduler's share of
+    /// them (section 6.2).
+    public func write(
+        handle: SFTPFileHandle, offset: UInt64, data: Data, window requestedWindow: Int? = nil
+    ) async throws {
         let chunk = writeChunkSize
-        let window = max(1, configuration.windowRequests)
+        let window = max(1, min(requestedWindow ?? configuration.windowRequests, configuration.windowRequests))
         var cursor = 0
 
         func nextRequest() -> (UInt64, Data)? {
@@ -853,6 +870,7 @@ public actor SFTPClient {
             while inFlight > 0 {
                 _ = try await group.next()
                 inFlight -= 1
+                if Task.isCancelled { throw SFTPError.cancelled }
                 while inFlight < window, let request = nextRequest() {
                     group.addTask {
                         try await self.writeChunk(

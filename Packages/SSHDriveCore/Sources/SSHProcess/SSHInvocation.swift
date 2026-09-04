@@ -100,9 +100,14 @@ public enum SSHCommandBuilder {
 
     /// The options shared by the master and every hop: everything except the mux settings
     /// and the destination overrides.
-    static func commonOptions() -> [(String, String)] {
+    ///
+    /// `hostKeyChecking` is `yes` everywhere except the collect connection of section 4.2,
+    /// which runs `ssh`'s default `ask` (or `accept-new` under `--trust-first`) so the
+    /// fingerprint question can be relayed to the terminal and written to the user's own
+    /// `known_hosts` exactly as it would have been from a tty (section 4.3).
+    static func commonOptions(hostKeyChecking: String = "yes") -> [(String, String)] {
         [
-            ("StrictHostKeyChecking", "yes"),
+            ("StrictHostKeyChecking", hostKeyChecking),
             ("UpdateHostKeys", "no"),
             ("ConnectTimeout", "15"),
             ("ServerAliveInterval", "15"),
@@ -134,7 +139,8 @@ public enum SSHCommandBuilder {
     public static func master(
         target: SSHTarget,
         controlPath: String,
-        proxyCommand: String? = nil
+        proxyCommand: String? = nil,
+        hostKeyChecking: String = "yes"
     ) -> SSHInvocation {
         var arguments = ["-N"]
         arguments += flatten([
@@ -142,7 +148,7 @@ public enum SSHCommandBuilder {
             ("ControlPath", controlPath),
             ("ControlPersist", "no"),
         ])
-        arguments += flatten(commonOptions())
+        arguments += flatten(commonOptions(hostKeyChecking: hostKeyChecking))
         if target.identityAgentNone {
             arguments += ["-o", "IdentityAgent=none"]
         }
@@ -163,6 +169,37 @@ public enum SSHCommandBuilder {
         arguments += SSHCommandBuilder.withoutProxyJump(target.sshOptions)
         arguments.append(target.host)
         return SSHInvocation(arguments: arguments)
+    }
+
+    /// Drops one `-o <keyword>=…` pair from a verbatim option list, whichever of the two
+    /// spellings it was stored in. `sshdrive set <name> option remove <SSHOPTION>` matches
+    /// on the whole `keyword=value` when one is given and on the keyword alone otherwise,
+    /// so both `option remove Ciphers` and `option remove Ciphers=aes256-gcm@openssh.com`
+    /// do what the user meant (section 8).
+    public static func removingOption(_ option: String, from options: [String]) -> [String] {
+        let keyword = option.firstIndex(of: "=").map { String(option[option.startIndex ..< $0]) }
+        func matches(_ pair: String) -> Bool {
+            if pair == option { return true }
+            guard keyword == nil, let equals = pair.firstIndex(of: "=") else { return false }
+            return String(pair[pair.startIndex ..< equals])
+                .caseInsensitiveCompare(option) == .orderedSame
+        }
+        var out: [String] = []
+        var index = 0
+        while index < options.count {
+            let word = options[index]
+            if word == "-o", index + 1 < options.count, matches(options[index + 1]) {
+                index += 2
+                continue
+            }
+            if word != "-o", matches(word) {
+                index += 1
+                continue
+            }
+            out.append(word)
+            index += 1
+        }
+        return out
     }
 
     /// Drops every `-o ProxyJump=…` pair (and the `-J` flag) from a verbatim option list.

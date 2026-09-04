@@ -9,6 +9,17 @@ real `SFTP` client are no longer stubs, a location with `backend: sftp` mounts
 for real, and the `debug secrets` and `debug ssh` hook sets are documented below.
 The spike runbook for it is `docs/spikes/milestone-2.md`.
 
+**Milestone 3** landed the same way on 2026-09-04, in two halves. Part 1: the
+transfer scheduler and the second bulk SFTP channel (section 6.2), the
+`MaxSessions` probe (section 6.1), permissions to capabilities and hidden names
+(section 5.4), directory paging and `fetchPartialContents` (sections 5.1, 5.2),
+and the containment half of S3 against a real server (section 9.1). Part 2: the
+user-facing CLI - `add` with the section 4.1 `ssh -G` display and the section 4.2
+collect connection with its prompts relayed to the terminal, `list`, `show`,
+`remove`, `set`, `mount`/`unmount`, `status` with section 8.1's capability
+report, and `doctor` extended for the transport. Results in
+`docs/spikes/results.md` (2026-09-04, "milestone 3, part 1" and "part 2").
+
 Built and tested on macOS 26.4.1 arm64, Xcode 26.4, Swift 6.3 (Swift 5 language mode),
 xcodegen 2.46. `scripts/mac-build.sh` does the sync, generate, `swift test` and
 `xcodebuild` loop; the Mac used for it has no signing identities, so it builds ad-hoc
@@ -23,7 +34,13 @@ on the command line only.
   anchors, anchor expiry, subtree path rewriting, `VACUUM INTO` backup). With milestone 2's
   three modules and their merge it is **214** tests, 0 failures: 31 are skipped without the
   spike testbed, and with `SSHDRIVE_TESTBED=1` on the build VM 212 run and 2 skip, those
-  two being the ones that need a real Mac (2026-09-04).
+  two being the ones that need a real Mac (2026-09-04). Milestone 3's first half takes it
+  to **246**, 0 failures, 31 skipped: a new `AgentCore` module covers section 5.4's
+  mode-to-capabilities mapping, its name rules, and section 6.2's scheduler against the
+  fake backend. Its second half takes it to **295**, 0 failures, 31 skipped: the `add`
+  destination and `set`-key parsers (`Config`), the `ssh -G` attribution diff and its
+  display (`SSHProcess`), the add-flow state machine and the askpass broker driven through
+  `AskpassHarness` (`AgentCore`), and the nested-transaction fix (`Index`).
 - `xcodebuild -scheme "SSH Drive"` in **both Debug and Release**: BUILD SUCCEEDED, no
   warnings from our own sources.
 - The produced bundle is exactly the tree in section 3:
@@ -31,7 +48,8 @@ on the command line only.
   `Contents/PlugIns/SSHDriveFileProvider.appex`,
   `Contents/Library/LaunchAgents/org.shirls.sshdrive.agent.plist`.
   (`ENABLE_DEBUG_DYLIB: NO` keeps Xcode's debug-dylib split out of `Contents/MacOS`.)
-- `sshdrive --help` runs and lists `doctor`, `agent`, `debug`.
+- `sshdrive --help` runs and lists `add`, `list`, `show`, `status`, `set`, `mount`,
+  `unmount`, `remove`, `doctor`, `agent` and `debug`.
 - The CLI carries an embedded `__TEXT,__info_plist` whose `CFBundleIdentifier` is
   `org.shirls.sshdrive.cli` (confirmed with `otool -s __TEXT __info_plist`), which is what
   the agent's peer requirement matches; a bare tool's default identifier would be its
@@ -51,13 +69,14 @@ signed build.
 | `Packages/.../XPCProtocols` | `SSHDriveAgentProtocol`, `SSHDriveExtensionProtocol`, the configured `NSXPCInterface`s with their class whitelists, `SSHDriveItemSnapshot`/`SSHDriveItemPage` (NSSecureCoding), `SSHDriveAgentError`, every identifier from section 3.1, and the peer code requirement. |
 | `Packages/.../Config` | The section 4 location model, `config.json` in the app-group container, atomic writes, `<name>` resolution (nickname, host, id prefix). |
 | `Packages/.../Index` | The full section 5.3 schema (`items`, `anchors`, `roots`, `held`, `meta`), a small SQLite wrapper, `IndexWriter` (agent, sole writer: upsert, delete with its deletion anchor, subtree path rewrite, anchor append/prune/expire, roots, `VACUUM INTO` backup, `reconciling` and `generation`), `IndexReader` (extension, read-only WAL, meta checks, `item`, `children`, change stream with `.syncAnchorExpired`), and the row-to-snapshot conversion both sides share. |
+| `Packages/.../AgentCore` | The agent's own derivations, in the package so they are unit-testable without an app bundle (2026-09-04): `ItemDerivation` and `ServerIdentity` (section 5.4's mode/uid/gid to `capabilities` and `fileSystemFlags`, and the stable metadata version), `NameVisibility` (case and normalisation collisions, non-UTF-8 names, and the four kinds of entry that get no row at all), and `TransferScheduler` (section 6.2: four at once, foreground before background, the window split between them, cancellation). |
 | `Packages/.../SFTP` | `RelativePath` (the section 9.1 chokepoint, byte components), `SFTPTransport`, the section 6.2 error classes, and `FakeTransport`: an in-memory tree with list, fetch, write, rename (non-overwriting), posix-rename, delete, symlink, statvfs, plus the mutation hook. Since 2026-09-04 (milestone 2) also the real thing: the SFTP v3 wire codec, `SFTPClient` with pipelining, per-request deadlines and the OpenSSH extensions, and `RealSFTPTransport`, which is the only place a `RelativePath` becomes an absolute server path. It sits on `SSHProcess`'s `ByteStream`. |
 | `Packages/.../SSHProcess` | Real since 2026-09-04 (milestone 2): `SSHCommandBuilder` (every `ssh` command line of section 6.1), `SSHMaster` (the `-N` ControlMaster, its `SFTPChannel` and `ExecChannel` mux clients, the askpass token it mints per spawn), `ProxyChainBuilder`, `RemoteScript` with the section 9.2 sentinel and the section 6.4 heartbeat wrapper, `LoginShellSnapshot`, `SSHExitClassifier`, `IdentityAgentCheck`, `ControlSocket` and its orphan sweep, and `Spawn` (`posix_spawn` with a real `argv[0]`). |
 | `Packages/.../Secrets` | Real since 2026-09-04 (milestone 2): `KeychainSecretsStore` on the data-protection keychain, `AskpassBroker` (the section 4.2 token protocol and the answer table), `AskpassPromptClassifier`, `SSHGResolver`, `ProcessAncestry`, and the `AskpassHarness` seam the tests drive it through. |
 | `Packages/.../Logging` | The section 3.1 subsystem and categories. |
-| `Apps/Agent` | Two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
+| `Apps/Agent` | `LocationCommands` (section 8's user-facing half), `CollectConnection` (section 4.2's verification connection, and the `AddFlow.AttemptRunning` the state machine drives), `CLIRelay` (the terminal, as the agent sees it), `ServerProbe` (section 8.1's one-script probe: `uname`, `id`, `$HOME`, the `find` flavour, a checksum tool and a cache directory), `CapabilityReport` (section 8.1's eight features and their glyphs), `PeerExecutable` (which of our four executables a peer is), and: two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
 | `Apps/FileProvider` | `NSFileProviderReplicatedExtension` with `item(for:)` answered from the read-only index reader and an XPC fallback, container and working-set enumerators, `fetchContents` over a `FileHandle` with a cancellable `Progress`, `createItem`/`modifyItem`/`deleteItem`, `disconnect(reason:)`/`reconnect()` on an unreachable agent, and the agent-error to `NSFileProviderError` mapping. |
-| `Apps/CLI` | `sshdrive` on ArgumentParser: `doctor` (fully implemented for the skeleton's checks), `agent start|stop|restart`, and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. |
+| `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
 | `Apps/Askpass` | `sshdrive-askpass`: reads the token, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`), calls the agent over the askpass-only interface, prints the answer. An empty line is "skip this identity"; a non-zero exit fails the prompt. |
 
 ## Stubbed, with the milestone named
@@ -78,16 +97,34 @@ signed build.
   metadata, an hour for a transfer, since the wire client re-arms its own while bytes
   arrive) and **a lost master is reported as `.serverUnreachable`** rather than as
   whatever the dying channel said. The `NWPathMonitor` gate, the circuit breaker and
-  reconnection with backoff are still milestone 5, and there is still only one SFTP
-  channel: the bulk channel and the transfer scheduler of section 6.2 arrive with
-  milestone 3's fetching.
-- `fetchPartialContents` (milestone 3), the temp-file plus rename upload, conflict copies,
+  reconnection with backoff are still milestone 5. ~~and there is still only one SFTP
+  channel~~ - since 2026-09-04 there are **two**: a metadata channel and a bulk channel
+  for fetches and uploads, chosen by the `MaxSessions` probe of section 6.1, with the
+  transfer scheduler of section 6.2 on top.
+- ~~`fetchPartialContents` (milestone 3)~~ - real since 2026-09-04, as a foreground
+  transfer under the scheduler, with the range widened to the alignment the system asks
+  for. The temp-file plus rename upload, conflict copies,
   symlink containment, `.DS_Store` (milestone 4), reconcile walk and restore-into-live
   (milestone 5), root-set rotation and the mass-deletion guard (milestone 6), eviction
   (7), real pin/unpin and `performAction` (8), helper (9, placeholder `helper/README.md`).
-- Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
-  yet recorded with `hidden = 2`. Milestone 3.
-- Every section 8 command other than `doctor`, `agent` and `debug`.
+- ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
+  yet recorded with `hidden = 2`~~ - all three real since 2026-09-04. Listings are paged at
+  2,000 items (a page token is an offset into a listing the agent already holds, so a second
+  page never re-lists the directory), collisions and non-UTF-8 names are recorded with
+  `hidden = 2` and reported by `debug transport hidden`, and a create or rename onto a
+  hidden name fails `.filenameCollision`. A server-side `.DS_Store`, a socket or FIFO, and
+  our own `.sshdrive-upload-*` temp files get no row at all, which is what tells them apart
+  from a hidden name.
+- ~~Every section 8 command other than `doctor`, `agent` and `debug`~~ - `add`, `list`,
+  `show`, `remove`, `set`, `mount`, `unmount` and `status` are real since 2026-09-04, with
+  section 8.1's capability report behind `status`, `show` and the tail of `add`.
+  `CapabilityCache` now holds both the section 6.1 channel budget and section 8.1's probe,
+  merged rather than overwritten, so an offline `status` prints the cached report.
+  Still missing from section 8: **`passwd`** (the collect flow is there - it is
+  `CollectConnection` plus `AddFlow`, which `set host|user|port|identity` already re-runs -
+  so `passwd` is a command, not a mechanism), **`test`**, `--password` /
+  `--password-stdin`, and everything belonging to a later milestone: `evict` and
+  `accept-deletions` (6, 7), `pin`/`unpin`/`pins` (8), `logs` (10).
 
 ## `sshdrive debug` hooks, exact syntax
 
@@ -107,17 +144,23 @@ sshdrive debug index dump <name> [--table items|anchors|roots] [--limit N]
 sshdrive debug signal <name> [--container PATH]
 sshdrive debug keychain [--key K] [--value V]
 
-# Added 2026-09-04 for milestone 2 (the transport, spike S2):
-sshdrive debug ssh add <name> <[user@]host[:port]> [--remote-path P]
-                                                  [--identity FILE] [--jump CHAIN]
-sshdrive debug ssh remove <name>
-
 # Added 2026-09-04 for milestone 2 / spike S2 (the askpass token protocol):
 sshdrive debug secrets [store|lookup|delete|list|classify|connect]
         [--key ACCOUNT] [--destination user@host] [--port N] [--identity PATH]
         [--value V] [--prompt TEXT] [--kind confirm|none] [--command CMD]
         [--host-key-checking yes|ask|accept-new] [--jump CHAIN]
         [--purpose master|collect] [--with-key-agent]
+
+# Added 2026-09-04 for milestone 3, part 1 (the scheduler, the channel budget, names).
+# `sshdrive status` reports the same three things for a user; these show the queue.
+sshdrive debug transport show <name>          # channel budget, remote identity, scheduler counters
+sshdrive debug transport reprobe <name>       # forget the cached MaxSessions answer and probe again
+sshdrive debug transport hidden <name>        # section 5.4's "not shown" list, with reasons
+sshdrive debug transport fetch <name> <path> [--background] [--partial OFF:LEN]
+                                              [--cancel-after MS]
+sshdrive debug transport upload <name> <path> [--size-mib N] [--cancel-after MS]
+sshdrive debug transport escape <name> [--filename X] [--parent P]
+                                       [--symlink-target T] [--directory]
 
 # Added 2026-09-04 for spikes S4 and S6:
 sshdrive debug evict <name> <path>
@@ -199,50 +242,57 @@ only the launchd-started **signed** agent can run either, because
   socket is exported from `.zshrc`, and `--jump` takes a whole comma-separated chain built
   by `ProxyChainBuilder` rather than the single hand-rolled hop it used to have.
 
-### The 2026-09-04 hooks (milestone 2: `debug ssh`)
+### `debug ssh add` is gone (2026-09-04, milestone 3)
 
-`sshdrive debug ssh add <name> <[user@]host[:port]>` writes an **ssh-backed** location and
-adds its domain, so the milestone 2 transport can be driven end to end before milestone 3
-exists. It is deliberately not `sshdrive add`: there is no `ssh -G` display, no two-pass
-collect connection and no prompt relayed to the terminal, which are the three things the
-real command adds (section 8, section 4.2). It writes the location from what it is given
-and connects with whatever the keychain already holds, so put the secrets in place with
-`debug secrets store` first.
+`sshdrive debug ssh add|remove` was milestone 2's stand-in for `sshdrive add`: it wrote an
+ssh-backed location from what it was given and connected with whatever the keychain already
+held, with no `ssh -G` display, no two-pass collect connection and no prompt relayed to a
+terminal. Milestone 3's `add` does all three, and `sshdrive remove` replaces the other half,
+so the hook is gone rather than kept as a second, worse way to make a location. Nothing
+depended on it. The milestone 2 runbook's steps read `sshdrive add` now.
 
-- `<[user@]host[:port]>` - `user@host:port` is our own sugar, split here and passed as
-  `-o User=` and `-o Port=`, because `ssh` does not parse that form (section 6.1). The host
-  may be a `~/.ssh/config` alias, which is how the two-hop chain is reached
-  (`debug ssh add inner spike-inner`).
-- `--remote-path P` - the directory to mount. Default is the account's home, as SFTP
-  `realpath` of `.` resolves it.
-- `--identity FILE` - stored as the location's `identityFile`, together with
-  `IdentitiesOnly=yes` in `sshOptions`, which is what section 4 says `--identity` means.
-- `--jump CHAIN` - one or more `[user@]host[:port]`, comma separated, stored as
-  `-o ProxyJump=<chain>` in `sshOptions`. It reaches `ssh -G`, where the chain builder
-  reads it; it is stripped from the master's own command line, so section 6.1's "`ProxyJump`
-  is never handed to `ssh`" holds for this route too.
+Two implementation notes from it, still true:
 
-The command is all-or-nothing: a location that cannot connect is removed again rather than
-left in `config.json` pretending to be mounted, because unlike the real `add` it has no
-terminal to explain itself to. `debug ssh remove <name>` takes the domain, the index, the
-location and the location's `ssh` master (`-O exit`) away; it is the same handler as
-`debug fake remove`.
+- The listener hands a peer whose executable is `sshdrive-askpass` the askpass interface,
+  a peer whose executable is `sshdrive` the CLI callback interface (milestone 3), and the
+  extension's to everyone else (`AskpassService.register` and `PeerExecutable`, one line
+  each in `ListenerDelegate`). The peer code requirement is still the boundary; this only
+  decides *which* of our four executables gets *which* interface, so the path that hands
+  out secrets cannot also remove a location, and the path that types on a terminal is the
+  only one the agent ever asks a question of.
+- `AskpassEnvironment` lives once, in `Sources/XPCProtocols/AskpassEnvironment.swift`, where
+  agent, askpass, `Secrets` and `SSHProcess` can all see it. Beside it lives
+  `AskpassTokenProviding`, the seam the two modules meet on: `SSHMaster` mints a token per
+  spawn (a `collect` one for `add`'s verification connection), attaches the child's pid and
+  retires the token when the master goes, while `AskpassBroker` is what actually holds it
+  and answers the prompt. Neither module depends on the other.
 
-Two implementation notes worth carrying forward:
+### The 2026-09-04 hooks (milestone 3, part 1: `debug transport`)
 
-- The listener hands a peer whose executable is `sshdrive-askpass` the askpass interface
-  and the agent interface to everyone else (`AskpassService.register`, one line in
-  `ListenerDelegate`). The peer code requirement is still the boundary; this only decides
-  *which* of our four executables gets *which* interface, so the path that hands out
-  secrets cannot also remove a location. ~~The older `askpassAnswer` method on
-  `SSHDriveAgentProtocol` is now unused and should go~~ - removed 2026-09-04; the askpass
-  path is `SSHDriveAskpassProtocol` and nothing else.
-- ~~`SSHProcess` grew its own `AskpassEnvironment` in parallel with the one in `Secrets`~~ -
-  merged 2026-09-04 into `Sources/XPCProtocols/AskpassEnvironment.swift`, which agent,
-  askpass, `Secrets` and `SSHProcess` can all see. Beside it lives `AskpassTokenProviding`,
-  the seam the two modules meet on: `SSHMaster` mints a token per spawn, attaches the
-  child's pid and retires the token when the master goes, while `AskpassBroker` is what
-  actually holds it and answers the prompt. Neither module depends on the other.
+The scheduler, the channel budget and the name rules, driven without Finder in the way.
+`sshdrive status` reports the same three things for a user; these exist because a headless
+Mac has no other way to see the queue.
+
+- **`transport show`** - the section 6.1 channel budget (`concurrentChannels`,
+  `bulkChannel`, `execChannel` and the sentence `status` prints), the identity the `id`
+  exec channel found, and the scheduler's counters: running, waiting by class, peak
+  running, peak held, admitted, cancelled, `overCeilingAdmissions` and the current window
+  share.
+- **`transport reprobe`** - drops the cached `MaxSessions` answer from
+  `capabilities.json`, drops the runtime and reconnects, so the probe runs again. It is the
+  only invalidation there is: the agent never sees a server banner to key the cache on
+  (section 6.1).
+- **`transport fetch`** - one fetch through the scheduler, to a temp file that is thrown
+  away. Run several from a shell loop to see the four-at-a-time rule and the queue in the
+  log. `--background` puts it in section 6.2's background class, `--partial OFF:LEN` makes
+  it a range request, and `--cancel-after MS` cancels it mid-way, which is the
+  `Progress`-cancellation path S1 c2 said had to be tested from code.
+- **`transport upload`** - N MiB of zeroes through the same scheduler and the same
+  temp-file-plus-rename path a `createItem` takes, streamed a megabyte at a time.
+- **`transport escape`** - hands `createItem` a filename, and a symlink target, of your
+  choosing, with no shell and no string path in between. This is the section 9.1 chokepoint
+  test: `--filename ..` and `--filename ../x` are refused by the `RelativePath`
+  constructor itself.
 
 ### The 2026-09-04 hooks (S4, S6)
 

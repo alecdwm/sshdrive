@@ -143,3 +143,58 @@ final class IndexTests: XCTestCase {
         XCTAssertEqual(try reader.item(identifier: "id-1").filename, "a.txt")
     }
 }
+
+/// Nested transactions (DESIGN.md section 5.3).
+///
+/// Section 5.3's "a directory listing is written in one transaction" put a `batch` around
+/// a loop whose body calls `appendAnchor` and `delete`, and both of those open a
+/// transaction of their own. SQLite has no nested `BEGIN`, so the inner one failed with
+/// "cannot start a transaction within a transaction" and took the listing with it - found
+/// on the first real `sshdrive add`, 2026-09-04.
+final class NestedTransactionTests: XCTestCase {
+
+    private func writer() throws -> (IndexWriter, URL) {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sshdrive-nested-\(UUID().uuidString).sqlite")
+        return (try IndexWriter(path: url.path), url)
+    }
+
+    func testABatchMayContainTheCallsThatOpenTheirOwnTransactions() throws {
+        let (index, url) = try writer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try index.ensureRoot(mode: 0o755, uid: 0, gid: 0)
+
+        try index.batch {
+            // Both of these are `connection.transaction` calls in their own right.
+            try index.appendAnchor(identifier: "a", kind: .modified)
+            try index.appendAnchor(identifier: "b", kind: .modified)
+        }
+        XCTAssertEqual(try index.anchors(limit: 10).count, 2)
+    }
+
+    func testAnInnerFailureThatPropagatesRollsTheWholeBatchBack() throws {
+        let (index, url) = try writer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try index.ensureRoot(mode: 0o755, uid: 0, gid: 0)
+        let before = try index.anchors(limit: 100).count
+
+        struct Boom: Error {}
+        XCTAssertThrowsError(
+            try index.batch {
+                try index.appendAnchor(identifier: "a", kind: .modified)
+                throw Boom()
+            })
+        XCTAssertEqual(try index.anchors(limit: 100).count, before)
+    }
+
+    func testTheConnectionIsUsableAfterANestedRollback() throws {
+        let (index, url) = try writer()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try index.ensureRoot(mode: 0o755, uid: 0, gid: 0)
+        struct Boom: Error {}
+        XCTAssertThrowsError(try index.batch { throw Boom() })
+        // A leaked BEGIN would make this one fail too.
+        try index.batch { try index.appendAnchor(identifier: "c", kind: .modified) }
+        XCTAssertEqual(try index.anchors(limit: 10).count, 1)
+    }
+}
