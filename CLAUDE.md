@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (3752 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (3849 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -126,44 +126,44 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 194-230 | §3.1 Identifiers | the table above, plus per-target entitlements |
 | 231-278 | §4 Location model | `config.json` location schema field by field |
 | 279-322 | §4.1 Reusing `~/.ssh/config` | `ssh -G` resolution, attribution by diffing against `-F /dev/null`, the fixed override set |
-| 323-589 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline (300 s for the collect connection) and its re-arm |
-| 590-619 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
-| 620-621 | §5 The File Provider extension | (heading) |
-| 622-658 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
-| 659-772 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
-| 773-1023 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors, no tombstones (and the local-only exception), backup + reconcile-against-replica |
-| 1024-1189 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
-| 1190-1338 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
-| 1339-1361 | §5.6 Offline behaviour | situation -> behaviour table; when `disconnect(reason:)` is and is not used |
-| 1362-1499 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
-| 1500-1501 | §6 The background agent | (heading) |
-| 1502-1858 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
-| 1859-1947 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
-| 1948-1983 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
-| 1984-2030 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
-| 2031-2036 | Tier 0: SFTP poll | `readdir` every root |
-| 2037-2089 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
-| 2090-2130 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
-| 2131-2215 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
-| 2216-2254 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
-| 2255-2313 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2314-2321 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2322-2394 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
-| 2395-2483 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2484-2588 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2589-2628 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2629-2767 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
-| 2768-2888 | §8 The CLI | every command and flag, verbatim |
-| 2889-3009 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 3010-3053 | §9 Security | the security properties in one list |
-| 3054-3118 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3119-3205 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 3206-3308 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3309-3367 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 3368-3384 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3385-3431 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3432-3719 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3720-3752 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 323-596 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline (300 s for the collect connection) and its re-arm |
+| 597-626 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
+| 627-628 | §5 The File Provider extension | (heading) |
+| 629-665 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
+| 666-779 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
+| 780-1030 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors, no tombstones (and the local-only exception), backup + reconcile-against-replica |
+| 1031-1196 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
+| 1197-1345 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
+| 1346-1382 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
+| 1383-1520 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
+| 1521-1522 | §6 The background agent | (heading) |
+| 1523-1880 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
+| 1881-1969 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
+| 1970-2036 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
+| 2037-2083 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
+| 2084-2089 | Tier 0: SFTP poll | `readdir` every root |
+| 2090-2142 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
+| 2143-2183 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
+| 2184-2268 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
+| 2269-2322 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2323-2381 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2382-2389 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2390-2462 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
+| 2463-2551 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2552-2656 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2657-2696 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2697-2835 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
+| 2836-2956 | §8 The CLI | every command and flag, verbatim |
+| 2957-3077 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
+| 3078-3121 | §9 Security | the security properties in one list |
+| 3122-3186 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3187-3273 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
+| 3274-3376 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3377-3435 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
+| 3436-3452 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3453-3499 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3500-3816 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 3817-3849 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -228,8 +228,29 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       4"). Not in milestone 4 and not claimed: the sync-error list `status` needs to
       show a refused link's message (milestone 5/6), and reconnection, which is why a
       queued write does not flush by itself.*
-- [ ] **5. Offline hardening** - breaker with bounded waiting, reconnect, queued-write flush,
+- [x] **5. Offline hardening** - breaker with bounded waiting, reconnect, queued-write flush,
       sleep/wake, agent-missing behaviour, deadline re-arm. Spike **S5**.
+      *Done 2026-09-04. `AgentCore` gained two pure state machines - `CircuitBreaker`
+      (§6.3's four rules, time as an argument) and `DeadlineRearmState` (§4.2's two
+      triggers and the once-a-minute presence rule) - and the agent gained
+      `ReconnectingTransport` with its `ConnectionGate`, which sits between
+      `LocationRuntime` and `SSHBackedTransport` and holds the live connection or does
+      not. Beside them `PowerEvents` (IOKit, not `NSWorkspace`), `NetworkPathGate`
+      (`NWPathMonitor`), `AgentPresence` (`CGEventSource` + `CGSessionCopyCurrentDictionary`)
+      and `ScreenLockObserver`. `LocationRuntime.start()` split into a part that always
+      runs and `applyConnection()`, which is re-run on every reconnect, so a location whose
+      server is down still mounts and still queues writes. **381/381 package tests**, with
+      two long-standing flaky scheduler tests fixed. Proved on a real mount of
+      `alec@192.168.64.1:2201`: an edit made while the master was `kill -9`ed flushed 20 ms
+      after `signalErrorResolved`; two fetches arriving during a 20 s reconnect both waited
+      and both succeeded; the will-sleep drop, the wake reconnect and the path gate all
+      exercised. **S5 is answered.** Two behaviours were added because S5 measured that the
+      system will not do them: the agent reconnects on the breaker's backoff unprompted, and
+      a read that meets a silently dead connection is retried once. See
+      `docs/spikes/milestone-5.md` and `docs/spikes/results.md` (2026-09-04, "milestone 5").
+      Not in milestone 5 and not claimed: `sshdrive test` and `passwd` (the CLI commands
+      that clear a stop; the mechanism is there as `debug breaker --connect`), the reconcile
+      walk, and s5-7b, the unmatched-content-version half of S5's working-set question.*
 - [ ] **6. Change detection tiers 0-1** - root set, anchors, poll cadence, sweep, fallback ladder,
       mass-deletion guard. Spike **S7**.
 - [ ] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
@@ -303,6 +324,17 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 55. **A refused `ln -s` is a sync error, not a message.** The create succeeds locally and the refusal comes back as the item's `uploadingError` with the system's own wording, so §5.7's sentence only reaches the user through `sshdrive status` (2026-09-04, S8, §5.7).
 56. **`launchctl kill` plus `open -g` does not reinstall the agent** - launchd brings the old binary back before `ditto` finishes and `open -g` then does nothing. Use `sshdrive agent restart`, and check `ping`'s `interfaceVersion`. Related: `pgrep` lists killed mux clients as zombies until the agent reaps them, and a restarted location can hold two masters (2026-09-04).
 57. **macOS asks for Local Network access in the app's name on first connect,** which every NAS on the user's own network will hit; no entitlement suppresses it and a launchd agent has no window to put it over (2026-09-04, §2, §10).
+58. **`signalErrorResolved(.serverUnreachable)` is the only thing that flushes a queued write.** `signalEnumerator` alone does not, and neither does reconnecting; the queued `modifyItem` arrived 20 ms after the signal and not at all without it. §5.6's "fallback" does not exist (2026-09-04, S5, §5.6).
+59. **The system re-offers a queued write on a doubling backoff past five minutes, and re-issues a failed `fetchContents` never.** So the agent reconnects on the breaker's backoff **unprompted**, and a read that meets a silently dead connection is retried once through the breaker; a write is not (its source cannot be replayed, and the write is the one thing the system does re-offer) (2026-09-04, S5, §6.3).
+60. **The system does not time out an `enumerateItems` held the full 60 s** the breaker may hold a call for, and leaves the extension running. Finder draws a static circular progress ring in place of the dataless badge for the length of the wait, with no alert (2026-09-04, S5, §6.3).
+61. **`disconnect(reason:)` works from inside the extension.** With the login item unregistered the domain goes `permanently disconnected` (state 4); the replica listing and queued writes survive, and re-launching the app lifts it and flushes them (2026-09-04, S5, §5.2).
+62. **From `fetchContents`, `.noSuchItem` and `.cannotSynchronize` both leave the item in place** - `ESTALE` against `ETIMEDOUT`. The "never `.noSuchItem`" rule is about `item(for:)` and only about it (2026-09-04, S5, §6.4, §5.2).
+63. **A pending edit on an item reported deleted comes back as a `createItem`,** which collides with the path still on the server and is then retried for ever with no alert - the save is stranded and the identifier is new. The mass-deletion guard must hold deletions of pending items (2026-09-04, S5, §6.4, §5.5).
+64. **Sleep and wake are IOKit, and the constants do not import.** `kIOMessageSystemWillSleep` and friends are `iokit_common_msg()` macros, spelled out as `0xE0000280` / `0xE0000270` / `0xE0000300`; `CGEventType` likewise has no `.any`, so the presence read is `CGEventType(rawValue: ~0)`. The will-sleep message must be acknowledged with `IOAllowPowerChange` (§6.1).
+65. **`launchctl setenv` does not reach a launchd agent on macOS 26,** even across `sshdrive agent restart`, so the spike's presence override is a file in the group container (2026-09-04, S5, §4.2).
+66. **`scripts/mac-build.sh` rsyncs with `--delete` and there is no `build/` on the Linux side,** so every run wipes the Mac's build directory. Run `signed` last, or `ditto` fails with "Cannot get the real path for source" (2026-09-04).
+67. **The local-attributes blob is encoded with `JSONEncoder` and `.sortedKeys` is load-bearing.** The blob is hashed into the metadata version, and without a sorted key order the same attributes encode to two different byte strings *within one process*, the hash moves, and the system re-reads every item the agent holds (2026-09-04, §5.3, §5.4).
+68. **The build VM does not honour `pmset sleepnow`** (`error 0xe00002e2`, exit 71): `powerd` holds "Prevent sleep while display is on". `IORegisterForSystemPower` does register there, so the handlers are driven with `sshdrive debug power will-sleep|did-wake` and only the delivery is unproven (2026-09-04, S5, §6.1).
 
 ## Glossary
 
@@ -315,6 +347,6 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 - **sweep** - one exec-channel `find` pass over the root set within a window from the **server's** clock; also the 30-min insurance pass. **full sweep** = window opened to the last recorded server timestamp, run on reconnect and on fresh anchors (§6.4, §5.3).
 - **metadata version** - content version + mode/uid/gid + derived `capabilities`/`fs_flags` + effective `kept` + xattr hash. The system re-reads an item only when this moves (§5.3).
 - **generation** - per-row counter bumped when ns-mtime or inode evidence shows a change size+second-mtime cannot; it is what moves the content version (§5.3).
-- **breaker** - per-location circuit breaker, 2 s doubling to 60 s, failing calls fast; calls **wait** for an attempt already in progress. Auth and host-key failures bypass it and stop reconnection (§6.3).
+- **breaker** - per-location circuit breaker, 2 s doubling to 60 s (300 s for a key agent that is not ready), failing calls fast; calls **wait** for an attempt already in progress, bounded by that attempt's own remaining 60 s. The backoff is also a **reconnect schedule**: the agent attempts unprompted when it expires. Auth and host-key failures bypass it and stop reconnection (§6.3).
 - **collect connection** - the verification connection the *agent* makes during `add`/`passwd`, prompts relayed to the CLI; twice at most, `IdentityAgent=none` first (§4.2).
 - **in-flight set** - paths with an upload in progress; change detection skips them so our own writes never look like remote changes (§5.5).

@@ -275,7 +275,14 @@ enum LocationCommands {
         guard location.mounted else { return "not mounted" }
         guard let runtime = await DomainManager.shared.startedRuntime(locationID: location.id)
         else { return "idle (not connected)" }
-        return await runtime.isConnected() ? "online" : "offline"
+        if await runtime.isConnected() { return "online" }
+        // Section 6.3: "offline" is not the whole answer any more. The breaker knows
+        // whether the location is backing off, has no path at all, or has stopped until
+        // the user acts, and section 4.2's stop is the one the user has to be told about.
+        if let gate = await DomainManager.shared.gate(locationID: location.id) {
+            return "offline (\(await gate.stateSentence()))"
+        }
+        return "offline"
     }
 
     // MARK: show
@@ -350,6 +357,9 @@ enum LocationCommands {
             ? "registered" : "not registered"
         report["state"] = await stateWord(location)
 
+        if let gate = await DomainManager.shared.gate(locationID: location.id) {
+            report["connection"] = await gate.report(includeCounters: false)
+        }
         if let runtime = await DomainManager.shared.startedRuntime(locationID: location.id) {
             report["lastError"] = await runtime.lastErrorText() ?? "none"
             report["channels"] = await runtime.channelReport()

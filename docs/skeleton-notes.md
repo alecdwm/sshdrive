@@ -20,6 +20,14 @@ collect connection with its prompts relayed to the terminal, `list`, `show`,
 report, and `doctor` extended for the transport. Results in
 `docs/spikes/results.md` (2026-09-04, "milestone 3, part 1" and "part 2").
 
+**Milestone 5**, offline hardening, landed the same way on 2026-09-04: section 6.3's
+circuit breaker with its bounded waiting and its reconnect schedule, reconnection with
+backoff and both mux channels re-opened, the queued-write flush on network-up through
+`signalErrorResolved(.serverUnreachable)`, sleep and wake from IOKit, the `NWPathMonitor`
+gate, the agent-missing behaviour of section 5.2 confirmed end to end, and section 4.2's
+deadline re-arm. Spike **S5 is answered**; the runbook is `docs/spikes/milestone-5.md` and
+the results entry is 2026-09-04, "milestone 5".
+
 **Milestone 4**, read-write, landed the same way on 2026-09-04: the section 5.5
 upload protocol (temp file, the create-versus-overwrite rename, the mode and
 modification-date restore, the post-upload `lstat`, the in-flight set and the
@@ -106,12 +114,13 @@ signed build.
   a `.sftp` location gets an `SSHBackedTransport` (2026-09-04): login shell snapshot,
   `-N` master with a token of its own, an SFTP channel on its mux socket, the wire client
   on that channel, and `realpath` of the root verified on every connection. What it adds
-  over `RealSFTPTransport` is the two things the extension is owed before section 6.3
-  lands in milestone 5: **every transport call has a wall-clock deadline** (25 s for
-  metadata, an hour for a transfer, since the wire client re-arms its own while bytes
-  arrive) and **a lost master is reported as `.serverUnreachable`** rather than as
-  whatever the dying channel said. The `NWPathMonitor` gate, the circuit breaker and
-  reconnection with backoff are still milestone 5. ~~and there is still only one SFTP
+  over `RealSFTPTransport` is the two things the extension is owed: **every transport call
+  has a wall-clock deadline** (25 s for metadata, an hour for a transfer, since the wire
+  client re-arms its own while bytes arrive) and **a lost master is reported as
+  `.serverUnreachable`** rather than as whatever the dying channel said. ~~The
+  `NWPathMonitor` gate, the circuit breaker and reconnection with backoff are still
+  milestone 5.~~ - all three real since 2026-09-04, in `ReconnectingTransport` and its
+  `ConnectionGate`, which now sits between `LocationRuntime` and `SSHBackedTransport`. ~~and there is still only one SFTP
   channel~~ - since 2026-09-04 there are **two**: a metadata channel and a bulk channel
   for fetches and uploads, chosen by the `MaxSessions` probe of section 6.1, with the
   transfer scheduler of section 6.2 on top.
@@ -119,9 +128,9 @@ signed build.
   transfer under the scheduler, with the range widened to the alignment the system asks
   for. ~~The temp-file plus rename upload, conflict copies, symlink containment,
   `.DS_Store` (milestone 4)~~ - all real since 2026-09-04. Still stubbed: the reconcile
-  walk and restore-into-live (milestone 5), root-set rotation and the mass-deletion guard
-  (milestone 6), eviction (7), real pin/unpin and `performAction` (8), helper (9,
-  placeholder `helper/README.md`).
+  walk and restore-into-live, root-set rotation and the mass-deletion guard (milestone 6),
+  eviction (7), real pin/unpin and `performAction` (8), helper (9, placeholder
+  `helper/README.md`).
 - ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
   yet recorded with `hidden = 2`~~ - all three real since 2026-09-04. Listings are paged at
   2,000 items (a page token is an offset into a listing the agent already holds, so a second
@@ -179,6 +188,18 @@ sshdrive debug transport escape <name> [--filename X] [--parent P]
 
 # Added 2026-09-04 for milestone 4 (spikes S8 and S10).
 sshdrive debug transport rename-check <name>
+
+# Added 2026-09-04 for milestone 5 / spike S5 (section 6.3's breaker, section 4.2's re-arm).
+sshdrive debug breaker <name> [--drop] [--reset] [--connect] [--quiet-recovery on|off]
+sshdrive debug power [will-sleep|did-wake|path-down|path-up]
+sshdrive debug presence
+sshdrive debug rearm <name> [--request]
+sshdrive debug calls [<name>] [--limit N] [--reset]
+sshdrive debug row <name> <path> [--forget] [--content-version V]
+sshdrive debug fault <name> [--unreachable on|off] [--connect-hang MS] [--transport-hang MS]
+                            [--connect-failure transient|authenticationDeadline|
+                                               authenticationFailed|hostKeyFailed|keyAgentNotReady]
+                            [--fetch-error noSuchItem|cannotSynchronize|none]
 
 # Added 2026-09-04 for spikes S4 and S6:
 sshdrive debug evict <name> <path>

@@ -99,6 +99,17 @@ actor LocationRuntime {
     /// the xattr hash in the metadata version exists to prevent.
     private var frozenMetadata = false
 
+    /// `sshdrive debug fault <name> --fetch-error noSuchItem|cannotSynchronize|none`: what
+    /// every `fetchContents` answers instead of reading bytes. S5's eighth question is what
+    /// the system does with each, since the mass-deletion guard (section 6.4) needs
+    /// `.cannotSynchronize` to leave the item in place where `.noSuchItem` would delete it.
+    private var fetchError: String?
+
+    /// Section 8.1's probe as the last connection found it. Kept on the runtime rather
+    /// than read off the transport, because since milestone 5 there may be no transport:
+    /// `status` on an offline location still has to print what the server was (section 6.3).
+    private var serverProbeResult: ServerProbe.Result?
+
     /// The last transport error, for `show` and `status` (section 8).
     private var lastTransportError: String?
 
@@ -149,32 +160,77 @@ actor LocationRuntime {
             identity = ServerIdentity(
                 uid: await fake.serverUID, gid: await fake.serverGID, supplementaryGroups: [])
         }
-        if let ssh = transport as? SSHBackedTransport {
-            // Section 5.4: the identity comes from one `id` exec channel at connect, and
-            // an SFTP-only account - no shell, or no channel to spare for one - keeps
-            // `.unknown`, which is what gives every item full capabilities.
-            identity = ssh.probe.identity
-            channelBudget = ssh.budget
-            await scheduler.setSharesMetadataChannel(ssh.transfersShareMetadataChannel)
-        }
         // An agent that starts and finds `reconciling` set redoes the walk before serving
         // anything (section 5.3). Milestone 1 has no reconcile walk to redo, so it clears
-        // the flag and says so; milestone 5 replaces this with the walk itself.
+        // the flag and says so; the walk itself is milestone 6's reconcile work.
         if index.isReconciling {
             Log.agent.error(
-                "index for \(self.location.id, privacy: .public) was left reconciling; the reconcile walk is milestone 5, clearing the flag")
+                "index for \(self.location.id, privacy: .public) was left reconciling; the reconcile walk is not written yet, clearing the flag")
             try index.setReconciling(false)
         }
+        do {
+            try await applyConnection()
+        } catch {
+            // Section 5.6: a location whose server is down still mounts. The domain is
+            // added, `item(for:)` and the replica keep working, a save is queued, and the
+            // breaker answers every remote call `.serverUnreachable` until it connects -
+            // at which point `applyConnection` runs again from the gate's hook. Failing
+            // `start()` here instead would leave the location with no domain at all, so a
+            // laptop booted on a train would come back with nothing in Finder.
+            Log.agent.notice(
+                "\(self.location.id, privacy: .public): starting offline (\(error.localizedDescription, privacy: .public)); the domain is served from the replica until the breaker connects"
+            )
+        }
+    }
+
+    /// Everything about a location that can only be known from a live connection: the
+    /// identity behind section 5.4's capability mapping, section 6.1's channel budget,
+    /// section 5.7's two spellings of the root, and the root row itself.
+    ///
+    /// Called from `start()` and again from `ConnectionGate`'s connected hook on every
+    /// reconnect, because a server can come back with a different `MaxSessions`, a
+    /// different `id`, or a root that has moved (section 9.1). Explicit values come from
+    /// the hook; without them it reads whatever the transport is holding now.
+    func applyConnection(
+        budget: ChannelBudget? = nil, probe: ServerProbe.Result? = nil,
+        sharesMetadataChannel: Bool? = nil
+    ) async throws {
         // Section 5.7: both spellings of the root, because on a host where `/home` is a
         // symlink the canonical root is `/var/home/alec` while every absolute link the
         // user ever made says `/home/alec/…`, and checked against the canonical spelling
         // alone all of them would be hidden.
-        let canonical = (try? await transport.realpath(.root)) ?? (location.remotePath ?? "/")
+        //
+        // This is also the first remote call of the location, so on the `start()` path it
+        // is what makes the breaker open its first connection.
+        let canonical = try await transport.realpath(.root)
+
+        var live = probe
+        if live == nil || budget == nil, let reconnecting = transport as? ReconnectingTransport,
+            let connection = await reconnecting.gate.currentConnection()
+        {
+            if live == nil { live = connection.probe }
+            channelBudget = budget ?? connection.budget
+            await scheduler.setSharesMetadataChannel(
+                sharesMetadataChannel ?? connection.transfersShareMetadataChannel)
+        } else {
+            if let budget { channelBudget = budget }
+            if let sharesMetadataChannel {
+                await scheduler.setSharesMetadataChannel(sharesMetadataChannel)
+            }
+        }
+        // Section 5.4: the identity comes from one `id` exec channel at connect, and an
+        // SFTP-only account - no shell, or no channel to spare for one - keeps `.unknown`,
+        // which is what gives every item full capabilities.
+        if let live {
+            identity = live.identity
+            serverProbeResult = live
+        }
+
         var alternate: String? = nil
         if let typed = location.remotePath, typed.hasPrefix("/") {
             alternate = typed
-        } else if let ssh = transport as? SSHBackedTransport, !ssh.probe.home.isEmpty {
-            alternate = ssh.probe.home
+        } else if let live, !live.home.isEmpty {
+            alternate = live.home
         }
         symlinkRoots = SymlinkPolicy.Roots(canonical: canonical, alternate: alternate)
         rows = RowBuilder(
@@ -191,6 +247,7 @@ actor LocationRuntime {
             uid: Int64(rootAttributes.uid),
             gid: Int64(rootAttributes.gid))
         try refreshRootRow(rootAttributes)
+        lastTransportError = nil
 
         // Section 5.5: "the probe tests this once, in the location root". Off the start
         // path, because it is five round trips and nothing before the first write needs
@@ -213,9 +270,29 @@ actor LocationRuntime {
         try await transport.realpath(.root)
     }
 
+    /// The live `SSHBackedTransport`, when there is one. Since milestone 5 a location's
+    /// transport is a `ReconnectingTransport` and the connection behind it comes and goes
+    /// (section 6.3), so everything that used to cast the transport asks here instead and
+    /// answers for "offline" as well as for "fake".
+    private func liveConnection() async -> SSHBackedTransport? {
+        if let ssh = transport as? SSHBackedTransport { return ssh }
+        if let reconnecting = transport as? ReconnectingTransport {
+            return await reconnecting.gate.currentConnection()
+        }
+        return nil
+    }
+
+    private var isRemoteBacked: Bool {
+        transport is SSHBackedTransport || transport is ReconnectingTransport
+    }
+
     /// `-O exit` on the master and the SFTP channel with it, for a location that is
     /// being unmounted or removed. A fake-backed location has nothing to shut down.
     func shutdownTransport() async {
+        if let reconnecting = transport as? ReconnectingTransport {
+            await reconnecting.gate.shutdown()
+            return
+        }
         if let ssh = transport as? SSHBackedTransport { await ssh.shutdown() }
     }
 
@@ -586,6 +663,21 @@ actor LocationRuntime {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
         }
         let path = try RelativePath.fromIndexBytes(row.path)
+
+        // S5's `.noSuchItem` versus `.cannotSynchronize` question, which decides whether
+        // the mass-deletion guard of section 6.4 also has to hold deletions of pending
+        // items. The refusal is raised before anything is read, exactly as the guard
+        // would raise it.
+        switch fetchError {
+        case "noSuchItem":
+            throw SSHDriveAgentError.noSuchItem.asNSError(
+                "debug fault --fetch-error noSuchItem")
+        case "cannotSynchronize":
+            throw SSHDriveAgentError.cannotSynchronize.asNSError(
+                "debug fault --fetch-error cannotSynchronize: the item is held by the mass-deletion guard.")
+        default:
+            break
+        }
 
         // Section 5.4: a local-only item has no remote content, so a `fetchContents` for
         // one - after Finder's "Remove Download", or a system-side eviction - returns the
@@ -1076,25 +1168,28 @@ actor LocationRuntime {
     /// Section 8.1's probe as the live connection found it, plus the SFTP `extensions`
     /// list from the init reply. Nil for a fake location, which has no server to probe.
     func serverProbe() async -> (probe: ServerProbe.Result, extensions: SFTPServerExtensions)? {
-        guard let ssh = transport as? SSHBackedTransport else { return nil }
-        return (ssh.probe, await ssh.extensions)
+        if let ssh = await liveConnection() { return (ssh.probe, await ssh.extensions) }
+        guard isRemoteBacked, let cached = serverProbeResult else { return nil }
+        return (cached, SFTPServerExtensions())
     }
 
     /// `status --probe`: "re-runs the server probe instead of using the cached result"
     /// (section 8). The channel budget's own cache is left alone - that is what
     /// `debug transport reprobe` invalidates, and section 6.1 gives it different rules.
     func reprobeServer() async {
-        guard let ssh = transport as? SSHBackedTransport else { return }
+        guard let ssh = await liveConnection() else { return }
         let probe = await ServerProbe.run(master: ssh.master)
         CapabilityCache.storeProbe(
             probe, extensions: await ssh.extensions, locationID: location.id)
         if probe.identity.isKnown, location.permissions == .mode { identity = probe.identity }
+        serverProbeResult = probe
     }
 
     /// `-O check` on our own child. False for a location whose master has gone, which is
     /// what `list` and `status` print as "offline".
     func isConnected() async -> Bool {
-        guard let ssh = transport as? SSHBackedTransport else { return true }
+        guard isRemoteBacked else { return true }
+        guard let ssh = await liveConnection() else { return false }
         return await ssh.isMasterAlive()
     }
 
@@ -1105,7 +1200,7 @@ actor LocationRuntime {
     /// password and a dead key agent are all reported there and nowhere else, and the
     /// classifier has already read it (section 6.1).
     func lastErrorText() async -> String? {
-        if let ssh = transport as? SSHBackedTransport {
+        if let ssh = await liveConnection() {
             let stderr = await ssh.master.lastStderr
             if !stderr.isEmpty { return stderr }
         }
@@ -1125,7 +1220,7 @@ actor LocationRuntime {
     /// `statvfs@openssh.com`, shown in `status` as "server free space" (section 8.1). Not
     /// a capability level: Finder has no way to display it for a third-party domain.
     func freeSpaceDescription() async -> String? {
-        guard transport is SSHBackedTransport else { return nil }
+        guard isRemoteBacked else { return nil }
         guard let stats = try? await transport.statvfs(.root) else { return nil }
         let free = stats.availableBlocks &* stats.blockSize
         let total = stats.totalBlocks &* stats.blockSize
@@ -1137,12 +1232,12 @@ actor LocationRuntime {
     /// The identity section 5.4 maps modes against, and how it was found. Nil for a fake
     /// location, which has no server to ask.
     func identityReport() -> [String: Any]? {
-        guard let ssh = transport as? SSHBackedTransport else { return nil }
+        guard isRemoteBacked, let probe = serverProbeResult else { return nil }
         return [
-            "known": ssh.probe.identity.isKnown,
-            "description": ssh.probe.description,
-            "failure": ssh.probe.failure,
-            "shellPrefix": ssh.probe.shellPrefix,
+            "known": probe.identity.isKnown,
+            "description": probe.description,
+            "failure": probe.failure,
+            "shellPrefix": probe.shellPrefix,
             "permissionsSetting": location.permissions.rawValue,
         ]
     }
@@ -1323,8 +1418,9 @@ actor LocationRuntime {
     func setFault(
         writes: Bool?, fetchDelayMilliseconds delay: Int?, versionMismatch mismatch: Bool?,
         collisions: Bool?, uploadDelayMilliseconds uploadDelay: Int? = nil,
-        frozenMetadata frozen: Bool? = nil
+        frozenMetadata frozen: Bool? = nil, fetchError: String? = nil
     ) async {
+        if let fetchError { self.fetchError = fetchError == "none" ? nil : fetchError }
         if let writes { writesFail = writes }
         if let delay { fetchDelayMilliseconds = delay }
         if let mismatch { versionMismatch = mismatch }
@@ -1390,6 +1486,42 @@ actor LocationRuntime {
             totalFetches = 0
             fetchTimeline.removeAll()
         }
+        return report
+    }
+
+    /// S5's seventh question, in two halves. `forget` deletes the row with its deletion
+    /// anchor, which is exactly what the extension reports through the working set when a
+    /// listing says an item has gone (section 5.3, no tombstones); `contentVersion` gives
+    /// the row a version the system cannot match, which is what the reconcile walk produces
+    /// for an item with a pending local edit. Neither touches the server: the point is what
+    /// the **system** does with a pending edit when the index says one of those two things.
+    func rewriteRowForSpike(pathString: String, forget: Bool, contentVersion: String?) async throws
+        -> [String: Any]
+    {
+        let path = try RelativePath(string: pathString)
+        guard var row = try index.item(path: path.bytes) else {
+            throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(pathString).")
+        }
+        var report: [String: Any] = ["path": pathString, "identifier": row.identifier]
+        if forget {
+            try index.batch {
+                for descendant in try index.allItems()
+                where descendant.path != path.bytes
+                    && (try? RelativePath.fromIndexBytes(descendant.path))?.isUnder(path) == true
+                {
+                    try index.delete(identifier: descendant.identifier)
+                }
+                try index.delete(identifier: row.identifier)
+            }
+            report["forgotten"] = true
+        } else if let contentVersion {
+            row.contentVersion = contentVersion
+            row.metadataVersion = contentVersion + "-spike"
+            try index.upsert(row)
+            _ = try index.appendAnchor(identifier: row.identifier, kind: .modified)
+            report["contentVersion"] = contentVersion
+        }
+        report["sequence"] = try index.currentSequence()
         return report
     }
 

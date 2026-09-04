@@ -92,20 +92,26 @@ final class TransferSchedulerTests: XCTestCase {
     /// at most one background transfer's share of the window rather than for the pin."
     func testForegroundJumpsAheadOfQueuedBackground() async throws {
         let scheduler = TransferScheduler(locationID: "test")
-        let holding = Gate()
         let concurrency = Concurrency()
 
-        // Four background transfers fill every slot.
+        // Four background transfers fill every slot, each on a gate of its own so exactly
+        // one slot can be freed. Releasing all four at once was the old shape of this
+        // test, and it raced: with four slots free both queued transfers are admitted and
+        // which of their bodies reaches `enter` first is the executor's business, not the
+        // scheduler's. One slot means only one can be admitted, and the class is then the
+        // only thing that can choose (2026-09-04).
+        let holders = (0..<4).map { _ in Gate() }
         let running = expectation(description: "four background running")
         running.expectedFulfillmentCount = 4
         running.assertForOverFulfill = false
         var tasks: [Task<Void, Error>] = []
         for index in 0..<4 {
+            let holder = holders[index]
             tasks.append(
                 Task {
                     try await scheduler.run(transferID: "bg\(index)", kind: .background) { _ in
                         running.fulfill()
-                        await holding.wait()
+                        await holder.wait()
                     }
                 })
         }
@@ -132,13 +138,15 @@ final class TransferSchedulerTests: XCTestCase {
         XCTAssertEqual(waiting.waitingForeground, 1)
         XCTAssertEqual(waiting.waitingBackground, 1)
 
-        // Free exactly one slot's worth of work and let the queue drain.
-        await holding.release()
+        // Free exactly one slot. Only one of the two waiting transfers can be admitted,
+        // so the assertion is about the scheduler's choice and about nothing else.
+        await holders[0].release()
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(
-            concurrency.order.first, "foreground",
+            concurrency.order, ["foreground"],
             "a queued foreground transfer is admitted before a queued background one")
 
+        for holder in holders.dropFirst() { await holder.release() }
         await queued.release()
         for task in tasks { try await task.value }
         try await queuedBackground.value
@@ -170,9 +178,11 @@ final class TransferSchedulerTests: XCTestCase {
         }
         await fulfillment(of: [started], timeout: 5)
         // The first gets the whole window, the fourth a quarter of it: the share is
-        // computed at admission and a running transfer is never re-sized.
-        XCTAssertEqual(observed.values.first, 16)
-        XCTAssertEqual(observed.values.last, 4)
+        // computed at admission and a running transfer is never re-sized. Compared sorted,
+        // because the shares are handed out in a defined order but four concurrent bodies
+        // record them in whatever order the executor runs them, which used to make this
+        // assertion flaky in its own right (2026-09-04).
+        XCTAssertEqual(observed.values.sorted(), [4, 5, 8, 16])
         XCTAssertTrue(observed.values.allSatisfy { $0 >= 2 })
         await gate.release()
         for task in tasks { try await task.value }

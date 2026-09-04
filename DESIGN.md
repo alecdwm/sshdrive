@@ -582,7 +582,14 @@ attempt after a sleep is the one the unlock re-arms, so it never spends
 runs with the same 60 s deadline; if
 it times out again the location is stopped again until the next trigger,
 so an unattended Mac never retries and the prompt appears only when the
-user is there to see it. Refused prompts (a PIN, a one-time code, a
+user is there to see it. S5 exercised the wiring end to end against a
+forced deadline stop (2026-09-04): the unlock trigger re-arms exactly one
+attempt, a request with input idle at 45 s re-arms nothing, a request with
+input idle at 2 s re-arms one, the presence reading is taken at most once
+a minute so a burst of requests inside that minute costs nothing at all,
+and the domain stays connected throughout, with `fetchContents` and
+`createItem` still arriving while every call fails fast - which is what
+gives the request trigger anything to ride on. Refused prompts (a PIN, a one-time code, a
 `confirm` outside `add`) are never re-armed: they cannot succeed attended
 or unattended. The first unattended reconnect is therefore what tells the
 user, once, and the next time they touch the mount it tries again.
@@ -1158,6 +1165,11 @@ Two things about that set are not obvious, and S4 found both:
   the *agent* changes the stored blob, which a restore from the index
   backup does (§5.3), and without it the system would never re-read the
   item and would keep serving tags that are no longer there.
+  The blob is JSON with **sorted keys**, which is not a tidiness
+  preference: `JSONEncoder` promises no key order without them, so the same
+  attributes encode to two different byte strings inside one process, the
+  hash moves on its own, and the system re-reads every item the agent holds
+  for nothing (2026-09-04).
 
 **`.DS_Store` is swallowed** - and, as it turns out, mostly by the system
 rather than by us. A `createItem` or `modifyItem` for a
@@ -1344,9 +1356,23 @@ drops them with its type test.
 | Browse a folder listed before, network down | Served from the system's replica; the refresh request gets `.serverUnreachable` and Finder shows the cached listing. |
 | Browse a never-listed folder, network down | `.serverUnreachable` at once; Finder shows the folder as unavailable. |
 | Save a file, network down | System stores it locally, marks it "waiting to upload", calls `modifyItem` again on retry. The agent fails fast until it can connect, then the flush goes through. |
-| Network returns | Agent's `NWPathMonitor` fires → connection attempt → on success `signalErrorResolved(.serverUnreachable)` on every domain, which is the system's cue to retry pending uploads and fetches, then `signalEnumerator` for the working set, and `reconnect()` if `disconnect(reason:)` had been used. S5 confirms `signalErrorResolved` wakes the flush; `signalEnumerator` alone is the fallback. |
+| Network returns | Agent's `NWPathMonitor` fires → connection attempt → on success `signalErrorResolved(.serverUnreachable)` on every domain, which is the system's cue to retry pending uploads and fetches, then `signalEnumerator` for the working set, and `reconnect()` if `disconnect(reason:)` had been used. **`signalErrorResolved` is the one that does it, and it is not optional:** S5 measured the queued `modifyItem` arriving 20 ms after the signal, and measured that neither reconnecting on its own nor `signalEnumerator` for the working set wakes the flush at all (2026-09-04). The working-set signal is still sent, for the working set. |
 | Laptop wakes from sleep | Same path as network returns; the masters were already dropped at the will-sleep message (§6.1). |
 | Agent not running | Domain shows a disconnect message (§5.2); everything already cached keeps working. |
+
+**What the system does while we are down decides how hard the agent has to
+try.** S5 measured both halves (2026-09-04). A queued `modifyItem` is
+re-offered with a doubling backoff - 5.5 s, 10.6 s, 20.3 s, 43 s, 79 s,
+153 s, 331 s - which is past five minutes after ten minutes offline and
+still growing, and each retry arrives on a freshly launched extension
+instance. A `fetchContents` that failed is **never** re-issued: the read
+that provoked it gets `ETIMEDOUT` and nothing comes back until something
+opens the file again. So an agent that only reconnected when it was asked
+would leave a mount dead until the user clicked it, and a save waiting on
+an interval that only grows. Two things follow, and both are in §6.3: the
+agent reconnects on the breaker's backoff **without being asked**, and a
+read that meets a connection which died silently is retried once through
+the breaker rather than surfaced.
 
 We deliberately do not use `disconnect(reason:)` for network outages;
 throwing `.serverUnreachable` is enough and keeps the domain writable. The
@@ -1682,7 +1708,8 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   `kIOMessageSystemHasPoweredOn`), not from `NSWorkspace`, since the
   agent runs no `NSApplication`.
 - `ssh` exiting is classified: connection errors are `.serverUnreachable`
-  and the agent reconnects with jittered backoff (§6.3); auth and host-key
+  and the agent reconnects with jittered backoff (§6.3) **on its own
+  schedule, not when something next asks** (§6.3 rule 5); auth and host-key
   banners are `.notAuthenticated` (§4.3) and **reconnection stops** until
   `sshdrive test`, `sshdrive passwd`, or a change to the location's
   settings. A stale password retried every minute is a `fail2ban` ban
@@ -1976,10 +2003,41 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
 4. A connection that died silently is found by the per-request deadline
    (§6.2) and, after sleep, by dropping the master outright (§6.1), so the
    breaker opens within seconds rather than after the keepalive window.
-5. Auth and host-key failures do not go through the breaker at all: they
+   The request that finds it is **retried once**, through the breaker, if
+   it is a read or a metadata call: by then the breaker is either
+   connecting, in which case the retry waits for the attempt under rule 2,
+   or open, in which case it fails fast as it should. Writes are not
+   retried - an upload's source cannot be replayed and a `rename` that may
+   already have landed must not be re-sent - and they need no help,
+   because a failed write is the one thing the system does re-offer on its
+   own (§5.6). Without the read retry the first double-click after a
+   master died is spent discovering the death: S5 measured that the system
+   never re-issues a `fetchContents` that failed, so that one call is the
+   whole of the user's experience of it (2026-09-04).
+5. **The breaker's backoff is a reconnect schedule, not only a refusal
+   window.** When it expires the agent attempts a connection whether or
+   not anything has asked, and a connection that drops is attempted again
+   at once. Same reason as rule 4: the system re-offers a queued write on
+   an interval that has passed five minutes by the time the mount has been
+   down ten, and re-offers a failed read never, so waiting to be asked
+   would make "the server came back" mean "the user clicked twice". The
+   attempt is what produces the `signalErrorResolved` of §5.6, which is
+   what flushes the queue.
+6. Auth and host-key failures do not go through the breaker at all: they
    stop reconnection until the user acts (§6.1), or, for a deadline stop,
    until screen unlock, or a request arriving with the user present,
-   re-arms one attempt (§4.2).
+   re-arms one attempt (§4.2). A stopped location gets no reconnect
+   schedule: rule 5 would be a stale password retried every minute, which
+   is a `fail2ban` ban within the hour (§6.1).
+
+S5 confirmed the two things the bounded wait of rule 2 rests on
+(2026-09-04): the system does **not** time out an `enumerateItems` held
+for the full 60 s - it waited 60.19 s, took the answer and left the
+extension running - and requests keep arriving at the extension while the
+domain is connected and every call fails fast, which is what §4.2's
+present-user re-arm rides on. What Finder draws during the wait is a
+circular progress indicator in place of the item's dataless badge, for the
+length of the connect, with no alert.
 
 ### 6.4 Remote change detection
 
@@ -2237,8 +2295,14 @@ the items fetches from the server and fails. The failure is reported as
 error tells the system the item does not exist, and it would remove the
 item locally while the row, the pin and the hold remain, which is the
 half-applied deletion the guard exists to avoid. Finder shows an error on
-that file, which is the honest state; S5 records what the system does
-with each of the two errors.
+that file, which is the honest state. S5 measured both (2026-09-04):
+`.cannotSynchronize` reaches the reader as `ETIMEDOUT` and
+`.noSuchItem` as `ESTALE`, and **neither removes the item** - it was still
+listed a minute later and after a working-set signal. So the difference is
+in what the user is told, not in whether the file survives the answer; the
+rule above stands on the honesty of the message rather than on a deletion
+that does not happen. (`item(for:)` is the call where `.noSuchItem`
+really does delete the user's file, §5.2, and that has not changed.)
 `sshdrive status` shows "14 deletions held in Photos, re-check at 14:32",
 `sshdrive accept-deletions <name> [path]` applies them now, and
 `sshdrive test` re-checks now. The guard applies to deletions **inferred
@@ -2247,10 +2311,19 @@ any tier, the reconnect sweep, and the root's own listing. It does not
 apply to explicit delete events from the helper: an `rm -rf Photos`
 produces one event per item and is real, while a vanished mount produces
 no events at all, so holding event-driven deletions would only leave
-thousands of ghosts in Finder for 35 minutes. S5 records what the system
-does with a pending local edit on an item we report deleted, which decides
-whether the guard also needs to hold deletions of items the system lists
-as pending.
+thousands of ghosts in Finder for 35 minutes. **The guard also holds deletions of items the system lists as
+pending, and S5 is why** (2026-09-04). Reporting an item with a pending
+local edit deleted through the working set does not lose the edit: the
+system keeps the local content and re-offers it, but as a **`createItem`**
+rather than the `modifyItem` it was. Because the path is still there on the
+server - the deletion was wrong, which is the case the guard exists for -
+that create is answered `.filenameCollision`, and the system retries a
+collided create for ever with no alert (§5.5, S3). The user's edit then
+sits in the mount, never reaches the server, and nothing ever resolves it.
+The item also comes back with a new identifier, since there are no
+tombstones (§5.3), so any pin or tag on it is lost even when the create
+does succeed. Holding is therefore not an optimisation here; it is what
+keeps a wrongly-inferred deletion from stranding a save.
 
 ### 6.5 The root set
 
@@ -3714,6 +3787,40 @@ there, so that this list cannot drift from the body.
 - **A launchd agent that dials a LAN address draws the Local Network
   privacy prompt** in the app's name, which a NAS on the user's own network
   will hit on first connect (2026-09-04, §2, §10).
+- **`signalErrorResolved(.serverUnreachable)` is the only thing that wakes
+  the queued-write flush;** `signalEnumerator` alone does not, and nor does
+  reconnecting, so it has no fallback (2026-09-04, S5, §5.6).
+- **The system re-offers a queued write on a doubling backoff past five
+  minutes, and re-issues a failed `fetchContents` never,** which is why the
+  agent reconnects on the breaker's backoff without being asked and retries
+  a read that met a dead connection once (2026-09-04, S5, §6.3, §5.6).
+- **The system does not time out an `enumerateItems` held for the full
+  60 s** the breaker may hold a call during a reconnect, and leaves the
+  extension running; Finder draws a circular progress indicator in place of
+  the dataless badge for the length of the wait (2026-09-04, S5, §6.3).
+- **Requests keep reaching the extension while the domain is connected and
+  every call fails fast,** including after an authentication-deadline stop,
+  which is what §4.2's present-user re-arm rides on (2026-09-04, S5, §4.2,
+  §5.6).
+- **`disconnect(reason:)` works from inside the extension:** with the login
+  item unregistered the domain goes permanently disconnected, cached reads
+  and the replica listing keep working, a save is queued, and re-launching
+  the app lifts the disconnect and flushes it (2026-09-04, S5, §5.2).
+- **`.noSuchItem` and `.cannotSynchronize` from `fetchContents` both leave
+  the item in place;** they differ only in what the reader is told, `ESTALE`
+  against `ETIMEDOUT` (2026-09-04, S5, §6.4).
+- **The mass-deletion guard must hold deletions of pending items:** the
+  system re-offers a pending edit on a deleted item as a `createItem`, which
+  collides with the path that is still there and is then retried for ever
+  with no alert, stranding the save (2026-09-04, S5, §6.4, §5.5).
+- **The presence reading has to come from a file, not the environment,** for
+  any test of §4.2's re-arm: `launchctl setenv` does not reach a launchd
+  agent on macOS 26 (2026-09-04, S5, §4.2).
+- **The local-attributes blob is encoded with sorted keys,** because the
+  metadata version hashes it and `JSONEncoder` promises no key order
+  without them: the same attributes otherwise encode to two different byte
+  strings in one process and every item is re-read for nothing
+  (2026-09-04, §5.3, §5.4).
 
 ---
 

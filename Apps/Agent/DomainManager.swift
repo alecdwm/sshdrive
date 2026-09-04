@@ -19,6 +19,10 @@ actor DomainManager {
     /// file ever runs on this actor's executor: see `ConfigAccess`.
     private let config: ConfigAccess?
     private var runtimes: [String: LocationRuntime] = [:]
+    /// Section 6.3's breaker and reconnection, one per `.sftp` location. Held here rather
+    /// than inside the runtime because sleep, wake, a path change and a screen unlock all
+    /// arrive for every location at once and none of them wants the index actor.
+    private var gates: [String: ConnectionGate] = [:]
     private var started = false
 
     init() {
@@ -34,6 +38,13 @@ actor DomainManager {
             Log.agent.error("no app group container; the agent cannot serve any location")
             return
         }
+        // Section 6.1's sleep and wake, section 6.3's path gate, and section 4.2's
+        // screen-unlock re-arm. Started before any location, so a wake that lands during
+        // the first connect is not missed.
+        PowerEvents.shared.start()
+        NetworkPathGate.shared.start()
+        ScreenLockObserver.shared.start()
+
         // Section 6.1: orphans are not adopted. A master left behind by a crashed agent
         // still owns its socket, and `ControlMaster=yes` against an existing socket
         // disables multiplexing, so later mux clients would attach to the orphan.
@@ -89,15 +100,24 @@ actor DomainManager {
         case .fake:
             transport = FakeTransport(root: location.remotePath ?? "/srv/fake")
         case .sftp:
-            // Section 6.1 and 6.2: the login shell snapshot, the `-N` master with a token
-            // of its own, an SFTP channel on its mux socket, and the wire client on that
-            // channel. `SSHBackedTransport` adds the deadline and the lost-master rule;
-            // everything below this line is the same code the fake backend runs.
-            transport = try await SSHBackedTransport.connect(
+            // Section 6.3: the breaker, not the connection, is what a location is made of
+            // now. The gate holds the `SSHBackedTransport` when there is one and answers
+            // every call while there is not, so a location whose server is down still
+            // mounts, still serves the replica and still queues writes (section 5.6).
+            let gate = ConnectionGate(
                 location: location,
                 askpassPath: AgentSecrets.askpassPath,
                 askpass: AgentSecrets.broker,
                 uploadTag: macID)
+            gates[location.id] = gate
+            await gate.setOnConnected { [weak self] id, connected in
+                await self?.connectionCameUp(locationID: id, connected: connected)
+            }
+            await gate.setOnDisconnected { id, reason in
+                Log.agent.notice(
+                    "\(id, privacy: .public) is offline: \(reason, privacy: .public)")
+            }
+            transport = ReconnectingTransport(gate: gate, locationID: location.id)
         }
         let runtime = try LocationRuntime(
             location: location,
@@ -130,11 +150,107 @@ actor DomainManager {
     /// `status --probe` as the way to ask for a connection on purpose.
     func startedRuntime(locationID: String) -> LocationRuntime? { runtimes[locationID] }
 
+    func gate(locationID: String) -> ConnectionGate? { gates[locationID] }
+
     func dropRuntime(locationID: String) async {
+        if let gate = gates.removeValue(forKey: locationID) { await gate.shutdown() }
         guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
         // `-O exit` on the master and the channel with it, so removing a location does
         // not leave an `ssh` behind (section 6.1).
         await runtime.shutdownTransport()
+    }
+
+    // MARK: Section 6.1's sleep and wake, section 6.3's path gate, section 4.2's re-arm
+
+    /// `kIOMessageSystemWillSleep`: `-O exit` on every master before the Mac abandons the
+    /// connection (section 6.1). Runs them together, because the acknowledgement the
+    /// system is waiting for cannot be serialised behind eight `ssh` shutdowns.
+    func willSleep() async {
+        let all = Array(gates.values)
+        await withTaskGroup(of: Void.self) { group in
+            for gate in all { group.addTask { await gate.willSleep() } }
+        }
+    }
+
+    /// `kIOMessageSystemHasPoweredOn`. Section 5.6: the same path a returning network path
+    /// takes, because the masters were already dropped at the will-sleep message.
+    func didWake(trigger: String) async {
+        for gate in gates.values { await gate.didWake(trigger: trigger) }
+    }
+
+    func networkPathChanged(available: Bool) async {
+        for gate in gates.values { await gate.setNetworkPath(available) }
+    }
+
+    /// `com.apple.screenIsUnlocked`: one re-armed attempt per location stopped by the
+    /// authentication deadline (section 4.2).
+    func screenUnlocked() async {
+        for gate in gates.values { await gate.screenUnlocked() }
+    }
+
+    /// Every File Provider request that reaches the agent for this domain. Section 4.2's
+    /// second re-arm trigger, behind the presence test and its once-a-minute rule, so this
+    /// is cheap enough to sit on the hot path.
+    @discardableResult
+    nonisolated func noteFileProviderRequest(
+        domainIdentifier: String, method: String = "request", subject: String = ""
+    ) -> CallTiming {
+        Task { await DomainManager.shared.fileProviderRequestArrived(domainIdentifier) }
+        return CallTiming(domain: domainIdentifier, method: method, subject: subject)
+    }
+
+    private func fileProviderRequestArrived(_ domainIdentifier: String) async {
+        guard let gate = gates[domainIdentifier] else { return }
+        await gate.fileProviderRequestArrived()
+    }
+
+    /// Section 5.6's "network returns" row, and the only place it lives.
+    ///
+    /// On success: re-derive the location's identity, channel budget and root row from the
+    /// connection that just came up, then tell the system its error is resolved - which is
+    /// the cue to retry pending uploads and fetches - and signal the working set. S5
+    /// measures whether `signalErrorResolved` alone wakes the flush; `signalEnumerator` is
+    /// the documented fallback and is sent either way, since it costs one call and the
+    /// working set needs it regardless.
+    private func connectionCameUp(locationID: String, connected: ConnectionGate.Connected) async {
+        if let runtime = runtimes[locationID] {
+            do {
+                try await runtime.applyConnection(
+                    budget: connected.budget, probe: connected.probe,
+                    sharesMetadataChannel: connected.sharesMetadataChannel)
+            } catch {
+                Log.agent.error(
+                    "\(locationID, privacy: .public): could not apply the new connection: \(error, privacy: .public)")
+            }
+        }
+        if let gate = gates[locationID], await gate.suppressRecoverySignals {
+            Log.agent.notice(
+                "\(locationID, privacy: .public): recovery signals suppressed by a debug hook")
+            return
+        }
+        await signalErrorResolved(locationID: locationID)
+        await signalWorkingSet(locationID: locationID)
+    }
+
+    /// `NSFileProviderManager.signalErrorResolved(.serverUnreachable)`: the system's cue to
+    /// retry the uploads and fetches it queued while we were failing fast (section 5.6).
+    nonisolated func signalErrorResolved(locationID: String) async {
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: locationID),
+            displayName: locationID)
+        guard let manager = NSFileProviderManager(for: domain) else {
+            Log.agent.error("no manager for domain \(locationID, privacy: .public)")
+            return
+        }
+        do {
+            try await Deadline.run("signalling that serverUnreachable is resolved") {
+                try await manager.signalErrorResolved(NSFileProviderError(.serverUnreachable))
+            }
+            Log.agent.notice(
+                "signalled errorResolved(serverUnreachable) for \(locationID, privacy: .public)")
+        } catch {
+            Log.agent.error("signalErrorResolved failed: \(error, privacy: .public)")
+        }
     }
 
     // MARK: Domains

@@ -30,9 +30,19 @@ public struct LocalAttributes: Codable, Equatable, Sendable {
     /// The blob stored on the row. Nil when there is nothing to store, so that an item
     /// that has never carried a tag or an xattr hashes exactly as it did before the
     /// column existed.
+    ///
+    /// **`.sortedKeys` is load-bearing.** Section 5.3 hashes this blob into the metadata
+    /// version, and `JSONEncoder` does not promise a key order without it - not for the
+    /// `xattrs` dictionary and not for the struct's own two keys. Without it the same
+    /// attributes encode to two different byte strings within one process, the hash moves,
+    /// and the system re-reads every item it holds for no reason. Caught by
+    /// `RowBuilderTests.testTheSameAttributesTwiceProduceTheSameVersion` failing about one
+    /// run in three (2026-09-04); it had been read as flakiness in the test.
     public func encoded() -> Data? {
         guard !isEmpty else { return nil }
-        return try? JSONEncoder().encode(self)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(self)
     }
 
     /// Decodes a stored blob. A blob written before tags had a field of their own is a

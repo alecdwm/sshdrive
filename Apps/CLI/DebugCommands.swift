@@ -15,6 +15,7 @@ struct Debug: ParsableCommand {
             IndexCommand.self, Keychain.self, Secrets.self, Signal.self,
             Evict.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
             Stabilize.self, Testing.self, Transport.self,
+            Breaker.self, Power.self, Presence.self, Rearm.self, Calls.self, Row.self,
         ])
 }
 
@@ -255,8 +256,15 @@ struct Signal: ParsableCommand {
     @Option(help: "Signal this folder's own enumerator instead of the working set. / is the root.")
     var container: String?
 
+    @Flag(
+        name: .customLong("error-resolved"),
+        help:
+            "Send signalErrorResolved(.serverUnreachable) alone - section 5.6's flush cue, without the working-set signal (S5).")
+    var errorResolved = false
+
     func run() throws {
         var arguments = ["name": name]
+        if errorResolved { arguments["errorResolved"] = "true" }
         if let container { arguments["container"] = container }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.signal", arguments: arguments))
     }
@@ -482,8 +490,43 @@ struct Fault: ParsableCommand {
         help: "on or off: modifyItem replies with the metadata version the item had before the change, which is S10's control case for the xattr hash.")
     var frozenMetadata: String?
 
+    @Option(
+        help:
+            "on or off: every transport call and every connect attempt fails as if the server had gone (section 6.3). What a VM guest uses in place of a link-down it cannot cause."
+    )
+    var unreachable: String?
+
+    @Option(
+        name: .customLong("transport-hang"),
+        help:
+            "Milliseconds every transport call stalls before doing anything - a network that has gone away without saying so.")
+    var transportHang: Int?
+
+    @Option(
+        name: .customLong("connect-hang"),
+        help:
+            "Milliseconds every connect attempt stalls, with calls left alone: section 6.3's bounded wait, on its own.")
+    var connectHang: Int?
+
+    @Option(
+        name: .customLong("connect-failure"),
+        help:
+            "transient | authenticationDeadline | authenticationFailed | hostKeyFailed | keyAgentNotReady: what --unreachable reports the attempt failed as (section 6.1's classifier).")
+    var connectFailure: String?
+
+    @Option(
+        name: .customLong("fetch-error"),
+        help:
+            "noSuchItem | cannotSynchronize | none: what every fetchContents answers instead of reading bytes (S5).")
+    var fetchError: String?
+
     func run() throws {
         var arguments = ["name": name]
+        if let fetchError { arguments["fetchError"] = fetchError }
+        if let unreachable { arguments["unreachable"] = unreachable }
+        if let transportHang { arguments["transportHang"] = String(transportHang) }
+        if let connectHang { arguments["connectHang"] = String(connectHang) }
+        if let connectFailure { arguments["connectFailure"] = connectFailure }
         if let writes { arguments["writes"] = writes }
         if let fetchDelay { arguments["fetchDelay"] = String(fetchDelay) }
         if let versionMismatch { arguments["versionMismatch"] = versionMismatch }
@@ -547,5 +590,145 @@ struct Testing: ParsableCommand {
             try AgentClient.send(
                 command: "debug.testing",
                 arguments: ["name": name, "run": action == "run" ? "true" : "false"]))
+    }
+}
+
+
+// MARK: milestone 5 - the breaker, sleep and wake, and the deadline re-arm
+
+/// Section 6.3's circuit breaker, as the agent holds it right now.
+///
+/// The report is the state machine's own fields: the state sentence, the consecutive
+/// failure count, what the next backoff would be, whether the location is stopped, and
+/// section 4.2's two re-arm flags. The counters (`attempts`, `reconnects`, `failFastCalls`,
+/// `waitedCalls`) are what an S5 run reads to tell the three admission paths apart.
+struct Breaker: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Show or drive one location's circuit breaker (section 6.3).")
+
+    @Argument var name: String
+
+    @Flag(help: "Run `-O exit` on the master: the connection dies with no process killed.")
+    var drop = false
+
+    @Flag(help: "Reset the breaker, as a path change or a wake does, and reconnect.")
+    var reset = false
+
+    @Flag(help: "Clear a stop the way `sshdrive test` does, and attempt once.")
+    var connect = false
+
+    @Option(
+        name: .customLong("quiet-recovery"),
+        help:
+            "on or off: a reconnect sends neither signalErrorResolved nor signalEnumerator, so S5 can send one by hand.")
+    var quietRecovery: String?
+
+    func run() throws {
+        var arguments = ["name": name]
+        if let quietRecovery { arguments["quietRecovery"] = quietRecovery }
+        if drop { arguments["drop"] = "true" }
+        if reset { arguments["reset"] = "true" }
+        if connect { arguments["connect"] = "true" }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.breaker", arguments: arguments))
+    }
+}
+
+/// Section 6.1's will-sleep and did-wake handlers, and section 6.3's path gate, driven by
+/// hand. `pmset sleepnow` is the real path; a VM that does not honour it uses this, and the
+/// spike records which was used.
+struct Power: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Drive the sleep, wake and network-path handlers (sections 6.1, 6.3).")
+
+    @Argument(
+        help: "will-sleep | did-wake | path-down | path-up. Omit to just report the counters.")
+    var event: String?
+
+    func run() throws {
+        var arguments: [String: String] = [:]
+        if let event { arguments["event"] = event }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.power", arguments: arguments))
+    }
+}
+
+/// Section 4.2's presence test, read exactly as the re-arm reads it: seconds since the last
+/// input event from `CGEventSource`, and the screen-lock flag from
+/// `CGSessionCopyCurrentDictionary`.
+struct Presence: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "What the agent thinks about whether a human is here (section 4.2).")
+
+    func run() throws {
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.presence", arguments: [:]))
+    }
+}
+
+/// Section 4.2's two re-arm triggers after an authentication-deadline stop. A headless VM
+/// has no screen to unlock, so the distributed notification's own handler is called here.
+struct Rearm: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Fire the screen-unlock or present-user re-arm trigger (section 4.2).")
+
+    @Argument var name: String
+
+    @Flag(help: "Fire the present-user request trigger instead of the screen unlock.")
+    var request = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if request { arguments["request"] = "true" }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.rearm", arguments: arguments))
+    }
+}
+
+
+/// Spike S5's journal of the File Provider calls that reached the agent: when each
+/// arrived, what it answered, how long it took, and the gap since the previous call of the
+/// same method for the same item. Every "how long does the system wait before calling
+/// again" question in the S5 row of section 11 is read off this.
+struct Calls: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "The File Provider calls the agent has seen, with the gaps between them.")
+
+    @Argument var name: String?
+
+    @Option(help: "How many entries to print (default 200).")
+    var limit: Int?
+
+    @Flag(help: "Clear the journal after printing.")
+    var reset = false
+
+    func run() throws {
+        var arguments: [String: String] = [:]
+        if let name { arguments["name"] = name }
+        if let limit { arguments["limit"] = String(limit) }
+        if reset { arguments["reset"] = "true" }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.calls", arguments: arguments))
+    }
+}
+
+/// S5's working-set questions, driven against the index directly. `--forget` deletes the
+/// row and its subtree with a deletion anchor, which is what the extension reports through
+/// the working set when a listing says an item has gone; `--content-version` gives the row
+/// a version the system cannot match, which is what the reconcile walk produces for an item
+/// with a pending local edit. Neither touches the server.
+struct Row: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Report an item deleted, or with an unmatched version, through the working set.")
+
+    @Argument var name: String
+    @Argument var path: String
+
+    @Flag(help: "Delete the row and its subtree, with a deletion anchor.")
+    var forget = false
+
+    @Option(name: .customLong("content-version"), help: "Give the row this content version.")
+    var contentVersion: String?
+
+    func run() throws {
+        var arguments = ["name": name, "path": path]
+        if forget { arguments["forget"] = "true" }
+        if let contentVersion { arguments["contentVersion"] = contentVersion }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.row", arguments: arguments))
     }
 }

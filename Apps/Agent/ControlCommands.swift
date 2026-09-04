@@ -186,6 +186,19 @@ enum ControlCommands {
 
         case "debug.fault":
             let runtime = try await resolveRuntime(arguments)
+            // Section 6.3's outage simulation. A VM guest cannot take its host's link
+            // down or stop the host's containers, so `--unreachable` and
+            // `--transport-hang` are what stand in for those: the first fails every
+            // transport call and every connect attempt the way a dead server does, the
+            // second stalls them the way a network that has gone but not said so does.
+            let location = try await resolveLocation(arguments)
+            if let gate = await DomainManager.shared.gate(locationID: location.id) {
+                await gate.setFault(
+                    unreachable: arguments["unreachable"].map { $0 == "on" },
+                    hangMilliseconds: arguments["transportHang"].flatMap { Int($0) },
+                    connectHangMilliseconds: arguments["connectHang"].flatMap { Int($0) },
+                    connectFailure: arguments["connectFailure"])
+            }
             let writes = arguments["writes"].map { $0 == "on" }
             let delay = arguments["fetchDelay"].flatMap { Int($0) }
             let mismatch = arguments["versionMismatch"].map { $0 == "on" }
@@ -195,8 +208,101 @@ enum ControlCommands {
             await runtime.setFault(
                 writes: writes, fetchDelayMilliseconds: delay, versionMismatch: mismatch,
                 collisions: collisions, uploadDelayMilliseconds: uploadDelay,
-                frozenMetadata: frozen)
+                frozenMetadata: frozen, fetchError: arguments["fetchError"])
             return try json(await runtime.transferStats(reset: false))
+
+        case "debug.calls":
+            // Spike S5's journal of the File Provider calls that reached the agent, with
+            // the gap since the previous call of the same kind. Every "how long does the
+            // system wait before calling again" question is read off this.
+            let location = try? await resolveLocation(arguments)
+            if arguments["reset"] == "true" { CallJournal.shared.reset() }
+            return try json(
+                CallJournal.shared.report(
+                    domain: location?.id, limit: Int(arguments["limit"] ?? "") ?? 200))
+
+        case "debug.row":
+            // S5's working-set questions: forget a row (an item reported deleted) or give
+            // it a content version the system cannot match (what the reconcile walk
+            // produces for a pending item).
+            let runtime = try await resolveRuntime(arguments)
+            guard let path = arguments["path"] else {
+                throw SSHDriveAgentError.notImplemented.asNSError("debug.row needs a path.")
+            }
+            let report = try await runtime.rewriteRowForSpike(
+                pathString: path, forget: arguments["forget"] == "true",
+                contentVersion: arguments["contentVersion"])
+            let location = try await resolveLocation(arguments)
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            return try json(report)
+
+        case "debug.breaker":
+            // Section 6.3's breaker, as the agent holds it: state, backoff, the counters,
+            // and section 4.2's re-arm flags. `--drop` runs `-O exit` on the master
+            // without touching config, which is "the connection died" without a `kill`;
+            // `--reset` is the `sshdrive test` reset; `--connect` clears a stop the way
+            // `test` does and attempts once.
+            let location = try await resolveLocation(arguments)
+            _ = try? await resolveRuntime(arguments)
+            guard let gate = await DomainManager.shared.gate(locationID: location.id) else {
+                return try json(["breaker": "none", "reason": "not an sftp location"])
+            }
+            if let quiet = arguments["quietRecovery"] {
+                await gate.setSuppressRecoverySignals(quiet == "on")
+            }
+            if arguments["drop"] == "true" { await gate.drop(reason: "sshdrive debug breaker --drop") }
+            if arguments["reset"] == "true" { await gate.didWake(trigger: "sshdrive debug breaker --reset") }
+            if arguments["connect"] == "true" { await gate.clearStopAndConnect() }
+            return try json(["breaker": await gate.report()])
+
+        case "debug.power":
+            // `pmset sleepnow` is the real path; this is what a machine that will not
+            // honour it uses instead, and it drives the same two handlers (section 6.1).
+            switch arguments["event"] ?? "" {
+            case "will-sleep":
+                await DomainManager.shared.willSleep()
+                return try json(["event": "will-sleep", "power": PowerEvents.shared.report])
+            case "did-wake":
+                await DomainManager.shared.didWake(trigger: "a debug hook")
+                return try json(["event": "did-wake", "power": PowerEvents.shared.report])
+            case "path-down":
+                await DomainManager.shared.networkPathChanged(available: false)
+                return try json(["event": "path-down", "path": NetworkPathGate.shared.report])
+            case "path-up":
+                await DomainManager.shared.networkPathChanged(available: true)
+                return try json(["event": "path-up", "path": NetworkPathGate.shared.report])
+            default:
+                return try json([
+                    "power": PowerEvents.shared.report,
+                    "path": NetworkPathGate.shared.report,
+                    "screen": ScreenLockObserver.shared.report,
+                ])
+            }
+
+        case "debug.presence":
+            // Section 4.2's presence test, exactly as the re-arm reads it.
+            return try json([
+                "presence": AgentPresence.report(),
+                "screen": ScreenLockObserver.shared.report,
+            ])
+
+        case "debug.rearm":
+            // The screen-unlock trigger of section 4.2, driven by hand because a headless
+            // VM has no screen to unlock. `--request` drives the other trigger.
+            let location = try await resolveLocation(arguments)
+            if arguments["request"] == "true" {
+                guard let gate = await DomainManager.shared.gate(locationID: location.id) else {
+                    return try json(["rearm": "none"])
+                }
+                await gate.fileProviderRequestArrived()
+                return try json(["rearm": "request", "breaker": await gate.report()])
+            }
+            await ScreenLockObserver.shared.simulateUnlock()
+            let gate = await DomainManager.shared.gate(locationID: location.id)
+            return try json([
+                "rearm": "unlock",
+                "breaker": await gate?.report() ?? [:],
+            ])
 
         case "debug.transfers":
             let runtime = try await resolveRuntime(arguments)
@@ -226,6 +332,12 @@ enum ControlCommands {
 
         case "debug.signal":
             let location = try await resolveLocation(arguments)
+            if arguments["errorResolved"] == "true" {
+                // Section 5.6's first half on its own, so S5 can say whether it is what
+                // wakes the flush or whether the working-set signal is doing the work.
+                await DomainManager.shared.signalErrorResolved(locationID: location.id)
+                return try json(["signalled": location.id, "container": "errorResolved"])
+            }
             guard let container = arguments["container"] else {
                 await DomainManager.shared.signalWorkingSet(locationID: location.id)
                 return try json(["signalled": location.id, "container": "workingSet"])

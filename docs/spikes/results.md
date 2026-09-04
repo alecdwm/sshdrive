@@ -6,6 +6,379 @@ the write matrix); this file records only what happened.
 
 ---
 
+## 2026-09-04 (milestone 5) - S5: the breaker, reconnection, the queued-write flush, sleep/wake and the deadline re-arm
+
+Milestone 5 end to end: DESIGN.md section 6.3's circuit breaker with its bounded waiting,
+reconnection with backoff and the mux channels re-opened, the queued-write flush on
+network-up, sleep and wake, the agent-missing behaviour of section 5.2, and section 4.2's
+deadline re-arm. Same headless VM (macOS 26.4.1 arm64, Xcode 26.4, `OpenSSH_10.2p1`), the
+signed Debug build from `scripts/mac-build.sh signed` installed over
+`/Applications/SSH Drive.app` with `ditto`. Testbed up on the Mac; one server, `deb`
+(2201, Debian, OpenSSH `sftp-server`), and two locations, `m5` and `m5b`. Steps are in
+`milestone-5.md`.
+
+**381 package tests, 0 failures**, four runs in a row (was 355; 31 skipped without the
+testbed). The 26 new ones are `CircuitBreakerTests` (section 6.3's four rules against an injected clock and an
+injected jitter: the 2 s doubling to 60 s, the 300 s key-agent cap, the half-open probe,
+the bound on a waiting call being the attempt's own remaining 60 s and not 60 s from now,
+the stop on auth and host-key failures surviving a reset, and only a deadline stop being
+re-armable) and `DeadlineRearmTests` (section 4.2: each trigger firing exactly once per
+stop, idle over 30 s and a locked screen not firing the request trigger, the presence
+reading taken at most once a minute proven by counting it, an unlock consulting presence
+not at all, and refusals never being re-armed), plus one in `LocalAttributesTests` for the encoding bug
+below.
+
+### What was built
+
+`AgentCore` gained two pure state machines, because everything in this milestone that is
+worth testing is a decision and not an I/O: **`CircuitBreaker`**, a struct that takes the
+time as an argument and answers `proceed` / `connect` / `wait(seconds:)` /
+`failFast(reason:)`, and **`DeadlineRearmState`**, which owns section 4.2's two triggers
+and the once-a-minute presence rule. The agent side is
+**`ReconnectingTransport`** plus its `ConnectionGate` actor: an `SFTPTransport` that holds
+the live `SSHBackedTransport` - or does not - so nothing in `LocationRuntime` changed
+except that its transport can now be absent. Beside them, `PowerEvents`
+(`IORegisterForSystemPower`, not `NSWorkspace`: the agent runs no `NSApplication`),
+`NetworkPathGate` (`NWPathMonitor`), `AgentPresence` (`CGEventSource` +
+`CGSessionCopyCurrentDictionary`) and `ScreenLockObserver`
+(`com.apple.screenIsUnlocked`).
+
+`LocationRuntime.start()` was split: everything that can only be known from a live
+connection - the identity behind section 5.4's mapping, the channel budget, both spellings
+of the root, the root row - moved into `applyConnection()`, which `start()` calls and
+tolerates the failure of, and which the gate calls again on **every** reconnect. That is
+what makes a location whose server is down still mount, still serve the replica and still
+queue writes, instead of failing `start()` and getting no domain at all.
+
+### The instrument this spike needed
+
+`sshdrive debug calls <name>` is a ring of the last 2,000 File Provider calls with the
+arrival time, the outcome and the gap since the previous call of the same method for the
+same item. Every "how long does the system wait before calling again" question below is
+read off it, and none of them can be answered from `os_log` or `fileproviderctl`, which
+report state rather than traffic.
+
+### S5, question by question
+
+| # | Question | Answer |
+|---|---|---|
+| s5-1 | How long does the system retry a write after `.serverUnreachable`? | **For ever, on a doubling backoff, and it grows without a cap in sight** |
+| s5-2 | Does `signalErrorResolved` wake the flush? Does `signalEnumerator` alone? | **Yes, in 20 ms. And no - nor does reconnecting** |
+| s5-3 | Do requests still reach the extension while the domain is connected and every call fails fast? | **Yes**, and the domain stays connected through a deadline stop |
+| s5-4 | How long does the system wait after `.serverUnreachable` from `fetchContents` before calling again? | **It never calls again.** There is no interval to measure |
+| s5-5 | What does the extension see when the mach service is gone, and can it call `disconnect(reason:)`? | **It can, and does.** The domain goes permanently disconnected; the replica and queued writes survive |
+| s5-6 | Does the system time out an `enumerateItems` held the full 60 s? | **No.** 60.19 s, answer taken, extension untouched |
+| s5-7 | A pending edit when the item is reported deleted? And with an unmatched content version? | **Re-offered as a `createItem`,** which then collides for ever |
+| s5-8 | `.noSuchItem` versus `.cannotSynchronize` from `fetchContents`? | `ESTALE` versus `ETIMEDOUT`; **neither removes the item** |
+| s5-9 | Is a `readdir`/`lstat` walk served from the replica while every enumeration fails? | **Yes**, and it reaches the extension not at all |
+
+#### s5-1. The write retry, measured
+
+`debug fault --unreachable on`, one edit in the mount, twelve minutes of watching. Every
+gap is the arrival of the next `modifyItem` for the same item:
+
+```
+5.50 s -> 10.56 -> 20.30 -> 43.03 -> 79.36 -> 153.23 -> 331.30
+```
+
+Roughly a doubling, and 331 s is five and a half minutes ten minutes into the outage with
+no sign of a ceiling. **Each retry arrives on a freshly launched extension instance** - an
+`indexReady` lands in the same millisecond as every `modifyItem` - so the system is not
+holding an instance open for the pending work; it relaunches to make each attempt.
+
+That number is the whole argument for the two things the agent now does that section 6.3
+did not previously spell out: it reconnects on the breaker's backoff without being asked,
+and it retries a read that met a dead connection once. Left to the system, a mount whose
+server blinked comes back somewhere between three and eleven minutes later, and only if
+there was a pending write at all.
+
+#### s5-2. Which signal does it
+
+The recovery normally sends `signalErrorResolved` and then `signalEnumerator`, so
+`debug breaker --quiet-recovery on` was added to send neither and let each be sent by hand.
+With a write pending and the backoff out past five minutes:
+
+| Step | Result |
+|---|---|
+| the location reconnects, no signal sent | 75 s, nothing |
+| `signalEnumerator(.workingSet)` alone | 60 s, nothing |
+| `signalErrorResolved(.serverUnreachable)` | `modifyItem` at **+20 ms**, upload done, pending set empty |
+
+So section 5.6's "`signalEnumerator` alone is the fallback" is wrong and is now corrected:
+there is no fallback. The working-set signal is still sent, because the working set needs
+it, but it is not what flushes anything.
+
+#### s5-3, s5-9. What still reaches us, and what the replica serves
+
+With every call failing fast, `ls -R` of the mount returns the whole tree with exit 0 and
+`stat` of a dataless file answers, and **neither reaches the extension at all**: a folder
+is enumerated once, ever (section 6.5), so the walk is the system's replica answering. That
+is exactly what section 5.3's reconcile stall needs.
+
+What does reach us is the work that needs the server. During one deadline stop, with the
+breaker refusing everything, the journal recorded 6 `fetchContents` and 4 `createItem`
+arrivals and `failFastCalls: 7`, while `fileproviderctl dump` showed the domain **not**
+disconnected - no `permanently disconnected` marker, unlike the agent-missing case below.
+Section 4.2's present-user re-arm has traffic to ride on.
+
+#### s5-4. The fetch retry that does not exist
+
+A `cat` of an evicted file with the location down produces exactly one `fetchContents`, one
+`.serverUnreachable`, and `cat: …: Operation timed out` **at once**. Seven minutes of
+watching produced no second call. A second `cat` produces a second call, so the item is not
+poisoned - the system simply has no retry of its own for a fetch, and no spinner either
+when the answer is immediate.
+
+The question as section 11 asks it ("how long the system waits … since that, not our
+breaker, bounds the spinner") therefore has a false premise. **Our breaker is the only
+thing that bounds anything here**, and the spinner exists only while a call is waiting for
+a connect attempt, which is s5-13 below.
+
+#### s5-5. The agent's mach service gone
+
+`sshdrive agent stop`, then `SSHDRIVE_AGENT_ROLE=unregister` on the app's main executable,
+which is the only thing that clears launchd's record (S1(f)). `launchctl print` then says
+`Could not find service "org.shirls.sshdrive.agent"`.
+
+**`disconnect(reason:)` works from inside the extension.** `fileproviderctl dump` shows
+
+```
+domain: 4{34}E (m5)
+  + (⏹  permanently disconnected)
+  can't dump the extension: Error Domain=NSFileProviderErrorDomain Code=-1004 …
+      UserInfo={NSFileProviderErrorDomainDisconnectionStateKey=4}
+```
+
+and the item-level state carries `error:'NSError: FP -1004 …' domain:serverUnreachable`.
+So section 5.2's message can be shown to the user by the extension, and does not have to
+live only in `sshdrive doctor`.
+
+What still works with no agent at all: the directory listing (replica), and a **write** -
+`echo agent-gone > …/newfile.txt` succeeded locally and was queued. What does not: any
+fetch, which is `ETIMEDOUT`. `open -g -a "SSH Drive"` brought the agent back, the
+disconnect was lifted, and `newfile.txt` was on the server with its contents.
+
+#### s5-6. Sixty seconds inside `enumerateItems`
+
+A second location, `m5b`, added and then never listed, with `debug fault --transport-hang
+60000` set before the first `ls`:
+
+```
+12:01:43.053  enumerateItems  arrived
+12:02:43.240  enumerateItems  60186.8 ms   2 item(s)
+ls exit=0 after 61s
+```
+
+The system waited, took the answer, and the extension process was still alive afterwards.
+Section 6.3's bounded wait can use the whole 60 s of the authentication deadline without
+the system taking the call away.
+
+#### s5-7. A pending edit whose item is reported gone
+
+`debug row <name> <path> --forget` deletes the row and its subtree with a deletion anchor -
+what the extension reports when a listing says the item has gone (section 5.3, no
+tombstones) - and touches nothing on the server. With an edit pending:
+
+- the file stays in the mount with the **local** content, and stays in the pending set;
+- the pending `modifyItem` becomes a **`createItem`**, re-offering the same bytes as a new
+  item;
+- that create is answered `.filenameCollision`, because the path is still on the server;
+- and the system retries a collided create for ever with no alert (section 5.5, S3).
+  Observed at 11:51:54 and again at 11:57:21, four hundred seconds apart, still going.
+
+So no data is lost, and nothing is ever resolved either: the mount shows the new content,
+the server keeps the old, and the user is told nothing. That settles the question section
+11 attaches to this row - **the mass-deletion guard must hold deletions of pending items** -
+and adds a second reason: the item comes back with a new identifier, so a pin or a tag on
+it is lost even when the create does succeed.
+
+The unmatched-content-version half could not be measured separately here, because the
+row was already forgotten by the first half and `debug row --content-version` needs a row;
+it is left in the runbook for the next pass. What it would add is small: the identifier
+does not change, so the create-versus-modify finding above does not apply to it.
+
+#### s5-8. The two fetch errors
+
+| Fault | What the reader gets | The item |
+|---|---|---|
+| `.cannotSynchronize` | `Operation timed out` (`ETIMEDOUT`) | still listed |
+| `.noSuchItem` | `Stale NFS file handle` (`ESTALE`) | still listed, after 60 s and after a working-set signal |
+
+**Neither removes the item.** The rule that `.noSuchItem` deletes the user's file is about
+`item(for:)` (section 5.2), not about `fetchContents`, and the mass-deletion guard's
+preference for `.cannotSynchronize` therefore rests on the message the user sees rather
+than on a deletion that does not happen. Both were reversible: clearing the fault and
+re-reading returned the content.
+
+### The two proofs on a real mount
+
+**An edit made while the master is dead is flushed after reconnect.** `kill -9` on the
+master, then `echo … > edit.txt`:
+
+```
+11:37:44  write exit=0, pending count 1, server still says "before-the-outage"
+          sshdrive list: mounted  offline (backing off for 4 s after 3 failure(s))
+11:38:24  46 s later: pending count still 1, server unchanged
+11:38:30  the server comes back
+11:38:30.911  modifyItem -> modified          (20 ms after signalErrorResolved)
+11:38:42  server: written-while-the-master-was-dead
+```
+
+**A fetch arriving during a reconnect resolves within the section 6.3 bound.** With
+`debug fault --connect-hang 20000` (the attempt stalls, calls are left alone) and the
+master killed, two reads three seconds apart:
+
+```
+waitedCalls 3, failFastCalls 0
+read B  exit=0 after 21s      fetchContents 17520.7 ms   6 bytes
+read A  exit=0 after 21s      fetchContents 20555.4 ms   3000000 bytes
+```
+
+Both waited for the one attempt and both succeeded, bounded by the attempt's own remaining
+60 s and not by any retry of the system's - which, per s5-4, does not exist. And the first
+read after a **silent** master death now succeeds in 1 s rather than failing, because a read
+that meets a dead connection is retried once through the breaker (below).
+
+**The Finder-visible spinner.** `~/m5-shots/2*.png`, captured with `screencapture -x` over
+ssh. While the fetch waits for the connect, the item's status column shows a **circular
+progress indicator** where the other, dataless items show the cloud-with-a-down-arrow; the
+row stays selected, no alert appears, and after the fetch the badge is gone entirely. The
+indicator is identical in the frames at t+5 s, t+13 s and t+21 s, so it is a static
+progress ring rather than an animation, and it is the whole of what the user sees for a
+21-second reconnect.
+
+### Sleep and wake
+
+**The VM does not honour `pmset sleepnow`:** `Unable to sleep system: error 0xe00002e2`,
+exit 71. `pmset -g` reports `sleep 1 (sleep prevented by powerd)` on a `VirtualMac2,1`, and
+the assertion holding it is powerd's own "Prevent sleep while display is on". So the two
+handlers were driven through `sshdrive debug power will-sleep|did-wake`, which calls exactly
+what the IOKit callback calls; `IORegisterForSystemPower` itself registers successfully on
+this VM (`debug power` reports `registered: true`), so what is unproven is only that macOS
+delivers the messages, not what the agent does with them.
+
+| Step | Result |
+|---|---|
+| will-sleep | both masters gone (`-O exit`), both locations `offline (idle)`, **no** reconnect scheduled |
+| did-wake | new masters within 8 s, `connected`, `reconnects` incremented |
+| `NWPathMonitor` path down | `hasNetworkPath false`, state `no network path`, a read fails fast (`failFastCalls` +1) with no socket opened |
+| path up | reconnected, `reconnects` incremented |
+
+The will-sleep handler acknowledges the message with `IOAllowPowerChange` after the drop,
+with a 5 s cap so a wedged `ssh` can never delay a lid close.
+
+### The deadline re-arm
+
+A headless VM has no key agent, no FIDO key and no screen, so the stop was produced with a
+new fault, `debug fault --unreachable on --connect-failure authenticationDeadline`, which
+makes the attempt fail with exactly the classification section 6.1's exit classifier would
+produce, and presence was supplied through an override file.
+
+| Step | Result |
+|---|---|
+| the attempt fails `authenticationDeadline` | `state: stopped: authenticationDeadline`, `rearmArmed: true`, and `sshdrive show` says "offline (stopped: authenticationDeadline)" |
+| a request with input idle **45 s** | no attempt; `presenceEvaluations` +1, `rearmRequestUsed` false |
+| a request 5 s later, idle now 2 s | no attempt and **no presence read at all** - the once-a-minute rule |
+| a request 65 s later, idle 2 s | one attempt; `presenceEvaluations` +1 |
+| the screen-unlock notification | one attempt, `state: connecting`, without reading presence at all |
+| the screen locked (`locked=1`) | `userIsPresent false` |
+| the domain, throughout | **not** disconnected; `fetchContents` and `createItem` kept arriving |
+
+Each new deadline stop re-arms both triggers again, which is section 4.2 as written ("if it
+times out again the location is stopped again until the next trigger"), so "exactly once"
+is per stop and not per lifetime.
+
+**`launchctl setenv` does not reach a launchd agent on macOS 26.** The first attempt at the
+presence override was `SSHDRIVE_PRESENCE_OVERRIDE` in the user session's environment plus
+`sshdrive agent restart`; `debug presence` kept reporting `overridden: false` and the
+machine's real idle time. The override now reads
+`<group container>/presence-override` first, needs no restart, and the environment spelling
+is kept only for a harness that spawns the agent itself.
+
+### Simulating an outage from inside a VM, and what is still missing
+
+Four substitutes were used, in order of how much of the stack they exercise: `kill -9` on
+the master (the connection dying), `debug breaker --drop` (the clean `-O exit` form),
+`debug fault --unreachable on` (every **connect attempt** fails, so the breaker opens on the
+ordinary path) and `debug fault --connect-hang MS` / `--transport-hang MS` (a stall in the
+attempt, or in every call).
+
+One correction is worth recording, because the first shape of the fault measured nothing.
+`--unreachable` originally failed the transport **call**, which short-circuits `acquire()`:
+the breaker was never entered, `failFastCalls` stayed at zero, and the fault was testing
+itself. Failing the **attempt** instead is what makes a faulted location take exactly the
+path a dead server takes.
+
+**What a real link-down would still add,** for whoever has the host to hand. `docker
+compose stop deb` in `testbed/` on the Mac gives a server that completes the TCP handshake
+and then refuses, which is the only way to see the `ConnectTimeout=15` and connection-refused
+branches of the exit classifier under the breaker rather than under a synthetic failure;
+and taking the VM's interface down is the only way to see `NWPathMonitor` report an
+unsatisfied path for real, rather than through `debug power path-down`. Neither changes any
+answer above - the breaker sees the same classification either way - but both are cheap and
+would close the last gap between "the fault says the attempt failed" and "the attempt
+failed".
+
+### Three assumptions that failed
+
+**Section 5.6's fallback does not exist.** "S5 confirms `signalErrorResolved` wakes the
+flush; `signalEnumerator` alone is the fallback" - the second half is false. Neither
+`signalEnumerator` nor a plain reconnect wakes a queued write. Section 5.6 corrected, and
+section 13 records it.
+
+**Section 6.3 assumed the system's own retry was the thing to bound.** It is not: there is
+no retry for a fetch at all, and the retry for a write has passed five minutes by the time
+the mount has been down ten. The section now says the breaker's backoff is a reconnect
+schedule the agent runs unprompted, and that a read which meets a silently dead connection
+is retried once. Both are new behaviour in the code, not only in the doc.
+
+**Section 6.4's question about pending items has a sharper answer than "hold them".** The
+system does not lose a pending edit on an item we report deleted - it re-offers it - but it
+re-offers it as a **create**, which collides with the path that is still there and is then
+retried for ever with no alert. The guard has to hold, and the reason is a stranded save and
+a lost identifier rather than lost bytes.
+
+### Two smaller things
+
+- **`CGEventType` has no `.any` in Swift.** `kCGAnyInputEventType` is a C macro for
+  `0xFFFFFFFF` and does not import, so the presence read spells it
+  `CGEventType(rawValue: ~0)`. Asking for one concrete type instead would miss a user who
+  only moved the mouse.
+- **`kIOMessageSystemWillSleep` and friends do not import either** - they are
+  `iokit_common_msg(0x280)` macros. `PowerEvents` spells out `0xE0000280`, `0xE0000270` and
+  `0xE0000300` with the arithmetic that produces them.
+- **`scripts/mac-build.sh` rsyncs with `--delete`, and `build/` does not exist on the Linux
+  side,** so every run wipes the Mac's build directory. Run `signed` last: a `test` run after
+  it removes the app that was about to be installed, and `ditto` fails with "Cannot get the
+  real path for source".
+- **One "flaky test" was a real bug.** `RowBuilderTests.testTheSameAttributesTwiceProduceTheSameVersion`
+  failed about one run in three with two different xattr hashes for the same attributes.
+  The blob the metadata version hashes is `JSONEncoder().encode(LocalAttributes)`, and
+  `JSONEncoder` promises no key order without `.sortedKeys` - so the same attributes encode
+  to two different byte strings **inside one process**, the hash moves on its own, and the
+  system re-reads every item the agent holds for nothing. `.sortedKeys` is now set and
+  `LocalAttributesTests` encodes a six-key blob two hundred times and compares the bytes.
+  This dates from milestone 4 and had been read as flakiness in the test.
+- **Two flaky scheduler tests were fixed rather than tolerated.**
+  `testForegroundJumpsAheadOfQueuedBackground` released all four holding transfers at once,
+  so both queued transfers were admitted and which body ran first was the executor's
+  business; it now frees exactly one slot. `testWindowIsSplitBetweenRunningTransfers`
+  compared `values.first` and `values.last` of an array four concurrent bodies append to; it
+  now compares the sorted multiset. The suite has been green on every run since.
+
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no
+`sshdrive-*` control sockets and no `ssh` masters, `~/m5` and `~/m5b` removed from the
+server, the presence-override file deleted, and `sshdrive doctor` green apart from the
+expected uninstall note. Four orphaned `ssh -N` masters from earlier sessions (ppid 1,
+sockets already unlinked, so `-O exit` could not reach them - the trap the milestone 2
+results record) were killed by hand. Screenshots from the spinner pass are in `~/m5-shots/`.
+The signed Debug build is installed at `/Applications/SSH Drive.app` and the agent is
+running.
+
+---
+
 ## 2026-09-04 (milestone 4) - read-write: the section 5.5 upload protocol, conflict copies, symlinks (S8), Finder tags (S10)
 
 Milestone 4 end to end: create, modify, delete, rename and move through the real

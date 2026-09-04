@@ -56,4 +56,26 @@ final class LocalAttributesTests: XCTestCase {
         XCTAssertEqual(back.tagData, Data([7, 8]))
         XCTAssertEqual(back.extendedAttributes, ["k": Data([1])])
     }
+
+    /// The blob is hashed into the metadata version (section 5.3), so two encodes of the
+    /// same attributes have to be the same bytes. `JSONEncoder` promises no key order
+    /// without `.sortedKeys`, and without it this fails about one run in three - which is
+    /// the system re-reading every item the agent holds, for nothing (2026-09-04).
+    func testEncodingIsByteStableAcrossManyEncodesAndManyKeys() {
+        let local = LocalAttributes(
+            xattrs: [
+                "com.apple.TextEncoding": Data("utf-8;134217984".utf8),
+                "com.apple.quarantine": Data("0081;".utf8),
+                "user.one": Data([1]),
+                "user.two": Data([2]),
+                "user.three": Data([3]),
+                "zzz.last": Data([9, 9]),
+            ],
+            tagData: Data([0x62, 0x70, 0x6c, 0x69, 0x73, 0x74]))
+        guard let first = local.encoded() else { return XCTFail("nothing encoded") }
+        for _ in 0..<200 {
+            XCTAssertEqual(LocalAttributes(xattrs: local.xattrs, tagData: local.tagData).encoded(), first)
+        }
+        XCTAssertEqual(LocalAttributes.decode(first), local)
+    }
 }

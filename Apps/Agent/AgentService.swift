@@ -31,13 +31,23 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
 
     func indexReady(domainIdentifier: String, reply: @escaping (Bool) -> Void) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "indexReady", subject: "")
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 _ = try await runtime.currentSequence()
+                call.finish("ready")
                 reply(true)
             } catch {
                 // An agent mid-restore, or one that cannot open the index at all, answers
                 // no and the instance opens nothing (section 5.3).
+                call.finish(error: error)
                 reply(false)
             }
         }
@@ -50,6 +60,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "enumerateItems", subject: containerIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 // Section 5.2: paged for directories with tens of thousands of entries.
@@ -58,11 +76,13 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                 let page = try await runtime.enumerateItems(
                     container: containerIdentifier, pageToken: pageToken)
                 let anchor = try await runtime.currentSequence()
+                call.finish("\(page.items.count) item(s)")
                 reply(
                     SSHDriveItemPage(
                         items: page.items, nextPageToken: page.nextPageToken,
                         anchor: String(anchor)), nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -73,15 +93,25 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "enumerateChanges", subject: containerIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let result = try await runtime.enumerateChanges(container: containerIdentifier)
                 let sequence = try await runtime.currentSequence()
+                call.finish("\(result.items.count) changed, \(result.deleted.count) deleted")
                 reply(
                     SSHDriveItemPage(
                         items: result.items, deletedIdentifiers: result.deleted,
                         anchor: String(sequence)), nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -92,10 +122,21 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "item", subject: itemIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
-                reply(try await runtime.snapshot(identifier: itemIdentifier), nil)
+                let snapshot = try await runtime.snapshot(identifier: itemIdentifier)
+                call.finish("ok")
+                reply(snapshot, nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -110,6 +151,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "fetchContents", subject: itemIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchContents(
@@ -119,8 +168,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     progress: progressReporter(transferID: transferID))
                 peer?.transferProgress(
                     transferID: transferID, bytesCompleted: snapshot.size, bytesTotal: snapshot.size)
+                call.finish("\(snapshot.size) bytes")
                 reply(snapshot, nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -152,14 +203,24 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "fetchPartialContents", subject: itemIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchPartialContents(
                     identifier: itemIdentifier, offset: offset, length: length,
                     into: destination, transferID: transferID,
                     progress: progressReporter(transferID: transferID))
+                call.finish("ok")
                 reply(snapshot, nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -173,6 +234,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "createItem", subject: filename)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.createItem(
@@ -187,8 +256,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     contents: contents,
                     transferID: transferID,
                     progress: progressReporter(transferID: transferID))
+                call.finish("created")
                 reply(snapshot, nil)
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -203,6 +274,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "modifyItem", subject: itemIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let result = try await runtime.modifyItem(
@@ -219,6 +298,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     contents: contents,
                     transferID: transferID,
                     progress: progressReporter(transferID: transferID))
+                call.finish(result.evictAfterReply ? "conflict copy" : "modified")
                 reply(result.snapshot, nil)
                 // Section 5.5, and S3's finding that a `modifyItem` reply is believed: a
                 // conflict copy is only half done when the remote item has been returned.
@@ -234,6 +314,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                         locationID: domainIdentifier, identifier: itemIdentifier)
                 }
             } catch {
+                call.finish(error: error)
                 reply(nil, sshDriveXPCError(error))
             }
         }
@@ -244,11 +325,21 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (Error?) -> Void
     ) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "deleteItem", subject: itemIdentifier)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 try await runtime.deleteItem(identifier: itemIdentifier, recursive: recursive)
+                call.finish("deleted")
                 reply(nil)
             } catch {
+                call.finish(error: error)
                 reply(sshDriveXPCError(error))
             }
         }
@@ -277,15 +368,25 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
 
     func workingSetAnchorExpired(domainIdentifier: String, freshAnchor: String) {
         Task {
+            // Section 4.2's second re-arm trigger: a File Provider request for this
+            // domain. Behind the presence test and its once-a-minute rule, so it is
+            // cheap enough to sit on every request. The `CallTiming` it hands back is
+            // spike S5's journal: arrival, outcome and the gap since the previous call
+            // of the same kind, which is what every "how long does the system wait"
+            // question in the S5 row is asking for.
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "workingSetAnchorExpired", subject: freshAnchor)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let changes = try await runtime.runCatchUpSweep()
+                call.finish("\(changes) change(s)")
                 Log.agent.notice(
                     "catch-up sweep after an anchor expiry found \(changes, privacy: .public) change(s)")
                 if changes > 0 {
                     await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
                 }
             } catch {
+                call.finish(error: error)
                 Log.agent.error("catch-up sweep failed: \(error, privacy: .public)")
             }
         }
