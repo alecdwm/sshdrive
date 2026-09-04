@@ -27,6 +27,10 @@ public enum SSHDriveAgentError: Int, Sendable {
     case unknownDomain = 10
     /// The operation is not permitted on the server.
     case permissionDenied = 11
+    /// A delete the agent will not perform: a non-empty directory the system did not ask
+    /// to remove recursively (section 5.5). The system leaves the item in place rather
+    /// than retrying, which is the whole point of having an error of its own.
+    case deletionRejected = 12
 
     public static let domain = "org.shirls.sshdrive.AgentError"
 

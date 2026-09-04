@@ -51,9 +51,9 @@ let package = Package(
         // The agent's own derivations, kept in the package so they are unit-testable
         // without an app bundle: section 5.4's mode-to-capabilities mapping and name
         // rules, and section 6.2's transfer scheduler.
-        .target(name: "AgentCore", dependencies: ["Logging", "Config", "SFTP", "Secrets", "SSHProcess"]),
+        .target(name: "AgentCore", dependencies: ["Logging", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
 
-        .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "SFTP", "Secrets", "SSHProcess"]),
+        .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
         .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),

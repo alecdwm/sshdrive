@@ -3,9 +3,12 @@ import Foundation
 /// The per-domain index schema, exactly as DESIGN.md section 5.3 sets it out. The agent
 /// is the only writer; the extension opens the same file read-only in WAL mode.
 public enum IndexSchema {
-    /// Bumped whenever a column changes. An extension that finds a version newer than it
+    /// Bumped whenever a column changes, or whenever the *meaning* of one does. Version 2
+    /// is milestone 4: the `xattrs` blob now holds a `LocalAttributes` object (extended
+    /// attributes plus the Finder `tagData` that never arrives as an xattr, section 5.4)
+    /// rather than a bare dictionary. An extension that finds a version newer than it
     /// understands falls back to asking the agent for items (section 5.2).
-    public static let version = 1
+    public static let version = 2
 
     /// Keys in the `meta` table. The reader checks all three on every call.
     public enum MetaKey {

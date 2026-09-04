@@ -252,6 +252,46 @@ public actor RealSFTPTransport: SFTPTransport {
             serverPath(path), SFTPSettableAttributes(permissions: mode))
     }
 
+    /// The exclusive create the section 5.5 upload protocol writes its temp file with:
+    /// `SSH_FXF_CREAT | SSH_FXF_EXCL` at exactly this path, the permission bits in the
+    /// `open` attributes as `sftp put` does, `fsync@openssh.com` where the server offers
+    /// it, and no rename of any kind. The rename, the conflict check between the two and
+    /// the mode and mtime restore afterwards all belong to the agent (section 5.5).
+    ///
+    /// A cancel, or any failure, removes the partial file it had started.
+    public func writeExclusive(
+        _ path: RelativePath, mode: UInt32, window: Int = 16,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        let serverPath = serverPath(path)
+        let handle = try await client.open(
+            serverPath,
+            flags: [.write, .create, .exclusive],
+            attributes: SFTPSettableAttributes(permissions: mode))
+        var written: Int64 = 0
+        do {
+            while true {
+                if Task.isCancelled { throw SFTPError.cancelled }
+                let piece = try source()
+                if piece.isEmpty { break }
+                try await client.write(
+                    handle: handle, offset: UInt64(written), data: piece, window: window)
+                written += Int64(piece.count)
+                progress(written)
+            }
+            // Section 5.5, durability: fsync after each upload where the server offers it.
+            if await client.extensions.contains(.fsync) {
+                try? await client.fsync(handle)
+            }
+            try await client.close(handle)
+        } catch {
+            try? await client.close(handle)
+            try? await client.remove(serverPath)
+            throw error
+        }
+    }
+
     public func mkdir(_ path: RelativePath, mode: UInt32) async throws {
         try await client.mkdir(serverPath(path), mode: mode)
     }

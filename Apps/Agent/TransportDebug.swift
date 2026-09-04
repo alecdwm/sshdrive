@@ -29,9 +29,29 @@ enum TransportDebug {
             return try await upload(arguments)
         case "debug.transport.escape":
             return try await escape(arguments)
+        case "debug.transport.rename-check":
+            return try await renameCheck(arguments)
         default:
             throw SSHDriveAgentError.notImplemented.asNSError("Unknown command \"\(command)\".")
         }
+    }
+
+    /// Section 5.5's rename-semantics probe: does this server's plain `rename` refuse a
+    /// name that is already taken? OpenSSH implements it as `link` + `unlink` and does;
+    /// a server that overwrites instead makes every create and rename take an `lstat`
+    /// preflight, and `sshdrive set <name> create-check lstat` forces that anyway. Two
+    /// temp files of our own in the location root, one renamed over the other, both
+    /// removed afterwards.
+    private static func renameCheck(_ arguments: [String: String]) async throws -> Data {
+        let location = try await DomainManager.shared.location(named: arguments["name"] ?? "")
+        let runtime = try await DomainManager.shared.runtime(for: location)
+        let refuses = await runtime.probeRenameSemantics()
+        return try ControlCommands.json([
+            "location": location.displayName,
+            "createCheck": location.createCheck.rawValue,
+            "renameRefusesAnExistingName": refuses,
+            "preflight": refuses && location.createCheck == .auto ? "not needed" : "every create and rename lstats first",
+        ])
     }
 
     // MARK: The report

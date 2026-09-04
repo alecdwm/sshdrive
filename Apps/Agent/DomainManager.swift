@@ -81,6 +81,10 @@ actor DomainManager {
         if let existing = runtimes[location.id] { return existing }
         try GroupContainer.createDomainDirectory(locationID: location.id)
         let transport: any SFTPTransport
+        // Section 5.5's `<mac8>`: the first eight hex digits of the identifier minted
+        // once per install, which names our upload temp files so every one of them says
+        // which Mac made it.
+        let macID = String(((try? await config?.load())??.macID ?? "00000000").prefix(8))
         switch location.backend {
         case .fake:
             transport = FakeTransport(root: location.remotePath ?? "/srv/fake")
@@ -89,18 +93,18 @@ actor DomainManager {
             // of its own, an SFTP channel on its mux socket, and the wire client on that
             // channel. `SSHBackedTransport` adds the deadline and the lost-master rule;
             // everything below this line is the same code the fake backend runs.
-            let file = try? await config?.load()
             transport = try await SSHBackedTransport.connect(
                 location: location,
                 askpassPath: AgentSecrets.askpassPath,
                 askpass: AgentSecrets.broker,
-                uploadTag: String((file?.macID ?? "00000000").prefix(8)))
+                uploadTag: macID)
         }
         let runtime = try LocationRuntime(
             location: location,
             transport: transport,
             indexURL: try GroupContainer.indexURL(locationID: location.id),
-            backupURL: try GroupContainer.indexBackupURL(locationID: location.id))
+            backupURL: try GroupContainer.indexBackupURL(locationID: location.id),
+            macID: macID)
         try await runtime.start()
         runtimes[location.id] = runtime
         return runtime

@@ -81,6 +81,11 @@ public actor FakeTransport: SFTPTransport {
     public let serverGID: UInt32
 
     private var tree: Node
+    /// Paths the fake account may not write, itself or anything under it. The real
+    /// mapping of section 5.4 turns a mode into `capabilities`, and section 5.5's upload
+    /// needs write permission on the *directory*; this is how a test gets a server that
+    /// says no without inventing a whole permission model.
+    private var refusedPaths: Set<Data> = []
     private var nextInode: UInt64 = 2
     /// Every mutation applied since the transport was created, so a test can assert on
     /// what it asked for.
@@ -95,8 +100,30 @@ public actor FakeTransport: SFTPTransport {
             mtime: Int64(Date().timeIntervalSince1970), mtimeNanoseconds: 0, inode: 1)
     }
 
-    public var extensions: SFTPServerExtensions {
-        [.posixRename, .statvfs, .fsync, .limits, .lsetstat]
+    /// Which OpenSSH extensions this fake claims. Settable so a test can stand in for a
+    /// server without `posix-rename@openssh.com`, which section 5.5 makes take the
+    /// non-atomic `remove` + `rename` path.
+    private var offeredExtensions: SFTPServerExtensions = [
+        .posixRename, .statvfs, .fsync, .limits, .lsetstat,
+    ]
+
+    public var extensions: SFTPServerExtensions { offeredExtensions }
+
+    public func setExtensions(_ extensions: SFTPServerExtensions) {
+        offeredExtensions = extensions
+    }
+
+    /// Refuse every write at or below these paths with `PERMISSION_DENIED`.
+    public func refuseWrites(under paths: [RelativePath]) {
+        refusedPaths = Set(paths.map(\.bytes))
+    }
+
+    private func checkWritable(_ path: RelativePath) throws {
+        guard !refusedPaths.isEmpty else { return }
+        for refused in refusedPaths {
+            guard let root = try? RelativePath.fromIndexBytes(refused) else { continue }
+            if path.isUnder(root) { throw SFTPError.permissionDenied }
+        }
     }
 
     // MARK: Tree walking
@@ -156,6 +183,7 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws {
+        try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent else { throw SFTPError.failure("Failure") }
         if let existing = parent.children[name] {
@@ -171,7 +199,34 @@ public actor FakeTransport: SFTPTransport {
         parent.mtime = now()
     }
 
+    /// The exclusive create the section 5.5 upload protocol writes its temp file with.
+    /// A name that is already taken is a `FAILURE` on the wire, exactly as `open` with
+    /// `SSH_FXF_EXCL` gives (section 6.2).
+    public func writeExclusive(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        try checkWritable(path)
+        let parent = try parentNode(of: path)
+        guard let name = path.lastComponent else { throw SFTPError.failure("Failure") }
+        guard parent.children[name] == nil else { throw SFTPError.failure("Failure") }
+        var contents = Data()
+        while true {
+            if Task.isCancelled { throw SFTPError.cancelled }
+            let piece = try source()
+            if piece.isEmpty { break }
+            contents.append(piece)
+            progress(Int64(contents.count))
+        }
+        parent.children[name] = Node(
+            type: .file, contents: contents, mode: mode, uid: serverUID, gid: serverGID,
+            mtime: now(), mtimeNanoseconds: 0, inode: newInode())
+        parent.mtime = now()
+    }
+
     public func mkdir(_ path: RelativePath, mode: UInt32) async throws {
+        try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent else { throw SFTPError.failure("Failure") }
         // EEXIST reaches the wire as a bare FAILURE (section 6.2).
@@ -183,6 +238,7 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func remove(_ path: RelativePath) async throws {
+        try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent, let node = parent.children[name] else {
             throw SFTPError.noSuchFile
@@ -193,6 +249,7 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func rmdir(_ path: RelativePath) async throws {
+        try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent, let node = parent.children[name] else {
             throw SFTPError.noSuchFile
@@ -205,6 +262,8 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func rename(_ source: RelativePath, to destination: RelativePath) async throws {
+        try checkWritable(source)
+        try checkWritable(destination)
         let sourceParent = try parentNode(of: source)
         let destinationParent = try parentNode(of: destination)
         guard
@@ -243,6 +302,7 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func symlink(target: String, at path: RelativePath) async throws {
+        try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent else { throw SFTPError.failure("Failure") }
         guard parent.children[name] == nil else { throw SFTPError.failure("Failure") }

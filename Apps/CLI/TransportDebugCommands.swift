@@ -15,6 +15,7 @@ struct Transport: ParsableCommand {
         subcommands: [
             TransportReport.self, TransportReprobe.self, TransportHidden.self,
             TransportFetch.self, TransportUpload.self, TransportEscape.self,
+            TransportRenameCheck.self,
         ])
 }
 
@@ -42,6 +43,22 @@ struct TransportReprobe: ParsableCommand {
         AgentClient.prettyPrint(
             try AgentClient.send(
                 command: "debug.transport.reprobe", arguments: ["name": name]))
+    }
+}
+
+/// Section 5.5's one-off probe: does a plain SFTP `rename` refuse a name that is already
+/// taken? OpenSSH does; a server that does not makes every create and rename lstat first.
+struct TransportRenameCheck: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename-check",
+        abstract: "Does this server's plain rename refuse an existing name (section 5.5)?")
+
+    @Argument var name: String
+
+    func run() throws {
+        AgentClient.prettyPrint(
+            try AgentClient.send(
+                command: "debug.transport.rename-check", arguments: ["name": name]))
     }
 }
 

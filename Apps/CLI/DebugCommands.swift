@@ -472,12 +472,24 @@ struct Fault: ParsableCommand {
         help: "on or off: fail every createItem with .filenameCollision.")
     var collisions: String?
 
+    @Option(
+        name: .customLong("upload-delay"),
+        help: "Milliseconds to hold every upload open between the bytes landing in the temp file and the lstat of the destination - section 5.5's conflict window. Change the file on the server inside it to get a real conflict copy (milestone 4).")
+    var uploadDelay: Int?
+
+    @Option(
+        name: .customLong("frozen-metadata"),
+        help: "on or off: modifyItem replies with the metadata version the item had before the change, which is S10's control case for the xattr hash.")
+    var frozenMetadata: String?
+
     func run() throws {
         var arguments = ["name": name]
         if let writes { arguments["writes"] = writes }
         if let fetchDelay { arguments["fetchDelay"] = String(fetchDelay) }
         if let versionMismatch { arguments["versionMismatch"] = versionMismatch }
         if let collisions { arguments["collisions"] = collisions }
+        if let uploadDelay { arguments["uploadDelay"] = String(uploadDelay) }
+        if let frozenMetadata { arguments["frozenMetadata"] = frozenMetadata }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.fault", arguments: arguments))
     }
 }

@@ -47,12 +47,12 @@ public enum SSHDriveXPCInterface {
             itemClassSet,
             for: #selector(SSHDriveAgentProtocol.fetchPartialContents(domainIdentifier:itemIdentifier:offset:length:into:transferID:reply:)),
             argumentIndex: 0, ofReply: true)
-        interface.setClasses(
-            itemClassSet,
-            for: #selector(SSHDriveAgentProtocol.createItem(domainIdentifier:parentIdentifier:filename:isDirectory:symlinkTarget:contents:transferID:reply:)),
-            argumentIndex: 0, ofReply: true)
+        let create = #selector(SSHDriveAgentProtocol.createItem(domainIdentifier:parentIdentifier:filename:isDirectory:symlinkTarget:fileSystemFlags:modificationDate:extendedAttributes:tagData:contents:transferID:reply:))
+        interface.setClasses(itemClassSet, for: create, argumentIndex: 0, ofReply: true)
+        // extendedAttributes: [String: Data]
+        interface.setClasses(plistClassSet, for: create, argumentIndex: 7, ofReply: false)
 
-        let modify = #selector(SSHDriveAgentProtocol.modifyItem(domainIdentifier:itemIdentifier:baseVersion:changedFields:newParentIdentifier:newFilename:newFileSystemFlags:newModificationDate:newExtendedAttributes:contents:transferID:reply:))
+        let modify = #selector(SSHDriveAgentProtocol.modifyItem(domainIdentifier:itemIdentifier:baseVersion:changedFields:newParentIdentifier:newFilename:newFileSystemFlags:newModificationDate:newExtendedAttributes:newTagData:newSymlinkTarget:contents:transferID:reply:))
         interface.setClasses(itemClassSet, for: modify, argumentIndex: 0, ofReply: true)
         // newExtendedAttributes: [String: Data]
         interface.setClasses(plistClassSet, for: modify, argumentIndex: 8, ofReply: false)

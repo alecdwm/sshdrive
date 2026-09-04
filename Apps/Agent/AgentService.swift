@@ -167,7 +167,9 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
 
     func createItem(
         domainIdentifier: String, parentIdentifier: String, filename: String, isDirectory: Bool,
-        symlinkTarget: String?, contents: FileHandle?, transferID: String,
+        symlinkTarget: String?, fileSystemFlags: NSNumber?, modificationDate: NSNumber?,
+        extendedAttributes: [String: Data]?, tagData: Data?, contents: FileHandle?,
+        transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
@@ -178,6 +180,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     filename: filename,
                     isDirectory: isDirectory,
                     symlinkTarget: symlinkTarget,
+                    fileSystemFlags: fileSystemFlags?.uint64Value,
+                    modificationDate: modificationDate.map { Int64($0.doubleValue) },
+                    extendedAttributes: extendedAttributes,
+                    tagData: tagData,
                     contents: contents,
                     transferID: transferID,
                     progress: progressReporter(transferID: transferID))
@@ -192,22 +198,41 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         domainIdentifier: String, itemIdentifier: String, baseVersion: String?,
         changedFields: UInt64, newParentIdentifier: String?, newFilename: String?,
         newFileSystemFlags: NSNumber?, newModificationDate: NSNumber?,
-        newExtendedAttributes: [String: Data]?, contents: FileHandle?, transferID: String,
+        newExtendedAttributes: [String: Data]?, newTagData: Data?, newSymlinkTarget: String?,
+        contents: FileHandle?, transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
-                let snapshot = try await runtime.modifyItem(
+                let result = try await runtime.modifyItem(
                     identifier: itemIdentifier,
                     changedFields: NSFileProviderItemFields(rawValue: UInt(changedFields)),
+                    baseVersion: baseVersion,
                     newParentIdentifier: newParentIdentifier,
                     newFilename: newFilename,
+                    newFileSystemFlags: newFileSystemFlags?.uint64Value,
+                    newModificationDate: newModificationDate.map { Int64($0.doubleValue) },
                     newExtendedAttributes: newExtendedAttributes,
+                    newTagData: newTagData,
+                    newSymlinkTarget: newSymlinkTarget,
                     contents: contents,
                     transferID: transferID,
                     progress: progressReporter(transferID: transferID))
-                reply(snapshot, nil)
+                reply(result.snapshot, nil)
+                // Section 5.5, and S3's finding that a `modifyItem` reply is believed: a
+                // conflict copy is only half done when the remote item has been returned.
+                // The eviction is what makes the next open download the remote content,
+                // and it must come *after* the reply, or the system records the version
+                // it was about to evict.
+                if result.evictAfterReply {
+                    // The conflict copy is a new sibling with an anchor of its own; the
+                    // signal is what makes the system read that anchor, so Finder shows
+                    // the copy at once rather than at the next enumeration (section 5.5).
+                    await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
+                    await SpikeHooks.evictAfterConflict(
+                        locationID: domainIdentifier, identifier: itemIdentifier)
+                }
             } catch {
                 reply(nil, sshDriveXPCError(error))
             }

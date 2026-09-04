@@ -64,6 +64,12 @@ final class Item: NSObject, NSFileProviderItem {
 
     var extendedAttributes: [String: Data] { snapshot.extendedAttributes }
 
+    /// Finder tags (section 5.4). They are not an xattr: the system excludes
+    /// `com.apple.metadata:_kMDItemUserTags` from `extendedAttributes` deliberately and
+    /// rebuilds that xattr from this on every update, so an item that returns nothing
+    /// here loses the user's tags on the next re-download (S4, 2026-09-04).
+    var tagData: Data? { snapshot.tagData }
+
     /// Pinning declares itself per item through contentPolicy (section 2, section 7.1.1).
     var contentPolicy: NSFileProviderContentPolicy {
         switch SSHDriveContentPolicy(rawValue: snapshot.contentPolicyRawValue) ?? .unset {

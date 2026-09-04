@@ -2,6 +2,7 @@ import Foundation
 import FileProvider
 import Security
 import ServiceManagement
+import AgentCore
 import Config
 import Secrets
 import Index
@@ -163,12 +164,24 @@ enum ControlCommands {
             let runtime = try await resolveRuntime(arguments)
             let path = arguments["path"] ?? ""
             let (identifier, row) = try await runtime.identifier(forPath: path)
+            let local = LocalAttributes.decode(row.xattrs)
             return try json([
                 "path": path,
                 "identifier": identifier,
+                "contentVersion": row.contentVersion,
                 "metadataVersion": row.metadataVersion,
+                // Section 5.3 hashes exactly the stored blob into the metadata version;
+                // S10's question is whether that is enough to stop the system re-offering
+                // a tag change, so the hash is printed beside the version it feeds.
+                "xattrHash": String(ItemDerivation.fnv1a(row.xattrs ?? Data()), radix: 16),
+                "storedBlobBytes": row.xattrs?.count ?? 0,
+                "hidden": row.hidden,
                 "servedExtendedAttributes": try await runtime.servedExtendedAttributes(
                     pathString: path),
+                // Tags never arrive as an xattr: they are the item's own `tagData`
+                // (section 5.4). Printed base64 because the blob is a binary plist.
+                "tagDataBase64": local.tagData?.base64EncodedString() ?? "",
+                "tagDataBytes": local.tagData?.count ?? 0,
             ])
 
         case "debug.fault":
@@ -177,9 +190,12 @@ enum ControlCommands {
             let delay = arguments["fetchDelay"].flatMap { Int($0) }
             let mismatch = arguments["versionMismatch"].map { $0 == "on" }
             let collisions = arguments["collisions"].map { $0 == "on" }
+            let uploadDelay = arguments["uploadDelay"].flatMap { Int($0) }
+            let frozen = arguments["frozenMetadata"].map { $0 == "on" }
             await runtime.setFault(
                 writes: writes, fetchDelayMilliseconds: delay, versionMismatch: mismatch,
-                collisions: collisions)
+                collisions: collisions, uploadDelayMilliseconds: uploadDelay,
+                frozenMetadata: frozen)
             return try json(await runtime.transferStats(reset: false))
 
         case "debug.transfers":
@@ -626,6 +642,12 @@ enum ControlCommands {
                         "capabilities": row.capabilities,
                         "fsFlags": row.fileSystemFlags,
                         "hidden": row.hidden,
+                        // Section 5.7: the Mac-side target after the relative rewrite, as
+                        // the extension will serve it. Empty for anything but a link that
+                        // passed the lexical check.
+                        "linkTarget": row.linkTarget.map {
+                            String(decoding: $0, as: UTF8.self)
+                        } ?? "",
                     ] as [String: Any]
                 }
             ])

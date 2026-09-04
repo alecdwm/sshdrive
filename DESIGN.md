@@ -873,7 +873,10 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   system reports that way). A pin marker on a path that vanishes vanishes
   with it, so `sshdrive pins` never shows a dangling pin; the only pin
   that outlives its item is one on a directory whose deletion the guard
-  is currently holding.
+  is currently holding. A **local-only** row (`hidden = 3`, §5.4) is the
+  one exception to the listing half of this rule: it has no remote content
+  by definition, so a `readdir` that does not mention it is not evidence
+  that it went, and the differ skips it. Only a `deleteItem` removes one.
 - **A listing is one transaction.** Every row and every anchor a
   `readdir` produces is written inside a single `BEGIN IMMEDIATE`, not
   row by row. A directory with 10,000 entries is 10,000 autocommits
@@ -1136,13 +1139,39 @@ Two things about that set are not obvious, and S4 found both:
   that returns no `tagData` **loses the user's tags on the next
   re-download** - which S4 watched happen. Tags are therefore stored and
   served the same way as xattrs, in the row and hashed into the metadata
-  version, but through `tagData` and `.tags` in `changedFields`, not
-  through the xattr dictionary. S10 proves the round trip.
+  version, but through `tagData` and `NSFileProviderItemTagData` in
+  `changedFields` (bit 4, `0x10`), not through the xattr dictionary.
+  **S10 measured the round trip and one surprise** (2026-09-04). Tagging a
+  file in the mount arrives as exactly one `modifyItem` with
+  `changedFields = 0x10`, an empty `extendedAttributes` dictionary, and a
+  `tagData` that is an `NSKeyedArchiver` archive - not the
+  `com.apple.metadata:_kMDItemUserTags` property list the xattr holds -
+  which is why it is stored and served opaquely and never parsed. Nothing
+  reaches the server, the item survives an eviction and a re-download with
+  its tags intact, and the system does **not** re-offer the change. But it
+  does not re-offer it either when the reply deliberately carries the
+  metadata version the item already had: with the version frozen, the same
+  single `modifyItem` arrived and no more. So the xattr hash is not what
+  stops a retry loop - there is no retry loop on 26.4, for the same reason
+  a `modifyItem` reply is believed at all (S3). What the hash is for is the
+  other direction: it is the only thing that moves an item's version when
+  the *agent* changes the stored blob, which a restore from the index
+  backup does (§5.3), and without it the system would never re-read the
+  item and would keep serving tags that are no longer there.
 
-**`.DS_Store` is swallowed.** A `createItem` or `modifyItem` for a
+**`.DS_Store` is swallowed** - and, as it turns out, mostly by the system
+rather than by us. A `createItem` or `modifyItem` for a
 `.DS_Store` succeeds locally with an item the agent records as local-only
 (`hidden = 3`) but never uploads; a `.DS_Store` on the server is never
-enumerated. Local-only items have no remote content, so the
+enumerated. Measured on macOS 26.4 (2026-09-04): **a `.DS_Store` written
+into the mount never reaches the extension at all.** No `createItem`, no
+`modifyItem`; the system keeps the file in the replica, reports it through
+`fileproviderctl evaluate` as an ordinary item with `isUploaded = 0` and
+`isUploading = 0`, and never asks anyone to upload it. So the server stays
+clean for free, and the local-only path is not exercised by the case it
+was written for. It is kept anyway: it is one branch, the exclusion is the
+system's choice rather than a contract, and it is the path any other
+writer of a `.DS_Store` would take. Local-only items have no remote content, so the
 eviction loop (§7) skips them, and their bytes (a few KB for a
 `.DS_Store`) are kept in the row's `local_content` column so that a
 `fetchContents` for one, after Finder's "Remove Download" or a
@@ -1264,7 +1293,19 @@ drops them with its type test.
   calls `NSFileProviderManager.evictItem(identifier:)` on that item
   straight after returning it - eviction works on files, directories and
   the root (S4, 2026-09-04) - which makes the next open download the
-  remote content. The same finding is a second reason the post-upload
+  remote content. **One call is not enough.** An `evictItem` issued
+  immediately after the reply is refused with
+  `NSFileProviderErrorNonEvictable` (-2008): the system is still finishing
+  the modification it has just been told about. So the eviction is retried
+  with a doubling backoff from 0.25 s and given up after seven attempts,
+  logging either way (2026-09-04; the first retry was enough every time it
+  was measured, and with no retry at all the replica keeps the *local*
+  bytes under the *remote* version for ever, which is exactly what the
+  eviction exists to prevent). The conflict copy is a new sibling in a
+  folder the system has already listed, so its anchor is a row nobody will
+  ask for: the agent signals the working set after the reply as well, and
+  only then does Finder show the copy at once as this paragraph promises
+  (§6.5 - a folder is enumerated once, ever). The same finding is a second reason the post-upload
   `lstat` above is not optional: a version we invent is a version the next
   sweep will not recognise, and nothing will correct it. The check-then-rename is not atomic; a write landing in that
   one round trip is lost the same way it would be with any two SFTP
@@ -1348,7 +1389,23 @@ spellings are prefix-matched lexically, and the rewrite to a relative
 target (below) uses whichever matched. Links that pass are native
 symlinks on the Mac, and the rewritten target is stored on the row
 (`link_target`, §5.3) so the extension serves it without repeating the
-check.
+check. "Once per link at enumeration time" costs a round trip of its own:
+SFTP v3's `readdir` carries attributes but no target, so every link a
+listing reports needs a `readlink` before its row can be built. That is
+the price of the check, it is paid once per link rather than once per
+look, and a directory of ordinary files pays nothing.
+
+What the Mac makes of the links it is given was measured on macOS 26.4
+(S8, 2026-09-04). The system creates a **real symlink** under
+`~/Library/CloudStorage/`: `ls -la` shows `lrwx------`, `readlink` returns
+the string the row carries, a relative target resolves inside the mount
+and `cat link` reads the file it points at. Finder lists every one of them
+with **Kind "Alias"** and the arrow-badged icon, and a link to a directory
+gets a badged *folder* icon. A **dangling** link is drawn exactly like a
+working one - same badge, same Kind, its size the length of the target
+string - with no broken-link marker of any sort, which is the honest
+presentation this section wanted and the reason a link whose target may
+appear later is worth showing.
 Links that fail are **omitted from enumeration entirely**, logged at debug
 level, and otherwise ignored. A link that leaves the share has no meaning
 inside a File Provider mount, and a broken link in Finder would only
@@ -1416,6 +1473,16 @@ Rules:
   with the same message even when it points inside the mount. Finder itself cannot create symlinks; it creates alias
   files, which upload as regular files. Converting those into remote
   symlinks is listed in §14.
+  `ln -s` does reach `createItem` with the target intact (S8,
+  2026-09-04): a relative target inside the share is written to the server
+  unchanged, and an absolute or escaping one never leaves the Mac. What
+  the user sees of the refusal is less than this paragraph implies.
+  `ln -s` itself succeeds - the system takes the item locally first - and
+  the refusal comes back as the item's `uploadingError`, an
+  `NSFileProviderErrorCannotSynchronize` carrying the system's own wording
+  and not ours; the link sits in the replica with an error badge and the
+  system keeps retrying it. Our sentence therefore has to reach the user
+  through `sshdrive status`'s sync-error list and nowhere else.
 - Renaming or moving a link moves the link only; the server's target
   string is not rewritten, matching `mv` on the server (the Mac-side
   spelling of an absolute-inside-root target is recomputed as above).
@@ -3226,6 +3293,19 @@ So:
   whose identifier is not in `config.json`, or every domain of ours when
   the container is gone too.
 
+**First connect draws the Local Network prompt.** The agent is the process
+that dials the server, and when the server's address is on the user's own
+network macOS asks *"Allow “SSH Drive” to find devices on local
+networks?"* in the app's name, once, the first time it connects (observed
+on macOS 26.4, 2026-09-04, against a server on the host's vmnet segment).
+That is the ordinary case for this app rather than an edge one: a NAS is
+exactly a device on the local network. Nothing can pre-arm it - there is no
+entitlement that suppresses it, and a launchd agent has no window to put it
+over - so `add` mentions it, `sshdrive doctor` names it when a location is
+offline, and the cask's `caveats` say it once. A refusal is harmless for a
+server reached off the LAN and fatal for one on it, and the fix is System
+Settings > Privacy & Security > Local Network.
+
 ### 10.1 Repository and hosting
 
 Everything lives on GitHub under `alecdwm/sshdrive`, with one small satellite
@@ -3606,6 +3686,34 @@ there, so that this list cannot drift from the body.
   (2026-09-04, §5.3).
 - **`sshdrive add` also takes the nickname as a first positional argument,**
   which is what people write; `--nickname` is unchanged (2026-09-04, §8).
+- **The eviction after a conflict copy has to be retried:** an `evictItem`
+  issued straight after the `modifyItem` reply is refused
+  `NSFileProviderErrorNonEvictable` (-2008), and the working set must be
+  signalled as well or the copy is not shown (2026-09-04, §5.5).
+- **The xattr hash does not stop a retry loop, because there is none:** a
+  tag change is not re-offered even when the reply carries the metadata
+  version the item already had. The hash is what lets a change the *agent*
+  makes reach the system (2026-09-04, S10, §5.4, §5.3).
+- **Finder tags arrive as an `NSKeyedArchiver` archive in `tagData`,** not
+  as the `_kMDItemUserTags` property list, and are stored and served
+  opaquely; `changedFields` carries `NSFileProviderItemTagData` (`0x10`)
+  and an empty xattr dictionary (2026-09-04, S10, §5.4).
+- **A `.DS_Store` written into the mount never reaches the extension:** the
+  system keeps it in the replica and never asks anyone to upload it, so the
+  local-only path exists for writers other than Finder (2026-09-04, §5.4).
+- **A local-only row survives a listing that does not mention it,** which is
+  the one exception to "deleted rows are deleted" (2026-09-04, §5.3, §5.4).
+- **Every symlink a listing reports costs a `readlink`:** SFTP v3's
+  `readdir` carries attributes but no target (2026-09-04, §5.7, §6.2).
+- **Finder draws a remote symlink as Kind "Alias", dangling or not,** with
+  the arrow badge and no broken-link marker (2026-09-04, S8, §5.7).
+- **A refused `ln -s` is a sync error, not a message:** the create succeeds
+  locally and the refusal comes back as the item's `uploadingError` with
+  the system's own wording, so ours only reaches the user through
+  `sshdrive status` (2026-09-04, S8, §5.7).
+- **A launchd agent that dials a LAN address draws the Local Network
+  privacy prompt** in the app's name, which a NAS on the user's own network
+  will hit on first connect (2026-09-04, §2, §10).
 
 ---
 

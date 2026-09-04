@@ -26,6 +26,24 @@ actor LocationRuntime {
     /// something real to work from from milestone 1 on.
     private var identity: ServerIdentity
 
+    /// Every derived field of a row, in one place (sections 5.2, 5.4, 5.7). Rebuilt when
+    /// the identity or the root spellings change, since both feed the derivation.
+    private var rows: RowBuilder
+
+    /// The server half of section 5.5: the temp-file-plus-rename upload protocol, the
+    /// conflict check, the conflict copy, the stale-temp rule and the delete rules. It
+    /// owns the transport and the in-flight set; this actor stays the only writer of the
+    /// index.
+    private var writer: RemoteWriter
+
+    /// The two spellings of the location root a symlink target is measured against
+    /// (section 5.7): the canonical one `realpath` returned, and the one the user typed -
+    /// or `$HOME` for a default root.
+    private var symlinkRoots: SymlinkPolicy.Roots
+
+    /// This install's `<mac8>` (section 5.5), for the upload temp names.
+    private let macID: String
+
     /// The catch-up sweep the agent runs when the extension hands out a fresh working-set
     /// anchor (section 5.3). S3 needs it off, so the system's own behaviour after
     /// `.syncAnchorExpired` is visible; `sshdrive debug sweep off` is that switch.
@@ -69,6 +87,18 @@ actor LocationRuntime {
     /// check will raise for real in milestone 4. s3-4 needs it to see what Finder draws.
     private var createsCollide = false
 
+    /// `sshdrive debug fault <name> --upload-delay MS`: holds every upload between the
+    /// bytes landing in the temp file and the destination `lstat`, which is section 5.5's
+    /// conflict window. A spike changes the file on the server inside that window and
+    /// gets a **real** conflict rather than a simulated one (S8/S10 runbook).
+    private var uploadDelayMilliseconds = 0
+
+    /// `sshdrive debug fault <name> --frozen-metadata on`: `modifyItem` replies with the
+    /// metadata version the item had *before* the change. That is S10's second question -
+    /// what happens when the version is deliberately left unchanged - and it is the case
+    /// the xattr hash in the metadata version exists to prevent.
+    private var frozenMetadata = false
+
     /// The last transport error, for `show` and `status` (section 8).
     private var lastTransportError: String?
 
@@ -79,14 +109,39 @@ actor LocationRuntime {
     /// the reference date, so S6 can see the overlap rather than infer it from a peak.
     private var fetchTimeline: [(path: String, start: Double, end: Double)] = []
 
-    init(location: Location, transport: any SFTPTransport, indexURL: URL, backupURL: URL) throws {
+    init(
+        location: Location, transport: any SFTPTransport, indexURL: URL, backupURL: URL,
+        macID: String = "00000000"
+    ) throws {
         self.location = location
         self.transport = transport
         self.indexURL = indexURL
         self.backupURL = backupURL
         self.index = try IndexWriter(path: indexURL.path)
         self.identity = .unknown
+        self.macID = macID
         self.scheduler = TransferScheduler(locationID: location.id)
+        // Provisional until `start()` has asked the server where its root really is; a
+        // location that never starts never writes, so nothing is judged against it.
+        self.symlinkRoots = SymlinkPolicy.Roots(canonical: location.remotePath ?? "/")
+        self.rows = RowBuilder(
+            permissions: location.permissions, identity: .unknown, roots: self.symlinkRoots)
+        self.writer = RemoteWriter(
+            transport: transport,
+            options: RemoteWriter.Options(
+                macID: macID,
+                localHostName: LocationRuntime.localHostName,
+                createCheck: location.createCheck))
+    }
+
+    /// This Mac's `LocalHostName`, which is what names a conflict copy (section 5.5): it
+    /// is the Mac's content that is being set aside, so it is the Mac that signs it.
+    /// `ProcessInfo.hostName` is `<LocalHostName>.local` on a Mac with no domain, so the
+    /// suffix comes off rather than pulling in SystemConfiguration for one string.
+    static var localHostName: String {
+        var name = ProcessInfo.processInfo.hostName
+        if name.hasSuffix(".local") { name.removeLast(6) }
+        return name.isEmpty ? "this Mac" : name
     }
 
     func start() async throws {
@@ -110,13 +165,47 @@ actor LocationRuntime {
                 "index for \(self.location.id, privacy: .public) was left reconciling; the reconcile walk is milestone 5, clearing the flag")
             try index.setReconciling(false)
         }
+        // Section 5.7: both spellings of the root, because on a host where `/home` is a
+        // symlink the canonical root is `/var/home/alec` while every absolute link the
+        // user ever made says `/home/alec/…`, and checked against the canonical spelling
+        // alone all of them would be hidden.
+        let canonical = (try? await transport.realpath(.root)) ?? (location.remotePath ?? "/")
+        var alternate: String? = nil
+        if let typed = location.remotePath, typed.hasPrefix("/") {
+            alternate = typed
+        } else if let ssh = transport as? SSHBackedTransport, !ssh.probe.home.isEmpty {
+            alternate = ssh.probe.home
+        }
+        symlinkRoots = SymlinkPolicy.Roots(canonical: canonical, alternate: alternate)
+        rows = RowBuilder(
+            permissions: location.permissions, identity: identity, roots: symlinkRoots)
+        await writer.setOptions(
+            RemoteWriter.Options(
+                macID: macID,
+                localHostName: LocationRuntime.localHostName,
+                createCheck: location.createCheck))
+
         let rootAttributes = try await transport.lstat(.root)
         try index.ensureRoot(
             mode: Int64(rootAttributes.mode),
             uid: Int64(rootAttributes.uid),
             gid: Int64(rootAttributes.gid))
         try refreshRootRow(rootAttributes)
+
+        // Section 5.5: "the probe tests this once, in the location root". Off the start
+        // path, because it is five round trips and nothing before the first write needs
+        // its answer - `needsPreflight` assumes OpenSSH's refusal until it lands.
+        let writer = self.writer
+        Task.detached { await writer.probeRenameSemantics() }
     }
+
+    /// Whether this server's plain `rename` refuses an existing name, as the probe found
+    /// it, for `status` and the debug hooks. Nil until the probe has answered.
+    func renameRefusesExistingNames() async -> Bool? { await writer.renameSemantics() }
+
+    /// Runs section 5.5's rename-semantics probe now, or reports the answer it already
+    /// has. `sshdrive debug transport rename-check` is this.
+    func probeRenameSemantics() async -> Bool { await writer.probeRenameSemantics() }
 
     /// The canonical root the transport resolved, for the debug hooks and, in
     /// milestone 3, for `sshdrive show`.
@@ -262,6 +351,31 @@ actor LocationRuntime {
             throw LocationRuntime.mapped(.cancelled)
         }
 
+        // Section 5.5's stale temp files: one carrying this Mac's `<mac8>` that is not
+        // in the in-flight set died with a connection or an agent and is removed as soon
+        // as the agent lists its directory, however new it is; another Mac's is left for
+        // 30 days. This runs before the rows are built, so a temp file never gets one.
+        await writer.sweepTemporaries(in: directory, entries: entries)
+
+        // Section 5.5's in-flight set: the differ skips paths with an upload in flight,
+        // or our own writes come back as remote changes and the system re-fetches the
+        // file it just wrote.
+        let dirty = await writer.inFlightPaths()
+
+        // SFTP v3's `readdir` carries attributes but no link target, so every link in the
+        // listing costs one `readlink`. Section 5.7 wants the lexical check "done once per
+        // link at enumeration time", and this is that once: the answer is stored on the
+        // row and the extension never repeats it.
+        var targets: [Data: String] = [:]
+        for entry in entries where entry.attributes.type == .symlink
+            && entry.attributes.symlinkTarget == nil
+        {
+            guard let childPath = try? directory.appending(component: entry.name) else { continue }
+            if let target = try? await transport.readlink(childPath) {
+                targets[childPath.bytes] = target
+            }
+        }
+
         var result = ReconcileResult()
         var seenPaths: Set<Data> = []
 
@@ -289,6 +403,9 @@ actor LocationRuntime {
             let entry = classifiedEntry.entry
             guard let childPath = try? directory.appending(component: entry.name) else { continue }
             seenPaths.insert(childPath.bytes)
+            // A path the agent is uploading to right now is skipped whole: its row is
+            // written by the upload's own post-upload `lstat` (section 5.5).
+            if dirty.contains(childPath.bytes) { continue }
 
             if classifiedEntry.hidden == 0 {
                 hiddenReasons.removeValue(forKey: childPath.bytes)
@@ -297,17 +414,23 @@ actor LocationRuntime {
             }
 
             let existing = try index.item(path: childPath.bytes)
+            var attributes = entry.attributes
+            if attributes.type == .symlink, attributes.symlinkTarget == nil {
+                attributes.symlinkTarget = targets[childPath.bytes]
+            }
             let row = try makeRow(
                 path: childPath,
-                attributes: entry.attributes,
+                attributes: attributes,
                 parent: containerRow,
                 existing: existing,
                 hidden: classifiedEntry.hidden)
             try index.upsert(row)
 
             // A hidden row holds its name and nothing else: it is never enumerated, and a
-            // create or rename onto it fails `.filenameCollision` (section 5.4).
-            guard classifiedEntry.hidden == 0 else {
+            // create or rename onto it fails `.filenameCollision` (sections 5.4, 5.7).
+            // The row's own `hidden`, not the name rules': a link whose target leaves the
+            // share is judged by `RowBuilder`, after the names have been sorted out.
+            guard row.hidden == 0 else {
                 // A name that was shown and is now hidden - a newcomer took the slot, or
                 // the incumbent was renamed away - has to reach the system as a deletion,
                 // or the replica keeps a file no enumeration will ever mention again.
@@ -328,9 +451,12 @@ actor LocationRuntime {
             }
         }
 
-        // Deleted rows are deleted: no tombstones (section 5.3).
+        // Deleted rows are deleted: no tombstones (section 5.3). A local-only row
+        // (`hidden = 3`, a `.DS_Store` Finder wrote) is the exception: it has no remote
+        // content by definition, so a listing that does not mention it is not evidence
+        // that it went (section 5.4).
         for child in try index.children(ofParent: containerRow.identifier)
-        where !seenPaths.contains(child.path) {
+        where !seenPaths.contains(child.path) && child.hidden != RowBuilder.hiddenLocalOnly {
             try index.delete(identifier: child.identifier)
             result.deleted.append(child.identifier)
         }
@@ -363,99 +489,27 @@ actor LocationRuntime {
         try index.appendAnchor(identifier: replaced.identifier, kind: .modified)
     }
 
-    /// Builds a finished row: every derived field computed here, none in the extension
-    /// (section 5.2).
+    /// Builds a finished row. Every derived field - the version formula, the generation
+    /// bump, the two bitmasks, the section 5.7 symlink check - is `RowBuilder`'s, in the
+    /// package, so that none of it lives in the extension (section 5.2) and all of it is
+    /// unit-testable without an app bundle.
     private func makeRow(
         path: RelativePath,
         attributes: SFTPFileAttributes,
         parent: IndexItem,
         existing: IndexItem?,
-        hidden: Int64? = nil
+        hidden: Int64? = nil,
+        localAttributes: LocalAttributes? = nil
     ) throws -> IndexItem {
-        // ns-mtime and inode feed change detection only. When either differs from the
-        // stored value while size and second-mtime do not, the generation is bumped,
-        // which changes the version and makes the system re-fetch (section 5.3).
-        var generation = existing?.generation ?? 0
-        if let existing,
-            existing.size == attributes.size,
-            existing.mtime == attributes.mtime
-        {
-            let nanosecondsMoved =
-                existing.mtimeNanoseconds != nil && attributes.mtimeNanoseconds != nil
-                && existing.mtimeNanoseconds != attributes.mtimeNanoseconds
-            let inodeMoved =
-                existing.inode != nil && attributes.inode != nil
-                && existing.inode != Int64(bitPattern: attributes.inode ?? 0)
-            if nanosecondsMoved || inodeMoved { generation += 1 }
+        let built = rows.build(
+            path: path, attributes: attributes, parent: parent, existing: existing,
+            hidden: hidden, localAttributes: localAttributes)
+        if built.hiddenReason.isEmpty {
+            if built.row.hidden == 0 { hiddenReasons.removeValue(forKey: path.bytes) }
+        } else {
+            hiddenReasons[path.bytes] = built.hiddenReason
         }
-
-        let contentVersion = IndexItem.contentVersion(
-            size: attributes.size, mtime: attributes.mtime, generation: generation)
-
-        // The effective kept state is derived by the agent from the markers at and above
-        // the path (sections 5.2, 7.1.1). Pinning is milestone 8; until then the marker
-        // on the row is the whole answer and nothing inherits.
-        let pinState = existing?.pinState ?? 0
-        let kept = pinState == 1
-
-        let capabilities = ItemDerivation.capabilities(
-            type: attributes.type,
-            mode: attributes.mode,
-            uid: attributes.uid,
-            gid: attributes.gid,
-            parentMode: UInt32(parent.mode ?? 0o755),
-            parentUID: UInt32(parent.uid ?? 0),
-            parentGID: UInt32(parent.gid ?? 0),
-            permissions: location.permissions,
-            identity: identity,
-            kept: kept)
-
-        let filename = String(decoding: path.lastComponent ?? Data(), as: UTF8.self)
-        let flags = ItemDerivation.fileSystemFlags(
-            type: attributes.type,
-            mode: attributes.mode,
-            uid: attributes.uid,
-            gid: attributes.gid,
-            permissions: location.permissions,
-            identity: identity,
-            capabilities: capabilities,
-            filename: filename)
-
-        let xattrs = existing?.xattrs
-        let metadataVersion = ItemDerivation.metadataVersion(
-            contentVersion: contentVersion,
-            mode: Int64(attributes.mode),
-            uid: Int64(attributes.uid),
-            gid: Int64(attributes.gid),
-            capabilities: Int64(capabilities.rawValue),
-            fileSystemFlags: Int64(flags.rawValue),
-            kept: kept,
-            xattrs: xattrs)
-
-        return IndexItem(
-            identifier: existing?.identifier ?? UUID().uuidString,
-            path: path.bytes,
-            parent: parent.identifier,
-            type: attributes.type.rawValue,
-            size: attributes.size,
-            mtime: attributes.mtime,
-            mtimeNanoseconds: attributes.mtimeNanoseconds,
-            inode: attributes.inode.map { Int64(bitPattern: $0) },
-            uid: Int64(attributes.uid),
-            gid: Int64(attributes.gid),
-            mode: Int64(attributes.mode),
-            generation: generation,
-            contentVersion: contentVersion,
-            metadataVersion: metadataVersion,
-            lastFetch: existing?.lastFetch,
-            pinState: pinState,
-            kept: kept,
-            capabilities: Int64(capabilities.rawValue),
-            fileSystemFlags: Int64(flags.rawValue),
-            linkTarget: attributes.symlinkTarget.map { Data($0.utf8) },
-            hidden: hidden ?? existing?.hidden ?? 0,
-            xattrs: xattrs,
-            localContent: existing?.localContent)
+        return built.row
     }
 
     private func refreshRootRow(_ attributes: SFTPFileAttributes) throws {
@@ -533,6 +587,27 @@ actor LocationRuntime {
         }
         let path = try RelativePath.fromIndexBytes(row.path)
 
+        // Section 5.4: a local-only item has no remote content, so a `fetchContents` for
+        // one - after Finder's "Remove Download", or a system-side eviction - returns the
+        // bytes the row kept rather than an empty file that would reset the folder's view
+        // settings.
+        if row.hidden == RowBuilder.hiddenLocalOnly {
+            let sink = HandleSink(handle: handle)
+            try sink.truncate()
+            let bytes = row.localContent ?? Data()
+            if !bytes.isEmpty {
+                let slice = range.map { window -> Data in
+                    let start = Int(min(window.offset, UInt64(bytes.count)))
+                    let end = min(start + Int(window.length), bytes.count)
+                    return start < end ? bytes.subdata(in: start..<end) : Data()
+                } ?? bytes
+                sink.write(at: 0, data: slice)
+            }
+            try sink.finish()
+            progress(Int64(bytes.count), max(Int64(bytes.count), 1))
+            return LocationRuntime.snapshot(from: row)
+        }
+
         let slot = noteFetchStarted(path: path.description)
         defer { noteFetchFinished(slot) }
 
@@ -609,15 +684,32 @@ actor LocationRuntime {
 
     // MARK: Writing
 
-    /// mkdir, symlink, or upload-to-temp plus a non-overwriting rename into place
-    /// (section 5.1). The temp-file dance itself is milestone 4; milestone 1 writes
-    /// straight through the fake transport, which refuses to overwrite exactly as a plain
-    /// SFTP rename does.
+    /// What a mutation produced, and whether the agent still owes the system an
+    /// eviction. The system **believes whatever version a `modifyItem` reply carries** -
+    /// it records it, never re-fetches and never re-offers (S3, 2026-09-04) - so
+    /// returning the remote item after a conflict copy would leave the replica holding
+    /// the *local* bytes under the *remote* version for ever. The eviction is what makes
+    /// the next open download the remote content, and it has to happen after the reply
+    /// has gone, which is why it travels back to the caller rather than being done here
+    /// (section 5.5).
+    struct MutationResult {
+        var snapshot: SSHDriveItemSnapshot
+        var evictAfterReply = false
+    }
+
+    /// `mkdir`, `symlink`, `.DS_Store`, or the section 5.5 upload: bytes into
+    /// `.sshdrive-upload-<mac8>-<uuid>` beside the destination and then a plain,
+    /// non-overwriting `rename` into place, with the mode and the modification date set
+    /// back afterwards and the row built from the `lstat` that follows.
     func createItem(
         parentIdentifier: String,
         filename: String,
         isDirectory: Bool,
         symlinkTarget: String?,
+        fileSystemFlags: UInt64? = nil,
+        modificationDate: Int64? = nil,
+        extendedAttributes: [String: Data]? = nil,
+        tagData: Data? = nil,
         contents: FileHandle?,
         transferID: String = UUID().uuidString,
         progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
@@ -637,31 +729,63 @@ actor LocationRuntime {
         let path = try parentPath.appending(component: filename)
         try refuseHiddenName(at: path)
 
-        let transport = self.transport
+        let local = LocalAttributes(xattrs: extendedAttributes ?? [:], tagData: tagData)
+
+        // Section 5.4: a `.DS_Store` succeeds locally and is never uploaded. Finder keeps
+        // working, the server stays clean.
+        if NameVisibility.isDSStore(Data(filename.utf8)) {
+            return try swallowLocalOnly(
+                at: path, parent: parentRow, contents: contents, localAttributes: local)
+        }
+
         do {
+            let attributes: SFTPFileAttributes
             if isDirectory {
-                try await transport.mkdir(path, mode: 0o755)
+                try await writer.makeDirectory(path, mode: 0o755)
+                attributes = try await writer.stat(path)
             } else if let symlinkTarget {
-                // TODO milestone 4: refuse a target that escapes the root (section 5.7).
-                try await transport.symlink(target: symlinkTarget, at: path)
-            } else if let contents {
-                // Section 6.2: every `createItem` and `modifyItem` upload is a foreground
-                // transfer, and runs on the bulk channel under the scheduler.
-                let source = HandleSource(handle: contents)
-                try await scheduler.run(transferID: transferID, kind: .foreground) { window in
-                    try await transport.writeStreaming(
-                        path, mode: 0o644, window: window, source: { try source.next() }
+                // Section 5.7: `ln -s` inside the mount arrives here, and an absolute or
+                // escaping target is refused, because the link would be hidden the moment
+                // it was created.
+                _ = try await writer.makeSymlink(
+                    target: symlinkTarget, at: path, roots: symlinkRoots)
+                attributes = try await writer.stat(path)
+            } else {
+                // Section 5.5: 0644 for an ordinary file, 0755 when the local one is
+                // executable, as `sftp put` does; the server's umask still applies, which
+                // is why the mode is set back after the rename.
+                let mode = LocationRuntime.uploadMode(fileSystemFlags: fileSystemFlags)
+                // A create with no contents is an empty file, which is what Finder's
+                // "New Document" and a shell `touch` both send.
+                let source = contents.map { HandleSource(handle: $0) }
+                let outcome = try await scheduler.run(
+                    transferID: transferID, kind: .foreground
+                ) { [writer] window in
+                    try await writer.upload(
+                        to: path, mode: mode, modificationDate: modificationDate,
+                        replacingExisting: false, base: nil, currentGeneration: 0,
+                        window: window, source: { try source?.next() ?? Data() }
                     ) { written in progress(written, max(written, 1)) }
                 }
-            } else {
-                try await transport.write(path, contents: Data(), mode: 0o644)
+                guard case let .landed(landed) = outcome else {
+                    // A create has no base version, so the conflict branch is unreachable.
+                    throw SFTPError.failure("Unexpected conflict on a create")
+                }
+                attributes = landed
             }
-            let attributes = try await transport.lstat(path)
-            let row = try makeRow(
-                path: path, attributes: attributes, parent: parentRow, existing: nil)
+            var row = try makeRow(
+                path: path, attributes: attributes, parent: parentRow, existing: nil,
+                localAttributes: local)
+            // Section 5.3: the inode and ns-mtime a rename gave the path cannot be read
+            // back over SFTP, so they are reset to null after every upload of ours and
+            // the next helper event or GNU sweep records whatever it finds.
+            row.inode = nil
+            row.mtimeNanoseconds = nil
             try index.upsert(row)
             try index.appendAnchor(identifier: row.identifier, kind: .modified)
             return LocationRuntime.snapshot(from: row)
+        } catch let error as RemoteWriteError {
+            throw LocationRuntime.mapped(error)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
@@ -672,17 +796,63 @@ actor LocationRuntime {
         }
     }
 
-    /// Rename/move, content, attributes, extended attributes (section 5.1).
+    /// Section 5.5: "0644 for an ordinary file, 0755 when the local file is executable".
+    static func uploadMode(fileSystemFlags: UInt64?) -> UInt32 {
+        guard let fileSystemFlags else { return 0o644 }
+        let flags = NSFileProviderFileSystemFlags(rawValue: UInt(truncatingIfNeeded: fileSystemFlags))
+        return flags.contains(.userExecutable) ? 0o755 : 0o644
+    }
+
+    /// Section 5.4's `.DS_Store`: a row the agent records as local-only (`hidden = 3`)
+    /// and never uploads, with its bytes in `local_content` so that a `fetchContents` for
+    /// one - after Finder's "Remove Download", or a system-side eviction - returns what
+    /// Finder wrote rather than an empty file that would reset the folder's view settings.
+    private func swallowLocalOnly(
+        at path: RelativePath, parent: IndexItem, contents: FileHandle?,
+        localAttributes: LocalAttributes
+    ) throws -> SSHDriveItemSnapshot {
+        let bytes = (try? contents?.readToEnd()) ?? nil ?? Data()
+        let existing = try index.item(path: path.bytes)
+        let now = Int64(Date().timeIntervalSince1970)
+        let attributes = SFTPFileAttributes(
+            type: .file, size: Int64(bytes.count), mtime: now, mode: 0o644,
+            uid: UInt32(truncatingIfNeeded: parent.uid ?? 0),
+            gid: UInt32(truncatingIfNeeded: parent.gid ?? 0),
+            mtimeNanoseconds: nil, inode: nil, symlinkTarget: nil)
+        var row = try makeRow(
+            path: path, attributes: attributes, parent: parent, existing: existing,
+            hidden: RowBuilder.hiddenLocalOnly, localAttributes: localAttributes)
+        row.localContent = bytes
+        try index.upsert(row)
+        try index.appendAnchor(identifier: row.identifier, kind: .modified)
+        Log.agent.notice(
+            "kept \(path.description, privacy: .public) on this Mac only (\(bytes.count, privacy: .public) bytes); nothing was uploaded"
+        )
+        return LocationRuntime.snapshot(from: row)
+    }
+
+    /// Rename/move, content, mode, extended attributes and Finder tags (section 5.1).
+    ///
+    /// The content path is section 5.5 end to end: the bytes go to a temp file beside the
+    /// destination, the destination is `lstat`ed immediately before the rename, and a
+    /// size, mtime or generation that moved since the `baseVersion` the system passed us
+    /// makes the temp file - which already holds the local content - a conflict copy
+    /// instead.
     func modifyItem(
         identifier: String,
         changedFields: NSFileProviderItemFields,
+        baseVersion: String? = nil,
         newParentIdentifier: String?,
         newFilename: String?,
+        newFileSystemFlags: UInt64? = nil,
+        newModificationDate: Int64? = nil,
         newExtendedAttributes: [String: Data]?,
+        newTagData: Data? = nil,
+        newSymlinkTarget: String? = nil,
         contents: FileHandle?,
         transferID: String = UUID().uuidString,
         progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
-    ) async throws -> SSHDriveItemSnapshot {
+    ) async throws -> MutationResult {
         try failWritesIfFaulted()
         guard var row = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
@@ -690,10 +860,33 @@ actor LocationRuntime {
         var path = try RelativePath.fromIndexBytes(row.path)
         Log.agent.notice(
             """
-            modifyItem \(path.description, privacy: .public)             changedFields=0x\(String(changedFields.rawValue, radix: 16), privacy: .public)             xattrKeys=\(newExtendedAttributes?.keys.sorted().joined(separator: ",") ?? "-", privacy: .public)
+            modifyItem \(path.description, privacy: .public) \
+            changedFields=0x\(String(changedFields.rawValue, radix: 16), privacy: .public) \
+            xattrKeys=\(newExtendedAttributes?.keys.sorted().joined(separator: ",") ?? "-", privacy: .public) \
+            tagData=\(newTagData.map { "\($0.count) bytes" } ?? "-", privacy: .public)
             """)
 
+        // The local half first: it is the only half a local-only item has (section 5.4).
+        var local = LocalAttributes.decode(row.xattrs)
+        if changedFields.contains(.extendedAttributes), let newExtendedAttributes {
+            local.xattrs = newExtendedAttributes
+        }
+        if changedFields.contains(.tagData) {
+            // Section 5.4: tags reach a provider as `tagData`, not as an xattr, and the
+            // system rebuilds the tags xattr from it on every update. Storing nil when the
+            // user clears every tag is the difference between "no tags" and "we forgot".
+            local.tagData = newTagData
+        }
+
+        if row.hidden == RowBuilder.hiddenLocalOnly {
+            return MutationResult(
+                snapshot: try modifyLocalOnly(
+                    row: row, path: path, contents: contents, localAttributes: local))
+        }
+
         do {
+            var evictAfterReply = false
+
             if changedFields.contains(.parentItemIdentifier) || changedFields.contains(.filename) {
                 let parentRow =
                     try index.item(identifier: newParentIdentifier ?? row.parent ?? "")
@@ -702,50 +895,101 @@ actor LocationRuntime {
                 let name = newFilename ?? row.filename
                 let destination = try parentPath.appending(component: name)
                 try refuseHiddenName(at: destination)
-                // A plain, non-overwriting rename (section 5.5).
-                try await transport.rename(path, to: destination)
+                // Section 5.7: a link's target is re-checked from the destination
+                // directory before the move. Allowing the move and then hiding the result
+                // would be a way to plant an escaping link on the server through the mount.
+                if row.type == "symlink" {
+                    let target = try await writer.stat(path).symlinkTarget ?? ""
+                    do {
+                        _ = try SymlinkPolicy.targetForMove(
+                            target, to: destination.parent ?? .root, roots: symlinkRoots)
+                    } catch {
+                        throw RemoteWriteError.escapingSymlinkTarget
+                    }
+                }
+                // A plain, non-overwriting rename, with the case-only exception of
+                // section 5.5 (section 5.5's `move`).
+                try await writer.move(path, to: destination)
                 try index.rewritePaths(from: path.bytes, to: destination.bytes)
                 row.parent = parentRow.identifier
                 try index.upsert(row)
                 path = destination
             }
 
-            if changedFields.contains(.contents), let contents {
-                // TODO milestone 4: the conflict check compares size, mtime and
-                // generation before the write, and a conflict copy is named after this
-                // Mac (section 5.5).
-                let transport = self.transport
+            if changedFields.contains(.contents) {
                 let mode = UInt32(row.mode ?? 0o644)
-                let uploadPath = path
-                let source = HandleSource(handle: contents)
-                try await scheduler.run(transferID: transferID, kind: .foreground) { window in
-                    try await transport.writeStreaming(
-                        uploadPath, mode: mode, window: window, source: { try source.next() }
+                let source = contents.map { HandleSource(handle: $0) }
+                let base = baseVersion.flatMap { RemoteWriter.BaseVersion(contentVersion: $0) }
+                let generation = row.generation
+                let outcome = try await scheduler.run(
+                    transferID: transferID, kind: .foreground
+                ) { [writer] window in
+                    try await writer.upload(
+                        to: path, mode: mode, modificationDate: newModificationDate,
+                        replacingExisting: true, base: base, currentGeneration: generation,
+                        window: window, source: { try source?.next() ?? Data() }
                     ) { written in progress(written, max(written, 1)) }
+                }
+                if case let .conflicted(copy, copyAttributes, _) = outcome {
+                    // Section 5.5: the conflict copy is a sibling, and it gets a
+                    // working-set anchor of its own so Finder shows it at once.
+                    let parentRow =
+                        try index.item(identifier: row.parent ?? IndexWriter.rootIdentifier)
+                        ?? index.ensureRoot()
+                    let copyRow = try makeRow(
+                        path: copy, attributes: copyAttributes, parent: parentRow,
+                        existing: nil)
+                    try index.upsert(copyRow)
+                    try index.appendAnchor(identifier: copyRow.identifier, kind: .modified)
+                    evictAfterReply = true
+                    Log.agent.error(
+                        "\(path.description, privacy: .public) changed on the server; the local content is in \(copy.description, privacy: .public) and the remote item was returned"
+                    )
                 }
             }
 
-            if changedFields.contains(.extendedAttributes), let newExtendedAttributes {
-                // Extended attributes stay local (section 5.4), so this only touches the
-                // row, and the xattr hash in the metadata version is what stops the
-                // system re-offering the change (S10).
-                row.xattrs = try? JSONEncoder().encode(newExtendedAttributes)
+            // Section 5.4: a `modifyItem` whose changedFields carries `.fileSystemFlags`
+            // - a `chmod +x` inside the mount - sets or clears the execute bits and
+            // re-records the mode. The read and write bits are never changed that way.
+            if changedFields.contains(.fileSystemFlags), let newFileSystemFlags,
+                row.type != "symlink"
+            {
+                let flags = NSFileProviderFileSystemFlags(
+                    rawValue: UInt(truncatingIfNeeded: newFileSystemFlags))
+                let mode = RemoteWriter.modeAfterExecutableChange(
+                    current: UInt32(row.mode ?? 0o644),
+                    userExecutable: flags.contains(.userExecutable))
+                if mode != UInt32(row.mode ?? 0o644) {
+                    _ = try await writer.setMode(path, mode: mode)
+                }
             }
 
-            let attributes = try await transport.lstat(path)
+            let attributes = try await writer.stat(path)
             let parentRow =
                 try index.item(identifier: row.parent ?? IndexWriter.rootIdentifier)
                 ?? index.ensureRoot()
             var updated = try makeRow(
-                path: path, attributes: attributes, parent: parentRow, existing: row)
-            updated.xattrs = row.xattrs
-            updated.metadataVersion = ItemDerivation.metadataVersion(
-                contentVersion: updated.contentVersion,
-                mode: updated.mode, uid: updated.uid, gid: updated.gid,
-                capabilities: updated.capabilities, fileSystemFlags: updated.fileSystemFlags,
-                kept: updated.kept, xattrs: updated.xattrs)
+                path: path, attributes: attributes, parent: parentRow, existing: row,
+                localAttributes: local)
+            if changedFields.contains(.contents) {
+                // Section 5.3: reset after every upload of ours, conflict or not - the
+                // rename gave the path a new inode either way.
+                updated.inode = nil
+                updated.mtimeNanoseconds = nil
+            }
             try index.upsert(updated)
             try index.appendAnchor(identifier: updated.identifier, kind: .modified)
+            if frozenMetadata {
+                // S10's control case: reply with the metadata version the item had before
+                // the change. Section 5.3's xattr hash exists so this never happens by
+                // accident, and this fault is how the runbook sees what it costs.
+                var frozen = updated
+                frozen.metadataVersion = row.metadataVersion
+                Log.agent.notice(
+                    "debug fault --frozen-metadata: replying with the old metadata version \(row.metadataVersion, privacy: .public)"
+                )
+                return MutationResult(snapshot: LocationRuntime.snapshot(from: frozen))
+            }
             if versionMismatch {
                 var lying = updated
                 lying.contentVersion = updated.contentVersion + "-fault"
@@ -753,9 +997,13 @@ actor LocationRuntime {
                 Log.agent.notice(
                     "debug fault --version-mismatch: replying with \(lying.contentVersion, privacy: .public) instead of \(updated.contentVersion, privacy: .public)"
                 )
-                return LocationRuntime.snapshot(from: lying)
+                return MutationResult(snapshot: LocationRuntime.snapshot(from: lying))
             }
-            return LocationRuntime.snapshot(from: updated)
+            return MutationResult(
+                snapshot: LocationRuntime.snapshot(from: updated),
+                evictAfterReply: evictAfterReply)
+        } catch let error as RemoteWriteError {
+            throw LocationRuntime.mapped(error)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
@@ -764,6 +1012,27 @@ actor LocationRuntime {
             // it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
+    }
+
+    /// A `.DS_Store` that Finder rewrote. Nothing reaches the server; only the row's
+    /// bytes and its versions move (section 5.4).
+    private func modifyLocalOnly(
+        row: IndexItem, path: RelativePath, contents: FileHandle?,
+        localAttributes: LocalAttributes
+    ) throws -> SSHDriveItemSnapshot {
+        var updated = row
+        if let contents, let bytes = try? contents.readToEnd() {
+            updated.localContent = bytes
+            updated.size = Int64(bytes.count)
+            updated.mtime = Int64(Date().timeIntervalSince1970)
+            updated.contentVersion = IndexItem.contentVersion(
+                size: updated.size, mtime: updated.mtime, generation: updated.generation)
+        }
+        updated.xattrs = localAttributes.encoded()
+        RowBuilder.restamp(&updated)
+        try index.upsert(updated)
+        try index.appendAnchor(identifier: updated.identifier, kind: .modified)
+        return LocationRuntime.snapshot(from: updated)
     }
 
     /// "Hidden names hold their slot: a create or rename to one of them fails with
@@ -784,8 +1053,16 @@ actor LocationRuntime {
             (
                 path: String(decoding: row.path, as: UTF8.self),
                 reason: hiddenReasons[row.path]
-                    ?? (row.hidden == 3
-                        ? "kept on this Mac only" : "a name macOS cannot tell from another here")
+                    ?? {
+                        switch row.hidden {
+                        case RowBuilder.hiddenEscapingLink:
+                            return "a symbolic link whose target is outside this location"
+                        case RowBuilder.hiddenLocalOnly:
+                            return "kept on this Mac only"
+                        default:
+                            return "a name macOS cannot tell from another here"
+                        }
+                    }()
             )
         }
     }
@@ -870,20 +1147,26 @@ actor LocationRuntime {
         ]
     }
 
+    /// Section 5.5's deletes. A non-empty directory is refused with `.deletionRejected`
+    /// unless the system passed the recursive option; a delete of something already gone
+    /// succeeds; and the recursive walk comes from the server rather than the index,
+    /// because folders Finder never opened have no rows.
     func deleteItem(identifier: String, recursive: Bool) async throws {
         guard let row = try index.item(identifier: identifier) else { return }
         let path = try RelativePath.fromIndexBytes(row.path)
-        do {
-            if row.type == "directory" {
-                if recursive {
-                    try await removeRecursively(path)
-                } else {
-                    try await transport.rmdir(path)
-                }
-            } else {
-                try await transport.remove(path)
-            }
+
+        // A local-only item (`hidden = 3`) has no remote content: the row and its bytes
+        // are the whole item (section 5.4).
+        if row.hidden == RowBuilder.hiddenLocalOnly {
             try index.delete(identifier: identifier)
+            return
+        }
+
+        do {
+            try await writer.delete(
+                path, isDirectory: row.type == "directory", recursive: recursive)
+        } catch let error as RemoteWriteError {
+            throw LocationRuntime.mapped(error)
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
@@ -892,26 +1175,19 @@ actor LocationRuntime {
             // it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
-    }
 
-    /// Recursive operations walk the server with readdir and re-lstat each directory
-    /// before descending, so a directory replaced by a symlink after it was enumerated is
-    /// noticed before anything is done inside it (section 9.1).
-    private func removeRecursively(_ path: RelativePath) async throws {
-        let attributes = try await transport.lstat(path)
-        guard attributes.type == .directory else {
-            try await transport.remove(path)
-            return
-        }
-        for entry in try await transport.readdir(path) {
-            let child = try path.appending(component: entry.name)
-            if entry.attributes.type == .directory {
-                try await removeRecursively(child)
-            } else {
-                try await transport.remove(child)
+        // Deleted rows are deleted, and so is everything beneath them: no tombstones
+        // (section 5.3). Each `delete` writes its own deletion anchor in the same
+        // transaction as the row, and the whole subtree is one outer transaction.
+        try index.batch {
+            for descendant in try index.allItems()
+            where descendant.path != path.bytes
+                && (try? RelativePath.fromIndexBytes(descendant.path))?.isUnder(path) == true
+            {
+                try index.delete(identifier: descendant.identifier)
             }
+            try index.delete(identifier: identifier)
         }
-        try await transport.rmdir(path)
     }
 
     // MARK: Signals and maintenance
@@ -1046,12 +1322,23 @@ actor LocationRuntime {
 
     func setFault(
         writes: Bool?, fetchDelayMilliseconds delay: Int?, versionMismatch mismatch: Bool?,
-        collisions: Bool?
-    ) {
+        collisions: Bool?, uploadDelayMilliseconds uploadDelay: Int? = nil,
+        frozenMetadata frozen: Bool? = nil
+    ) async {
         if let writes { writesFail = writes }
         if let delay { fetchDelayMilliseconds = delay }
         if let mismatch { versionMismatch = mismatch }
         if let collisions { createsCollide = collisions }
+        if let frozen { frozenMetadata = frozen }
+        if let uploadDelay {
+            uploadDelayMilliseconds = uploadDelay
+            await writer.setOptions(
+                RemoteWriter.Options(
+                    macID: macID,
+                    localHostName: LocationRuntime.localHostName,
+                    createCheck: location.createCheck,
+                    conflictWindowHoldMilliseconds: uploadDelay))
+        }
     }
 
     private func failWritesIfFaulted() throws {
@@ -1085,6 +1372,8 @@ actor LocationRuntime {
             "fetchDelayMilliseconds": fetchDelayMilliseconds,
             "versionMismatch": versionMismatch,
             "createsCollide": createsCollide,
+            "uploadDelayMilliseconds": uploadDelayMilliseconds,
+            "frozenMetadata": frozenMetadata,
             "inFlight": concurrentFetches,
             "peakConcurrent": peakConcurrentFetches,
             "total": totalFetches,
@@ -1174,6 +1463,22 @@ actor LocationRuntime {
             // The wire carries no errno: a collision is confirmed with an lstat and a
             // full disk with statvfs, both by the caller (section 6.2).
             return SSHDriveAgentError.cannotSynchronize.asNSError(message)
+        }
+    }
+
+    /// The writer's own refusals (section 5.5, section 5.7). None of these came off the
+    /// wire: each is the answer to a second question the writer asked.
+    static func mapped(_ error: RemoteWriteError) -> NSError {
+        switch error {
+        case let .filenameCollision(name):
+            return SSHDriveAgentError.filenameCollision.asNSError(
+                "\"\(name)\" already exists on the server.")
+        case let .deletionRejected(name):
+            return SSHDriveAgentError.deletionRejected.asNSError(
+                "\"\(name)\" is not empty. Delete what is inside it first.")
+        case .escapingSymlinkTarget:
+            return SSHDriveAgentError.permissionDenied.asNSError(
+                SymlinkPolicy.escapingTargetMessage)
         }
     }
 

@@ -54,6 +54,12 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
     /// Extended attributes, stored locally only (section 5.4).
     public let extendedAttributes: [String: Data]
 
+    /// Finder tags, stored locally only (section 5.4). They never arrive as an xattr:
+    /// they are the item's own `tagData`, and the system rebuilds the tags xattr from it
+    /// on every update, so an item that returns none loses the user's tags on the next
+    /// re-download (S4, 2026-09-04).
+    public let tagData: Data?
+
     public init(
         identifier: String,
         parentIdentifier: String,
@@ -73,7 +79,8 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
         fileSystemFlags: UInt64,
         kept: Bool,
         contentPolicyRawValue: Int,
-        extendedAttributes: [String: Data]
+        extendedAttributes: [String: Data],
+        tagData: Data? = nil
     ) {
         self.identifier = identifier
         self.parentIdentifier = parentIdentifier
@@ -94,6 +101,7 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
         self.kept = kept
         self.contentPolicyRawValue = contentPolicyRawValue
         self.extendedAttributes = extendedAttributes
+        self.tagData = tagData
     }
 
     private enum Key {
@@ -116,6 +124,7 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
         static let kept = "kept"
         static let contentPolicy = "contentPolicy"
         static let xattrs = "xattrs"
+        static let tagData = "tagData"
     }
 
     public func encode(with coder: NSCoder) {
@@ -138,6 +147,7 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
         coder.encode(kept, forKey: Key.kept)
         coder.encode(contentPolicyRawValue, forKey: Key.contentPolicy)
         coder.encode(extendedAttributes as NSDictionary, forKey: Key.xattrs)
+        coder.encode(tagData as NSData?, forKey: Key.tagData)
     }
 
     public init?(coder: NSCoder) {
@@ -173,6 +183,7 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
         let classes: [AnyClass] = [NSDictionary.self, NSString.self, NSData.self]
         self.extendedAttributes =
             (coder.decodeObject(of: classes, forKey: Key.xattrs) as? [String: Data]) ?? [:]
+        self.tagData = coder.decodeObject(of: NSData.self, forKey: Key.tagData) as Data?
     }
 
     public override var description: String {

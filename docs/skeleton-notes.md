@@ -20,6 +20,15 @@ collect connection with its prompts relayed to the terminal, `list`, `show`,
 report, and `doctor` extended for the transport. Results in
 `docs/spikes/results.md` (2026-09-04, "milestone 3, part 1" and "part 2").
 
+**Milestone 4**, read-write, landed the same way on 2026-09-04: the section 5.5
+upload protocol (temp file, the create-versus-overwrite rename, the mode and
+modification-date restore, the post-upload `lstat`, the in-flight set and the
+stale-temp rule), the conflict check and the conflict copy, the whole write
+matrix, local xattrs and Finder tags through `tagData` (section 5.4),
+`.DS_Store`, and section 5.7's symlink handling in both directions. Spikes
+**S8 and S10 are answered**; the runbook is `docs/spikes/milestone-4.md` and the
+results entry is 2026-09-04, "milestone 4".
+
 Built and tested on macOS 26.4.1 arm64, Xcode 26.4, Swift 6.3 (Swift 5 language mode),
 xcodegen 2.46. `scripts/mac-build.sh` does the sync, generate, `swift test` and
 `xcodebuild` loop; the Mac used for it has no signing identities, so it builds ad-hoc
@@ -40,7 +49,12 @@ on the command line only.
   fake backend. Its second half takes it to **295**, 0 failures, 31 skipped: the `add`
   destination and `set`-key parsers (`Config`), the `ssh -G` attribution diff and its
   display (`SSHProcess`), the add-flow state machine and the askpass broker driven through
-  `AskpassHarness` (`AgentCore`), and the nested-transaction fix (`Index`).
+  `AskpassHarness` (`AgentCore`), and the nested-transaction fix (`Index`). Milestone 4
+  takes it to **355**, 0 failures, 31 skipped: `SymlinkPolicyTests` (section 5.7's table
+  and both spellings of the root), `RemoteWriterTests` (the section 5.5 upload protocol
+  against the fake backend, the conflict copy, the delete rules, a case-insensitive server
+  and one whose plain `rename` overwrites), `RowBuilderTests` (the xattr and tag hash in
+  the metadata version, the symlink check on the row) and `LocalAttributesTests`.
 - `xcodebuild -scheme "SSH Drive"` in **both Debug and Release**: BUILD SUCCEEDED, no
   warnings from our own sources.
 - The produced bundle is exactly the tree in section 3:
@@ -69,7 +83,7 @@ signed build.
 | `Packages/.../XPCProtocols` | `SSHDriveAgentProtocol`, `SSHDriveExtensionProtocol`, the configured `NSXPCInterface`s with their class whitelists, `SSHDriveItemSnapshot`/`SSHDriveItemPage` (NSSecureCoding), `SSHDriveAgentError`, every identifier from section 3.1, and the peer code requirement. |
 | `Packages/.../Config` | The section 4 location model, `config.json` in the app-group container, atomic writes, `<name>` resolution (nickname, host, id prefix). |
 | `Packages/.../Index` | The full section 5.3 schema (`items`, `anchors`, `roots`, `held`, `meta`), a small SQLite wrapper, `IndexWriter` (agent, sole writer: upsert, delete with its deletion anchor, subtree path rewrite, anchor append/prune/expire, roots, `VACUUM INTO` backup, `reconciling` and `generation`), `IndexReader` (extension, read-only WAL, meta checks, `item`, `children`, change stream with `.syncAnchorExpired`), and the row-to-snapshot conversion both sides share. |
-| `Packages/.../AgentCore` | The agent's own derivations, in the package so they are unit-testable without an app bundle (2026-09-04): `ItemDerivation` and `ServerIdentity` (section 5.4's mode/uid/gid to `capabilities` and `fileSystemFlags`, and the stable metadata version), `NameVisibility` (case and normalisation collisions, non-UTF-8 names, and the four kinds of entry that get no row at all), and `TransferScheduler` (section 6.2: four at once, foreground before background, the window split between them, cancellation). |
+| `Packages/.../AgentCore` | The agent's own derivations, in the package so they are unit-testable without an app bundle (2026-09-04): `ItemDerivation` and `ServerIdentity` (section 5.4's mode/uid/gid to `capabilities` and `fileSystemFlags`, and the stable metadata version), `NameVisibility` (case and normalisation collisions, non-UTF-8 names, and the four kinds of entry that get no row at all), and `TransferScheduler` (section 6.2: four at once, foreground before background, the window split between them, cancellation). Since milestone 4 also `SymlinkPolicy` (section 5.7's lexical inside-the-share check, both spellings of the root, the relative rewrite, and what `createItem` and a move each accept), `RowBuilder` (every derived field of a row in one place, including that check and the xattr/tag hash) and **`RemoteWriter`** (the server half of section 5.5: the temp-file-plus-rename upload, the conflict check between the bytes and the rename, the conflict copy, the in-flight set, the stale-temp rule, the rename-semantics probe and the delete rules). `RemoteWriter` never touches the index - the agent hands it the three fields the conflict check needs and writes the result back itself - which is what keeps `LocationRuntime` the only writer and makes all of section 5.5 testable against `FakeTransport`. |
 | `Packages/.../SFTP` | `RelativePath` (the section 9.1 chokepoint, byte components), `SFTPTransport`, the section 6.2 error classes, and `FakeTransport`: an in-memory tree with list, fetch, write, rename (non-overwriting), posix-rename, delete, symlink, statvfs, plus the mutation hook. Since 2026-09-04 (milestone 2) also the real thing: the SFTP v3 wire codec, `SFTPClient` with pipelining, per-request deadlines and the OpenSSH extensions, and `RealSFTPTransport`, which is the only place a `RelativePath` becomes an absolute server path. It sits on `SSHProcess`'s `ByteStream`. |
 | `Packages/.../SSHProcess` | Real since 2026-09-04 (milestone 2): `SSHCommandBuilder` (every `ssh` command line of section 6.1), `SSHMaster` (the `-N` ControlMaster, its `SFTPChannel` and `ExecChannel` mux clients, the askpass token it mints per spawn), `ProxyChainBuilder`, `RemoteScript` with the section 9.2 sentinel and the section 6.4 heartbeat wrapper, `LoginShellSnapshot`, `SSHExitClassifier`, `IdentityAgentCheck`, `ControlSocket` and its orphan sweep, and `Spawn` (`posix_spawn` with a real `argv[0]`). |
 | `Packages/.../Secrets` | Real since 2026-09-04 (milestone 2): `KeychainSecretsStore` on the data-protection keychain, `AskpassBroker` (the section 4.2 token protocol and the answer table), `AskpassPromptClassifier`, `SSHGResolver`, `ProcessAncestry`, and the `AskpassHarness` seam the tests drive it through. |
@@ -103,10 +117,11 @@ signed build.
   transfer scheduler of section 6.2 on top.
 - ~~`fetchPartialContents` (milestone 3)~~ - real since 2026-09-04, as a foreground
   transfer under the scheduler, with the range widened to the alignment the system asks
-  for. The temp-file plus rename upload, conflict copies,
-  symlink containment, `.DS_Store` (milestone 4), reconcile walk and restore-into-live
-  (milestone 5), root-set rotation and the mass-deletion guard (milestone 6), eviction
-  (7), real pin/unpin and `performAction` (8), helper (9, placeholder `helper/README.md`).
+  for. ~~The temp-file plus rename upload, conflict copies, symlink containment,
+  `.DS_Store` (milestone 4)~~ - all real since 2026-09-04. Still stubbed: the reconcile
+  walk and restore-into-live (milestone 5), root-set rotation and the mass-deletion guard
+  (milestone 6), eviction (7), real pin/unpin and `performAction` (8), helper (9,
+  placeholder `helper/README.md`).
 - ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
   yet recorded with `hidden = 2`~~ - all three real since 2026-09-04. Listings are paged at
   2,000 items (a page token is an offset into a listing the agent already holds, so a second
@@ -162,6 +177,9 @@ sshdrive debug transport upload <name> <path> [--size-mib N] [--cancel-after MS]
 sshdrive debug transport escape <name> [--filename X] [--parent P]
                                        [--symlink-target T] [--directory]
 
+# Added 2026-09-04 for milestone 4 (spikes S8 and S10).
+sshdrive debug transport rename-check <name>
+
 # Added 2026-09-04 for spikes S4 and S6:
 sshdrive debug evict <name> <path>
 sshdrive debug materialized <name> [--pending]
@@ -169,6 +187,7 @@ sshdrive debug stat <name> <path> [--read]
 sshdrive debug xattr <name> <path>
 sshdrive debug fault <name> [--writes on|off] [--fetch-delay MS]
                             [--version-mismatch on|off] [--collisions on|off]
+                            [--upload-delay MS] [--frozen-metadata on|off]
 sshdrive debug transfers <name> [--reset]
 sshdrive debug stabilize <name>
 sshdrive debug testing <name> list|run

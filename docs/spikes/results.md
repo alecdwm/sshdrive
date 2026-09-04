@@ -1,8 +1,195 @@
 # Spike results
 
 One entry per sub-question, newest date first. Steps and expected answers are in
-`milestone-1.md` (S1, S3, S4, S6) and `milestone-2.md` (S2); this file records only what
-happened.
+`milestone-1.md` (S1, S3, S4, S6), `milestone-2.md` (S2) and `milestone-4.md` (S8, S10 and
+the write matrix); this file records only what happened.
+
+---
+
+## 2026-09-04 (milestone 4) - read-write: the section 5.5 upload protocol, conflict copies, symlinks (S8), Finder tags (S10)
+
+Milestone 4 end to end: create, modify, delete, rename and move through the real
+transport, the temp-file-plus-rename upload with its mode and mtime restore, conflict
+copies, local xattrs and Finder tags, `.DS_Store`, and section 5.7's symlink handling.
+Same headless VM (macOS 26.4.1 arm64, `OpenSSH_10.2p1`), the signed Debug build from
+`scripts/mac-build.sh signed` installed over `/Applications/SSH Drive.app` with `ditto`.
+Testbed up on the Mac; two servers were used, `deb` (2201, OpenSSH `sftp-server` on
+Debian) and `alp` (2206, busybox and `internal-sftp` on Alpine). Steps are in
+`milestone-4.md`.
+
+**355 package tests, 0 failures** (was 295; 31 skipped without the testbed). The 60 new
+ones are `SymlinkPolicyTests` (section 5.7's table, both root spellings, the create and
+move checks), `RemoteWriterTests` (the upload protocol against `FakeTransport`: the temp
+file, the create-versus-overwrite rule, the conflict copy and its naming, the in-flight
+set, the stale-temp rule, the delete rules, the case-only rename against a
+case-insensitive double, a server whose plain `rename` overwrites, and a directory the
+account cannot write), `RowBuilderTests` (the xattr and tag hash in the metadata version,
+the symlink check on the row, the generation bump, the read-only mapping) and
+`LocalAttributesTests`.
+
+### What was built
+
+The write half of section 5.5 now lives in `AgentCore` as `RemoteWriter`, an actor that
+owns the transport and the in-flight set and **never touches the index**: the agent reads
+the row, hands the writer the three fields the conflict check needs, and writes the result
+back itself, so `LocationRuntime` stays the only writer of the index and every rule in
+section 5.5 is testable against the fake backend with no database at all. Beside it,
+`RowBuilder` (every derived field of a row, including section 5.7's lexical check) and
+`SymlinkPolicy` (that check, and nothing else). The transport grew one primitive,
+`writeExclusive`, because the conflict check has to sit *between* the bytes landing and
+the rename and the transport cannot own both halves.
+
+### S8 - symlinks
+
+| Question | Answer |
+|---|---|
+| Does the system create a real symlink under CloudStorage? | **Yes.** `lrwx------`, and `readlink` returns the row's target |
+| Does a relative target resolve inside the mount? | **Yes.** `cat Docs/rel-inside` returns the contents of `note.txt` |
+| Is an absolute in-root target rewritten? | **Yes.** `/home/alec/m4/Other` is served as `../Other` |
+| Are escaping targets omitted? | **Yes**, with `hidden = 1` and a reason in "not shown" |
+| Does Finder badge it? | **Yes**: Kind **"Alias"**, arrow badge, badged *folder* icon for a link to a directory |
+| How does a dangling one present? | **Identically.** Same badge, same Kind, size = the target string's length, no broken-link marker |
+| Does `ln -s` reach `createItem` with the target intact? | **Yes**, and escaping and absolute targets never leave the Mac |
+
+Two things the runbook could not have guessed. **SFTP v3's `readdir` carries no link
+target**, so the "once per link at enumeration time" check costs a `readlink` per link
+before its row can be built. And **a refused `ln -s` is not a message the user sees**:
+`ln -s` exits 0, the system keeps the item locally, and the refusal comes back as its
+`uploadingError` (`NSFileProviderErrorCannotSynchronize`, -2005) with the system's own
+wording. Section 5.7's sentence about the target having to be relative and inside the
+share can only reach the user through `sshdrive status`'s sync-error list.
+
+### S10 - Finder tags and the xattr hash
+
+Tags arrive as **`tagData` and nothing else**: one `modifyItem` with
+`changedFields = 0x10` (`NSFileProviderItemTagData`), an empty `extendedAttributes`
+dictionary, and a 453-byte **`NSKeyedArchiver` archive** - not the
+`com.apple.metadata:_kMDItemUserTags` property list the xattr holds, which is why the row
+stores and serves it opaquely and never parses it. Nothing reaches the server. The
+metadata version moves with it (`xattrHash cbf29ce484222325 -> e2a2e7907f0e585a`), the
+tags survive an eviction and a re-download - the system rebuilds the xattr from the
+`tagData` the item returns, which is the S4 loss this design exists to prevent - and the
+system asks **once**.
+
+**And it asks once with the version frozen too.** With `debug fault --frozen-metadata on`,
+which replies with the metadata version the item already had, the same single `modifyItem`
+arrived and no more over sixty seconds. So the xattr hash is **not** what stops a retry
+loop; there is no retry loop on 26.4, for the same reason a `modifyItem` reply is believed
+at all (S3). What the hash is for is the other direction: it is the only thing that moves
+an item's version when the *agent* changes the stored blob, which a restore from the index
+backup does, and without it the system would keep serving tags that are no longer there.
+Section 5.4, section 5.3 and section 13 corrected.
+
+One trap for the next person: `xattr` and Finder both **follow a symlink**, so a link's
+row shows its target's tag colour and `xattr <link>` reads the target's attributes. It is
+not evidence about the link.
+
+### The write matrix, checked server-side
+
+| Step | Result |
+|---|---|
+| create | temp file + non-overwriting rename, `0644`, nothing left behind |
+| create an executable | `0755` survives the rename (`setstat` after it) |
+| modify | `posix-rename@openssh.com` overwrite, mode kept |
+| modification date | `touch -t 202401021530.45` -> the same instant on the server, whole seconds |
+| rename in place | plain rename |
+| rename across directories | one rename, paths rewritten |
+| move of a directory subtree | one rename; every descendant row rewritten |
+| delete a file | `remove` |
+| `rmdir` a non-empty directory | refused, item left in place |
+| `rm -r` | server-side depth-first walk, `lstat` before each descent |
+| write to a read-only item | refused up front by the served flags; nothing sent |
+| `chmod +x` and `-x` | `.fileSystemFlags` -> `setstat`, `0644 <-> 0755` |
+| create onto a taken name | `lstat`-confirmed `.filenameCollision` |
+| stale temp files | ours removed at once, another Mac's after 30 days |
+| a lost master | `-1004` serverUnreachable, the edit in the pending set, `list` says offline |
+
+The read-only row is worth quoting because it is derived, not guessed:
+`ro/locked.txt mode=666 caps=65 fsFlags=2` - a `0666` file inside a `0555` directory gets
+reading and evicting only, so the kernel refuses the write from the flags we served and
+nothing is ever sent. Section 5.4's most-argued paragraph, end to end.
+
+### Three assumptions that failed
+
+**Section 5.5's eviction after a conflict copy cannot be a single call.** The conflict
+path itself works exactly as written - the local content lands in
+`c2 (conflicted copy from chosen-newt 2026-09-04 at 19.57.28).txt`, the destination keeps
+the remote bytes, the remote item is returned - but the `evictItem` that has to follow the
+reply was refused:
+
+```
+"errorDescription" : "The file ‘conflict.txt‘ cannot be evicted.", "errorCode" : -2008
+```
+
+`-2008` is `NSFileProviderErrorNonEvictable`: the system is still finishing the
+modification it has just been told about. The same call a few seconds later succeeds, and
+the next open then downloads the remote content. Without it the replica keeps the *local*
+bytes under the *remote* version for ever, which is the entire reason the eviction is
+there (S3, this morning). The conflict path now retries with a doubling backoff from
+0.25 s, seven attempts, logging either way; the first retry has been enough every time.
+And it signals the working set, without which the copy's anchor is a row nobody asks for
+and Finder never shows it, because a folder is enumerated once, ever (section 6.5).
+
+**A `.DS_Store` written into the mount never reaches the extension at all.** No
+`createItem`, no `modifyItem`, no row; the system keeps the file in the replica and
+reports it through `fileproviderctl evaluate` as an ordinary item with `isUploaded = 0`
+and `isUploading = 0`, and never asks anyone to upload it. The server stays clean for
+free. Section 5.4's local-only path (`hidden = 3`, `local_content`) is therefore not
+exercised by the case it was written for; it is kept, because it is one branch, because
+the exclusion is the system's choice rather than a contract, and because it is the path
+any other writer of a `.DS_Store` would take. Section 5.4 corrected.
+
+**"Deleted rows are deleted" needed one exception.** A local-only row has no remote
+content by definition, so a `readdir` that does not mention it is not evidence that it
+went. Without the exception the first listing after a local-only create deletes the row
+and the user's file with it. Section 5.3 corrected.
+
+### busybox and `internal-sftp` (`alp`, 2206)
+
+The rename-over-existing and `setstat` paths on a server that is neither GNU nor OpenSSH's
+external subsystem: `rename-check` reports `renameRefusesAnExistingName: true` and no
+preflight needed, a create with `chmod +x` lands `-rwxr-xr-x`, a modify keeps `0644`, a
+create onto a taken name is a confirmed collision, `chmod +x` on an existing file reaches
+the server, `rmdir` of a non-empty directory is refused and `rm -r` takes it, and the
+symlink policy hides `esc -> /etc/passwd` while showing `rel -> note.txt`. Alpine's
+`internal-sftp` offers the same OpenSSH extensions as the external `sftp-server`
+(`posix-rename`, `fsync`, `lsetstat`, `limits`), so nothing in section 5.5 degrades there;
+the capability report reads `5/8 optimal`, the two `◐` being busybox `find`.
+
+### Three smaller things worth writing down
+
+- **`launchctl kill TERM` plus `open -g` does not reinstall the agent.** launchd brings it
+  back before `ditto` has finished, `open -g` finds it running and does nothing, and every
+  measurement is then taken against the old binary. That cost an hour: the tell was
+  `debug index dump` missing a field the source had, and `strings` on the installed binary
+  proving the field *was* there. `sshdrive agent restart` is the reliable form, and
+  `ping`'s `interfaceVersion` is the cheap check.
+- **`pgrep` counts zombies.** An `ssh` mux client killed with `-9` stays in `pgrep -f`
+  output as `Z` until the agent reaps it, which makes "did I actually kill the master?"
+  unanswerable from `pgrep` alone; `ps -o stat` is the one to read. Also: a location that
+  has been restarted can be holding **two** masters, so a lost-connection test has to kill
+  them all. Both belong to milestone 5.
+- **`TransferSchedulerTests.testForegroundJumpsAheadOfQueuedBackground` is timing-flaky.**
+  It failed once in five runs on a loaded VM and passed on every re-run, including three
+  in a row with `--filter`. Nothing in milestone 4 touches the scheduler; the test races a
+  `Task.sleep` against the admission order it is asserting, and it wants a barrier rather
+  than a sleep before somebody spends an hour on it.
+- **macOS asks for Local Network access in the app's name on first connect.** *"Allow
+  “SSH Drive” to find devices on local networks?"* appeared while the mount was in use
+  against a server on the host's vmnet segment. A NAS is exactly a device on the local
+  network, so this is the ordinary case rather than an edge one, there is no entitlement
+  that suppresses it, and a launchd agent has no window to put it over. Section 10 and
+  section 13 record it; `add`, `doctor` and the cask's `caveats` are where it has to be
+  said.
+
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no
+`sshdrive-*` control sockets, every fault off, `~/m4` and `~/m4a` removed from both
+servers, and the testbed trees back to what `testbed/README.md` documents. The signed
+Debug build is installed at `/Applications/SSH Drive.app` and the agent is running.
+Screenshots from the S8 pass are in `~/m4-shots/` on the VM. `sshdrive doctor` is green
+apart from the two expected warnings.
 
 ---
 

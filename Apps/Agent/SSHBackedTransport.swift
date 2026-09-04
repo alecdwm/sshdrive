@@ -354,6 +354,18 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
         }
     }
 
+    func writeExclusive(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws {
+        let transport = transferTransport
+        try await guarded("write", seconds: SSHBackedTransport.transferDeadlineSeconds) {
+            try await transport.writeExclusive(
+                path, mode: mode, window: window, source: source, progress: progress)
+        }
+    }
+
     func mkdir(_ path: RelativePath, mode: UInt32) async throws {
         let inner = self.inner
         try await guarded("mkdir") { try await inner.mkdir(path, mode: mode) }

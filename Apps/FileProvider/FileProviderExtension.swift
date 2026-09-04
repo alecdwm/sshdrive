@@ -293,6 +293,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             filename: itemTemplate.filename,
             isDirectory: isDirectory,
             symlinkTarget: isSymlink ? itemTemplate.symlinkTargetPath ?? nil : nil,
+            // Section 5.5: the temp file is opened with the Mac file's permission bits,
+            // 0755 when the local one is executable, and the modification date is set
+            // back after the rename.
+            fileSystemFlags: (itemTemplate.fileSystemFlags?.rawValue).map {
+                NSNumber(value: UInt64($0))
+            },
+            modificationDate: (itemTemplate.contentModificationDate ?? nil).map {
+                NSNumber(value: $0.timeIntervalSince1970)
+            },
+            extendedAttributes: fields.contains(.extendedAttributes)
+                ? (itemTemplate.extendedAttributes ?? [:]) : nil,
+            // Section 5.4: tags never arrive as an xattr; they are the item's own
+            // `tagData`, and an item that returns none loses them on the next
+            // re-download.
+            tagData: fields.contains(.tagData) ? (itemTemplate.tagData ?? nil) : nil,
             contents: handle,
             transferID: transferID
         ) { [weak self] snapshot, error in
@@ -343,6 +358,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             },
             newExtendedAttributes: changedFields.contains(.extendedAttributes)
                 ? (item.extendedAttributes ?? [:]) : nil,
+            newTagData: changedFields.contains(.tagData) ? (item.tagData ?? nil) : nil,
+            newSymlinkTarget: item.symlinkTargetPath ?? nil,
             contents: handle,
             transferID: transferID
         ) { [weak self] snapshot, error in

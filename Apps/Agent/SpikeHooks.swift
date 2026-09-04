@@ -48,6 +48,36 @@ enum SpikeHooks {
         return report
     }
 
+    /// Section 5.5's conflict path: the eviction that has to follow the reply.
+    ///
+    /// It cannot be done once. Measured on macOS 26.4 (2026-09-04): an `evictItem` issued
+    /// immediately after a `modifyItem` reply is refused with
+    /// `NSFileProviderErrorNonEvictable` (-2008) - the system is still finishing the
+    /// modification it was told about - while the same call a few seconds later succeeds
+    /// and the next open downloads the remote content. So the conflict path retries with
+    /// a doubling backoff and gives up after `attempts`, logging either way. Without the
+    /// retry the replica keeps the *local* bytes under the *remote* version for ever,
+    /// which is the whole reason the eviction is there (S3, 2026-09-04).
+    static func evictAfterConflict(
+        locationID: String, identifier: String, attempts: Int = 7
+    ) async {
+        var delay: UInt64 = 250_000_000  // 0.25 s
+        for attempt in 1...max(1, attempts) {
+            try? await Task.sleep(nanoseconds: delay)
+            let report = await evict(locationID: locationID, identifier: identifier)
+            if report["evicted"] as? Bool == true {
+                Log.agent.notice(
+                    "evicted \(identifier, privacy: .public) after a conflict copy on attempt \(attempt, privacy: .public)"
+                )
+                return
+            }
+            delay = min(delay * 2, 8_000_000_000)
+        }
+        Log.agent.error(
+            "could not evict \(identifier, privacy: .public) after a conflict copy; the replica still holds the local bytes under the remote version"
+        )
+    }
+
     static func describe(error: Error) -> [String: Any] {
         let nsError = error as NSError
         var report: [String: Any] = [

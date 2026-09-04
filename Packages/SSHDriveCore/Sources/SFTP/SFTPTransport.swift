@@ -47,6 +47,23 @@ public protocol SFTPTransport: AnyObject, Sendable {
     /// the real client. `mode` is the permission bits the temp file is opened with.
     func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws
 
+    /// Creates `path` and streams `source` into it, failing if the name is already taken.
+    ///
+    /// This is the *primitive* the upload protocol of section 5.5 is built from, not the
+    /// protocol itself: the agent picks the `.sshdrive-upload-<mac8>-<uuid>` name, writes
+    /// the bytes here, makes its conflict check against a fresh `lstat` of the
+    /// destination, and only then chooses between a non-overwriting `rename` (create)
+    /// and `posix-rename@openssh.com` (overwrite). The check has to sit between the
+    /// bytes landing and the rename, which is why the transport cannot own both halves.
+    ///
+    /// Exclusive because the name is a fresh UUID: anything already there is either
+    /// another Mac's collision, which must not be overwritten, or a bug.
+    func writeExclusive(
+        _ path: RelativePath, mode: UInt32, window: Int,
+        source: @Sendable @escaping () throws -> Data,
+        progress: @escaping @Sendable (Int64) -> Void
+    ) async throws
+
     func mkdir(_ path: RelativePath, mode: UInt32) async throws
 
     /// Plain SFTP remove. Fails on a directory.

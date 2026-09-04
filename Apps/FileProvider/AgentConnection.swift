@@ -129,6 +129,8 @@ final class AgentConnection: NSObject {
             return NSFileProviderError(.filenameCollision)
         case .insufficientQuota:
             return NSFileProviderError(.insufficientQuota)
+        case .deletionRejected:
+            return NSFileProviderError(.deletionRejected)
         case .versionMismatch, .cannotSynchronize, .permissionDenied, .notImplemented:
             return NSFileProviderError(.cannotSynchronize)
         }

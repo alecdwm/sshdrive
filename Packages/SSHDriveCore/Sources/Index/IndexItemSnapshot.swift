@@ -14,8 +14,10 @@ extension IndexItem {
             kept
             ? .downloadEagerlyAndKeepDownloaded
             : (pinState == -1 ? .downloadLazily : .unset)
-        let attributes: [String: Data] =
-            xattrs.flatMap { try? JSONDecoder().decode([String: Data].self, from: $0) } ?? [:]
+        // Section 5.4: the row's one local blob carries both the extended attributes and
+        // the Finder tags, and section 5.3 hashes exactly that blob into the metadata
+        // version, which is what stops the system re-offering a tag change (S10).
+        let local = LocalAttributes.decode(xattrs)
         return SSHDriveItemSnapshot(
             identifier: identifier,
             parentIdentifier: parent ?? IndexWriter.rootIdentifier,
@@ -35,6 +37,7 @@ extension IndexItem {
             fileSystemFlags: UInt64(bitPattern: fileSystemFlags),
             kept: kept,
             contentPolicyRawValue: policy.rawValue,
-            extendedAttributes: attributes)
+            extendedAttributes: local.xattrs,
+            tagData: local.tagData)
     }
 }

@@ -9,7 +9,7 @@ import XPCProtocols
 /// not available. SFTP-only accounts, where the identity is unknown, get full
 /// capabilities and learn about permission errors from the sync error list
 /// (DESIGN.md section 5.4).
-public struct ServerIdentity {
+public struct ServerIdentity: Sendable, Equatable {
     public var uid: UInt32?
     public var gid: UInt32?
     public var supplementaryGroups: Set<UInt32>

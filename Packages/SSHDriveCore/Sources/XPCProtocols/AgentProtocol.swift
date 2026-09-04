@@ -2,7 +2,7 @@ import Foundation
 
 /// Version of the XPC interface. A mismatched agent and extension (mid upgrade) is
 /// reported as `.serverUnreachable` until the agent restarts (DESIGN.md section 5.2).
-public let sshDriveXPCInterfaceVersion = 2
+public let sshDriveXPCInterfaceVersion = 3
 
 /// The agent's interface, exported to the extension, the CLI and askpass alike. One
 /// interface rather than three keeps the peer check in one place; what a peer may
@@ -92,13 +92,22 @@ public let sshDriveXPCInterfaceVersion = 2
 
     /// `mkdir`, `symlink`, or upload-to-temp plus a non-overwriting rename into place.
     /// `contents` is nil for a directory or a symlink.
-    @objc(createItemInDomain:parent:filename:isDirectory:symlinkTarget:contents:transferID:reply:)
+    ///
+    /// `fileSystemFlags` decides the mode the temp file is opened with: 0644 for an
+    /// ordinary file, 0755 when the local one is executable, as `sftp put` does
+    /// (section 5.5). `modificationDate` is set back onto the file after the rename,
+    /// truncated to whole seconds since SFTP v3 carries no more.
+    @objc(createItemInDomain:parent:filename:isDirectory:symlinkTarget:fileSystemFlags:modificationDate:extendedAttributes:tagData:contents:transferID:reply:)
     func createItem(
         domainIdentifier: String,
         parentIdentifier: String,
         filename: String,
         isDirectory: Bool,
         symlinkTarget: String?,
+        fileSystemFlags: NSNumber?,
+        modificationDate: NSNumber?,
+        extendedAttributes: [String: Data]?,
+        tagData: Data?,
         contents: FileHandle?,
         transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
@@ -106,7 +115,7 @@ public let sshDriveXPCInterfaceVersion = 2
 
     /// Rename/move, content, attributes or extended attributes, per `changedFields`
     /// (the raw value of NSFileProviderItemFields).
-    @objc(modifyItemInDomain:identifier:baseVersion:changedFields:newParent:newFilename:newFileSystemFlags:newModificationDate:newExtendedAttributes:contents:transferID:reply:)
+    @objc(modifyItemInDomain:identifier:baseVersion:changedFields:newParent:newFilename:newFileSystemFlags:newModificationDate:newExtendedAttributes:newTagData:newSymlinkTarget:contents:transferID:reply:)
     func modifyItem(
         domainIdentifier: String,
         itemIdentifier: String,
@@ -117,6 +126,8 @@ public let sshDriveXPCInterfaceVersion = 2
         newFileSystemFlags: NSNumber?,
         newModificationDate: NSNumber?,
         newExtendedAttributes: [String: Data]?,
+        newTagData: Data?,
+        newSymlinkTarget: String?,
         contents: FileHandle?,
         transferID: String,
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
