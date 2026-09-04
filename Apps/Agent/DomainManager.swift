@@ -3,6 +3,7 @@ import FileProvider
 import Config
 import Index
 import SFTP
+import SSHProcess
 import XPCProtocols
 import Logging
 
@@ -32,6 +33,13 @@ actor DomainManager {
         guard let config else {
             Log.agent.error("no app group container; the agent cannot serve any location")
             return
+        }
+        // Section 6.1: orphans are not adopted. A master left behind by a crashed agent
+        // still owns its socket, and `ControlMaster=yes` against an existing socket
+        // disables multiplexing, so later mux clients would attach to the orphan.
+        let swept = ControlSocket.sweepOrphans(environment: await AgentSSHEnvironment.shared.environment())
+        if !swept.isEmpty {
+            Log.ssh.notice("swept \(swept.count, privacy: .public) orphaned control socket(s)")
         }
         do {
             let file = try await config.load()
@@ -77,9 +85,16 @@ actor DomainManager {
         case .fake:
             transport = FakeTransport(root: location.remotePath ?? "/srv/fake")
         case .sftp:
-            // TODO milestone 2 (Transport): the real SFTP client over an ssh mux client.
-            throw SSHDriveAgentError.notImplemented.asNSError(
-                "The SFTP transport arrives in milestone 2. Use a fake-backed location.")
+            // Section 6.1 and 6.2: the login shell snapshot, the `-N` master with a token
+            // of its own, an SFTP channel on its mux socket, and the wire client on that
+            // channel. `SSHBackedTransport` adds the deadline and the lost-master rule;
+            // everything below this line is the same code the fake backend runs.
+            let file = try? await config?.load()
+            transport = try await SSHBackedTransport.connect(
+                location: location,
+                askpassPath: AgentSecrets.askpassPath,
+                askpass: AgentSecrets.broker,
+                uploadTag: String((file?.macID ?? "00000000").prefix(8)))
         }
         let runtime = try LocationRuntime(
             location: location,
@@ -101,8 +116,11 @@ actor DomainManager {
         return try await runtime(for: location)
     }
 
-    func dropRuntime(locationID: String) {
-        runtimes.removeValue(forKey: locationID)
+    func dropRuntime(locationID: String) async {
+        guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
+        // `-O exit` on the master and the channel with it, so removing a location does
+        // not leave an `ssh` behind (section 6.1).
+        await runtime.shutdownTransport()
     }
 
     // MARK: Domains

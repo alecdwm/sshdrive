@@ -1,7 +1,294 @@
 # Spike results
 
 One entry per sub-question, newest date first. Steps and expected answers are in
-`milestone-1.md`; this file records only what happened.
+`milestone-1.md` (S1, S3, S4, S6) and `milestone-2.md` (S2); this file records only what
+happened.
+
+---
+
+## 2026-09-04 (assembled stack) - S2: the transport end to end, three real mounts, and what is left for a real Mac
+
+The three milestone 2 modules (`SFTP`, `SSHProcess`, `Secrets`) merged into one stack, wired
+behind the agent's `SFTPTransport`, and driven from Finder's own mount path. Same headless VM
+(macOS 26.4.1 arm64, `OpenSSH_10.2p1, LibreSSL 3.3.6`), the signed Debug build from
+`scripts/mac-build.sh signed` (`MAC_DIR=~/sshdrive`), installed over `/Applications/SSH Drive.app`
+with `ditto` and restarted with `open -g`. Testbed up on the Mac. The three per-agent build
+directories on the VM (`~/sshdrive-sftp`, `~/sshdrive-ssh`, `~/sshdrive-secrets`) are gone.
+
+**214 package tests, 0 failures**, both without the testbed (31 skipped) and with
+`SSHDRIVE_TESTBED=1` (2 skipped; the two that need a real Mac).
+
+### What the seams became
+
+- **One `ByteStream`.** `SFTP` now depends on `SSHProcess` and uses its `ByteStream`;
+  `SFTPByteStream`/`SFTPPipeByteStream` are gone. `PipeByteStream` kept its deadline-carrying
+  `read(upTo:deadline:)` (the `bashbg` rule) and gained the bounded buffer the SFTP one had, so a
+  1 GB transfer cannot outrun the parser into memory; the deadline-free spelling the wire client
+  wants is a protocol extension, because deadlines there are per *request* (§6.2).
+- **`SFTPClient` runs on a mux client in production.** `SSHMaster.openSFTPChannel()` ->
+  `SFTPChannel.stream` -> `RealSFTPTransport.connect(stream:root:)`. `SFTPSubprocess` stays as the
+  test path `SFTPIntegrationTests` uses. New `TestbedChannelTransportTests` covers the production
+  route: list, write, read back, `lstat`, rename, delete over the master's socket, and a second
+  channel opening on the same master after the first was killed.
+- **One askpass environment,** in `XPCProtocols` (`AskpassEnvironment`), used by `Secrets`,
+  `SSHProcess`, the agent and `sshdrive-askpass`. `SSHProcess` and `Secrets` meet on
+  `AskpassTokenProviding`: `SSHMaster` mints a token per spawn, puts it in that child's
+  environment, attaches its pid and retires it when the master goes. Mux clients get
+  `removingAskpass(from:)`.
+- **`askpassAnswer` is off `SSHDriveAgentProtocol`.** The askpass path is
+  `SSHDriveAskpassProtocol` and nothing else.
+- **`ProxyCommand` before `ProxyJump=none`, everywhere.** `debug secrets connect` no longer
+  hand-rolls a hop: it calls `ProxyChainBuilder`, so it takes a whole comma-separated chain. And a
+  `ProxyJump` written into a location's own `sshOptions` now reaches `ssh -G` (where the chain
+  builder wants it) and is stripped from the master's command line, so "`ProxyJump` is never handed
+  to `ssh`" is literally true.
+
+### The debug hook the mounts were driven with
+
+`sshdrive debug ssh add <name> <[user@]host[:port]> [--remote-path P] [--identity F] [--jump CHAIN]`
+and `sshdrive debug ssh remove <name>`. Not `sshdrive add`: no `ssh -G` display, no two-pass
+collect connection, no relayed prompts - those are milestone 3. It writes the location, connects
+with whatever the keychain already holds, and is all-or-nothing (a location that cannot connect is
+not left in `config.json`). `--identity` stores `IdentitiesOnly=yes` with it, as §4 says.
+
+### Three mounts, each exercised through `~/Library/CloudStorage/SSHDrive-<name>`
+
+| Mount | How | Result |
+|---|---|---|
+| `deb` | `debug ssh add deb alec@192.168.64.1:2201 --identity ~/.ssh/sshdrive-spike` | root canonicalised to `/home/alec`; `ls -la`, `ls -R data/weird`, `cat`, create, `mkdir`, `mv` into the new directory, `rm -r`. Every one reached the server. |
+| `inner` | `debug ssh add inner spike-inner` (the alias's `ProxyJump spike-bastion-a,spike-bastion-b`), passwords put in place with `debug secrets store` | both hops answered from the keychain with **different** passwords, destination by key; `ls -R data`, write, `cat`, rename, delete, all confirmed on `inner` two hops away. |
+| `enc` | `debug ssh add enc alec@192.168.64.1:2201 --identity ~/.ssh/sshdrive-spike-enc` | passphrase from `passphrase:/Users/alec/.ssh/sshdrive-spike-enc`, no tty anywhere; write, `cat`, rename, delete. |
+
+All three came back after `sshdrive agent restart` without being re-added: `config.json` says
+`mounted`, and `DomainManager.start()` spawns a master per location.
+
+Two things worth knowing before repeating this:
+
+- **A name the server no longer has stays in the mount.** Change detection is milestone 6, so a
+  directory removed on the server by hand keeps its index row and keeps showing up. Nothing is
+  wrong; there is simply nothing yet that notices.
+- **`weird/` is served as it is.** `$(echo pwned)`, `quote'name`, `back\slash`, `*star*`,
+  `[bracket]`, `space in name`, a name containing a newline and `utf8-café` all list and open
+  through `ls -R` in the mount. The non-UTF-8 name is skipped, which is milestone 3's `hidden = 2`
+  row rather than a real answer.
+
+### The two-hop chain, as the master actually ran it
+
+`ps` while `inner` was mounted, elided:
+
+```
+/usr/bin/ssh -N -o ControlMaster=yes -o ControlPath=$TMPDIR/sshdrive-90ea6950 -o ControlPersist=no
+  … -o IdentityAgent=none
+  -o ProxyCommand='/usr/bin/ssh' '-W' '%h:%p' '-o' 'ControlMaster=no' '-o' 'ControlPath=none' …
+     '-o' 'ProxyCommand='\''/usr/bin/ssh'\'' '\''-W'\'' '\''%%h:%%p'\'' … '\''spike-bastion-a'\'''
+     '-o' 'ProxyJump=none' 'spike-bastion-b'
+  -o ProxyJump=none spike-inner
+```
+
+The three things §6.1 insists on are all visible: `ProxyCommand` written **before**
+`ProxyJump=none` at both levels, `%h:%p` doubled to `%%h:%%p` for the hop one level down, and
+`ControlPath=none` on every hop. A user's own multiplexing master for the same bastion
+(`ssh -N -M -o ControlPath=~/.ssh/cm-hop@192.168.64.1-2210`, which the testbed's `~/.ssh/config`
+sets up precisely so this can be falsified) was running throughout, and our hop did not attach to
+it.
+
+### S2 items this pass answered
+
+- **The login shell snapshot, from the launchd-started agent: PASS.** `sshdrive doctor` now prints
+  it. It reports `/bin/zsh` and the Homebrew `PATH` (`/opt/homebrew/bin` and the rest), which
+  launchd's own `/usr/bin:/bin:/usr/sbin:/sbin` does not have - that is the `ProxyCommand` that
+  calls a Homebrew tool, working.
+- **A key reachable only through an `SSH_AUTH_SOCK` exported in `.zshrc`: PASS.** With
+  `export SSH_AUTH_SOCK=/tmp/sshdrive-s2-agent` appended to a throwaway `~/.zshrc` and the agent
+  restarted, `doctor` reported that socket in place of launchd's Apple `ssh-agent` listener
+  (`/var/run/com.apple.launchd.*/Listeners`), and the agent pass below authenticated through it.
+  `.zshrc` was restored afterwards.
+- **The two-step collect connection, first pass, against a key `ssh-agent` already holds: PASS.**
+  `~/.ssh/sshdrive-spike-enc` loaded into the agent; `debug secrets connect --purpose collect
+  --identity ~/.ssh/sshdrive-spike-enc` (which runs `IdentityAgent=none`) raised the **passphrase**
+  prompt rather than signing through the agent: `prompts 1`, `answeredFromKeychain 1`,
+  `exitStatus 0`. Delete the keychain item and the same prompt is recorded as a miss keyed
+  `passphrase:/Users/alec/.ssh/sshdrive-spike-enc` - which is exactly what `add` relays to the
+  terminal and then stores - after which `ssh` falls through to `alec@192.168.64.1's password: `,
+  recorded as a second miss keyed by the destination. That second miss is §4.2's "your key files
+  did not authenticate and the server accepts passwords" branch, visible in the data.
+- **The second pass, for an agent-only key: PASS.** A fresh ed25519 key added to `ssh-agent`, its
+  public half appended to `deb`'s `authorized_keys`, and the **private file deleted**. First pass
+  (`IdentityAgent=none`): `exitStatus 255`, one password prompt,
+  `Permission denied (publickey,password)`. Second pass (`--with-key-agent`): `exitStatus 0` with
+  **zero prompts**. That is the `agentDependent` recording, end to end.
+- **`agent refused operation` could not be provoked here, and the reason matters.** OpenSSH's own
+  `ssh-agent` locked with `ssh-add -x` does not refuse a signature: it reports *no identities*, and
+  `ssh` exits with a plain `Permission denied (publickey,password)`. A socket whose agent has been
+  killed, and a socket path that no longer exists, both produce the same line at `LogLevel=ERROR`.
+  So §6.1's conclusion is stronger than it was written: stderr distinguishes **none** of the three
+  key-agent states, not only the missing-socket one, and the pre-spawn `IdentityAgentCheck` probe
+  is the only signal for a locked agent as well as an absent one. The `agent refused operation`
+  string stays in the classifier because 1Password and Secretive are documented to produce it;
+  neither is installable on this VM. §6.1 and §13 say so now.
+
+### Throughput, as far as a container on the same Mac can say
+
+The integration tests print rather than assert, and a `SSHDRIVE_TESTBED=1` run against
+`spike-deb` (OpenSSH 9.2) says:
+
+```
+[spike-deb] limits: maxPacketLength 262144, maxReadLength 261120,
+                    maxWriteLength 261120, maxOpenHandles 20475
+[deb] pipelined write 64 MiB in 0.49 s = 129.6 MiB/s
+[deb] pipelined read  64 MiB in 0.25 s = 252.1 MiB/s
+[S2]  64 MiB: sshdrive 0.25 s (252.1 MiB/s); sftp(1) 0.68 s (94.6 MiB/s)
+[deb] readdir data/many: 10000 entries in 0.10 s
+```
+
+Sixteen requests in flight at the server's own 255 KiB read size beats `sftp(1)` by about
+2.7x here, which is what §6.2 meant by "`sftp(1)`-class throughput", and the 255 KiB inside
+a 256 KiB packet that §6.2 quotes is confirmed on the wire. The 1 GB file
+(`BIG_FILE: "1"` on the `deb` service) and the `rsync` comparison are still not run, and
+none of this is a NAS over a network: a container on the same Mac is a floor.
+
+### Still needs a real Mac
+
+Unchanged from the S2 row of §11, and none of it is reachable from a headless VM: Tailscale SSH's
+`none` auth (the testbed's `nopw` account is the same wire outcome, not the same implementation),
+1Password or Secretive behind `IdentityAgent`, Apple's `UseKeychain`, a FIDO key's user-presence
+notice and the 60 s authentication deadline firing against a touch, and the screen-unlock and
+present-user re-arm after a deadline stop (§4.2, §5.6). The FIDO and PIN rows of §4.2's
+classification table remain format strings plus unit tests.
+
+### One trap this pass found
+
+`ssh -O exit` over the control socket is how the agent sweeps orphans at start, and it works
+(`Exit request sent.`, the master dies). But an orphan whose socket has **already** been unlinked
+cannot be reached at all, and that is what a test leaves behind when it shuts its master down in a
+detached `Task` inside a `defer`: the task can outlive the test process. Both testbed test files now
+shut the master down in `tearDown`.
+
+### State the VM was left in
+
+No File Provider domains, no locations in `config.json`, `~/.zshrc` restored, the throwaway
+`ssh-agent` and its key gone from the VM and from `deb`'s `authorized_keys`. Keychain items left in
+place on purpose, for whoever picks this up: `password:pw@192.168.64.1:2201`,
+`passphrase:/Users/alec/.ssh/sshdrive-spike-enc`, `password:hop@192.168.64.1:2210`,
+`password:hop@bastion-b:22`, `password:alec@inner:22`. Delete them with
+`sshdrive debug secrets delete --key <account>`.
+
+---
+
+## 2026-09-04 (night) - S2 askpass: the token protocol, the keychain, and the prompts `ssh` really sends
+
+Same headless VM (macOS 26.4.1 arm64, `OpenSSH_10.2p1, LibreSSL 3.3.6`), the signed Debug
+build from `MAC_DIR=~/sshdrive-secrets scripts/mac-build.sh signed`, installed over
+`/Applications/SSH Drive.app` with `ditto` (never `rm -rf` plus a copy - that is the S1 f2
+trap) and restarted with `open -g`. Testbed up on the Mac. Milestone 2 code: the real
+`Secrets` keychain store, the askpass broker, `sshdrive-askpass`, and the agent's
+askpass-only XPC interface.
+
+### The prompt strings, captured rather than assumed
+
+An `SSH_ASKPASS` script that logged `argv[1]` and `SSH_ASKPASS_PROMPT` and answered
+nothing, run against the testbed from the VM. Verbatim, **trailing spaces included**:
+
+| What | `argv[1]` | `SSH_ASKPASS_PROMPT` |
+|---|---|---|
+| password (`pw@…:2201`) | `pw@192.168.64.1's password: ` | **unset** |
+| passphrase (`-i ~/.ssh/sshdrive-spike-enc`) | `Enter passphrase for key '/Users/alec/.ssh/sshdrive-spike-enc': ` | **unset** |
+| keyboard-interactive (`kbd@…:2204`) | `(kbd@192.168.64.1) Password: ` | **unset** |
+| host key, empty `known_hosts`, `StrictHostKeyChecking=ask` | `The authenticity of host '[192.168.64.1]:2201 ([192.168.64.1]:2201)' can't be established.\nED25519 key fingerprint is: SHA256:sZBoBnxDlU39oYKVYqzjq1RLWQPpnryr1+EXhXWDt3w\nThis key is not known by any other names.\nAre you sure you want to continue connecting (yes/no/[fingerprint])? ` | **unset** |
+
+`strings /usr/bin/ssh` gives the format strings behind them, and the two we cannot raise
+on this VM: `%s@%s's password: `, `Enter passphrase for key '%.100s': `,
+`The authenticity of host '%.200s (%s)' can't be established`,
+`Are you sure you want to continue connecting (yes/no/[fingerprint])? `,
+`Are you sure you want to continue connecting (yes/no)? `,
+`Warning: the %s host key for '%.200s' differs from the key for the IP address '%.128s'`,
+`Confirm user presence for key %s %s`, `Enter PIN for %s key %s: `, `Enter PIN for '%s': `.
+
+### The §4.2 assumption that failed
+
+**The host-key question does not set `SSH_ASKPASS_PROMPT=confirm`.** §4.2's table and §4.3
+both say it does. It arrives with the variable unset, exactly like a password prompt:
+`ssh` sets the hint only for `RP_ASK_PERMISSION` ("confirm") and `notify_start` ("none"),
+and the host-key question goes through `read_passphrase(prompt, RP_ECHO)`. Classifying on
+the hint would have made the agent answer a **stored password** to "Are you sure you want
+to continue connecting". The classifier now matches the question's own text first and
+treats the hint as corroboration. §4.2, §4.3 and §13 corrected (2026-09-04). Nothing we
+raised on this VM produced `confirm` at all; the branch is kept and still refused outside
+`add`.
+
+Two smaller ones:
+
+- **`Enter passphrase for key '%.100s'` truncates.** A path over 100 bytes reaches askpass
+  cut short, so the prompt text alone cannot be the keychain key. The broker maps the
+  prefix onto the asking `ssh`'s own `identityfile` list from the same `ssh -G` resolution
+  and keys on the full path (§4.2, §13).
+- **A changed host key raises no prompt at all** under `StrictHostKeyChecking=ask`: `ssh`
+  prints the REMOTE HOST IDENTIFICATION HAS CHANGED banner and exits, which is the stderr
+  path §4.3 already describes. Only an *unknown* host asks.
+
+### An OpenSSH ordering trap, for §6.1
+
+**`-o ProxyJump=none` before `-o ProxyCommand=…` silently discards the ProxyCommand.**
+readconf takes the first setting of each keyword and `ProxyJump none` marks the jump host
+as set, after which `ProxyCommand` is skipped: the master then tries to resolve the inner
+hostname itself and dies with `Could not resolve hostname inner`. With `ProxyCommand`
+given **first** and `ProxyJump=none` after, `ssh -G` shows the proxycommand and the chain
+works, and a `ProxyJump` in the user's config is still cancelled. §6.1 says to do both but
+not in which order; the order is load-bearing.
+
+### What was proved end to end, from the launchd-started agent
+
+Hooks used: `sshdrive debug secrets store|lookup|delete|list|classify|connect`
+(documented in `docs/skeleton-notes.md`). Every `connect` spawns a real `/usr/bin/ssh`
+from the agent's own environment with `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE=force` and
+`SSHDRIVE_ASKPASS_TOKEN` set, and no tty anywhere.
+
+- **The real keychain from the agent: PASS.** `store` / `lookup` / `delete` / `list`
+  against the data-protection keychain, `kSecAttrAccessGroup =
+  RWGDZAYBM8.org.shirls.sshdrive`, `kSecUseDataProtectionKeychain = true`,
+  `kSecAttrAccessible = kSecAttrAccessibleAfterFirstUnlock`. `list` reports
+  `password stored for pw@192.168.64.1` / `passphrase stored for ~/.ssh/sshdrive-spike-enc`,
+  which is §4.2's `list`/`show` wording.
+- **Password auth through askpass: PASS.**
+  `debug secrets connect --destination pw@192.168.64.1 --port 2201` -> `exitStatus 0`,
+  `stdout "AUTH-OK-PASSWORD"`, `prompts 1`, `misses []`. The password came from
+  `password:pw@192.168.64.1:2201`.
+- **Encrypted key through askpass: PASS.** Same hook with
+  `--identity ~/.ssh/sshdrive-spike-enc` against `alec@192.168.64.1:2201` ->
+  `exitStatus 0`, `stdout "AUTH-OK-PASSPHRASE"`, `prompts 1`, `misses []`, passphrase from
+  `passphrase:/Users/alec/.ssh/sshdrive-spike-enc`.
+- **A `ProxyJump` hop is keyed by its own host: PASS.** Master to `alec@inner` through the
+  agent-built `ProxyCommand` to `hop@192.168.64.1:2210`. Two prompts, **both** answered
+  from the keychain with *different* passwords (`password:hop@192.168.64.1:2210` =
+  `spike-password-a`, `password:alec@inner:22` = `spike-password`), `exitStatus 0`,
+  `stdout "AUTH-OK-CHAIN"`. This is the whole §4.2 hop story working: the hop inherited
+  the master's token, and the agent told it apart by the argv the askpass read with
+  `sysctl KERN_PROCARGS2` and resolved with `ssh -G`.
+- **The host-key question is refused outside `add`: PASS.** A temporary `~/.ssh/config`
+  stanza pointing `UserKnownHostsFile` at an empty file (removed again in the same run)
+  plus `--host-key-checking ask`: the agent recorded the miss, replied a refusal,
+  `ssh` exited 255 with `Host key verification failed.`, and the empty `known_hosts`
+  stayed empty (0 bytes). Nothing was written to the user's real `known_hosts`.
+- **The token is what authorises: PASS.** `sshdrive-askpass` run by hand with no
+  `SSHDRIVE_ASKPASS_TOKEN` exits 1 without contacting the agent; run with a made-up token
+  it reaches the agent and gets
+  `Error Domain=org.shirls.sshdrive.AgentError Code=2 "unknown token"` and exits 1. The
+  second case also proves the listener hands an askpass peer the one-method askpass
+  interface (`AskpassService.register`, matched on the peer's `proc_pidpath`).
+- **An empty answer skips an identity: PASS** (measured with the logging askpass, not the
+  agent). `ssh` offered the encrypted key first, got an empty passphrase, logged
+  `no passphrase given, try next key`, moved to `~/.ssh/sshdrive-spike` and authenticated.
+  That is §4.2's "the agent answers with an empty passphrase ... and nothing is stopped".
+
+Not covered on this VM: the FIDO user-presence notice and the PIN prompt (no security key
+attached), so those two rows of the table are the format strings plus unit tests. The
+collect flow's relay to the terminal has unit coverage and no CLI yet - `sshdrive add`
+arrives in milestone 3.
+
+Left behind on the VM on purpose, for whoever picks S2 up: keychain items
+`password:pw@192.168.64.1:2201`, `passphrase:/Users/alec/.ssh/sshdrive-spike-enc`,
+`password:hop@192.168.64.1:2210` and `password:alec@inner:22`. Delete them with
+`sshdrive debug secrets delete --key <account>`.
 
 ---
 

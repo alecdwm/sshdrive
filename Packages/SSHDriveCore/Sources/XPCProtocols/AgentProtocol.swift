@@ -146,17 +146,11 @@ public let sshDriveXPCInterfaceVersion = 1
         reply: @escaping (Error?) -> Void
     )
 
-    // MARK: askpass
-
-    /// The askpass program forwards ssh's prompt with the one-time token the agent
-    /// minted for that ssh process (section 4.2). `promptKind` is the value of
-    /// SSH_ASKPASS_PROMPT: "confirm", "none", or empty for a secret.
-    func askpassAnswer(
-        token: String,
-        promptKind: String,
-        prompt: String,
-        reply: @escaping (String?, Error?) -> Void
-    )
+    // The askpass path is deliberately NOT on this interface. `sshdrive-askpass` is
+    // handed `SSHDriveAskpassProtocol` and nothing else (AskpassProtocol.swift,
+    // AskpassService.register), so the process that relays ssh's prompts cannot remove a
+    // location or evict a cache, and the processes that can do those cannot ask for a
+    // secret (section 4.2, section 5.2).
 
     // MARK: CLI
 

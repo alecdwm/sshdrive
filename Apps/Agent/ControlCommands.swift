@@ -40,8 +40,11 @@ enum ControlCommands {
         case "debug.fake.add":
             return try await addFakeLocation(arguments)
 
-        case "debug.fake.remove":
-            return try await removeFakeLocation(arguments)
+        case "debug.fake.remove", "debug.ssh.remove":
+            return try await removeLocation(arguments)
+
+        case "debug.ssh.add":
+            return try await addSSHLocation(arguments)
 
         case "debug.fake.list", "list":
             let file = try await DomainManager.shared.configuration()
@@ -193,6 +196,9 @@ enum ControlCommands {
         case "debug.keychain":
             return try keychainRoundTrip(arguments)
 
+        case "debug.secrets":
+            return try await AgentSecretsDebug.run(arguments)
+
         case "debug.signal":
             let location = try await resolveLocation(arguments)
             guard let container = arguments["container"] else {
@@ -295,10 +301,22 @@ enum ControlCommands {
         let sshVersion = SSHProcess.sshVersion()
         check("ssh", sshVersion != nil, sshVersion ?? "cannot run \(SSHProcess.sshBinaryPath)")
 
-        // The login shell snapshot (section 6.1). Milestone 2 takes it.
+        // The login shell snapshot (section 6.1): `PATH` and `SSH_AUTH_SOCK` as a fresh
+        // login shell has them, which is what makes a key agent socket exported from
+        // `.zshrc` and a `ProxyCommand` in /opt/homebrew/bin work from launchd.
+        let snapshot = await AgentSSHEnvironment.shared.current()
+        var snapshotReport = "\(snapshot.shell): PATH \(snapshot.path ?? "(launchd's)")"
+        snapshotReport += snapshot.sshAuthSock.map { ", SSH_AUTH_SOCK \($0)" } ?? ", no SSH_AUTH_SOCK"
+        if snapshot.interactiveOnly {
+            // csh and tcsh accept -l only as the sole flag, so those two are read with
+            // -ic: interactive but not login, which misses a PATH set only in .login.
+            snapshotReport += "; read with -ic, so a PATH set only in .login is missed"
+        }
         check(
-            "login shell snapshot", nil,
-            "not taken: the snapshot arrives in milestone 2 with the transport")
+            "login shell snapshot", snapshot.succeeded ? true : nil,
+            snapshot.succeeded
+                ? snapshotReport
+                : "failed (\(snapshot.diagnostic ?? "no diagnostic")); using launchd's PATH and SSH_AUTH_SOCK")
 
         // Domains the system currently holds for us.
         do {
@@ -388,7 +406,96 @@ enum ControlCommands {
         ])
     }
 
-    private static func removeFakeLocation(_ arguments: [String: String]) async throws -> Data {
+    /// `sshdrive debug ssh add <name> <user@host[:port]>`: an ssh-backed location and its
+    /// domain, with no `ssh -G` display and no relayed prompts.
+    ///
+    /// This is not `sshdrive add`. The real one (milestone 3, section 8) shows the
+    /// resolved configuration, runs the two-pass collect connection and relays every
+    /// prompt to the terminal; this writes the location from what it was given and
+    /// connects with whatever the keychain already holds, which is what milestone 2 needs
+    /// to prove the transport end to end. Put the secrets in place with
+    /// `sshdrive debug secrets store` first.
+    private static func addSSHLocation(_ arguments: [String: String]) async throws -> Data {
+        guard let name = arguments["name"], let destination = arguments["destination"] else {
+            throw SSHDriveAgentError.notImplemented.asNSError(
+                "debug ssh add needs a name and user@host[:port].")
+        }
+        // `user@host:port` is our own sugar; `ssh` does not parse it (section 6.1), so it
+        // is split here and passed as `-o User=` and `-o Port=`.
+        var body = destination
+        var user: String?
+        if let at = body.lastIndex(of: "@") {
+            user = String(body[body.startIndex ..< at])
+            body = String(body[body.index(after: at)...])
+        }
+        var port: Int?
+        if let colon = body.lastIndex(of: ":"), let parsed = Int(body[body.index(after: colon)...]) {
+            port = parsed
+            body = String(body[body.startIndex ..< colon])
+        }
+        guard !body.isEmpty else {
+            throw SSHDriveAgentError.notImplemented.asNSError(
+                "debug ssh add: the destination must be [user@]host[:port].")
+        }
+        var sshOptions: [String] = []
+        if let identity = arguments["identity"], !identity.isEmpty {
+            // Section 4: `--identity` stores the override with `IdentitiesOnly=yes`, so
+            // the named key is the only one offered and a touch key sitting in `~/.ssh`
+            // never gets its turn ahead of it (section 4.2).
+            sshOptions += ["-o", "IdentitiesOnly=yes"]
+        }
+        if let jump = arguments["jump"], !jump.isEmpty {
+            // Stored the way a `~/.ssh/config` ProxyJump would resolve: `ssh -G` reports
+            // it and the agent rebuilds every hop as its own ProxyCommand. It is never
+            // handed to `ssh` as an option (section 6.1, SSHCommandBuilder.master).
+            _ = try JumpHop.parseChain(jump)
+            sshOptions += ["-o", "ProxyJump=\(jump)"]
+        }
+        var location = Location(
+            nickname: name,
+            host: body,
+            user: user,
+            port: port,
+            identityFile: (arguments["identity"] as NSString?)?.expandingTildeInPath,
+            sshOptions: sshOptions,
+            remotePath: arguments["remotePath"],
+            mounted: true,
+            backend: .sftp)
+        if let existing = try? await DomainManager.shared.location(named: name) {
+            location.id = existing.id
+        }
+        let created = location
+        try await DomainManager.shared.mutateConfiguration { file in
+            file.locations.removeAll { $0.id == created.id }
+            file.locations.append(created)
+        }
+        do {
+            let runtime = try await DomainManager.shared.runtime(for: created)
+            let root = try await runtime.rootDescription()
+            // One listing before the domain exists, so the mount is not empty the first
+            // time Finder looks at it.
+            let items = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier)
+            try await DomainManager.shared.addDomain(for: created)
+            return try json([
+                "id": created.id, "name": created.displayName, "host": created.host,
+                "user": created.user ?? "", "port": created.port ?? 22,
+                "remotePath": root, "entries": items.count,
+                "jump": arguments["jump"] ?? "",
+                "mount": "~/Library/CloudStorage/SSHDrive-\(created.displayName)",
+            ])
+        } catch {
+            // A location that cannot connect is not left in config.json pretending to be
+            // mounted: `debug ssh add` is all-or-nothing, unlike the real `add`, which has
+            // a terminal to explain itself to.
+            await DomainManager.shared.dropRuntime(locationID: created.id)
+            try? await DomainManager.shared.mutateConfiguration { file in
+                file.locations.removeAll { $0.id == created.id }
+            }
+            throw error
+        }
+    }
+
+    private static func removeLocation(_ arguments: [String: String]) async throws -> Data {
         let location = try await resolveLocation(arguments)
         try await DomainManager.shared.removeDomain(for: location)
         await DomainManager.shared.dropRuntime(locationID: location.id)

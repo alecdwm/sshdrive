@@ -368,9 +368,27 @@ The agent classifies the prompt:
 | `Enter passphrase for key '<path>':` | `passphrase:<path>` | the stored passphrase |
 | `<user>@<hostname>'s password:` | `password:<user>@<hostname>:<port>`, the port from the `ssh -G` resolution of the asking `ssh` (below) | the stored password |
 | a keyboard-interactive password prompt, which `ssh` presents as `(<user>@<host>) Password:` with `<host>` replaced by `HostKeyAlias` when the config sets one | `password:<user>@<hostname>:<port>` for the destination of the asking `ssh`, identified by its argv and resolved with `ssh -G`; nothing is parsed out of the prompt text | the stored password |
-| `SSH_ASKPASS_PROMPT=confirm` (the host-key question, §4.3) | none | during `add`: relayed to the terminal; otherwise refused |
+| the host-key question of §4.3, recognised **by its text**: it begins `The authenticity of host '<host>' can't be established` (or `Warning: the <type> host key for … differs from the key for the IP address …`) and ends `Are you sure you want to continue connecting (yes/no/[fingerprint])? ` | none | during `add`: relayed to the terminal; otherwise refused |
+| `SSH_ASKPASS_PROMPT=confirm`, which `ssh` sets only for its own permission questions | none | during `add`: relayed to the terminal; otherwise refused |
 | `SSH_ASKPASS_PROMPT=none` (`Confirm user presence for key …`) | none | acknowledged; during `add` this marks the key as touch-required (below) |
 | `Enter PIN for … key`, a one-time code, anything else | none | refused |
+
+**The host-key question carries no hint, so the text is what classifies it.**
+`ssh` sets `SSH_ASKPASS_PROMPT` only where `read_passphrase` is called with
+`RP_ASK_PERMISSION` (`confirm`) or from `notify_start` (`none`); the
+host-key question goes through `read_passphrase(prompt, RP_ECHO)` and arrives
+with the variable **unset**, indistinguishable by hint from a password prompt.
+Measured on `OpenSSH_10.2p1` against the testbed with an empty `known_hosts`
+(2026-09-04, `docs/spikes/results.md`, "S2 askpass"). An agent that trusted the
+hint would answer a stored password to "Are you sure you want to continue
+connecting", so the classifier matches the question's own text first and treats
+the hint as corroboration. `confirm` still exists and is still refused outside
+`add`; nothing we have seen produces it.
+
+The passphrase prompt names the key through `%.100s`, so a path longer than 100
+bytes arrives truncated. The agent maps the prefix back onto the asking `ssh`'s
+own `identityfile` list from the same `ssh -G` resolution, and keys on the full
+path; with no unique match it takes the prompt at its word.
 
 Keying passwords by `<user>@<hostname>:<port>` rather than by location is
 what makes `ProxyJump` work with password auth on both hops: each hop's
@@ -566,7 +584,8 @@ user, once, and the next time they touch the mount it tries again.
 - The `add` connection (§4.2) runs with `ssh`'s default
   `StrictHostKeyChecking=ask`. An unknown host produces `ssh`'s own
   fingerprint question, which arrives at askpass with
-  `SSH_ASKPASS_PROMPT=confirm`; the agent relays it to the CLI, the user
+  `SSH_ASKPASS_PROMPT` **unset** and is recognised by its text (§4.2); the agent
+  relays it to the CLI, the user
   answers on the terminal, and `ssh` writes the answer to the user's
   `known_hosts` exactly as it would have from a tty. `--trust-first`
   passes `StrictHostKeyChecking=accept-new` instead and no question is
@@ -1588,7 +1607,17 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   backoff of §6.3, its cap raised from 60 s to 5 minutes for this one
   case, since a locked key agent stays locked for hours and a socket
   probe every minute buys nothing, and the mount comes up once the key
-  agent is unlocked without the user running `sshdrive test`.
+  agent is unlocked without the user running `sshdrive test`. The probe
+  carries more weight than "the socket may not exist yet" suggests:
+  measured against OpenSSH's own `ssh-agent` on 2026-09-04, a **locked**
+  agent does not refuse a signature either, it answers that it holds no
+  identities, and `ssh` then exits with the same bare
+  `Permission denied (publickey,password)` that a missing socket, a dead
+  socket and a genuine refusal all produce at `LogLevel=ERROR`. So stderr
+  separates none of the key-agent states and the pre-spawn probe is the
+  only signal for all of them; the `agent refused operation` text stays
+  because 1Password and Secretive are the two that emit it, and it is
+  corroboration rather than the test.
   Reconnection stops only after `ssh` has been refused with its keys
   actually offered. A location stopped by
   the authentication deadline, as opposed to a refusal, is re-armed for
@@ -1614,9 +1643,25 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   step's `IdentityAgent=none` pass so a bastion passphrase is never seen
   and stored, and keep the config's timeouts. So the agent never passes a
   `ProxyJump` through. When `ssh -G` resolves a `proxyjump`, the agent
-  cancels it with `-o ProxyJump=none` and supplies its own
-  `-o ProxyCommand='/usr/bin/ssh -W %h:%p <overrides> -l <jump-user> -p <jump-port> <jump-host>'`,
-  recursively for a multi-hop chain. The user and port are separate
+  supplies its own
+  `-o ProxyCommand='/usr/bin/ssh -W %h:%p <overrides> -l <jump-user> -p <jump-port> <jump-host>'`
+  and cancels the resolved jump with `-o ProxyJump=none` **after** it,
+  recursively for a multi-hop chain. The order of those two options is
+  not cosmetic: both keywords write the same field, and
+  `-o ProxyJump=none` placed ahead of `-o ProxyCommand=` makes `ssh`
+  discard the `ProxyCommand` outright, so `ssh -G` prints neither and the
+  master resolves the destination hostname itself, which behind a bastion
+  does not exist (measured against OpenSSH 10.2p1 on macOS 26.4,
+  2026-09-04). Nesting needs a second escape of its own. `ssh`
+  percent-expands the **whole** `ProxyCommand` string before handing it
+  to `/bin/sh -c`, including the `%h` and `%p` that belong to a hop
+  nested inside it, so an inner hop's tokens are doubled once for every
+  level it sits below the master: hop *n* carries `-W %h:%p`, hop *n-1*
+  carries `-W %%h:%%p`, hop *n-2* `-W %%%%h:%%%%p`, and any other `%` in
+  a nested value is doubled with them. Without that, hop 1 dials the
+  destination's host and port instead of hop 2's and the connection ends
+  at hop 2's host-key check, complaining that the identification of the
+  bastion has changed (measured the same day). The user and port are separate
   flags because the `user@host:port` form is sugar of our CLI that `ssh`
   itself does not parse: `ssh -G alec@10.0.0.1:2222` resolves the host to
   the literal `10.0.0.1:2222`. `<overrides>` are the same options as the
@@ -1659,13 +1704,20 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   `aws` from `/opt/homebrew/bin`, works in a terminal and is invisible to
   launchd. The agent therefore runs the user's login shell, taken from
   `getpwuid` rather than `$SHELL`, as
-  `<shell> -ilc '/usr/bin/printf "\0<sentinel>\0"; /usr/bin/env -0; /usr/bin/printf "<sentinel>\0"'`
+  `<shell> -ilc '/usr/bin/printf "\000"; /usr/bin/printf "%s" "<sentinel>"; /usr/bin/printf "\000"; /usr/bin/env -0; /usr/bin/printf "%s" "<sentinel>"; /usr/bin/printf "\000"'`
   with stdin from `/dev/null`, `TERM=dumb` and a 10 s timeout, and takes
   `PATH` and `SSH_AUTH_SOCK` from the NUL-separated records between the
   two sentinels, at agent start and again on every `add`, `test` and
   `passwd`. `env -0` rather than a `printf` of the two variables because
   the command has to be valid in every shell: in fish `"$PATH"` expands
-  to the list joined by spaces, not colons. The sentinel, a random
+  to the list joined by spaces, not colons. Each NUL is printed by a `printf` of
+  its own rather than embedded in the sentinel's format string: `printf`
+  reads `\0` together with the octal digits that follow it as a single
+  character, so `printf "\0<sentinel>"` with a sentinel beginning with a
+  digit silently loses its first bytes and the marker is never found
+  (measured on macOS 26.4, 2026-09-04: `/usr/bin/printf
+  "\0123456789abcdef"` writes a newline and `3456789abcdef`). §9.2's
+  remote scripts print their opening sentinel the same way. The sentinel, a random
   128-bit value chosen per run exactly as for remote scripts (§9.2), is
   there because rc files write to the same stdout: a "Welcome back" from
   `.zshrc` lands in front of `env`'s first record and glues onto it, and
@@ -1707,11 +1759,18 @@ is a few thousand lines, has no dependencies,
 and is tested against OpenSSH's `sftp-server` directly on stdio without any
 network.
 
-Requests are pipelined: reads and writes keep up to the server-advertised
-`limits@openssh.com` window in flight (or a conservative 32 KB × 16 without
-it), which is what gives `sftp(1)`-class throughput. `readdir` pages are
-requested back to back. The client exposes a `protocol SFTPTransport` whose
-methods take `RelativePath` values only (§9.1).
+Requests are pipelined: reads and writes keep sixteen requests in flight, each
+of the largest size the server will take, which is what gives `sftp(1)`-class
+throughput. `limits@openssh.com` sizes the request, not the window: it
+advertises `max-packet-length`, `max-read-length`, `max-write-length` and
+`max-open-handles`, and says nothing at all about how many requests may be
+outstanding, so the chunk size is the server's and the depth is ours. OpenSSH
+9.2 and 9.7 both answer 255 KiB reads and writes inside a 256 KiB packet
+(measured against the testbed, 2026-09-04), which makes the window about 4 MiB;
+without the extension the chunk falls back to a conservative 32 KB, and sixteen
+of those is a 512 KiB window. `readdir` pages are requested back to back.
+The client exposes a `protocol SFTPTransport` whose methods take
+`RelativePath` values only (§9.1).
 
 **Transfers are scheduled, not queued.** Every transfer of a location
 runs on the bulk channel, and SFTP requests are independent per handle,
@@ -1924,7 +1983,28 @@ loops reading stdin, and the agent writes a heartbeat line every 15 s.
 When no line has arrived for 60 s, or stdin hits EOF, the script kills
 its child and exits. `read -t` is used where `sh` supports it (bash,
 zsh, ksh, busybox) and a `sleep`-and-mtime watchdog where it does not
-(dash); the probe records which. The same wrapper runs the sweep and the
+(dash); the script chooses between them itself, in a subshell so that
+dash's `read: Illegal option -t` cannot take the shell down with it, and
+the probe records which. The watchdog is not the rare branch: the exec
+channel runs `sh`, not the account's login shell, and `/bin/sh` is dash
+on Debian and Ubuntu, so most Linux servers take it however their users
+log in (measured 2026-09-04). Its stamp file is written with `touch`
+rather than `:` and its path is left unquoted so `$TMPDIR` expands: a
+redirection failure on a POSIX *special* builtin ends a non-interactive
+shell outright, which would leave the wrapper dead and the child
+running - the one failure this whole mechanism exists to prevent. Two
+more details of that branch are not optional, and both were found by
+watching a wrapper kill a healthy child five seconds in (2026-09-04).
+The reader that consumes the heartbeat lines runs in the background, and
+with job control off a background child's fd 0 is replaced by
+`/dev/null`; `<&0` on the child cannot recover it, because the shell
+substitutes fd 0 in the forked child and only then applies that
+command's redirections. The channel's stdin has to be duplicated onto
+another descriptor in the *parent* (`exec 7<&0`) and the reader loop fed
+from that. And every subshell inherits the wrapper's cleanup `EXIT`
+trap and runs it when it exits, so the one-second `read -t` probe would
+otherwise delete the stamp file the moment it finished; each subshell
+clears the trap first. The same wrapper runs the sweep and the
 helper, so nothing we start on a server outlives our connection by more
 than a minute. The helper also stops on its own when its pings stop
 (below), so for it the wrapper is a second line of defence rather than
@@ -2931,9 +3011,14 @@ So:
   find the rc file; the probe (§8.1) runs the same check first, so the
   case is diagnosed at `add`. One more case wears the same symptom: an
   account under `ForceCommand internal-sftp` opens the exec channel and
-  answers with SFTP bytes instead of the sentinel. The probe recognises
-  the `SSH_FXP_VERSION` framing and reports "no shell access
-  (ForceCommand)", not unusable shell output.
+  answers with something that is not the sentinel. Which something
+  depends on the server: it may be SFTP bytes, and it may be a plain-text
+  refusal, `This service allows sftp connections only.`, which is what
+  OpenSSH 9.2 writes when a `ForceCommand internal-sftp` account is asked
+  to exec (measured on the testbed's `forcesftp` account, 2026-09-04).
+  The probe recognises both - the `SSH_FXP_VERSION` framing and that
+  sentence - and reports "no shell access (ForceCommand)", not unusable
+  shell output.
 - **The SFTP subsystem has no sentinel to hide behind.** When the server's
   `Subsystem sftp` names an external `sftp-server` rather than
   `internal-sftp`, sshd starts it through the login shell too, and the
@@ -2957,6 +3042,19 @@ So:
   while the shell was still parsing would vanish into its buffer. Once
   the sentinel is out, the whole script is already in that buffer and
   the `exec` follows without another read.
+- **The script is one compound command.** That block-buffered read is a
+  hazard for every script the heartbeat wrapper (§6.4) carries, not only
+  the `sftp-server` one, because the wrapper reads its heartbeat lines
+  off the same stdin the script arrived on: left as a flat sequence of
+  commands, a script longer than the shell's read block still has its
+  tail in the pipe when the wrapper's reader starts, the reader consumes
+  the rest of the script, and the shell then reads a heartbeat line as a
+  command - and `.` is a POSIX *special* builtin, so `.` with no argument
+  ends a non-interactive shell outright. So every script is wrapped in a
+  `{ … }` group ending in an `exit`: a compound command must be parsed in
+  full before any of it runs, which forces the shell to read the script
+  to its end before the sentinel is printed, and the `exit` stops it ever
+  reading stdin as script again (2026-09-04).
 - **Background children never share the script's stdin.** `find` and the
   helper are started with `</dev/null`, so the
   wrapper is the only reader of the heartbeat lines and a child cannot
@@ -3203,6 +3301,12 @@ there, so that this list cannot drift from the body.
 - **Prompts that need a human every time are refused at `add`;** a touch
   refusal names the key and the `--identity` that skips it, chosen over
   pinning the successful identity automatically (§4.2).
+- **The host-key question reaches askpass with no `SSH_ASKPASS_PROMPT` at all**
+  and is classified by its text, not by the `confirm` hint the doc assumed;
+  measured on OpenSSH 10.2p1 (2026-09-04, §4.2, §4.3).
+- **A passphrase prompt names its key through `%.100s`,** so a long path is
+  mapped back onto the `identityfile` list of the same `ssh -G` resolution
+  before it becomes a keychain key (2026-09-04, §4.2).
 - **Authentication has a 60 s deadline from spawn,** watching for the
   control socket; an `agentDependent` timeout stops reconnection and is
   re-armed once on screen unlock or a request with the user present;
@@ -3211,6 +3315,12 @@ there, so that this list cannot drift from the body.
   §6.1).
 - **Key agents are for `agentDependent` locations only;** every other
   location runs with `IdentityAgent=none` (§4.2, §6.1).
+- **The pre-spawn key-agent socket probe is the only signal for every
+  key-agent state, not only an absent socket** — a locked OpenSSH agent reports
+  that it holds no identities and `ssh` exits with a bare
+  "Permission denied (publickey)", exactly as a missing socket does; the
+  `agent refused operation` text corroborates, it does not decide (2026-09-04,
+  §6.1).
 - **`ssh` runs with the login shell's `PATH` and `SSH_AUTH_SOCK`,**
   snapshotted through `env -0` between two sentinels; `add` verifies
   through the agent (§4.2, §6.1).
@@ -3222,6 +3332,28 @@ there, so that this list cannot drift from the body.
   clients with `-F /dev/null`, `BatchMode=yes` and
   `ProxyCommand=/usr/bin/false`; a hand-written `ProxyCommand ssh …`
   escapes this and `add` says so (§6.1).
+- **The agent-built `ProxyCommand` is written before `ProxyJump=none`,
+  and a nested hop's `%h`/`%p` are doubled once per level** — the reverse
+  order makes `ssh` discard the `ProxyCommand`, and an unescaped nesting
+  has the inner hop dial the destination (2026-09-04, §6.1).
+- **Every sentinel's NUL is printed by a `printf` of its own,** because
+  `printf "\0<sentinel>"` eats the sentinel's leading octal digits
+  (2026-09-04, §6.1, §9.2).
+- **A `ForceCommand internal-sftp` account may answer an exec channel
+  with a plain-text refusal rather than SFTP framing;** the probe
+  recognises both and reports "no shell access" (2026-09-04, §9.2).
+- **The heartbeat wrapper's `sleep`-and-mtime branch is the ordinary
+  Linux path,** because an exec channel runs `sh` and Debian's `sh` is
+  dash; its stamp file is `touch`ed, never `:`-redirected, because a
+  redirection failure on a special builtin ends the shell (2026-09-04,
+  §6.4).
+- **The wrapper's heartbeat reader takes stdin from a descriptor
+  duplicated in the parent, and every subshell clears the `EXIT` trap;**
+  without either the wrapper kills its own healthy child seconds after
+  starting it (2026-09-04, §6.4).
+- **Every `sh -s` script is one `{ … }` group ending in an `exit`,** so
+  the shell parses it whole before the heartbeat reader can eat its tail
+  off the same stdin (2026-09-04, §9.2).
 - **`MaxSessions` is probed;** 2 drops the bulk channel, 1 makes the
   location SFTP-only (§6.1).
 - **Transfers interleave under a scheduler,** four at a time, foreground
@@ -3233,6 +3365,8 @@ there, so that this list cannot drift from the body.
   (§4.3, §6.1).
 - **SFTP status codes are the error model;** nothing reads an errno off
   the wire (§6.2).
+- **`limits@openssh.com` sizes the request, not the window;** the pipeline
+  depth is the client's own, sixteen (2026-09-04, §6.2).
 - **Content versions are size, second-mtime and generation at every
   tier;** ns-mtime and inode only feed change detection (§5.3).
 - **The conflict check includes generation,** read from the row (§5.5).

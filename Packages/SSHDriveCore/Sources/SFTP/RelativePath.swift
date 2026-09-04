@@ -117,6 +117,23 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
         String(decoding: bytes, as: UTF8.self)
     }
 
+    /// Joins to an absolute server root, byte for byte. This is the form that goes on
+    /// the wire: a component need not be valid UTF-8 (section 5.4), so it must never be
+    /// round-tripped through a String on the way there. Only the transport calls this.
+    public func absoluteBytes(root: Data) -> Data {
+        var out = root
+        // A trailing slash on the root would produce "//" here, which is legal but ugly
+        // in a log line; an empty root would produce a relative path, which is not what
+        // any caller means, so it becomes "/" plus the components.
+        while out.count > 1, out.last == 0x2F { out.removeLast() }
+        guard !components.isEmpty else { return out.isEmpty ? Data("/".utf8) : out }
+        for component in components {
+            out.append(0x2F)
+            out.append(component)
+        }
+        return out
+    }
+
     /// Joins to an absolute server root. Only the transport calls this.
     public func absolute(root: String) -> String {
         guard !components.isEmpty else { return root }

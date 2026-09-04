@@ -11,16 +11,26 @@ import Logging
 //     SSHDRIVE_ASKPASS_TOKEN=<one-time token minted by the agent for this ssh process>
 //
 // so every prompt, including host-key confirmations and user-presence notices, arrives
-// here. ssh tags each with SSH_ASKPASS_PROMPT: "confirm" for yes/no questions, "none" for
-// notifications, unset for secrets. This program reads nothing itself: it forwards the
-// prompt and the token to the agent and prints whatever the agent answers.
+// here. ssh tags a notification with SSH_ASKPASS_PROMPT=none and a permission question
+// with "confirm"; a secret carries no tag - and neither does the host-key question, so
+// the agent classifies by the text (section 4.2, and the S2 askpass capture).
 //
-// TODO milestone 2 (Transport): the agent side of this is a stub, so every call is
-// refused. The token protocol shape, the three prompt kinds and the exit codes are here
-// now because the target, its embedded Info.plist and its signing identifier have to
-// exist from milestone 1 for spike S1(d).
+// This program knows nothing and holds nothing. It forwards four things to the agent -
+// the token, the prompt, SSH_ASKPASS_PROMPT, and the argv of its parent ssh, which is how
+// the agent tells a ProxyJump hop apart from the master whose token it inherited - and
+// prints whatever the agent answers. It never reads the keychain, and it never learns
+// which location it is serving: an askpass that did either would be a password oracle for
+// any local process.
+//
+// Exit codes, which are what ssh actually reads:
+//
+//   0 + a line on stdout   the answer
+//   0 + an empty line      "skip this identity"; ssh logs "no passphrase given, try next
+//                          key" and moves on, and for a notification it is the ack
+//   non-zero               no answer: ssh fails the prompt, and with it the connection
 
 let environment = ProcessInfo.processInfo.environment
+// The variable name is section 4.2's, and the agent's AskpassEnvironment builds it.
 let token = environment["SSHDRIVE_ASKPASS_TOKEN"] ?? ""
 let promptKind = environment["SSH_ASKPASS_PROMPT"] ?? ""
 let prompt = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
@@ -29,51 +39,58 @@ Log.askpass.notice(
     "askpass invoked, kind \(promptKind.isEmpty ? "secret" : promptKind, privacy: .public)")
 
 guard !token.isEmpty else {
-    // No token means we were not started by the agent. Answer nothing at all: ssh treats
-    // an empty answer as a skip, which is the safe outcome (section 4.2).
+    // No token means we were not started by an ssh the agent spawned. Answer nothing:
+    // "an askpass invocation with no token ... gets no answer" (section 4.2).
     Log.askpass.error("no SSHDRIVE_ASKPASS_TOKEN in the environment; refusing to answer")
     exit(1)
 }
 
+// The parent is the ssh that invoked us. Its argv carries the destination and, for a
+// ProxyJump hop, that hop's own -p and -W (section 6.1).
+let parentArguments = SSHDriveProcessArguments.parentArguments()
+
 let connection = NSXPCConnection(
     machServiceName: SSHDriveIdentifiers.machServiceName, options: [])
-connection.remoteObjectInterface = SSHDriveXPCInterface.agent
+connection.remoteObjectInterface = SSHDriveXPCInterface.askpass
 connection.resume()
 
 let semaphore = DispatchSemaphore(value: 0)
 var answer: String?
-var failed = false
 
 let proxy = connection.remoteObjectProxyWithErrorHandler { error in
     Log.askpass.error("cannot reach the agent: \(error, privacy: .public)")
-    failed = true
     semaphore.signal()
-} as? SSHDriveAgentProtocol
+} as? SSHDriveAskpassProtocol
 
 if let proxy {
-    proxy.askpassAnswer(token: token, promptKind: promptKind, prompt: prompt) { value, error in
+    proxy.askpassRequest(
+        token: token, promptKind: promptKind, prompt: prompt,
+        parentArguments: parentArguments
+    ) { value, error in
         if let error {
             Log.askpass.error("the agent refused the prompt: \(error, privacy: .public)")
-            failed = true
+        } else {
+            answer = value
         }
-        answer = value
         semaphore.signal()
     }
 } else {
-    failed = true
     semaphore.signal()
 }
 
 // ssh's own authentication deadline is 60 s from spawn (section 4.2); waiting longer here
-// would only keep a process alive that ssh has already given up on.
-if semaphore.wait(timeout: .now() + 55) == .timedOut { failed = true }
+// would only keep a process alive that the agent has already killed.
+if semaphore.wait(timeout: .now() + 55) == .timedOut {
+    Log.askpass.error("the agent did not answer within the deadline")
+    answer = nil
+}
 connection.invalidate()
 
 if let answer {
-    // A "confirm" prompt wants "yes" or "no"; a "none" notification wants nothing; a
-    // secret wants the secret. In every case the agent decided, and this prints it.
+    // An empty answer prints an empty line on purpose: that is the "skip this identity"
+    // of section 4.2, and the acknowledgement of a notification.
     print(answer)
     exit(0)
 }
 
-exit(failed ? 1 : 0)
+exit(1)

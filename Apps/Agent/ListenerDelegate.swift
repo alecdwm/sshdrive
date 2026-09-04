@@ -26,6 +26,11 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
             return false
         }
 
+        // sshdrive-askpass gets the one-method askpass interface and nothing else: the
+        // path that hands out secrets must not also be able to remove a location
+        // (DESIGN.md sections 4.2, 5.2).
+        if AskpassService.register(peer: connection) { return true }
+
         connection.exportedInterface = SSHDriveXPCInterface.agent
         connection.exportedObject = AgentService(connection: connection)
         // The extension exports its callback object on the same connection; the CLI and

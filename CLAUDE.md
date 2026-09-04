@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (3403 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (3550 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -126,56 +126,67 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 194-230 | §3.1 Identifiers | the table above, plus per-target entitlements |
 | 231-278 | §4 Location model | `config.json` location schema field by field |
 | 279-322 | §4.1 Reusing `~/.ssh/config` | `ssh -G` resolution, attribution by diffing against `-F /dev/null`, the fixed override set |
-| 323-561 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline and its re-arm |
-| 562-590 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
-| 591-592 | §5 The File Provider extension | (heading) |
-| 593-629 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
-| 630-743 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
-| 744-975 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, anchors, no tombstones, backup + reconcile-against-replica |
-| 976-1115 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData`, `.DS_Store` |
-| 1116-1252 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the evict that makes them work), stale temp files, recursive delete |
-| 1253-1275 | §5.6 Offline behaviour | situation -> behaviour table; when `disconnect(reason:)` is and is not used |
-| 1276-1387 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, hidden-link collisions |
-| 1388-1389 | §6 The background agent | (heading) |
-| 1390-1699 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, `MaxSessions` |
-| 1700-1770 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and the system's six-fetch ceiling, per-request deadlines, why not a library |
-| 1771-1806 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
-| 1807-1853 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
-| 1854-1859 | Tier 0: SFTP poll | `readdir` every root |
-| 1860-1912 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
-| 1913-1932 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
-| 1933-2017 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
-| 2018-2056 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
-| 2057-2115 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2116-2123 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2124-2196 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
-| 2197-2285 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2286-2390 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2391-2430 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2431-2569 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
-| 2570-2684 | §8 The CLI | every command and flag, verbatim |
-| 2685-2805 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 2806-2849 | §9 Security | the security properties in one list |
-| 2850-2902 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
-| 2903-2971 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 2972-3061 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
-| 3062-3120 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 3121-3137 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3138-3184 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3185-3383 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3384-3416 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 323-579 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline and its re-arm |
+| 580-609 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
+| 610-611 | §5 The File Provider extension | (heading) |
+| 612-648 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
+| 649-762 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
+| 763-994 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, anchors, no tombstones, backup + reconcile-against-replica |
+| 995-1134 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData`, `.DS_Store` |
+| 1135-1271 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the evict that makes them work), stale temp files, recursive delete |
+| 1272-1294 | §5.6 Offline behaviour | situation -> behaviour table; when `disconnect(reason:)` is and is not used |
+| 1295-1406 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, hidden-link collisions |
+| 1407-1408 | §6 The background agent | (heading) |
+| 1409-1751 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, `MaxSessions` |
+| 1752-1829 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and the system's six-fetch ceiling, per-request deadlines, why not a library |
+| 1830-1865 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
+| 1866-1912 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
+| 1913-1918 | Tier 0: SFTP poll | `readdir` every root |
+| 1919-1971 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
+| 1972-2012 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
+| 2013-2097 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
+| 2098-2136 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
+| 2137-2195 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2196-2203 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2204-2276 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
+| 2277-2365 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2366-2470 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2471-2510 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2511-2649 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
+| 2650-2764 | §8 The CLI | every command and flag, verbatim |
+| 2765-2885 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
+| 2886-2929 | §9 Security | the security properties in one list |
+| 2930-2982 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
+| 2983-3069 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
+| 3070-3159 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
+| 3160-3218 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
+| 3219-3235 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3236-3282 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3283-3517 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 3518-3550 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
-- [ ] **1. Skeleton** - all four targets sign and launch, XPC between them, the extension's read-only
+- [x] **1. Skeleton** - all four targets sign and launch, XPC between them, the extension's read-only
       index reader (kept or dropped on S3's measurement), `sshdrive doctor` green, and a **fake
       backend** behind `SFTPTransport` that stays as the test double forever. Spikes **S1, S3
-      (fake-backend part), S4, S6**. *Scaffold written 2026-09-03; compiles Debug+Release on the VM, 33/33 package tests pass 2026-09-04.
+      (fake-backend part), S4, S6**. *Done 2026-09-04 except notarization, which is milestone 10:
+      scaffold written 2026-09-03, compiles Debug+Release, signs with a real Apple Development
+      identity and the embedded profile, launches under launchd, XPC works, the domain mounts.
       Spikes: **S1, S4 and S6 done**; S3 done bar s3-9 to s3-14. S1 c2 is closed as "Finder
       offers no cancel control", so the `Progress` cancellation belongs in a milestone 3
       test. See `docs/spikes/`.*
 - [ ] **2. Transport** - `-N` master + mux clients, agent-built `ProxyJump`, login-shell snapshot,
       askpass token protocol + keychain, SFTP client, `RelativePath`, `sh -s` scripts. Spike **S2**.
+      *Modules written and merged 2026-09-04; 214/214 package tests, and three real mounts on the
+      VM through `~/Library/CloudStorage` (plain key, a two-hop `ProxyJump` chain with a password
+      on each hop, an encrypted key with its passphrase in the keychain), each listed, read,
+      written, renamed and deleted. `sshdrive debug ssh add` is the hook that creates one; the real
+      `add` is milestone 3. **S2 is answered except the six items that need a real Mac** (Tailscale
+      `none`, 1Password/Secretive `IdentityAgent`, `UseKeychain`, FIDO touch, the deadline against
+      a touch, the screen-unlock and present-user re-arm). Still open inside milestone 2: the
+      second, bulk SFTP channel and the transfer scheduler (milestone 3's fetching), and the
+      `MaxSessions` probe. See `docs/spikes/milestone-2.md`.*
 - [ ] **3. Read-only** - `add`/`list`/`show`/`remove`, browsing and fetching, capability probe and
       `status`, permissions mapping, hidden names. Deferred real-server part of **S3** (containment).
 - [ ] **4. Read-write** - create/modify/delete/rename/move, temp+rename uploads, conflict copies,
@@ -201,9 +212,9 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 1. Transport is the system **`/usr/bin/ssh`** by absolute path with `argv[0]` set to it, plus our own SFTP v3 wire client in Swift. Not libssh2, Citadel or swift-nio-ssh; never a `PATH` lookup (§6.1, §6.2).
 2. The master is `ssh -N` with `ControlPersist=no` - with it set, `ssh` forks away and the agent loses the pid, stderr and exit signal. `ControlPath` is `$TMPDIR/sshdrive-<id8>`, never `%C` (collides for two locations on one host; 104-byte socket limit) (§6.1).
 3. Mux clients run `-F /dev/null -o BatchMode=yes -o ProxyCommand=/usr/bin/false`; otherwise a missing socket makes `ssh` open a *second, unsupervised* connection instead of failing. A mux client exiting before its channel opened is always "master lost", never an auth failure (§6.1).
-4. `ProxyJump` is never handed to `ssh`: cancel it with `ProxyJump=none` and rebuild each hop as the agent's own `ProxyCommand` with the same overrides plus `ControlMaster=no` **and `ControlPath=none`** (`no` alone still attaches to the config's socket) (§6.1, §2).
+4. `ProxyJump` is never handed to `ssh`: cancel it with `ProxyJump=none` and rebuild each hop as the agent's own `ProxyCommand` with the same overrides plus `ControlMaster=no` **and `ControlPath=none`** (`no` alone still attaches to the config's socket). Write the `ProxyCommand` **first** and the cancellation after it, and double a nested hop's `%h`/`%p` once per level (§6.1, §2, item 33).
 5. A location that passed the collect connection's first pass runs `IdentityAgent=none` for good; only `agentDependent` locations ever consult a key agent (§4.2, §6.1).
-6. askpass holds nothing: it sends the agent a one-time `SSHDRIVE_ASKPASS_TOKEN`, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`). Keychain items are keyed `password:<user>@<hostname>:<port>` / `passphrase:<keypath>` from `ssh -G`, never the alias, shared across locations (§4.2).
+6. askpass holds nothing: it sends the agent a one-time `SSHDRIVE_ASKPASS_TOKEN`, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`). Keychain items are keyed `password:<user>@<hostname>:<port>` / `passphrase:<keypath>` from `ssh -G`, never the alias, shared across locations. The **host-key question arrives with `SSH_ASKPASS_PROMPT` unset**, exactly like a password prompt, so it is classified by its own text and the hint is only corroboration; `Enter passphrase for key '%.100s'` truncates, so the prompt text alone can never be the key. The three variable names live once, in `XPCProtocols/AskpassEnvironment.swift` (§4.2).
 7. Authentication has a **60 s deadline from spawn**, signalled by the control socket appearing; the 15 s `ConnectTimeout` is contained in it, never added. A deadline stop is re-armed for exactly one attempt on screen unlock or a request arriving with input idle < 30 s and the screen unlocked; refusals are never re-armed (§4.2, §6.3).
 8. Every remote path goes through the **`RelativePath` chokepoint** - the SFTP layer exposes no string-path API. Zero components is the root. System filenames, CLI paths, sweep output and helper events all pass the same constructor (§9.1).
 9. **No tombstones.** A deleted row goes with its pin marker and xattrs; a re-created path is a new item with a new identifier (§5.3).
@@ -230,6 +241,14 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 30. The system **believes whatever version a `modifyItem` reply carries** - it never re-fetches and never re-offers - so a conflict copy must `evictItem` the item after returning the remote one, and `.filenameCollision` from `createItem` is retried for ever with no alert (§5.5).
 31. A custom action's activation rule binds **`fileproviderItems`** (lower-case p) as a **key path**, not a `$` substitution variable. Either mistake drops the menu entry silently; `fileproviderctl evaluate <path>` is how to check (§7.2).
 32. Finder contributes exactly two File Provider entries, **"Download Now"** or **"Remove Download"** by `isDownloaded`, and draws no built-in "Keep Downloaded" for us. Our two actions land **at the bottom of the contextual menu, top level**, and on the window background, but **never on the sidebar row** - so a whole location is pinned only from the CLI (§7.2).
+33. **`-o ProxyCommand=…` is written before `-o ProxyJump=none`.** Both keywords write the same field and `ssh` takes the first, so the reverse order makes OpenSSH discard the `ProxyCommand` outright and the master then resolves a hostname that only exists behind the bastion. A nested hop's `%h`/`%p` are doubled once per level it sits below the master (`%%h:%%p` at hop *n-1*), because `ssh` percent-expands the whole string before `/bin/sh -c` sees it; without that, hop 1 dials the destination. A `ProxyJump` in a location's own `sshOptions` reaches `ssh -G`, where the chain builder wants it, and is stripped from the master's command line (2026-09-04, §6.1).
+34. **Every sentinel's NUL is printed by a `printf` of its own.** `printf "\0<sentinel>"` reads `\0` and the octal digits after it as one character, so a sentinel beginning with a digit silently loses its first bytes and the marker is never found (§6.1, §9.2).
+35. **Every `sh -s` script is one `{ … }` group ending in an `exit`.** A compound command must be parsed whole before any of it runs, which is what stops the heartbeat reader eating the script's own tail off the same stdin - and `.` with no argument is a POSIX special builtin that ends a non-interactive shell outright (§9.2).
+36. **The heartbeat wrapper reads heartbeats from a descriptor duplicated in the parent, and every subshell clears the `EXIT` trap;** without either it kills its own healthy child seconds after starting it. Its stamp file is `touch`ed, never `:`-redirected, and the `sleep`-and-mtime branch is the *ordinary* Linux path, because an exec channel runs `sh` and Debian's `sh` is dash (§6.4).
+37. **A `ForceCommand internal-sftp` account may answer an exec channel with a plain sentence,** `This service allows sftp connections only.`, rather than SFTP framing. The probe recognises both and reports "no shell access (ForceCommand)", never "shell output unusable" (§9.2).
+38. **`limits@openssh.com` sizes the request, not the window.** It says nothing about how many requests may be outstanding, so the chunk size is the server's and the depth of sixteen is ours (§6.2).
+39. **An SFTP channel is a mux client of the master** (`ssh $MUX -s <host> sftp`), and the wire client sits on the same `ByteStream` an exec channel hands over - one definition, in `SSHProcess`, which `SFTP` depends on. `SFTPSubprocess`, which spawns an `ssh` of its own, is a test path only (§6.1, §6.2).
+40. **stderr distinguishes no key-agent state.** A missing socket, a dead socket and a *locked* agent all exit with the same bare `Permission denied (publickey)` at `LogLevel=ERROR`, so the pre-spawn socket probe is the only signal; `agent refused operation` corroborates, it does not decide (2026-09-04, §6.1).
 
 ## Glossary
 

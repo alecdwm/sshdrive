@@ -231,18 +231,6 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply(SSHDriveAgentError.notImplemented.asNSError("Custom actions: milestone 8."))
     }
 
-    // MARK: askpass
-
-    func askpassAnswer(
-        token: String, promptKind: String, prompt: String,
-        reply: @escaping (String?, Error?) -> Void
-    ) {
-        // TODO milestone 2: mint one-time tokens per ssh process, match this one, and
-        // answer from the keychain or by relaying the prompt to the CLI (section 4.2).
-        Log.agent.notice("askpass asked for a \(promptKind, privacy: .public) prompt; milestone 2")
-        reply(nil, SSHDriveAgentError.notImplemented.asNSError("askpass: milestone 2."))
-    }
-
     // MARK: CLI
 
     func control(

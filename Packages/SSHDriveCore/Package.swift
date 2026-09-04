@@ -21,7 +21,10 @@ let package = Package(
         .target(name: "Logging"),
 
         // Paths, the SFTPTransport protocol, and the milestone 1 fake backend.
-        .target(name: "SFTP", dependencies: ["Logging"]),
+        // The wire client sits on `SSHProcess`'s `ByteStream`: an SFTP channel is a mux
+        // client's stdio, exactly like an exec channel, so there is one definition of
+        // that pipe and not two (sections 6.1, 6.2).
+        .target(name: "SFTP", dependencies: ["Logging", "SSHProcess"]),
 
         // The location model and the JSON store in the app-group container.
         .target(name: "Config", dependencies: ["Logging"]),
@@ -36,15 +39,20 @@ let package = Package(
         // The agent's NSXPC interfaces plus the peer code requirement.
         .target(name: "XPCProtocols", dependencies: ["Logging"]),
 
-        // Keychain wrapper. Stub until milestone 2.
-        .target(name: "Secrets", dependencies: ["Logging", "Config"]),
+        // The keychain wrapper and the askpass token protocol (section 4.2).
+        .target(name: "Secrets", dependencies: ["Logging", "Config", "XPCProtocols"]),
 
-        // ssh supervision, ControlMaster, exec channels. Stub until milestone 2.
-        .target(name: "SSHProcess", dependencies: ["Logging", "Config"]),
+        // ssh supervision: the -N ControlMaster, mux clients, the agent-built ProxyJump
+        // chain, the login shell snapshot, sh -s scripts and exit classification
+        // (DESIGN.md sections 6.1 and 9.2).
+        .target(name: "SSHProcess", dependencies: ["Logging", "Config", "XPCProtocols"]),
 
-        .testTarget(name: "SFTPTests", dependencies: ["SFTP"]),
+        .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),
         .testTarget(name: "IndexTests", dependencies: ["Index", "Config", "XPCProtocols"]),
+        .testTarget(name: "SecretsTests", dependencies: ["Secrets", "XPCProtocols"]),
+        .testTarget(name: "SSHProcessTests", dependencies: ["SSHProcess", "Config", "XPCProtocols"]),
+
     ]
 )

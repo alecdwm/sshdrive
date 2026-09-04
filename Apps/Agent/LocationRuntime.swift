@@ -95,6 +95,18 @@ actor LocationRuntime {
         try refreshRootRow(rootAttributes)
     }
 
+    /// The canonical root the transport resolved, for the debug hooks and, in
+    /// milestone 3, for `sshdrive show`.
+    func rootDescription() async throws -> String {
+        try await transport.realpath(.root)
+    }
+
+    /// `-O exit` on the master and the SFTP channel with it, for a location that is
+    /// being unmounted or removed. A fake-backed location has nothing to shut down.
+    func shutdownTransport() async {
+        if let ssh = transport as? SSHBackedTransport { await ssh.shutdown() }
+    }
+
     // MARK: Reading
 
     /// The path an identifier maps to, or nil when there is no row.

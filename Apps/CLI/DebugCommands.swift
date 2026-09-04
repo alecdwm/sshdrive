@@ -11,8 +11,8 @@ struct Debug: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Test hooks for the fake backend and the index.",
         subcommands: [
-            Fake.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
-            IndexCommand.self, Keychain.self, Signal.self,
+            Fake.self, SSHLocation.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
+            IndexCommand.self, Keychain.self, Secrets.self, Signal.self,
             Evict.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
             Stabilize.self, Testing.self,
         ])
@@ -73,6 +73,65 @@ struct FakeList: ParsableCommand {
 
     func run() throws {
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.fake.list"))
+    }
+}
+
+// MARK: ssh-backed locations (milestone 2)
+
+/// `sshdrive debug ssh add|remove`. Not `sshdrive add`: the real one shows the `ssh -G`
+/// resolution and relays every prompt of the two-pass collect connection to the terminal,
+/// and it arrives in milestone 3 (section 8, section 4.2). This one writes an ssh-backed
+/// location from what it is given and connects with whatever the keychain already holds,
+/// which is what proves the milestone 2 transport end to end. Store the secrets first
+/// with `sshdrive debug secrets store`.
+struct SSHLocation: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "ssh",
+        abstract: "Create and remove ssh-backed locations (milestone 2 hook).",
+        subcommands: [SSHAdd.self, SSHRemove.self])
+}
+
+struct SSHAdd: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "add",
+        abstract: "Create an ssh-backed location and add its domain.")
+
+    @Argument(help: "Name for the location; becomes its nickname and the domain's display name.")
+    var name: String
+
+    @Argument(help: "Destination as [user@]host[:port]. The host may be a ~/.ssh/config alias.")
+    var destination: String
+
+    @Option(
+        name: .customLong("remote-path"),
+        help: "Directory on the server to mount. Default: the account's home.")
+    var remotePath: String?
+
+    @Option(help: "IdentityFile for this location.")
+    var identity: String?
+
+    @Option(help: "ProxyJump chain: one or more [user@]host[:port], comma separated.")
+    var jump: String?
+
+    func run() throws {
+        var arguments = ["name": name, "destination": destination]
+        if let remotePath { arguments["remotePath"] = remotePath }
+        if let identity { arguments["identity"] = identity }
+        if let jump { arguments["jump"] = jump }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.ssh.add", arguments: arguments))
+    }
+}
+
+struct SSHRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "remove",
+        abstract: "Remove a location, its domain, its index and its ssh master.")
+
+    @Argument var name: String
+
+    func run() throws {
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.ssh.remove", arguments: ["name": name]))
     }
 }
 
@@ -276,6 +335,86 @@ struct Keychain: ParsableCommand {
         var arguments = ["key": key]
         if let value { arguments["value"] = value }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.keychain", arguments: arguments))
+    }
+}
+
+// MARK: the keychain and the askpass path (milestone 2, spike S2)
+
+/// The milestone 2 hook set. `debug keychain` above proves `SecItem` is reachable at all;
+/// this drives the real `Secrets` store and the whole askpass token protocol from the
+/// launchd-started agent, which is the only process that can run either (DESIGN.md
+/// sections 3.1, 4.2).
+///
+/// A stored value never comes back out: `lookup` reports whether the item exists and,
+/// with `--value`, whether it matches.
+struct Secrets: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "secrets",
+        abstract: "Store, look up, delete and list keychain items, and run one real ssh through askpass.",
+        discussion: """
+            sshdrive debug secrets list
+            sshdrive debug secrets store --destination pw@192.168.64.1 --port 2201 --value spike-password
+            sshdrive debug secrets store --identity ~/.ssh/sshdrive-spike-enc --value spike-passphrase
+            sshdrive debug secrets lookup --key password:pw@192.168.64.1:2201
+            sshdrive debug secrets delete --identity ~/.ssh/sshdrive-spike-enc
+            sshdrive debug secrets classify --prompt "pw@nas's password: "
+            sshdrive debug secrets connect --destination pw@192.168.64.1 --port 2201
+            """)
+
+    @Argument(help: "store | lookup | delete | list | classify | connect")
+    var op: String = "list"
+
+    @Option(help: "Item account, e.g. password:user@host:port or passphrase:/path.")
+    var key: String?
+
+    @Option(help: "user@host, with --port, instead of spelling the key out.")
+    var destination: String?
+
+    @Option(help: "Port for --destination.")
+    var port: Int = 22
+
+    @Option(help: "Identity file, for a passphrase item.")
+    var identity: String?
+
+    @Option(help: "Value to store, or to compare against on lookup.")
+    var value: String?
+
+    @Option(help: "Prompt text, for `classify`.")
+    var prompt: String?
+
+    @Option(help: "SSH_ASKPASS_PROMPT value, for `classify`: confirm, none, or empty.")
+    var kind: String?
+
+    @Option(help: "Remote command, for `connect`.")
+    var command: String?
+
+    @Option(help: "StrictHostKeyChecking for `connect` (default yes).")
+    var hostKeyChecking: String?
+
+    @Option(help: "Token purpose for `connect`: master or collect.")
+    var purpose: String?
+
+    @Option(help: "ProxyJump chain for `connect`: one or more user@host:port, comma separated.")
+    var jump: String?
+
+    @Flag(help: "Let `connect` consult a key agent (default: IdentityAgent=none).")
+    var withKeyAgent = false
+
+    func run() throws {
+        var arguments: [String: String] = ["op": op, "port": String(port)]
+        if let key { arguments["key"] = key }
+        if let destination { arguments["destination"] = destination }
+        if let identity { arguments["identity"] = identity }
+        if let value { arguments["value"] = value }
+        if let prompt { arguments["prompt"] = prompt }
+        if let kind { arguments["kind"] = kind }
+        if let command { arguments["command"] = command }
+        if let hostKeyChecking { arguments["hostKeyChecking"] = hostKeyChecking }
+        if let purpose { arguments["purpose"] = purpose }
+        if let jump { arguments["jump"] = jump }
+        if withKeyAgent { arguments["noAgent"] = "false" }
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.secrets", arguments: arguments))
     }
 }
 
