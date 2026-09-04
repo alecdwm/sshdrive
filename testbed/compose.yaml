@@ -1,0 +1,302 @@
+# SSH Drive spike testbed - real SSH servers for milestone 2 (transport, S2)
+# and milestone 6 (change detection, S7).
+#
+#     docker compose up -d
+#
+# Every service runs testbed/entrypoint.sh over a stock, pinned base image, so
+# there is nothing to build and no Dockerfile.  Host keys are generated on
+# first start into the `hostkeys` volume, so known_hosts on the VM stays stable
+# across restarts; `docker compose down -v` throws them away and every host key
+# changes.  sshd runs in the foreground with -D -e (log to stderr), so
+# `docker compose logs -f <service>` is the auth log.
+#
+# --- where this runs and who can reach it ------------------------------------
+#
+# On Docker/OrbStack on the Mac that hosts the build VM, NOT on a separate
+# Linux box.  Every published port is bound to $TESTBED_BIND, default
+# 192.168.64.1: the Mac's own address on the vmnet segment the Virtualization
+# framework hands the VM (interface bridge100 on the Mac, the default gateway
+# inside the VM).  macOS does not route that address anywhere - not to the
+# LAN, not to the tailnet - so these servers answer the VM and processes on
+# the Mac, and nothing else.
+#
+#   docker compose up -d                             # 192.168.64.1, the default
+#   TESTBED_BIND=127.0.0.1 docker compose up -d      # Mac only, VM locked out
+#
+# Never publish these without a bind address.  The docker default is 0.0.0.0,
+# and service `deb` carries an account with an empty password (`nopw`, for the
+# `none` userauth method): on 0.0.0.0 that is a shell for anything that can
+# reach the Mac.
+#
+# Two consequences of binding to the vmnet gateway, both deliberate:
+#
+#   * The bind fails with "cannot assign requested address" when bridge100 is
+#     down, which is what "no VM is running" looks like.  Boot the VM first.
+#     The address itself is stable across VM reboots; the VM's own DHCP lease
+#     (192.168.64.11 today) is not, and only a pf rule would care.
+#   * vmnet shared mode is one segment, so any *other* VM on this Mac can also
+#     reach these ports.  See README.md for the pf rule that narrows it to the
+#     build VM if that matters.
+#
+# The traffic goes the one way only.  Nothing here is privileged, no container
+# is given the docker socket or the host network, and the only host path any of
+# them mounts is entrypoint.sh, read-only - so the VM reaching these ports does
+# not reach the Mac.  The containers do keep outbound NAT, because they install
+# their packages on first start; treat a compromised one as a machine sitting
+# on the Mac's LAN, not as a foothold on the Mac.
+#
+# See README.md for the account table, the ~/.ssh/config stanzas and the
+# smoke tests.
+name: sshdrive-testbed
+
+x-authorized-keys: &authorized_keys |
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOp0ALSM7cq9p2whRbUZpqkKFA1QQHfAYmOo0IRrQRTA sshdrive-spike@vm
+  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICHREP7v4ofBy892BQuGVCbYMezlgHQiSF35Px0zNr98 sshdrive-spike-enc@vm
+
+x-debian: &debian
+  image: debian:12-slim
+  restart: unless-stopped
+  command: ["/bin/sh", "/entrypoint.sh"]
+  volumes:
+    - ./entrypoint.sh:/entrypoint.sh:ro
+    - hostkeys:/hostkeys
+  networks: [edge]
+  healthcheck:
+    test: ["CMD-SHELL", "test -s /run/sshd.pid"]
+    interval: 10s
+    timeout: 3s
+    retries: 40
+    start_period: 120s
+
+x-alpine: &alpine
+  image: alpine:3.20
+  restart: unless-stopped
+  command: ["/bin/sh", "/entrypoint.sh"]
+  volumes:
+    - ./entrypoint.sh:/entrypoint.sh:ro
+    - hostkeys:/hostkeys
+  networks: [edge]
+  healthcheck:
+    test: ["CMD-SHELL", "test -s /run/sshd.pid"]
+    interval: 10s
+    timeout: 3s
+    retries: 40
+    start_period: 120s
+
+services:
+
+  # -- 1. main GNU/Debian target: bash, GNU find (-cmin, -printf), data tree,
+  #       key / password / empty-password accounts, ClientAliveInterval set.
+  deb:
+    <<: *debian
+    container_name: sshdrive-deb
+    hostname: deb
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2201:22"]
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh:ro
+      - hostkeys:/hostkeys
+      - home-deb:/home
+    environment:
+      SVC: deb
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      # The one server that hangs up on a dead client by itself.  Everywhere
+      # else ClientAliveInterval is unset (the OpenSSH default), which is the
+      # S7 case: "does a bare background process survive an abrupt kill".
+      SSHD_EXTRA: |
+        ClientAliveInterval 15
+        ClientAliveCountMax 3
+      USERS: |
+        alec:2001:bash:key:data
+        pw:2002:bash:pass:-
+        keypass:2003:bash:both:-
+        nopw:2004:bash:none:emptypw
+      # tree 250x20 = 5,000 files + 10,000 flat files + the weird-name set.
+      # For an S7-scale tree:  SEED_TREE_DIRS=2000 SEED_TREE_FILES=500 SEED_BYTES=0
+      SEED_TREE_DIRS: "250"
+      SEED_TREE_FILES: "20"
+      SEED_MANY: "10000"
+      SEED_BYTES: "2048"
+      BIG_FILE: "0"   # 1 = also write data/big/1g.bin for the throughput run
+
+  # -- 2. login-shell shapes (S7): zsh, fish, tcsh, dash, noisy bash, an rc
+  #       file that leaves a background child holding stdout, and a
+  #       ForceCommand internal-sftp account.  ClientAliveInterval unset.
+  deb-shells:
+    <<: *debian
+    container_name: sshdrive-deb-shells
+    hostname: deb-shells
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2202:22"]
+    environment:
+      SVC: deb-shells
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      PKGS: zsh fish tcsh
+      USERS: |
+        bashnoisy:2101:bash:key:noisy
+        bashbg:2102:bash:key:bg
+        zshuser:2103:zsh:key:noisy
+        fishuser:2104:fish:key:noisy
+        tcshuser:2105:tcsh:key:noisy
+        dashuser:2106:dash:key:-
+        forcesftp:2107:bash:both:forcesftp
+
+  # -- 3. external sftp-server subsystem (DESIGN 9.2): with a noisy rc the
+  #       output lands in front of the SFTP VERSION reply, which is what
+  #       forces the exec-channel sftp-server fallback.
+  deb-extsftp:
+    <<: *debian
+    container_name: sshdrive-deb-extsftp
+    hostname: deb-extsftp
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2203:22"]
+    environment:
+      SVC: deb-extsftp
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      SFTP_SUBSYSTEM: /usr/lib/openssh/sftp-server
+      USERS: |
+        extnoisy:2201:bash:key:noisy
+        extquiet:2202:bash:key:-
+
+  # -- 4. keyboard-interactive password (DESIGN 4.2 prompt table): ssh shows
+  #       "(kbd@host) Password:" instead of "kbd@host's password:".
+  deb-kbdint:
+    <<: *debian
+    container_name: sshdrive-deb-kbdint
+    hostname: deb-kbdint
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2204:22"]
+    environment:
+      SVC: deb-kbdint
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      SSHD_EXTRA: |
+        UsePAM yes
+        PasswordAuthentication no
+        KbdInteractiveAuthentication yes
+      USERS: |
+        kbd:2301:bash:pass:-
+
+  # -- 5. MaxSessions 2 (DESIGN 6.1): the channel-limit probe, the dropped bulk
+  #       SFTP channel, and the sweep-stops-the-helper behaviour at that limit.
+  deb-maxsess:
+    <<: *debian
+    container_name: sshdrive-deb-maxsess
+    hostname: deb-maxsess
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2205:22"]
+    environment:
+      SVC: deb-maxsess
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      SSHD_EXTRA: |
+        MaxSessions 2
+      USERS: |
+        alec:2401:bash:both:-
+
+  # -- 6. Alpine: busybox find (has -cmin, never -printf), busybox ash login
+  #       shell, internal-sftp.  ClientAliveInterval unset.
+  alp:
+    <<: *alpine
+    container_name: sshdrive-alp
+    hostname: alp
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2206:22"]
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh:ro
+      - hostkeys:/hostkeys
+      - home-alp:/home
+    environment:
+      SVC: alp
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      USERS: |
+        alec:2501:ash:key:data
+        pw:2502:ash:pass:-
+      SEED_TREE_DIRS: "100"
+      SEED_TREE_FILES: "20"
+      SEED_MANY: "0"
+
+  # -- 7. Alpine with the external sftp-server subsystem and a quiet shell:
+  #       the control case for service 3.
+  alp-ext:
+    <<: *alpine
+    container_name: sshdrive-alp-ext
+    hostname: alp-ext
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2207:22"]
+    environment:
+      SVC: alp-ext
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      SFTP_SUBSYSTEM: /usr/lib/ssh/sftp-server
+      USERS: |
+        alec:2601:ash:key:-
+
+  # -- 8. Alpine whose `find` rejects -cmin and -printf, emulating the
+  #       pre-1.34 busybox some Synology DSM builds ship: the probe must fall
+  #       back to -mmin and status must carry the note (DESIGN 6.4).
+  alp-nocmin:
+    <<: *alpine
+    container_name: sshdrive-alp-nocmin
+    hostname: alp-nocmin
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2208:22"]
+    environment:
+      SVC: alp-nocmin
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      FIND_SHIM: "1"
+      USERS: |
+        alec:2701:ash:key:data
+      SEED_TREE_DIRS: "50"
+      SEED_TREE_FILES: "10"
+      SEED_MANY: "0"
+
+  # -- 9. hop 1 of the two-hop ProxyJump chain: password auth, and the only
+  #       published door onto backnet.
+  bastion-a:
+    <<: *debian
+    container_name: sshdrive-bastion-a
+    hostname: bastion-a
+    ports: ["${TESTBED_BIND:-192.168.64.1}:2210:22"]
+    networks: [edge, backnet]
+    environment:
+      SVC: bastion-a
+      PASSWORD: spike-password-a
+      USERS: |
+        hop:2801:bash:pass:-
+
+  # -- 10. hop 2: password auth with a different password, so the per-host
+  #        keychain keying of DESIGN 4.2 is visible.  No published port.
+  bastion-b:
+    <<: *debian
+    container_name: sshdrive-bastion-b
+    hostname: bastion-b
+    networks: [backnet]
+    environment:
+      SVC: bastion-b
+      PASSWORD: spike-password-b
+      USERS: |
+        hop:2901:bash:pass:-
+
+  # -- 11. the destination behind the chain: key auth, a small data tree, no
+  #        published port, so the VM can reach it only through both hops.
+  inner:
+    <<: *debian
+    container_name: sshdrive-inner
+    hostname: inner
+    networks: [backnet]
+    environment:
+      SVC: inner
+      AUTHORIZED_KEYS: *authorized_keys
+      PASSWORD: spike-password
+      USERS: |
+        alec:3001:bash:both:data
+      SEED_TREE_DIRS: "20"
+      SEED_TREE_FILES: "10"
+      SEED_MANY: "0"
+
+networks:
+  edge:
+  backnet:
+
+volumes:
+  hostkeys:
+  home-deb:
+  home-alp:

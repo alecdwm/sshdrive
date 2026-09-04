@@ -72,6 +72,47 @@ needed by milestone 9.
 - **Do not run mutating git commands** (commit, push, checkout, branch, merge, rebase, reset, add, …)
   unless explicitly asked. Read-only git is fine.
 
+## The spike testbed (`testbed/`)
+
+Eleven real SSH servers for the milestone 2 (S2) and milestone 6 (S7) work: Debian and Alpine
+targets, every login-shell shape, an external `sftp-server`, keyboard-interactive, `MaxSessions 2`,
+a busybox `find` without `-cmin`, and a two-hop `ProxyJump` chain. `docker compose up -d` in
+`testbed/`, **on the Mac that hosts the build VM** (OrbStack), never on this Linux box. The account
+table, the `~/.ssh/config` stanzas and the per-service smoke tests are in `testbed/README.md`; read
+that before using it.
+
+| Reaching it from the VM | |
+|---|---|
+| Address | `192.168.64.1` - the Mac's vmnet gateway address, ports `2201`-`2208` and `2210` |
+| Reachable by | the build VM and the Mac itself. Not the LAN, not the tailnet, not this box |
+| Keys | `~/.ssh/sshdrive-spike` on the VM, and `~/.ssh/sshdrive-spike-enc` (passphrase `spike-passphrase`) |
+| Passwords | `spike-password`, plus `spike-password-a` / `spike-password-b` for the two bastions |
+| Behind the chain | `bastion-b` and `inner` have no published port and are reachable only through `hop@192.168.64.1:2210` |
+
+Verified from the VM on 2026-09-04, and the traps that pass found (details in `testbed/README.md`):
+
+- **An open port is not a running server.** docker's proxy completes the TCP handshake before sshd
+  is listening, so readiness is the banner: `nc -G 3 -w 4 192.168.64.1 2201 </dev/null | head -1`.
+- **`deb-shells`' `bashbg` account hangs any reader that waits for EOF** - which is the case §9.2's
+  sentinel exists for. Give every exec-channel read a deadline, in test harnesses too.
+- **A `-J` chain needs the *jump* host's key in `known_hosts` already**; `-o StrictHostKeyChecking`
+  on the command line does not reach the `-W` children, only a `~/.ssh/config` alias does.
+- **Killing an `ssh`/`sftp` that used `-J` leaves its `-W` children alive**, holding the pipe open.
+  The same orphan problem §6.1 describes for our own masters.
+- **A published port can be dead while the container is healthy.** `alp` (2206) accepted TCP and
+  answered nothing; its sshd was listening and had logged no connection at all, so the broken thing
+  was OrbStack's forward. `docker compose up -d --force-recreate <svc>` rebuilds it, and the volumes
+  mean no re-seed and no `known_hosts` churn.
+- Containers see connections coming from the docker bridge gateway (`192.168.117.1`), never from the
+  VM, so sshd logs and `Match Address` cannot tell clients apart.
+- **Current busybox has no `find -cmin`.** BusyBox 1.36.1 on Alpine 3.20 answers
+  `find: unrecognized: -cmin`; it has `-mmin` and `-newer FILE` only. §6.4 and §13 now say so
+  (2026-09-04); the ladder is unchanged, but the `-mmin` fallback is every busybox server's path.
+- The Alpine data trees come from `entrypoint.sh`'s shell fallback (no perl in the image). It used
+  to diverge from the perl branch - unpadded names, 29-byte files, no `weird/utf8-café`; fixed
+  2026-09-04, but an already-seeded volume keeps the old shape until `.testbed-seeded` is deleted
+  and the service restarted (`testbed/README.md`).
+
 ## Section index of DESIGN.md
 
 Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
@@ -101,28 +142,28 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 1771-1806 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, `ConnectTimeout=15` |
 | 1807-1853 | §6.4 Remote change detection | the three tiers, scope, selection ladder, poll schedule |
 | 1854-1859 | Tier 0: SFTP poll | `readdir` every root |
-| 1860-1902 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
-| 1903-1922 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
-| 1923-2007 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
-| 2008-2046 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
-| 2047-2105 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2106-2113 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2114-2186 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
-| 2187-2275 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2276-2380 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2381-2420 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2421-2559 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
-| 2560-2674 | §8 The CLI | every command and flag, verbatim |
-| 2675-2795 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
-| 2796-2839 | §9 Security | the security properties in one list |
-| 2840-2892 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
-| 2893-2961 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
-| 2962-3051 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
-| 3052-3110 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
-| 3111-3127 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3128-3174 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3175-3370 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 3371-3403 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 1860-1912 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, server-clock window, GNU `-printf` |
+| 1913-1932 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout) |
+| 1933-2017 | Tier 2: remote helper | targets, deployment and verification, NDJSON event protocol, ignore list, FreeBSD kqueue caveat |
+| 2018-2056 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` |
+| 2057-2115 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2116-2123 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2124-2196 | §7 Cache eviction (TTL) | the 5-minute loop, the settled atime answer and what the TTL therefore means, TCC, the opaque eviction errors, "anything that opens files downloads them" |
+| 2197-2285 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2286-2390 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2391-2430 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2431-2569 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge |
+| 2570-2684 | §8 The CLI | every command and flag, verbatim |
+| 2685-2805 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format |
+| 2806-2849 | §9 Security | the security properties in one list |
+| 2850-2902 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link |
+| 2903-2971 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround |
+| 2972-3061 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover |
+| 3062-3120 | §10.1 Repository and hosting | GitHub layout, release flow, tap naming |
+| 3121-3137 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3138-3184 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3185-3383 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 3384-3416 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -171,7 +212,7 @@ S5 -> M5, S7 -> M6, S9 -> M10.
 12. A row is a finished item: `capabilities`, `fs_flags`, `kept` and `link_target` are derived and stored by the agent. The extension never re-derives them and never walks ancestors (§5.2).
 13. Every exec channel runs exactly `sh -s` with the script on stdin, values single-quoted through `set --`. Each script prints a random 128-bit sentinel first and the agent discards everything before it, because rc files print on non-interactive startup (§9.2).
 14. Nothing on the server runs bare: the wrapper backgrounds its child with `</dev/null`, reads a 15 s heartbeat, and kills the child after 60 s of silence or EOF (§6.4).
-15. Sweep windows come from the **server's** clock (`date +%s` printed by the script, stored only after results are applied) and use `-cmin`, with a `-mmin` fallback for old busybox (§6.4).
+15. Sweep windows come from the **server's** clock (`date +%s` printed by the script, stored only after results are applied) and use `-cmin`, with a `-mmin` fallback on **every** busybox - no busybox build has `-cmin`, so that fallback and its `status` note are the ordinary NAS path, not a legacy case (§6.4).
 16. The mass-deletion guard holds listing-derived deletions removing >= half a directory and >= 20 items (or emptying a non-empty root), re-checking at 5 and 30 min. Helper delete events apply at once. A fetch of a held item fails `.cannotSynchronize`, never `.noSuchItem` (§6.4).
 17. Uploads go to `.sshdrive-upload-<mac8>-<uuid>` then non-overwriting `rename` (create) or `posix-rename@openssh.com` (overwrite), then `setstat` the mode back, then `lstat` for the version. Never write in place (§5.5).
 18. A path with an upload in flight sits in the **in-flight set** and change detection skips it; otherwise our own writes come back as remote changes (§5.5).

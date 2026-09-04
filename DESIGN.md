@@ -1873,11 +1873,21 @@ since the roots reach `find` as its argv and a few thousand
 mtime does, and also on `chmod`, `chown` and on writes that preserve mtime
 (`rsync -t`, `cp -p`, `touch -r`), all of which `-mmin` would miss and all
 of which change our content or metadata version. `-cmin` rather than
-`-newerct` because GNU, BSD and current busybox all accept it and only GNU
-takes an epoch timestamp; busybox builds older than 1.34, which some
-Synology DSM releases ship, lack `-cmin`, so the probe checks for it and
-the sweep falls back to `-mmin`, losing the `chmod`/`chown`/preserved-mtime
-cases, which `status` reports as a note. `N` is computed from the
+`-newerct` because GNU and BSD accept it and only GNU takes an epoch
+timestamp. **busybox has no `-cmin` at all** - not a pre-1.34 quirk, as
+this section previously assumed, but every build measured: BusyBox v1.36.1
+as shipped by current Alpine answers `find: unrecognized: -cmin`, and its
+`find` offers `-mmin` and `-newer FILE` and nothing else of use here
+(testbed, 2026-09-04). The mechanism is unchanged - the probe checks for
+`-cmin` and the sweep falls back to `-mmin`, losing the
+`chmod`/`chown`/preserved-mtime cases, which `status` reports as a note -
+but the fallback is the ordinary path for every busybox server, a NAS
+included, rather than a legacy fringe, so that note is a normal `status`
+line and not an alarm. `-newer <stamp>` against a stamp file the agent
+touches is the one thing busybox offers that `-mmin` does not: second
+resolution instead of whole minutes. It is still an mtime comparison, so
+it recovers none of the ctime-only cases, and it needs a writable path on
+the server, which tier 1 otherwise does not; it is not used. `N` is computed from the
 **server's** clock, never the Mac's: every sweep script prints `date +%s`
 first, the agent stores it once the sweep's results have been applied
 to the index, never before, and the next sweep's `N` is the minutes
@@ -3365,6 +3375,9 @@ there, so that this list cannot drift from the body.
 - **Finder gives a third-party download no cancel control:** the list-row
   progress ring is not clickable, so the extension's `Progress` cancellation
   has to be tested from code (2026-09-04, S1 c2, §5.2).
+- **No busybox has `find -cmin`,** so the sweep's `-mmin` fallback is the
+  ordinary busybox path, not an old-build case; the ladder itself is unchanged
+  (2026-09-04, testbed, §6.4).
 
 ---
 
