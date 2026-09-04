@@ -133,10 +133,19 @@ final class WorkingSetEnumerator: NSObject, NSFileProviderEnumerator {
         let anchorValue = Int64(String(decoding: anchor.rawValue, as: UTF8.self)) ?? 0
         do {
             guard let result = try extensionInstance.readerStore.changes(since: anchorValue) else {
-                // No reader: the working set is a change stream the agent cannot rebuild
-                // for us cheaply, so report nothing rather than guess. The catch-up sweep
-                // (section 5.3) is what makes this safe.
-                observer.finishEnumeratingChanges(upTo: anchor, moreComing: false)
+                // No reader yet - the `indexReady` round trip of section 5.3 has not come
+                // back, or the schema is newer than this build understands.
+                //
+                // This **must not** be answered as "no changes". The system launches a
+                // fresh extension instance for every working-set signal (S5), so the very
+                // first `enumerateChanges` on a signalled instance races the readiness
+                // call, and reporting an empty change set at the anchor the system already
+                // holds tells it that it is up to date: the change is then dropped until
+                // something else signals, which for a deletion means a file that is gone
+                // from the server and the index stays in Finder indefinitely. Measured on
+                // a real mount, 2026-09-04. `.serverUnreachable` is the honest answer and
+                // the system retries.
+                observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))
                 return
             }
             observer.didUpdate(

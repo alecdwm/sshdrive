@@ -24,6 +24,11 @@ public final class SQLiteConnection {
     let handle: OpaquePointer
     public let path: String
 
+    /// The raw `sqlite3 *`, for the one caller that needs the C API directly: the restore
+    /// of section 5.3, which copies a backup *into* this connection with
+    /// `sqlite3_backup_init`. Nothing else should reach past the wrapper.
+    var rawHandle: OpaquePointer { handle }
+
     public init(path: String, mode: OpenMode) throws {
         self.path = path
         var handle: OpaquePointer?

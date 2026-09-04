@@ -812,7 +812,10 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   domain is, so it can carry a pin state and xattrs like any other item.
 - Rename/move initiated by the user (via `modifyItem`) updates `path` and keeps
   the identifier. Moving a directory rewrites `path` on every descendant
-  row, and on the matching rows of `roots` and `held`, in one transaction;
+  row, and on the matching rows of `roots` and `held` - `held.dir` as
+  well as `held.path`, since the guard's 5- and 30-minute re-checks are
+  driven by re-listing that directory (§6.4) and a `dir` left at the old
+  name would be re-listed for ever and never resolve - in one transaction;
   pin markers need nothing extra because `pin_state` lives on the same
   rows. That is O(subtree) per directory rename and is the price of
   path-keyed tables; `parent` is kept alongside `path` so the rewrite can
@@ -915,7 +918,18 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   fresh anchor it tells the agent so over XPC, one call per expiry, and
   the sweep below is the agent's response. `enumerateItems` on the working set returns no
   items and the current sequence number as the anchor: the working set
-  is only ever a change stream, never a listing. A container enumerator
+  is only ever a change stream, never a listing. When the reader is not
+  usable - the `indexReady` call has not come back, or the schema is
+  newer than the extension understands - the working-set
+  `enumerateChanges` answers **`.serverUnreachable`**, never an empty
+  change set at the anchor the system already holds. That is not a
+  nicety: the system launches a fresh extension instance for every
+  working-set signal (S5), so the first `enumerateChanges` on a
+  signalled instance races the readiness call, and "no changes" tells
+  the system it is up to date. The change is then dropped until
+  something else signals, which for a deletion leaves a file that is
+  gone from both the server and the index sitting in Finder
+  indefinitely - measured on a real mount, 2026-09-04. A container enumerator
   hands out the same sequence number and its `enumerateChanges` never
   expires it: a folder refresh is a fresh listing diffed against the
   index (§5.1), whatever anchor the system holds. That makes expiry
@@ -1026,7 +1040,20 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   that is not there yet reads as `.noSuchItem`, which deletes the file.
   The flag also outlives a crash: an agent that starts and finds
   `reconciling` set redoes the walk before serving anything, since the
-  extension is stalled on that flag and nothing else will clear it.
+  extension is stalled on that flag and nothing else will clear it. Two
+  consequences follow from having built it. The health check and the
+  restore run at location start, but **the walk runs after
+  `NSFileProviderManager.add(domain)`**, because it reads the system's
+  replica and `getUserVisibleURL` has nothing to answer with until the
+  domain exists; the restore therefore leaves the flag set and the walk
+  is what clears it. And the walk is bounded - a deadline and an item
+  cap - because a replica of a million materialized files must not stall
+  a domain indefinitely; a walk that hits either limit **still clears
+  the flag**, since the alternative is a domain stalled for ever with
+  nothing that would ever clear it, and the cost is that the paths it
+  never reached get fresh identifiers on their next enumeration, which
+  is the delete-plus-create the walk exists to avoid for the paths it
+  did reach.
 
 ### 5.4 Names, permissions, attributes
 
@@ -1684,7 +1711,13 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` returns, read directly
   rather than from the environment, since a launchd agent's environment
   is not guaranteed to carry it.
-- **Orphans are not adopted.** If the agent crashes, its `ssh -N` children
+- **Orphans are not adopted. The sweep matches on the socket **type** as well as the
+name: `$TMPDIR` is a shared directory and `sshdrive-` is not ours
+exclusively, and a sweep keyed on the prefix alone counted six
+`sshdrive-nested-*.sqlite-wal`/`-shm` files - sidecars of the package's own
+temporary test databases - as orphaned sockets and reported a healthy
+install as failing (2026-09-04). Each candidate is `lstat`ed, never
+`stat`ed, so a symlink planted at that name decides nothing.** If the agent crashes, its `ssh -N` children
   live on with their sockets in place, and `ControlMaster=yes` against an
   existing socket disables multiplexing and leaves later mux clients
   attaching to the orphan. So before its first connection the agent runs
@@ -2143,7 +2176,28 @@ links (§9.1), not from staying on one filesystem. On GNU `find` the sweep
 replaces `-print0` with `-printf '%p\0%y\0%s\0%T@\0%i\0%m\0%U\0%G\0'`,
 so every hit arrives with its type, size, nanosecond mtime, inode, mode
 and owner and needs no follow-up `stat` (§5.3); elsewhere the returned
-paths are `stat`ed over SFTP, one round trip each.
+paths are `stat`ed over SFTP, one round trip each. Both time tests and
+`-printf` cost a `stat` per entry on the server, and that is most of
+what a sweep spends: over a million-file tree on Debian, the same walk
+is 204 ms with `-print0` and no time test, 850-900 ms with `-cmin` or
+`-mmin`, and 1.6-3.0 s with `-printf`, all warm (S7, 2026-09-04). The
+incremental sweep of that tree - `-cmin` over the window, one file
+changed - is under a second and returns one record, which is the number
+the 60-second cadence is sized against; a cold NAS is the case the
+30-minute insurance sweep exists for. Two spellings are not optional.
+Every root is passed as `./name` rather than bare, because `find` has
+no portable `--` and a top-level directory named `-name` would
+otherwise be read as an option and take the whole sweep with it; the
+prefix comes back on every path and is stripped before the path
+reaches the `RelativePath` constructor. And a root whose bytes are not
+valid UTF-8 cannot travel at all: `set --` is a String pipeline end to
+end (§9.2), so such a root is left out of the `find` argv and listed at
+tier 0 in the same cycle instead, which watches it at the same cadence
+and only loses the server-side walk. The sweep's own output ends with
+the channel's sentinel printed a second time, exactly as the login-shell
+snapshot does (§6.1), so the agent stops reading on the closing marker
+rather than on EOF - which an account whose rc file leaves a background
+child holding stdout never sends (§9.2).
 
 #### Lifetime of anything we start on the server
 
@@ -2152,7 +2206,16 @@ session is gone, and with `ClientAliveInterval` unset (the default) a
 connection that died under a sleeping laptop is noticed only when TCP
 gives up, hours later. Every reconnect would then add another helper
 holding another full set of watches, until `max_user_watches` is
-exhausted. So nothing is ever started bare: the stdin script (§9.2)
+exhausted. **Setting `ClientAliveInterval` does not fix this**, which
+this section previously implied: sshd reaping the session does not
+reach a child that has left the foreground job. A bare `sleep &`
+started by a session whose client was then `SIGKILL`ed was still
+running three minutes later on all three servers measured - Debian with
+`ClientAliveInterval` unset, Debian with it set to 15/3, and Alpine
+with busybox `sh` and it unset (S7, 2026-09-04). So the wrapper below
+is not a workaround for a common misconfiguration; on every server
+there is, it is the only thing that ever kills what we started. So
+nothing is ever started bare: the stdin script (§9.2)
 starts the command in the background with its stdin redirected from
 `/dev/null`, so the child cannot consume the heartbeat lines, and then
 loops reading stdin, and the agent writes a heartbeat line every 15 s.
@@ -3821,6 +3884,39 @@ there, so that this list cannot drift from the body.
   without them: the same attributes otherwise encode to two different byte
   strings in one process and every item is re-read for nothing
   (2026-09-04, §5.3, §5.4).
+- **The orphan control-socket sweep matches on the socket type, not the name
+  alone:** `$TMPDIR` is shared, and `sshdrive-*` there is not necessarily ours
+  (2026-09-04, §6.1).
+- **The working-set enumerator answers `.serverUnreachable` while its reader
+  is not ready, never an empty change set:** the system launches a fresh
+  instance for every signal, so "no changes" at the anchor it already holds
+  drops the change silently (2026-09-04, §5.3, §5.2).
+- **A bare background process on the server survives an abrupt client kill
+  whatever `ClientAliveInterval` is set to,** so the heartbeat wrapper is
+  the only thing that ever kills what we started, not a workaround for a
+  common misconfiguration (2026-09-04, S7, §6.4).
+- **The sweep's time test and `-printf` each cost a `stat` per entry,** and
+  that, not the walk, is what a sweep spends: 204 ms bare against 0.9-3.0 s
+  with them over a million files (2026-09-04, S7, §6.4).
+- **Every sweep root is spelled `./name`,** because `find` has no portable
+  `--` and a top-level directory named `-name` would be read as an option
+  (2026-09-04, §6.4).
+- **A sweep root whose bytes are not valid UTF-8 is listed at tier 0 for
+  that cycle instead:** `set --` is a String pipeline, so such a root
+  cannot reach `find` at all (2026-09-04, §6.4, §9.2).
+- **A busybox `find --version` prints an error and exits 0,** so the
+  flavour probe reads the `busybox` banner and the `-cmin` answer rather
+  than an exit status (2026-09-04, S7, §8.1).
+- **A directory rename rewrites `held.dir` as well as `held.path`,** or the
+  guard's 5- and 30-minute re-checks re-list a name that no longer exists
+  and the holds never resolve (2026-09-04, §5.3, §6.4).
+- **The reconcile walk runs after `add(domain)`, never inside `start()`:**
+  it reads the system's replica, and `getUserVisibleURL` has nothing to
+  answer with until the domain exists (2026-09-04, §5.3).
+- **A reconcile walk that hits its deadline or item cap still clears
+  `meta.reconciling`.** The alternative is a domain stalled for ever with
+  nothing that would ever clear it; the cost is that unreached paths get
+  fresh identifiers on their next enumeration (2026-09-04, §5.3).
 
 ---
 

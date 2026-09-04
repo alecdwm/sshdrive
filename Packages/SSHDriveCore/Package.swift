@@ -59,7 +59,7 @@ let package = Package(
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),
         .testTarget(name: "IndexTests", dependencies: ["Index", "Config", "XPCProtocols"]),
         .testTarget(name: "SecretsTests", dependencies: ["Secrets", "XPCProtocols"]),
-        .testTarget(name: "SSHProcessTests", dependencies: ["SSHProcess", "Config", "XPCProtocols"]),
+        .testTarget(name: "SSHProcessTests", dependencies: ["SSHProcess", "AgentCore", "SFTP", "Config", "XPCProtocols"]),
 
     ]
 )

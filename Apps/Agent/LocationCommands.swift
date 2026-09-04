@@ -690,6 +690,19 @@ enum LocationCommands {
                     budget: budget, probedAt: cached.probedAt, cached: true).asJSON
                 row["channels"] = budget.asJSON
             }
+            // Section 6.4: the tier in use, the cadence, the last sweep and where the
+            // location sits on the fallback ladder, plus anything the mass-deletion guard
+            // is holding (section 8's "0 held deletions" line).
+            if let detector = await DomainManager.shared.detector(locationID: location.id) {
+                var watch = await detector.status()
+                if let runtime { watch.merge(await runtime.watchReport()) { live, _ in live } }
+                row["watch"] = watch
+            } else if let runtime {
+                row["watch"] = await runtime.watchReport()
+            }
+            if let runtime {
+                row["heldDeletions"] = (try? await runtime.heldReport()) ?? []
+            }
             // Section 4.3: a changed host key needs no command of ours; `status` prints
             // the `ssh-keygen -R` line to run.
             if let text = await hostKeyAdvice(location) { row["hostKeyAdvice"] = text }
@@ -713,11 +726,28 @@ enum LocationCommands {
                 cached: true)
         }
         let freeSpace = await runtime.freeSpaceDescription()
+        // Section 8.1: the tier the ladder is actually running, and the reason it fell if
+        // it fell (section 6.4).
+        var activeTier: String?
+        var downgradeNote: String?
+        if let detector = await DomainManager.shared.detector(locationID: location.id) {
+            let status = await detector.status()
+            activeTier = status["tier"] as? String
+            if let downgrades = status["downgrades"] as? [[String: Any]], let last = downgrades.last {
+                downgradeNote = "dropped from \(last["from"] as? String ?? "") to "
+                    + "\(last["to"] as? String ?? "") at "
+                    + "\(Date(timeIntervalSince1970: last["at"] as? Double ?? 0)): "
+                    + "\(last["reason"] as? String ?? "")"
+            } else {
+                downgradeNote = status["note"] as? String
+            }
+        }
         return CapabilityReport.make(
             probe: live.probe, extensions: live.extensions, location: location,
             budget: await runtime.channelBudgetValue(),
             probedAt: CapabilityCache.probe(locationID: location.id)?.probedAt ?? Date(),
-            cached: false, freeSpace: freeSpace)
+            cached: false, freeSpace: freeSpace,
+            activeTier: activeTier, downgradeNote: downgradeNote)
     }
 
     /// "A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`

@@ -1,5 +1,6 @@
 import Foundation
 import FileProvider
+import AgentCore
 import Config
 import Index
 import SFTP
@@ -23,6 +24,10 @@ actor DomainManager {
     /// than inside the runtime because sleep, wake, a path change and a screen unlock all
     /// arrive for every location at once and none of them wants the index actor.
     private var gates: [String: ConnectionGate] = [:]
+    /// Section 6.4's change detection, one per location. Held here rather than inside the
+    /// runtime because a cycle must never queue behind an `item(for:)` fallback or a
+    /// three-minute sweep of a large tree.
+    private var detectors: [String: ChangeDetector] = [:]
     private var started = false
 
     init() {
@@ -56,8 +61,18 @@ actor DomainManager {
             let file = try await config.load()
             for location in file.locations where location.mounted {
                 do {
-                    _ = try await runtime(for: location)
+                    let started = try await runtime(for: location)
                     try await addDomain(for: location)
+                    // Section 5.3's replica walk needs the domain to exist before
+                    // `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can
+                    // answer, so it runs here rather than inside `start()`. It clears
+                    // `meta.reconciling`, which lifts the extension's stall.
+                    if let report = await started.finishReconcileIfOwed() {
+                        Log.agent.notice(
+                            "\(location.id, privacy: .public): reconciled against the replica: \(String(describing: report), privacy: .public)"
+                        )
+                        await signalWorkingSet(locationID: location.id)
+                    }
                 } catch {
                     Log.agent.error(
                         "cannot start location \(location.id, privacy: .public): \(error, privacy: .public)")
@@ -76,7 +91,16 @@ actor DomainManager {
 
     func location(named name: String) async throws -> Location {
         guard let config else { throw GroupContainer.ContainerError.unavailable }
-        return try await config.location(named: name)
+        let location = try await config.location(named: name)
+        // Section 6.4's cadence: "a File Provider request for it that was not a system
+        // request, **or a CLI command naming it**". Every user-facing command resolves
+        // through here, so this is the one place that rule needs to live. It matters more
+        // than it looks: a folder is enumerated once ever (section 6.5), so a user
+        // watching a mount from a terminal produces no File Provider traffic at all, and
+        // without this the location would sit at the ten-minute cadence while someone was
+        // plainly working on it.
+        await detectors[location.id]?.noteTouch()
+        return location
     }
 
     @discardableResult
@@ -127,8 +151,37 @@ actor DomainManager {
             macID: macID)
         try await runtime.start()
         runtimes[location.id] = runtime
+
+        // Section 6.4: change detection starts with the location and runs whether or not
+        // the server is reachable - the first cycle after a reconnect is the full sweep
+        // that catches everything done while we were away.
+        let detector = ChangeDetector(
+            locationID: location.id, runtime: runtime, location: location,
+            capabilities: await DomainManager.capabilities(of: runtime, location: location))
+        detectors[location.id] = detector
+        await runtime.setWatchTier(await detector.currentTier().rawValue)
+        await detector.start()
         return runtime
     }
+
+    /// What the ladder of section 6.4 decides on: whether there is an exec channel at all,
+    /// what `find` the probe found there, and whether the helper is available (it is not:
+    /// the helper is milestone 9, so `auto` tops out at sweep).
+    static func capabilities(of runtime: LocationRuntime, location: Location) async
+        -> ChangeDetectionLadder.ServerCapabilities
+    {
+        let probe = await runtime.probeForSweep()
+        let exec = await runtime.allowsExecChannel() && (probe?.hasShellAccess ?? false)
+        return ChangeDetectionLadder.ServerCapabilities(
+            hasExecChannel: exec,
+            hasFind: exec && !(probe?.findFlavour ?? "").isEmpty,
+            takesCmin: probe?.findTakesCmin ?? false,
+            takesPrintf: probe?.findTakesPrintf ?? false,
+            helperAvailable: false,
+            helperEnabledForLocation: location.helper)
+    }
+
+    func detector(locationID: String) -> ChangeDetector? { detectors[locationID] }
 
     func runtime(domainIdentifier: String) async throws -> LocationRuntime {
         if let existing = runtimes[domainIdentifier] { return existing }
@@ -153,6 +206,7 @@ actor DomainManager {
     func gate(locationID: String) -> ConnectionGate? { gates[locationID] }
 
     func dropRuntime(locationID: String) async {
+        if let detector = detectors.removeValue(forKey: locationID) { await detector.stop() }
         if let gate = gates.removeValue(forKey: locationID) { await gate.shutdown() }
         guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
         // `-O exit` on the master and the channel with it, so removing a location does
@@ -176,10 +230,19 @@ actor DomainManager {
     /// takes, because the masters were already dropped at the will-sleep message.
     func didWake(trigger: String) async {
         for gate in gates.values { await gate.didWake(trigger: trigger) }
+        // Section 6.4: a full sweep on the way back from any outage, so changes made while
+        // the Mac was asleep are caught rather than waiting for a file to be touched.
+        for detector in detectors.values { await detector.requestFullSweep(reason: "wake") }
     }
 
     func networkPathChanged(available: Bool) async {
         for gate in gates.values { await gate.setNetworkPath(available) }
+        guard available else { return }
+        // "and immediately on network-up" (section 6.4's schedule).
+        for detector in detectors.values {
+            await detector.requestFullSweep(reason: "network up")
+            await detector.noteTouch()
+        }
     }
 
     /// `com.apple.screenIsUnlocked`: one re-armed attempt per location stopped by the
@@ -193,15 +256,45 @@ actor DomainManager {
     /// is cheap enough to sit on the hot path.
     @discardableResult
     nonisolated func noteFileProviderRequest(
-        domainIdentifier: String, method: String = "request", subject: String = ""
+        domainIdentifier: String, method: String = "request", subject: String = "",
+        isSystemRequest: Bool = false
     ) -> CallTiming {
         Task { await DomainManager.shared.fileProviderRequestArrived(domainIdentifier) }
+        // Section 6.4's cadence rides on the same call: a request that is not the
+        // system's own is a touch, and a touched domain is polled every 60 s rather than
+        // every 10 minutes.
+        noteDomainTouched(domainIdentifier, isSystemRequest: isSystemRequest)
         return CallTiming(domain: domainIdentifier, method: method, subject: subject)
     }
 
     private func fileProviderRequestArrived(_ domainIdentifier: String) async {
         guard let gate = gates[domainIdentifier] else { return }
         await gate.fileProviderRequestArrived()
+    }
+
+    /// Section 6.4's cadence: "every 60 s while the user has touched the domain in the
+    /// last 10 minutes (a File Provider request for it that was not a system request, or a
+    /// CLI command naming it), every 10 min otherwise". A system request - the eager
+    /// download of a pinned subtree, a Spotlight pass - is deliberately not a touch, or a
+    /// background index of a large mount would hold every location at the fast cadence.
+    nonisolated func noteDomainTouched(_ domainIdentifier: String, isSystemRequest: Bool = false) {
+        guard !isSystemRequest else { return }
+        Task { await DomainManager.shared.touch(domainIdentifier) }
+    }
+
+    private func touch(_ domainIdentifier: String) async {
+        await detectors[domainIdentifier]?.noteTouch()
+    }
+
+    /// The extension told us the system's materialized set moved (section 6.5).
+    func materializedItemsChanged(locationID: String) async {
+        await detectors[locationID]?.materializedChanged()
+    }
+
+    /// The extension handed out a fresh working-set anchor, or a connection came back:
+    /// either way one full sweep at once (sections 5.3, 6.4).
+    func requestFullSweep(locationID: String, reason: String) async {
+        await detectors[locationID]?.requestFullSweep(reason: reason)
     }
 
     /// Section 5.6's "network returns" row, and the only place it lives.
@@ -221,6 +314,17 @@ actor DomainManager {
             } catch {
                 Log.agent.error(
                     "\(locationID, privacy: .public): could not apply the new connection: \(error, privacy: .public)")
+            }
+            // Section 6.4: "On reconnect after any outage every tier first runs one full
+            // sweep so changes made while disconnected are caught, then resumes streaming."
+            // A server can also come back as a different one - a NAS whose busybox replaced
+            // a GNU find - so the ladder is re-evaluated from the new probe first.
+            if let detector = detectors[locationID] {
+                await detector.applyCapabilities(
+                    await DomainManager.capabilities(of: runtime, location: runtime.location),
+                    watchMode: runtime.location.watchMode)
+                await runtime.setWatchTier(await detector.currentTier().rawValue)
+                await detector.requestFullSweep(reason: "reconnect")
             }
         }
         if let gate = gates[locationID], await gate.suppressRecoverySignals {

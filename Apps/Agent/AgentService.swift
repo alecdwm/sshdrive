@@ -158,7 +158,8 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
             let call = DomainManager.shared.noteFileProviderRequest(
-                domainIdentifier: domainIdentifier, method: "fetchContents", subject: itemIdentifier)
+                domainIdentifier: domainIdentifier, method: "fetchContents", subject: itemIdentifier,
+                isSystemRequest: isSystemRequest)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchContents(
@@ -360,10 +361,12 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     // MARK: Signals
 
     func materializedItemsDidChange(domainIdentifier: String) {
-        // TODO milestone 6: refresh the `materialized` reason of the root set from
-        // enumeratorForMaterializedItems() (section 6.5), and milestone 8's pin safety
-        // net (section 7.2).
+        // Section 6.5: the `materialized` reason is "every directory that contains at
+        // least one materialized file, from enumeratorForMaterializedItems() refreshed on
+        // materializedItemsDidChange". Milestone 8's pin safety net (section 7.2) hangs
+        // off the same signal.
         Log.agent.debug("materializedItemsDidChange for \(domainIdentifier, privacy: .public)")
+        Task { await DomainManager.shared.materializedItemsChanged(locationID: domainIdentifier) }
     }
 
     func workingSetAnchorExpired(domainIdentifier: String, freshAnchor: String) {
@@ -378,6 +381,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                 domainIdentifier: domainIdentifier, method: "workingSetAnchorExpired", subject: freshAnchor)
             do {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                // Section 5.3: "the agent treats handing out a fresh working-set anchor
+                // exactly as it treats a reconnect: it runs one full sweep of the root set
+                // at once, and every difference from the index becomes an anchor after the
+                // fresh one". The detector's next cycle is that sweep; the catch-up walk
+                // below is the immediate half, so a fresh anchor is never left waiting for
+                // the cadence.
+                await DomainManager.shared.requestFullSweep(
+                    locationID: domainIdentifier, reason: "working-set anchor expired")
                 let changes = try await runtime.runCatchUpSweep()
                 call.finish("\(changes) change(s)")
                 Log.agent.notice(

@@ -32,13 +32,29 @@ public enum ControlSocket {
             .appendingPathComponent("\(namePrefix)\(short.isEmpty ? "0" : short)")
     }
 
-    /// Every `sshdrive-*` socket in `$TMPDIR`, including the `<path>.<pid>` names `ssh`
+    /// Every `sshdrive-*` **socket** in `$TMPDIR`, including the `<path>.<pid>` names `ssh`
     /// leaves behind when it dies between bind and rename.
+    ///
+    /// The name alone is not enough: `$TMPDIR` is a shared directory and the prefix is not
+    /// ours exclusively - the package's own tests write `sshdrive-nested-<uuid>.sqlite`
+    /// there, and its `-wal` and `-shm` sidecars were counted as six orphaned control
+    /// sockets by `sshdrive doctor`, which reported a healthy install as failing
+    /// (2026-09-04). So the type is checked too: `S_IFSOCK` with `lstat`, never following
+    /// a link, and a non-socket with our prefix is left alone rather than deleted.
     public static func existingSockets() -> [String] {
         let directory = temporaryDirectory()
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         return entries.filter { $0.hasPrefix(namePrefix) }
             .map { (directory as NSString).appendingPathComponent($0) }
+            .filter { isSocket($0) }
+    }
+
+    /// `lstat` rather than `stat`: a symlink at that name is not our socket, and following
+    /// it would let anything in a shared directory decide what we unlink (section 9.1).
+    public static func isSocket(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFSOCK
     }
 
     /// Run before the agent's first connection. If the agent crashed, its `ssh -N`

@@ -180,4 +180,24 @@ final class OptionAssemblyTests: XCTestCase {
                 ["-o", "ProxyJump=a", "-J", "b", "-o", "User=x", "-4"]),
             ["-o", "User=x", "-4"])
     }
+
+    /// `$TMPDIR` is shared, and the `sshdrive-` prefix is not ours exclusively: the
+    /// package's own tests write `sshdrive-nested-<uuid>.sqlite` there. Its `-wal` and
+    /// `-shm` sidecars were counted as orphaned control sockets and `sshdrive doctor`
+    /// reported a healthy install as failing (2026-09-04, section 6.1).
+    func testOrphanSweepIgnoresANonSocketWithOurPrefix() throws {
+        let directory = ControlSocket.temporaryDirectory()
+        let name = "sshdrive-nested-\(UUID().uuidString).sqlite-wal"
+        let path = (directory as NSString).appendingPathComponent(name)
+        FileManager.default.createFile(atPath: path, contents: Data("not a socket".utf8))
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        XCTAssertFalse(ControlSocket.isSocket(path))
+        XCTAssertFalse(
+            ControlSocket.existingSockets().contains(path),
+            "a plain file with our prefix must not be swept")
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: path),
+            "and must certainly not be deleted")
+    }
 }

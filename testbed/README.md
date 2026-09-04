@@ -166,6 +166,14 @@ unset — the OpenSSH default, and the S7 case: kill the client abruptly and see
 whether a bare background process survives, and whether the §6.4 heartbeat
 wrapper kills it within a minute under bash, dash and busybox.
 
+**Measured 2026-09-04, and the answer is the same everywhere:** a bare `sleep &`
+started by a session whose client was then `SIGKILL`ed was still running three
+minutes later on `deb-shells` (unset), on `deb` (15/3) **and** on `alp` (busybox,
+unset). sshd reaping the session does not reach a child that has left the
+foreground job, so setting `ClientAliveInterval` buys nothing here and this
+testbed has no server that would clean up after us. The heartbeat wrapper is the
+whole mechanism, and `TestbedHeartbeatTests` is where it is proven.
+
 ## Accounts
 
 Every key account authorises **both** spike keys
@@ -219,6 +227,14 @@ Scaling for S7's "1M-file tree with 200 roots": set
 then `docker compose down -v deb`-style recreation (or delete
 `~alec/.testbed-seeded` inside the container and restart it). Seeding a million
 files takes a few minutes and roughly 4 GB of inodes.
+
+**A session with no `docker compose` to hand can seed it beside the existing tree
+instead**, over ssh, which is what S7 did on 2026-09-04: a nine-line perl script
+writing `~alec/bigtree` made 2,000 directories of 500 empty files — 1,000,000
+files — **in 11 seconds**, and left 13 GB free on `/home`. That leaves `data/`
+untouched for every other spike. Delete it afterwards: `rm -rf ~/bigtree
+~/seedbig.*`. Timings taken against a container on the same Mac are a floor, not
+a NAS: the page cache cannot be dropped from inside.
 
 `alp` and `alp-nocmin` get the same layout at 2,000 / 500 files. `inner` gets 200.
 

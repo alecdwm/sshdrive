@@ -90,15 +90,15 @@ signed build.
 |---|---|
 | `Packages/.../XPCProtocols` | `SSHDriveAgentProtocol`, `SSHDriveExtensionProtocol`, the configured `NSXPCInterface`s with their class whitelists, `SSHDriveItemSnapshot`/`SSHDriveItemPage` (NSSecureCoding), `SSHDriveAgentError`, every identifier from section 3.1, and the peer code requirement. |
 | `Packages/.../Config` | The section 4 location model, `config.json` in the app-group container, atomic writes, `<name>` resolution (nickname, host, id prefix). |
-| `Packages/.../Index` | The full section 5.3 schema (`items`, `anchors`, `roots`, `held`, `meta`), a small SQLite wrapper, `IndexWriter` (agent, sole writer: upsert, delete with its deletion anchor, subtree path rewrite, anchor append/prune/expire, roots, `VACUUM INTO` backup, `reconciling` and `generation`), `IndexReader` (extension, read-only WAL, meta checks, `item`, `children`, change stream with `.syncAnchorExpired`), and the row-to-snapshot conversion both sides share. |
-| `Packages/.../AgentCore` | The agent's own derivations, in the package so they are unit-testable without an app bundle (2026-09-04): `ItemDerivation` and `ServerIdentity` (section 5.4's mode/uid/gid to `capabilities` and `fileSystemFlags`, and the stable metadata version), `NameVisibility` (case and normalisation collisions, non-UTF-8 names, and the four kinds of entry that get no row at all), and `TransferScheduler` (section 6.2: four at once, foreground before background, the window split between them, cancellation). Since milestone 4 also `SymlinkPolicy` (section 5.7's lexical inside-the-share check, both spellings of the root, the relative rewrite, and what `createItem` and a move each accept), `RowBuilder` (every derived field of a row in one place, including that check and the xattr/tag hash) and **`RemoteWriter`** (the server half of section 5.5: the temp-file-plus-rename upload, the conflict check between the bytes and the rename, the conflict copy, the in-flight set, the stale-temp rule, the rename-semantics probe and the delete rules). `RemoteWriter` never touches the index - the agent hands it the three fields the conflict check needs and writes the result back itself - which is what keeps `LocationRuntime` the only writer and makes all of section 5.5 testable against `FakeTransport`. |
+| `Packages/.../Index` | The full section 5.3 schema (`items`, `anchors`, `roots`, `held`, `meta`), a small SQLite wrapper, `IndexWriter` (agent, sole writer: upsert, delete with its deletion anchor, subtree path rewrite, anchor append/prune/expire, roots with the rotation's `last_listed`, the `held` table with its re-check counter, `VACUUM INTO` backup and the restore back **into** the live database, `PRAGMA integrity_check`, the truncate-the-sidecars path, `reconciling` and `generation`; schema version 3), `IndexReader` (extension, read-only WAL, meta checks, `item`, `children`, change stream with `.syncAnchorExpired`), and the row-to-snapshot conversion both sides share. |
+| `Packages/.../AgentCore` | The agent's own derivations, in the package so they are unit-testable without an app bundle (2026-09-04): `ItemDerivation` and `ServerIdentity` (section 5.4's mode/uid/gid to `capabilities` and `fileSystemFlags`, and the stable metadata version), `NameVisibility` (case and normalisation collisions, non-UTF-8 names, and the four kinds of entry that get no row at all), and `TransferScheduler` (section 6.2: four at once, foreground before background, the window split between them, cancellation). Since milestone 4 also `SymlinkPolicy` (section 5.7's lexical inside-the-share check, both spellings of the root, the relative rewrite, and what `createItem` and a move each accept), `RowBuilder` (every derived field of a row in one place, including that check and the xattr/tag hash) and **`RemoteWriter`** (the server half of section 5.5: the temp-file-plus-rename upload, the conflict check between the bytes and the rename, the conflict copy, the in-flight set, the stale-temp rule, the rename-semantics probe and the delete rules). `RemoteWriter` never touches the index - the agent hands it the three fields the conflict check needs and writes the result back itself - which is what keeps `LocationRuntime` the only writer and makes all of section 5.5 testable against `FakeTransport`. Since milestone 6 also the whole of section 6.4's decision-making, every piece of it pure and clock-injected: **`RootSet`** (section 6.5's three reasons, the 64-per-cycle `materialized` rotation, the 256-entry `viewed` cap and its LRU, the pin-root exclusion, and the shallow/recursive split the sweep needs), **`SweepPlan`** (the two `find` invocations, the 64 KB argv batching, `-cmin` against the `-mmin` fallback, GNU `-printf`, the `-path … -prune` glob escaping, and the POSIX `sh` body that hands `find` one batch at a time through `set --`), **`SweepParser`**, **`SweepWindow`** (the server-clock window and the clock-went-backwards clamp), **`RemoteSweep`** (one sweep on one exec channel under the heartbeat wrapper, ended by its own closing sentinel), **`ChangeDetectionLadder`** (auto/poll/sweep/helper, the session-long runtime downgrade and its `status` note), **`MassDeletionGuard`** (both halves: the size test and the pending-item rule) and **`PollSchedule`**. |
 | `Packages/.../SFTP` | `RelativePath` (the section 9.1 chokepoint, byte components), `SFTPTransport`, the section 6.2 error classes, and `FakeTransport`: an in-memory tree with list, fetch, write, rename (non-overwriting), posix-rename, delete, symlink, statvfs, plus the mutation hook. Since 2026-09-04 (milestone 2) also the real thing: the SFTP v3 wire codec, `SFTPClient` with pipelining, per-request deadlines and the OpenSSH extensions, and `RealSFTPTransport`, which is the only place a `RelativePath` becomes an absolute server path. It sits on `SSHProcess`'s `ByteStream`. |
 | `Packages/.../SSHProcess` | Real since 2026-09-04 (milestone 2): `SSHCommandBuilder` (every `ssh` command line of section 6.1), `SSHMaster` (the `-N` ControlMaster, its `SFTPChannel` and `ExecChannel` mux clients, the askpass token it mints per spawn), `ProxyChainBuilder`, `RemoteScript` with the section 9.2 sentinel and the section 6.4 heartbeat wrapper, `LoginShellSnapshot`, `SSHExitClassifier`, `IdentityAgentCheck`, `ControlSocket` and its orphan sweep, and `Spawn` (`posix_spawn` with a real `argv[0]`). |
 | `Packages/.../Secrets` | Real since 2026-09-04 (milestone 2): `KeychainSecretsStore` on the data-protection keychain, `AskpassBroker` (the section 4.2 token protocol and the answer table), `AskpassPromptClassifier`, `SSHGResolver`, `ProcessAncestry`, and the `AskpassHarness` seam the tests drive it through. |
 | `Packages/.../Logging` | The section 3.1 subsystem and categories. |
-| `Apps/Agent` | `LocationCommands` (section 8's user-facing half), `CollectConnection` (section 4.2's verification connection, and the `AddFlow.AttemptRunning` the state machine drives), `CLIRelay` (the terminal, as the agent sees it), `ServerProbe` (section 8.1's one-script probe: `uname`, `id`, `$HOME`, the `find` flavour, a checksum tool and a cache directory), `CapabilityReport` (section 8.1's eight features and their glyphs), `PeerExecutable` (which of our four executables a peer is), and: two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
+| `Apps/Agent` | `LocationCommands` (section 8's user-facing half), `CollectConnection` (section 4.2's verification connection, and the `AddFlow.AttemptRunning` the state machine drives), `CLIRelay` (the terminal, as the agent sees it), `ServerProbe` (section 8.1's one-script probe: `uname`, `id`, `$HOME`, the `find` flavour, a checksum tool and a cache directory), `CapabilityReport` (section 8.1's eight features and their glyphs), `PeerExecutable` (which of our four executables a peer is), and: two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker) with `LocationRuntime+ChangeDetection` (the guard-aware listing diff, the `held` table, `accept-deletions`, the root-set refresh, the tier 0 cycle and the sweep's application to the index), `ChangeDetector` (one per location: the cadence, the tier, the full sweep on reconnect/wake/network-up/anchor-expiry, and the 30-minute insurance pass), `ReplicaEnumerators` (the system's own materialized and pending sets, which only an unsandboxed process can usefully drive), `IndexReconcile` (section 5.3's health check, the restore **into** the live database through `sqlite3_backup_init`, the truncate-under-its-own-inode path and the walk against the replica), `ExtensionPeers` (every live reader, so the restore can ask them all to close), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
 | `Apps/FileProvider` | `NSFileProviderReplicatedExtension` with `item(for:)` answered from the read-only index reader and an XPC fallback, container and working-set enumerators, `fetchContents` over a `FileHandle` with a cancellable `Progress`, `createItem`/`modifyItem`/`deleteItem`, `disconnect(reason:)`/`reconnect()` on an unreachable agent, and the agent-error to `NSFileProviderError` mapping. |
-| `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
+| `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, `accept-deletions`, plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
 | `Apps/Askpass` | `sshdrive-askpass`: reads the token, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`), calls the agent over the askpass-only interface, prints the answer. An empty line is "skip this identity"; a non-zero exit fails the prompt. |
 
 ## Stubbed, with the milestone named
@@ -127,8 +127,8 @@ signed build.
 - ~~`fetchPartialContents` (milestone 3)~~ - real since 2026-09-04, as a foreground
   transfer under the scheduler, with the range widened to the alignment the system asks
   for. ~~The temp-file plus rename upload, conflict copies, symlink containment,
-  `.DS_Store` (milestone 4)~~ - all real since 2026-09-04. Still stubbed: the reconcile
-  walk and restore-into-live, root-set rotation and the mass-deletion guard (milestone 6),
+  `.DS_Store` (milestone 4)~~ - all real since 2026-09-04. ~~Still stubbed: the reconcile walk and restore-into-live, root-set rotation and the
+  mass-deletion guard (milestone 6)~~ - real since 2026-09-04. Still stubbed:
   eviction (7), real pin/unpin and `performAction` (8), helper (9, placeholder
   `helper/README.md`).
 - ~~Directory paging, name-collision hiding and non-UTF-8 hiding: entries are skipped, not
@@ -139,6 +139,10 @@ signed build.
   hidden name fails `.filenameCollision`. A server-side `.DS_Store`, a socket or FIFO, and
   our own `.sshdrive-upload-*` temp files get no row at all, which is what tells them apart
   from a hidden name.
+- ~~The reconcile walk and restore-into-live, root-set rotation and the mass-deletion guard
+  (milestone 6)~~ - all real since 2026-09-04. What is deliberately **not** here: tier 2,
+  the remote helper, which is milestone 9, so `auto` tops out at sweep and `status` says
+  so on every location with a shell.
 - ~~Every section 8 command other than `doctor`, `agent` and `debug`~~ - `add`, `list`,
   `show`, `remove`, `set`, `mount`, `unmount` and `status` are real since 2026-09-04, with
   section 8.1's capability report behind `status`, `show` and the tail of `add`.
@@ -147,8 +151,8 @@ signed build.
   Still missing from section 8: **`passwd`** (the collect flow is there - it is
   `CollectConnection` plus `AddFlow`, which `set host|user|port|identity` already re-runs -
   so `passwd` is a command, not a mechanism), **`test`**, `--password` /
-  `--password-stdin`, and everything belonging to a later milestone: `evict` and
-  `accept-deletions` (6, 7), `pin`/`unpin`/`pins` (8), `logs` (10).
+  `--password-stdin`, and everything belonging to a later milestone: `evict` (7),
+  `pin`/`unpin`/`pins` (8), `logs` (10). `accept-deletions` is real since 2026-09-04.
 
 ## `sshdrive debug` hooks, exact syntax
 
@@ -395,6 +399,43 @@ evict`, `sshdrive pin` and the eviction timer replace them in milestones 7 and 8
   setting the marker and reports which rows it created, which is section 7.1 step 1. It
   also serves a real `.downloadLazily` for `pin_state = -1`; it used to serve "no opinion",
   under which an eager ancestor would simply have won and exclusions could not work.
+
+### The 2026-09-04 hooks (milestone 6: `debug watch`, `debug roots`, `debug held`, `debug reconcile`)
+
+Change detection is a timer, so every hook here exists to take the timer out of the loop.
+`sshdrive status` is the shipped surface for all of it; these are for a spike that wants a
+cycle *now*.
+
+- **`watch <name> [--now] [--full] [--pause on|off] [--clock-skew SECONDS]
+  [--forget-stamp]`** - `--now` runs one cycle at the location's current tier and prints
+  what it changed, deleted, held and released, and how many directories it listed;
+  `--full` runs the full sweep a reconnect, a wake, a returning network path and a fresh
+  working-set anchor all trigger. `--pause on` stops the cadence loop without stopping the
+  location, so a spike owns the timing. **`--clock-skew` shifts the *stored server
+  timestamp*, not the server's clock**, which is the only way to exercise section 6.4's
+  window from a container: containers share the host's clock and Docker has no time
+  namespace (`testbed/README.md`), so what the hook tests is the arithmetic and the
+  store-only-after-applying rule, and `status` prints `note: the sweep's server-clock
+  reference is shifted by Ns by a debug hook` for as long as it is set. `--forget-stamp`
+  drops the stamp so the next sweep is unbounded, which is what a fresh or rebuilt index
+  produces.
+- **`roots <name> [--refresh]`** - the section 6.5 root set as the index holds it: every
+  path with its reasons, `last_seen` and `last_listed`, the rotation period, and the exact
+  list the next tier 0 cycle would take. `--refresh` rebuilds the `materialized` reason
+  from `enumeratorForMaterializedItems()` first. This is the only way to see the rotation,
+  since a cycle that lists 64 of 5,000 roots looks identical from outside to one that
+  listed them all.
+- **`held <name>`** - the `held` table: path, directory, when it was first missing, when
+  the next re-check is, how many re-checks it has had and the reason line `status` prints.
+- **`reconcile <name> [--force]`** - section 5.3's walk against the system's replica, on
+  demand. `--force` sets `meta.reconciling` first, so the whole recovery path can be
+  exercised on a healthy index without corrupting one. The reply carries both the walk's
+  report and whatever `IndexReconcile` did at location start.
+
+Two existing hooks earn a note in this milestone. **`fault <name> --writes on`** is what
+makes an edit in the mount stay in the system's pending set, which is the input the
+mass-deletion guard's pending rule needs; and **`materialized <name> --pending`** is how to
+see that set. Turn `--writes` off again before leaving the VM.
 
 ## Verify on Mac (what the compiler could not settle)
 

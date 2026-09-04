@@ -211,6 +211,115 @@ enum ControlCommands {
                 frozenMetadata: frozen, fetchError: arguments["fetchError"])
             return try json(await runtime.transferStats(reset: false))
 
+        case "accept-deletions":
+            // Section 8: "apply deletions the mass-deletion guard is holding". With no
+            // path, everything the location is holding; with one, that path and its
+            // subtree.
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            let applied = try await runtime.acceptDeletions(pathString: arguments["path"])
+            if applied > 0 {
+                await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            }
+            return try json([
+                "location": location.displayName,
+                "applied": applied,
+                "stillHeld": (try? await runtime.heldReport())?.count ?? 0,
+            ])
+
+        case "debug.watch":
+            // Section 6.4's change detection, driven by hand: one cycle now, a full sweep
+            // now, the loop paused so a spike owns the timing, and the server-clock skew a
+            // container cannot provide (testbed/README.md: containers share the host's
+            // clock and Docker has no time namespace, so the sweep's own reference is
+            // shifted instead and `status` says so).
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            guard let detector = await DomainManager.shared.detector(locationID: location.id) else {
+                throw SSHDriveAgentError.notImplemented.asNSError(
+                    "no change detector for \(location.displayName)")
+            }
+            if let pause = arguments["pause"] { await detector.setPaused(pause == "on") }
+            if let skew = arguments["clockSkew"].flatMap({ Int64($0) }) {
+                await detector.setClockSkew(seconds: skew)
+            }
+            if arguments["forgetStamp"] == "true" { await runtime.setSweepServerTime(0) }
+            var report: [String: Any] = [:]
+            if arguments["now"] == "true" || arguments["full"] == "true" {
+                let started = Date()
+                let application = await detector.runCycle(forceFull: arguments["full"] == "true")
+                report["ranSeconds"] = Date().timeIntervalSince(started)
+                report["changed"] = application.changed
+                report["deleted"] = application.deleted
+                report["held"] = application.held
+                report["released"] = application.released
+                report["directoriesListed"] = application.listedDirectories
+                report["errors"] = application.errors
+            }
+            report["status"] = await detector.status()
+            report["watch"] = await runtime.watchReport()
+            report["pendingPaths"] = await runtime.pendingPathCount()
+            return try json(report)
+
+        case "debug.roots":
+            // Section 6.5's root set as the index holds it, with the rotation the next
+            // tier 0 cycle would take.
+            let runtime = try await resolveRuntime(arguments)
+            if arguments["refresh"] == "true" {
+                let location = try await resolveLocation(arguments)
+                let identifiers = await ReplicaEnumerators.materializedIdentifiers(
+                    locationID: location.id)
+                _ = try? await runtime.refreshRootSet(materializedIdentifiers: identifiers)
+            }
+            // `--seed N` marks the first N **real** directory rows as `materialized`
+            // roots. Only the reason is injected: every one of them is a directory that
+            // exists and is really `readdir`ed by the cycle. Materializing a file in each
+            // of five thousand directories to get the reason honestly is five thousand
+            // fetches, and what section 6.5's rotation is measured on is the cost of a
+            // cycle at that scale, not how the roots got there.
+            if let seed = arguments["seed"].flatMap({ Int($0) }) {
+                let added = try await runtime.seedMaterializedRoots(limit: seed)
+                let set = try await runtime.currentRootSet()
+                return try json([
+                    "seeded": added, "count": set.entries.count,
+                    "rotationPeriod": set.rotationPeriod(),
+                    "cycle": set.tier0Cycle().count,
+                ])
+            }
+            let set = try await runtime.currentRootSet()
+            return try json([
+                "count": set.entries.count,
+                "rotationPeriod": set.rotationPeriod(),
+                "cycle": set.tier0Cycle().map { String(decoding: $0, as: UTF8.self) },
+                "fullCycle": set.tier0Cycle(fullSweep: true).count,
+                "roots": set.entries.map {
+                    [
+                        "path": String(decoding: $0.path, as: UTF8.self),
+                        "reasons": $0.reasons.map(\.rawValue).sorted(),
+                        "lastSeen": $0.lastSeen,
+                        "lastListed": $0.lastListed,
+                    ] as [String: Any]
+                },
+            ])
+
+        case "debug.reconcile":
+            // Section 5.3's walk on demand: `--force` sets `meta.reconciling` first, so
+            // the whole recovery path can be exercised without corrupting an index.
+            let location = try await resolveLocation(arguments)
+            let runtime = try await resolveRuntime(arguments)
+            if arguments["force"] == "true" { try await runtime.markReconciling() }
+            let report = await runtime.finishReconcileIfOwed()
+            await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            return try json([
+                "location": location.displayName,
+                "report": report ?? ["state": "nothing owed"],
+                "recovery": await runtime.recoveryReport,
+            ])
+
+        case "debug.held":
+            let runtime = try await resolveRuntime(arguments)
+            return try json(["held": try await runtime.heldReport()])
+
         case "debug.calls":
             // Spike S5's journal of the File Provider calls that reached the agent, with
             // the gap since the previous call of the same kind. Every "how long does the

@@ -16,6 +16,7 @@ struct Debug: ParsableCommand {
             Evict.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
             Stabilize.self, Testing.self, Transport.self,
             Breaker.self, Power.self, Presence.self, Rearm.self, Calls.self, Row.self,
+            Watch.self, Roots.self, Held.self, Reconcile.self,
         ])
 }
 
@@ -730,5 +731,101 @@ struct Row: ParsableCommand {
         if forget { arguments["forget"] = "true" }
         if let contentVersion { arguments["contentVersion"] = contentVersion }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.row", arguments: arguments))
+    }
+}
+
+
+// MARK: change detection (section 6.4)
+
+struct Watch: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Drive section 6.4's change detection by hand.",
+        discussion: """
+            `--now` runs one cycle at the current tier; `--full` runs one full sweep, which
+            is what a reconnect and a fresh working-set anchor both trigger. `--pause on`
+            stops the loop so a spike owns the timing. `--clock-skew` shifts the sweep's own
+            server-clock reference, which is the only way to exercise the window from a
+            container: containers share the host's clock and Docker has no time namespace,
+            so what is under test is the window the agent computes rather than the value
+            the server reports, and `status` says the reference is shifted.
+            """)
+
+    @Argument var name: String
+
+    @Flag(help: "Run one cycle now.")
+    var now = false
+
+    @Flag(help: "Run one full sweep now.")
+    var full = false
+
+    @Option(help: "on|off: pause the cadence loop.")
+    var pause: String?
+
+    @Option(name: .customLong("clock-skew"), help: "Seconds to shift the stored server timestamp by.")
+    var clockSkew: Int?
+
+    @Flag(name: .customLong("forget-stamp"), help: "Drop the stored server timestamp, so the next sweep is unbounded.")
+    var forgetStamp = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if now { arguments["now"] = "true" }
+        if full { arguments["full"] = "true" }
+        if let pause { arguments["pause"] = pause }
+        if let clockSkew { arguments["clockSkew"] = String(clockSkew) }
+        if forgetStamp { arguments["forgetStamp"] = "true" }
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.watch", arguments: arguments, timeout: 1200))
+    }
+}
+
+struct Roots: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "The section 6.5 root set, and the rotation the next tier 0 cycle takes.")
+
+    @Argument var name: String
+
+    @Flag(help: "Rebuild the materialized reason from the system first.")
+    var refresh = false
+
+    @Option(help: "Mark the first N directory rows as materialized roots, to measure the rotation at scale.")
+    var seed: Int?
+
+    func run() throws {
+        var arguments = ["name": name]
+        if refresh { arguments["refresh"] = "true" }
+        if let seed { arguments["seed"] = String(seed) }
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.roots", arguments: arguments, timeout: 300))
+    }
+}
+
+struct Held: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "What the mass-deletion guard is holding.")
+
+    @Argument var name: String
+
+    func run() throws {
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.held", arguments: ["name": name]))
+    }
+}
+
+
+struct Reconcile: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Rebuild the index from the system's replica (section 5.3).")
+
+    @Argument var name: String
+
+    @Flag(help: "Set meta.reconciling first, so the walk runs on a healthy index.")
+    var force = false
+
+    func run() throws {
+        var arguments = ["name": name]
+        if force { arguments["force"] = "true" }
+        AgentClient.prettyPrint(
+            try AgentClient.send(command: "debug.reconcile", arguments: arguments, timeout: 600))
     }
 }

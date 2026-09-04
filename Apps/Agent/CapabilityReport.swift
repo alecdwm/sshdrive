@@ -75,14 +75,17 @@ struct CapabilityReport {
         probedAt: Date,
         cached: Bool,
         helperAvailable: Bool = false,
-        freeSpace: String? = nil
+        freeSpace: String? = nil,
+        activeTier: String? = nil,
+        downgradeNote: String? = nil
     ) -> CapabilityReport {
         let shell = probe.hasShellAccess && budget.allowsExecChannel
         var features: [Feature] = []
 
         // 1. Change detection: helper · sweep · poll.
-        features.append(changeDetection(probe: probe, location: location, shell: shell,
-                                        helperAvailable: helperAvailable))
+        features.append(changeDetection(
+            probe: probe, location: location, shell: shell, helperAvailable: helperAvailable,
+            activeTier: activeTier, downgradeNote: downgradeNote))
 
         // 2. Rename detection: rename events (helper) · delete+create.
         features.append(Feature(
@@ -157,17 +160,29 @@ struct CapabilityReport {
     }
 
     private static func changeDetection(
-        probe: ServerProbe.Result, location: Location, shell: Bool, helperAvailable: Bool
+        probe: ServerProbe.Result, location: Location, shell: Bool, helperAvailable: Bool,
+        activeTier: String? = nil, downgradeNote: String? = nil
     ) -> Feature {
         let best = "helper (push, ~1s)"
-        guard shell else {
+        // Section 8.1: "A runtime downgrade ... shows the level in use with ◐ and a
+        // `note:` line giving the reason and time, in addition to the `upgrade:` line."
+        // The ladder, not the probe, is the authority on which tier is running once the
+        // location has been up: a sweep that failed drops to poll for the session even
+        // though the probe still says the shell is there (section 6.4).
+        let running = activeTier ?? (shell && location.watchMode != .poll ? "sweep" : "poll")
+        guard shell, running != "poll" else {
             return Feature(
                 name: "change detection",
                 level: "poll (SFTP readdir every 60s while active)",
                 best: best, glyph: "◐",
-                upgrade: "shell access on the server enables the helper (push); plain shell "
-                    + "access enables remote sweep",
-                note: probe.failure.isEmpty ? nil : probe.failure)
+                upgrade: location.watchMode == .poll
+                    ? nil
+                    : "shell access on the server enables the helper (push); plain shell "
+                        + "access enables remote sweep",
+                note: downgradeNote
+                    ?? (location.watchMode == .poll
+                        ? "forced by watch-mode poll"
+                        : (probe.failure.isEmpty ? nil : probe.failure)))
         }
         // A user-forced watch-mode below the best available shows ◐ with `note: forced by
         // watch-mode <x>` and no `upgrade:` line (section 8.1).
@@ -193,6 +208,7 @@ struct CapabilityReport {
             note = "helper unsupported: \(probe.uname.isEmpty ? "unknown" : probe.uname)"
         }
         if location.watchMode == .sweep { note = "forced by watch-mode sweep" }
+        if let downgradeNote { note = downgradeNote }
         return Feature(
             name: "change detection", level: sweepLevel, best: best, glyph: "◐",
             upgrade: location.watchMode == .sweep ? nil : "the remote helper (push events, real renames)",

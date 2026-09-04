@@ -56,9 +56,35 @@ final class IndexTests: XCTestCase {
         XCTAssertEqual(root.identifier, IndexWriter.rootIdentifier)
         XCTAssertTrue(root.path.isEmpty)
         XCTAssertEqual(try writer.meta(IndexSchema.MetaKey.schemaVersion), String(IndexSchema.version))
+        // Version 3 is milestone 6: the roots rotation column and the sweep's server clock
+        // (sections 6.4, 6.5). A reader that finds a version it does not understand falls
+        // back to the agent, so the number has to move with the columns.
+        XCTAssertEqual(IndexSchema.version, 3)
         // The root row is permanent, so a second call must not duplicate it.
         _ = try writer.ensureRoot()
         XCTAssertEqual(try writer.allItems().count, 1)
+    }
+
+    /// The version 3 columns are on a freshly created database too, not only on a migrated
+    /// one: `CREATE TABLE IF NOT EXISTS` and the migration have to agree on the shape.
+    func testAFreshDatabaseHasTheVersion3Columns() throws {
+        let writer = try IndexWriter(path: indexPath)
+        try writer.addRoot(path: Data("Photos".utf8), reason: "materialized")
+        XCTAssertEqual(try writer.rootRows().first?.lastListed, 0)
+
+        try writer.hold(
+            path: Data("Photos/a.jpg".utf8), dir: Data("Photos".utf8),
+            firstMissing: 1, recheckAt: 301, reason: "Photos emptied")
+        XCTAssertEqual(try writer.heldRow(path: Data("Photos/a.jpg".utf8))?.checks, 0)
+        XCTAssertEqual(try writer.heldRow(path: Data("Photos/a.jpg".utf8))?.reason, "Photos emptied")
+
+        // The sweep's own stamps live in meta, so a restarted agent can answer for them.
+        try writer.setMeta(IndexSchema.MetaKey.sweepServerTime, "1700000000")
+        try writer.setMeta(IndexSchema.MetaKey.lastFullSweep, "1700000001")
+        try writer.setMeta(IndexSchema.MetaKey.watchTier, "1")
+        XCTAssertEqual(try writer.meta(IndexSchema.MetaKey.sweepServerTime), "1700000000")
+        XCTAssertEqual(try writer.meta(IndexSchema.MetaKey.lastFullSweep), "1700000001")
+        XCTAssertEqual(try writer.meta(IndexSchema.MetaKey.watchTier), "1")
     }
 
     func testReaderSeesWhatTheWriterWrote() throws {

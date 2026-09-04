@@ -6,6 +6,344 @@ the write matrix); this file records only what happened.
 
 ---
 
+## 2026-09-04 (milestone 6) - S7: the root set, the sweep, the fallback ladder and the mass-deletion guard
+
+Milestone 6 end to end: DESIGN.md section 6.5's root set with its rotation and the `viewed`
+reason, section 5.3's anchors and catch-up sweep, section 6.4's poll cadence, tier 0, tier 1
+and the fallback ladder, the mass-deletion guard and `sshdrive accept-deletions`, and
+section 5.3's reconcile against the replica, which milestone 5 left owed. Same headless VM
+(macOS 26.4.1 arm64, Xcode 26.4, `OpenSSH_10.2p1`), the signed Debug build installed over
+`/Applications/SSH Drive.app` with `ditto`. Testbed up on the Mac. Steps are in
+`milestone-6.md`.
+
+**Tier 2 is not here.** The helper is milestone 9, so `auto` tops out at sweep, S7's
+helper questions (the NDJSON stream beside two SFTP channels, FreeBSD kqueue on a
+100,000-file tree) are out of scope, and every location with a shell shows
+`◐ change detection  sweep` with a `note:` saying the helper is not in this release.
+
+**503 package tests, 0 failures** (was 381; 39 skipped without the testbed). The 122 new
+ones are `RootSetTests`, `SweepPlanTests` (which also holds `SweepWindowTests`),
+`SweepParserTests`, `ChangeDetectionLadderTests`, `MassDeletionGuardTests`,
+`PollScheduleTests`, `RootsAndHeldTests` and eight testbed-backed `TestbedSweepTests`.
+
+### What was built
+
+`AgentCore` took the whole of section 6.4's decision-making, because every part of it that
+is worth testing is a decision and not an I/O - the same split milestone 5 made for the
+breaker:
+
+- **`RootSet`** - section 6.5's three reasons, the 64-per-cycle `materialized` rotation in
+  order of least recent listing, `ceil(M / 64)` as the rotation period, the 256-entry
+  `viewed` cap with its LRU eviction, the pin-root exclusion, and the shallow/recursive
+  split tier 1 needs. Byte-level containment throughout: a root name need not be UTF-8.
+- **`SweepPlan`** - the two `find` invocations, batched at 64 KB of argv, `-cmin` with the
+  `-mmin` fallback, GNU `-printf`, the `-path <glob> -prune` escaping, and a POSIX `sh`
+  body that hands `find` one batch at a time out of a single `set --` list. Nothing from
+  the user is ever in the body.
+- **`SweepParser`**, **`SweepWindow`** (the server-clock window, `ceil(delta/60) + 1`, and a
+  clamp with a `clockWentBackwards` flag when the stored stamp is in the future),
+  **`RemoteSweep`** (one sweep on one exec channel under section 6.4's heartbeat wrapper,
+  ended by its own closing sentinel), **`ChangeDetectionLadder`**, **`MassDeletionGuard`**
+  and **`PollSchedule`**.
+
+The agent gained **`ChangeDetector`**, one actor per location holding the cadence and the
+tier. It is deliberately not part of `LocationRuntime`: the runtime is the index's writer
+and everything on it serialises behind the index, so a detector that lived there would put
+a multi-second sweep in front of every `item(for:)` fallback and every fetch. Beside it,
+**`ReplicaEnumerators`** (the system's own `enumeratorForMaterializedItems()` and
+`enumeratorForPendingItems()`, which only an unsandboxed process can usefully drive),
+**`LocationRuntime+ChangeDetection`** (the guard-aware listing diff, the `held` table,
+`accept-deletions`, the root-set refresh, the tier 0 cycle and the sweep's application to
+the index), **`IndexReconcile`** and **`ExtensionPeers`**.
+
+The index went to **schema version 3**: `roots.last_listed` (the rotation's round-robin
+key, distinct from `last_seen`, which is the `viewed` LRU key), `held.checks` and
+`held.reason`, and three `meta` keys - the sweep's server clock, the last full sweep and
+the tier in use. The migration is an explicit `ALTER TABLE` after a `PRAGMA table_info`,
+because `CREATE TABLE IF NOT EXISTS` does not alter an existing table; `RootsAndHeldTests`
+builds a version 2 database by hand and migrates it.
+
+### S7, question by question
+
+| # | Question | Answer |
+|---|---|---|
+| s7-1 | Does tier 1 coexist with two SFTP channels on one connection? | **Yes**, and it is not close: a 15,000-file sweep is 0.5 s of channel time |
+| s7-2 | How long does the `-cmin` sweep take on a 1M-file tree with 200 roots? | **876 ms** for the incremental case; 175-376 ms for 200 roots |
+| s7-3 | `-cmin` / `-printf` across GNU and busybox, and the `-mmin` fallback | busybox has **neither**; the fallback provably misses a `chmod` |
+| s7-4 | The server-clock window against skew | **Cannot be tested honestly here**; the reference is skewed by a hook and said so |
+| s7-5 | `sh -s` under bash, zsh, fish, tcsh, dash, and `bashbg` | All pass, including a whole **sweep** ending on the closing sentinel |
+| s7-6 | Abrupt client kill: does a bare background process survive? | **Yes, on every server - `ClientAliveInterval` set or not** |
+| s7-7 | External `sftp-server` behind a noisy shell; `ForceCommand internal-sftp` | Both as section 9.2 says |
+| s7-8 | A tier 0 cycle with as many `materialized`-only roots as we can make | See below |
+
+#### s7-1. Tier 1 beside two SFTP channels
+
+`TestbedSweepTests.testSweepCoexistsWithTwoSFTPChannelsOnOneConnection`: one `-N` master,
+two `SFTPChannel`s each with a real wire client `readdir`ing in a loop, and a sweep of
+`deb`'s 15,011-file `data/` tree on an exec channel at the same time. All three channels
+lived, both listings kept being served through the sweep, both channels answered an `lstat`
+afterwards, and the master was untouched. The whole test is **0.54 s**, which is the more
+useful half of the answer: a sweep is not a long-running stream, it is half a second of
+channel time, so on a `MaxSessions 2` server it competes with the probe and with nothing
+else.
+
+#### s7-2. The sweep on a million files
+
+The README's scaling knobs need the `deb` service recreated from the Mac, which this
+session could not do without re-seeding the `data/` tree every other spike uses. So the big
+tree was seeded beside it over ssh: **2,000 directories x 500 empty files = 1,000,000
+files, in 11 seconds.**
+
+| Shape (GNU findutils, Debian 12, warm) | Time | Output |
+|---|---|---|
+| 200 roots, recursive, `-cmin -60 -printf` (everything matches) | 175-376 ms | 7,213,200 B |
+| 200 roots, `-maxdepth 1`, same | 174-181 ms | the same set |
+| 1M tree, `-cmin -60 -printf` (everything matches) | 1,673-2,946 ms | 72,132,061 B |
+| 1M tree, `-cmin -1` (nothing matches) | 858-886 ms | 0 B |
+| **1M tree, `-cmin -2` after one `touch`** | **876 ms** | one record |
+| 1M tree, unbounded + `-printf` (a GNU full sweep) | 1,635-3,001 ms | 72,132,061 B |
+| 1M tree, unbounded + `-print0` (a non-GNU full sweep) | 204-228 ms | 23,028,008 B |
+
+**The number to remember is 876 ms**: an ordinary incremental sweep of a million-file tree,
+returning the one file that changed. The second number is why: `-cmin` and `-printf` each
+force a `stat` per entry, so the same walk is 204 ms with neither and 850-1,650 ms with
+either. That is a floor, not a NAS - a container on the same Mac cannot have its page cache
+dropped - but it settles the question section 6.4 asks, which is whether one command per
+minute is affordable at all. It is, by a wide margin.
+
+The 64 KB argv batching is right but rarely load-bearing: 200 roots is 2,799 bytes and
+2,000 roots is 28,000, so a single batch carries about 4,600 roots at these name lengths.
+`SweepPlanTests` proves the batching; the tree proves it is not the constraint.
+
+#### s7-3. GNU against busybox
+
+BusyBox v1.36.1, identical on `alp` (2206) and `alp-nocmin` (2208):
+
+```
+find data -maxdepth 0 -cmin -60   ->  find: unrecognized: -cmin      rc=1
+find data -maxdepth 0 -printf '%p' ->  find: unrecognized: -printf   rc=1
+find data -maxdepth 0 -mmin -60   ->  rc=0
+find data -maxdepth 0 -newer FILE ->  rc=0
+```
+
+Two things follow that were not in the design. **`find --version` prints
+`find: unrecognized: --version` and exits 0**, so a flavour probe keyed on the exit status
+would call every busybox server GNU and every sweep on it would fail outright with nothing
+on stdout; ours reads the `busybox` banner and the `-cmin` answer, and `SweepPlan` refuses
+`-cmin`/`-printf` on a busybox flavour a second time even when the probe claims them. And
+`alp-nocmin`'s shim is indistinguishable from stock busybox, so it is not a separate case -
+`testbed/README.md` already said so and now says why it matters.
+
+**The cost of the fallback, measured.** A file whose mtime was set back to 2020 and then
+`chmod`ed:
+
+```
+after create, -mmin -1 hits: 1
+after chmod with an old mtime, -mmin -1 hits: 0
+```
+
+and on GNU `deb` the same probe is found by `-cmin` and missed by `-mmin`
+(`TestbedSweepTests.testCminCatchesAChmodThatMminMisses`). So section 6.4's claim is exact:
+the fallback loses ctime-only changes and nothing else, and `status` says so on every
+busybox location as an ordinary line.
+
+#### s7-4. The server clock, and what could not be tested
+
+**A container cannot have its clock skewed.** Docker has no time namespace and every
+container shares the host's clock; skewing the VM instead would move the Mac's clock, which
+is the one thing the window must not depend on. So this is recorded as **not answered by a
+real skew**, and what was built instead is said plainly: `sshdrive debug watch
+--clock-skew N` shifts the *stored server timestamp* the next window is computed from, and
+`status` prints `note: the sweep's server-clock reference is shifted by Ns by a debug hook`
+while it is set.
+
+Building it did find a real error in the first implementation, though, and it is the error
+section 6.4 warns about. The window was computed as `serverNow - stored` with `serverNow`
+taken from the **Mac's** wall clock - which folds the entire clock difference into the
+window, so a server five minutes behind would be swept with a window of nothing at all.
+The window is now **elapsed time on our clock applied to the server's stamp**: the local
+time at which the server stamp was stored is kept beside it, and `N` is
+`ceil((now - thatLocalTime) / 60) + 1`. Neither clock's absolute value enters into it,
+which is what section 6.4 means and what a skewed server would otherwise break.
+
+The other half of the rule is enforced where it belongs: `RemoteSweep` returns
+`serverTime: nil` for a sweep whose closing sentinel never arrived, and `ChangeDetector`
+stores nothing in that case, so a cut-off sweep leaves the next window covering everything
+it missed.
+
+#### s7-5, s7-7. The shells, and the two awkward accounts
+
+All the milestone 2 answers hold, and tier 1 adds two of its own: a whole **sweep** returns
+on its closing sentinel against `bashbg`, whose rc file leaves a background child holding
+stdout so EOF never arrives, and six directory names from the testbed's `weird/` tree -
+`$(echo pwned)`, `quote'name`, `space in name`, `*star*`, `[bracket]`, `back\slash` - are
+used as **sweep roots**, each returning its own `inside.txt` and creating no `pwned` file.
+`forcesftp` is still reported as "no shell access (ForceCommand)", and `deb-extsftp`'s
+`extnoisy` still needs the exec-channel `sftp-server` fallback.
+
+#### s7-6. The bare background process
+
+This is the one where the design was optimistic. The control case - a bare `sleep &`
+started **by the session that is then `SIGKILL`ed**, with no wrapper:
+
+| Server | `ClientAliveInterval` | at t+180 s |
+|---|---|---|
+| `deb-shells` (2202) | unset | **alive** |
+| `deb` (2201) | 15 / 3 | **alive** |
+| `alp` (2206, busybox) | unset | **alive** |
+
+Section 6.4 explained the danger in terms of `ClientAliveInterval` being unset, which reads
+as though setting it would fix the problem. It does not: sshd reaping the session does not
+reach a child that has left the foreground job. The section now says so. The heartbeat
+wrapper is not a workaround for a common misconfiguration; on every server measured it is
+the only thing that ever kills what we started, and `TestbedHeartbeatTests` shows it doing
+so within 75 s under dash's watchdog branch, busybox's `read -t` branch, a dash login
+shell, and on silence alone with the channel still open.
+
+#### s7-8. A tier 0 cycle with 5,000 `materialized`-only roots
+
+Five thousand directories on `deb`, a location on them, the root enumerated so every
+directory has a row, and the `materialized` reason put on all five thousand with
+`sshdrive debug roots --seed 5000`. Only the *reason* is injected; every one of those
+directories exists and is really `readdir`ed.
+
+| | Directories listed | Time |
+|---|---|---|
+| one tier 0 cycle under the rotation | **65** (64 materialized-only, plus the root, which is `viewed`) | **0.91 s** |
+| one **full** cycle, rotation suspended | **5,001** | **16.69 s** |
+
+`rotationPeriod` is 79 = `ceil(5000 / 64)`, and `status` prints
+`5001 root(s) rotating over 79 cycles`. The rotation is worth about **eighteen times** here:
+without it a location holding five thousand cached directories would spend 16.7 s of every
+60 s listing them. That is section 6.5's argument, measured.
+
+### The mount proofs
+
+Two locations, `m6` on `deb` (GNU `-cmin -printf`) and `m6a` on `alp` (busybox `-mmin`).
+Every change is made by a **separate** ssh, never by the agent.
+
+**A file created, modified, renamed and deleted on the server, seen in the mount:**
+
+| Step | `m6` (GNU) | `m6a` (busybox) |
+|---|---|---|
+| `created.txt` appears | 59,743 ms | 60,687 ms |
+| its content changes | 104 ms | 117 ms |
+| `renamed.txt` appears | 59,923 ms | 59,406 ms |
+| `created.txt` vanishes | 7 ms | 4 ms |
+| `renamed.txt` vanishes | 59,647 ms | 60,122 ms |
+
+Every step inside one poll interval on both. The pattern is the cadence rather than the
+mechanism: a change is found by the next 60-second cycle and everything that cycle finds
+arrives together, which is why the second and fourth rows are milliseconds. The busybox
+column matches because a create, a write, a rename and a delete all move mtime; the one
+thing `-mmin` misses is a ctime-only change.
+
+**A directory deleted on the server with a pending local edit inside it:**
+
+```
+pending set: keepme/note.txt                       (count 1)
+the directory is deleted on the server
+  "deleted" : 0,  "held" : 1
+held: path "keepme"   reason "1 deletion held in the location root"
+still in the mount? yes          the local edit: edited-on-the-mac
+status: 1 deletion(s) held in the location root, re-check at 23:44
+        apply them now with: sshdrive accept-deletions m6
+accept-deletions -> Applied 1 held deletion(s).   still in the mount? NO
+```
+
+Note what is held: the **directory**, while the pending edit is on the file inside it. A
+listing infers the deletion of the directory, not of the file, so the guard counts every
+ancestor of a pending path as pending too. Matching pending paths exactly - which the first
+implementation did - would have let `keepme` through and stranded the save inside it, which
+is exactly the case S5 measured. Found by the mount proof, fixed, and covered by
+`MassDeletionGuardTests`.
+
+**A mass deletion over the threshold:** 40 files, 30 removed in one go.
+
+```
+rows before: 40      ->  "deleted" : 0,  "held" : 30      in the mount: still 40
+a file still on the server:  f31.txt -> x
+a HELD file:                 cat .../bulk/f01.txt: Operation timed out
+status: 30 deletion(s) held in bulk, re-check at 23:45
+accept-deletions m6 bulk -> Applied 30.   in the mount: 10
+```
+
+`Operation timed out` is `ETIMEDOUT`, which is `.cannotSynchronize`; `.noSuchItem` would
+have given `ESTALE` (S5). Section 6.4 asks for exactly that - the item stays and the user is
+told the truth about it.
+
+**`status`** shows the tier, the cadence and whether the domain is active, the cycle count,
+the root count with the rotation period when it exceeds one cycle, the last cycle or full
+sweep with what it found and how long it took, the ladder's note, the `-mmin` warning on a
+busybox server, and the held-deletion line with the command that applies it.
+
+### Four assumptions that failed
+
+**Section 6.4 framed the lifetime problem around `ClientAliveInterval`.** It is not a
+`ClientAliveInterval` problem: a bare background child survives an abrupt client kill on
+every server measured, with the setting on or off. The section now says the wrapper is the
+only mechanism there is, and section 13 records it.
+
+**Section 5.3's working-set enumerator could report an empty change set, and that loses
+changes.** The extension answered `finishEnumeratingChanges(upTo: theSameAnchor)` whenever
+its reader was not yet usable. Since the system launches a **fresh extension instance for
+every working-set signal** (S5 measured that for writes; it is true for signals too), the
+first `enumerateChanges` on a signalled instance races the `indexReady` round trip, and an
+empty change set at the anchor the system already holds tells it that it is up to date. The
+symptom on a real mount was a file deleted on the server and removed from the index that
+stayed in Finder for ten minutes, until an unrelated change signalled again and the system
+caught up on both at once. The answer is `.serverUnreachable`, which the system retries.
+Found by the milestone 6 mount proof and fixed; section 5.3 and section 13 record it.
+
+**Section 6.4's server-clock window is only skew-proof if it is written as elapsed time.**
+The first implementation computed `N` from the **Mac's** wall clock minus the stored
+**server** stamp, which folds the whole clock difference into the window - a server five
+minutes behind would have been swept with no window at all, which is exactly the failure
+the rule exists to prevent. The agent now keeps its own clock reading beside the server
+stamp and computes `N` from the elapsed time between them, so neither clock's absolute
+value enters into it.
+
+**A sweep root is not always expressible.** Section 9.2's `set --` pipeline is Strings end
+to end, and section 5.4 says server names need not be valid UTF-8, so a root whose bytes are
+not UTF-8 cannot reach `find` at all. Such a root is dropped from the sweep's argv and
+listed at tier 0 in the same cycle instead, which watches it at the same cadence and loses
+only the server-side walk. Section 6.4 now says so, and so does section 13.
+
+### Three smaller things
+
+- **`find` has no portable `--`**, so every sweep root is spelled `./name`. A top-level
+  directory called `-name` would otherwise be read as an option and take the whole sweep
+  with it. The prefix comes back on every path and is stripped before the path reaches the
+  `RelativePath` constructor.
+- **`rewritePaths` moved `held.path` and not `held.dir`.** The guard's 5- and 30-minute
+  re-checks are driven by re-listing the directory the deletion was inferred from, so a
+  `dir` left at the old name would be re-listed for ever against a path that no longer
+  exists and the holds would never resolve. Found by reading, not by a test, and fixed with
+  a test.
+- **The orphan control-socket sweep matched by name alone, and `$TMPDIR` is shared.**
+  `sshdrive doctor` on a clean VM reported `[ fail ] control sockets  6 socket(s), 6 with
+  no location` - all six were `sshdrive-nested-<uuid>.sqlite-wal` and `-shm`, sidecars of
+  the package's own temporary test databases. The sweep would have deleted them, and on a
+  worse day it would delete whatever else in a shared directory happened to start with
+  `sshdrive-`. It now `lstat`s each candidate and takes only `S_IFSOCK`, following no
+  links.
+- **A CLI command naming a location is a touch, and it has to be.** Section 6.4 says so and
+  it was easy to read as decoration - until the first mount proof, where `test -e` inside
+  the mount is answered from the system's replica and never reaches the extension (a folder
+  is enumerated once, ever), so a run that only polled the mount fell to the ten-minute
+  cadence half way through and the last three steps timed out. A person watching a mount
+  from a terminal produces no File Provider traffic at all; the CLI is the only signal
+  there is.
+### State the VM was left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no
+`sshdrive-*` control sockets and no `ssh` masters; `~/m6`, `~/m6a`, `~/m6roots` and the
+million-file `~/bigtree` removed from the servers, and `sshdrive doctor` green apart from
+the expected uninstall note. The signed Debug build is installed at
+`/Applications/SSH Drive.app` and the agent is running.
+
+---
+
 ## 2026-09-04 (milestone 5) - S5: the breaker, reconnection, the queued-write flush, sleep/wake and the deadline re-arm
 
 Milestone 5 end to end: DESIGN.md section 6.3's circuit breaker with its bounded waiting,

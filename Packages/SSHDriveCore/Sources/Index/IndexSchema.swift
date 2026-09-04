@@ -6,9 +6,13 @@ public enum IndexSchema {
     /// Bumped whenever a column changes, or whenever the *meaning* of one does. Version 2
     /// is milestone 4: the `xattrs` blob now holds a `LocalAttributes` object (extended
     /// attributes plus the Finder `tagData` that never arrives as an xattr, section 5.4)
-    /// rather than a bare dictionary. An extension that finds a version newer than it
-    /// understands falls back to asking the agent for items (section 5.2).
-    public static let version = 2
+    /// rather than a bare dictionary. Version 3 is milestone 6: `roots` carries
+    /// `last_listed`, the round-robin key of section 6.5's tier 0 rotation, `held` carries
+    /// the re-check count and the reason section 6.4's guard reports, and `meta` carries
+    /// the server's own clock from the last applied sweep. An extension that finds a
+    /// version newer than it understands falls back to asking the agent for items
+    /// (section 5.2).
+    public static let version = 3
 
     /// Keys in the `meta` table. The reader checks all three on every call.
     public enum MetaKey {
@@ -22,6 +26,20 @@ public enum IndexSchema {
         public static let generation = "generation"
         /// The canonical absolute remote root this index was built against (section 9.1).
         public static let remoteRoot = "remote_root"
+        /// The server's own `date +%s` from the last sweep whose results were *applied*
+        /// (section 6.4). Stored only after the apply, never before: a stamp written
+        /// ahead of the results would, if the sweep or the agent died between the two,
+        /// claim we had seen everything up to a moment whose changes were never recorded,
+        /// and the next sweep would ask for changes since then and never find them.
+        public static let sweepServerTime = "sweep_server_time"
+        /// Our own clock at the last full sweep of the root set, which is what the
+        /// 30-minute insurance pass times from (section 6.4). It is deliberately not the
+        /// server's: the interval between our own passes is ours to measure, and the two
+        /// clocks need not agree.
+        public static let lastFullSweep = "last_full_sweep"
+        /// The change-detection tier actually in use (section 6.4), so `status` can answer
+        /// for a location whose agent has just restarted and not yet re-probed.
+        public static let watchTier = "watch_tier"
     }
 
     public static let createStatements = """
@@ -59,10 +77,15 @@ public enum IndexSchema {
             at REAL NOT NULL
         );
 
+        -- The change-detection root set (section 6.5). These two tables gained columns in
+        -- schema version 3, and `CREATE TABLE IF NOT EXISTS` will not put them on a
+        -- database that already has the table: it sees the name, does nothing, and leaves
+        -- the old shape in place. IndexWriter.migrate() adds them explicitly.
         CREATE TABLE IF NOT EXISTS roots (
             path BLOB NOT NULL,
             reason TEXT NOT NULL,           -- materialized | pinned | viewed
-            last_seen REAL NOT NULL,
+            last_seen REAL NOT NULL,        -- when the reason was last refreshed; the viewed LRU key
+            last_listed REAL NOT NULL DEFAULT 0,  -- when tier 0 last readdir'd it; the rotation key
             PRIMARY KEY (path, reason)
         );
 
@@ -70,7 +93,9 @@ public enum IndexSchema {
             path BLOB PRIMARY KEY,
             dir BLOB NOT NULL,
             first_missing REAL NOT NULL,
-            recheck_at REAL NOT NULL
+            recheck_at REAL NOT NULL,
+            checks INTEGER NOT NULL DEFAULT 0,  -- the re-checks at 5 and 30 minutes (section 6.4)
+            reason TEXT NOT NULL DEFAULT ''     -- why the deletion was held, for `status`
         );
 
         CREATE TABLE IF NOT EXISTS meta (

@@ -394,6 +394,70 @@ struct Status: ParsableCommand {
                 print("       not shown  \(entry["path"] as? String ?? "") "
                     + "(\(entry["reason"] as? String ?? ""))")
             }
+            // Section 6.4: the tier in use, the cadence, the last sweep and where the
+            // location sits on the fallback ladder.
+            if let watch = row["watch"] as? [String: Any] {
+                var line = "       watch \(watch["tier"] as? String ?? "?")"
+                if let interval = watch["intervalSeconds"] as? Double {
+                    line += "   every \(Int(interval))s"
+                        + ((watch["active"] as? Bool == true) ? " (active)" : " (idle)")
+                }
+                if let cycles = watch["cycles"] as? Int { line += "   \(cycles) cycle(s)" }
+                if let roots = watch["roots"] as? Int {
+                    line += "   \(roots) root(s)"
+                    // "status shows the rotation period when it exceeds one cycle"
+                    // (section 6.5).
+                    if let period = watch["rotationPeriod"] as? Int, period > 1 {
+                        line += " rotating over \(period) cycles"
+                    }
+                }
+                print(line)
+                if let note = watch["note"] as? String, !note.isEmpty {
+                    print("         note: \(note)")
+                }
+                if watch["sweepUsesMmin"] as? Bool == true {
+                    print("         note: this server's find has no -cmin, so the sweep uses "
+                        + "-mmin and a chmod, a chown or a write that preserved mtime is only "
+                        + "found by the 30-minute full sweep")
+                }
+                if let skew = watch["clockSkewSeconds"] as? Int, skew != 0 {
+                    print("         note: the sweep's server-clock reference is shifted by "
+                        + "\(skew)s by a debug hook")
+                }
+                for downgrade in watch["downgrades"] as? [[String: Any]] ?? [] {
+                    print("         note: dropped from \(downgrade["from"] as? String ?? "") to "
+                        + "\(downgrade["to"] as? String ?? "") - "
+                        + "\(downgrade["reason"] as? String ?? "")")
+                }
+                if let last = watch["lastCycle"] as? [String: Any] {
+                    let seconds = last["seconds"] as? Double ?? 0
+                    print("         last \((last["full"] as? Bool == true) ? "full sweep" : "cycle") "
+                        + "\(CapabilityRendering.age(last["at"] as? Double ?? 0)): "
+                        + "\(last["changed"] as? Int ?? 0) changed, "
+                        + "\(last["deleted"] as? Int ?? 0) deleted, "
+                        + "\(last["held"] as? Int ?? 0) held, "
+                        + "\(last["directoriesListed"] as? Int ?? 0) listed, "
+                        + String(format: "%.2fs", seconds))
+                }
+            }
+            // Section 8: "0 held deletions" on the Sync line, and section 6.4's
+            // "14 deletions held in Photos, re-check at 14:32" when there are any.
+            let held = row["heldDeletions"] as? [[String: Any]] ?? []
+            if held.isEmpty {
+                print("       0 held deletions")
+            } else {
+                let byDirectory = Dictionary(grouping: held) {
+                    ($0["directory"] as? String ?? "")
+                }
+                for (directory, entries) in byDirectory.sorted(by: { $0.key < $1.key }) {
+                    let next = entries.compactMap { $0["recheckAt"] as? Double }.min() ?? 0
+                    print("       \(entries.count) deletion(s) held in "
+                        + "\(directory.isEmpty ? "the location root" : directory)"
+                        + ", re-check at \(CapabilityRendering.clock(next))")
+                }
+                print("       apply them now with: sshdrive accept-deletions "
+                    + "\(row["name"] as? String ?? "")")
+            }
             if let error = row["lastError"] as? String, error != "none" {
                 print("       last error \(error)")
             }
@@ -444,6 +508,15 @@ enum CapabilityRendering {
         }
     }
 
+    /// A wall-clock time, which is how section 8 prints a guard re-check:
+    /// "14 deletions held in Photos, re-check at 14:32".
+    static func clock(_ timestamp: Double) -> String {
+        guard timestamp > 0 else { return "the next cycle" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: timestamp))
+    }
+
     static func age(_ timestamp: Double) -> String {
         guard timestamp > 0 else { return "never" }
         let seconds = Int(Date().timeIntervalSince1970 - timestamp)
@@ -451,5 +524,43 @@ enum CapabilityRendering {
         if seconds < 3600 { return "\(seconds / 60)m ago" }
         if seconds < 86400 { return "\(seconds / 3600)h ago" }
         return "\(seconds / 86400)d ago"
+    }
+}
+
+
+// MARK: accept-deletions
+
+/// `sshdrive accept-deletions <name> [path]` (DESIGN.md section 8): apply the deletions
+/// the mass-deletion guard of section 6.4 is holding, now, rather than waiting for its
+/// second re-check.
+struct AcceptDeletions: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "accept-deletions",
+        abstract: "Apply deletions the mass-deletion guard is holding.",
+        discussion: """
+            The guard holds a diff that would remove at least half of a directory's known
+            items and at least twenty of them, or would empty a root that held anything -
+            a NAS whose dataset has not imported yet looks exactly like a directory that
+            was emptied. It also holds any deletion of an item with a local edit still
+            waiting to upload. Held items stay visible in Finder and fail to open; this
+            command says the deletions are real.
+            """)
+
+    @Argument(help: "The location.")
+    var name: String
+
+    @Argument(help: "Only this path and what is under it. Everything when omitted.")
+    var path: String?
+
+    func run() throws {
+        var arguments = ["name": name]
+        if let path { arguments["path"] = path }
+        let data = try AgentClient.send(
+            command: "accept-deletions", arguments: arguments, timeout: 120)
+        let report = AgentClient.object(data)
+        let applied = report["applied"] as? Int ?? 0
+        let remaining = report["stillHeld"] as? Int ?? 0
+        print("Applied \(applied) held deletion(s) in \(report["location"] as? String ?? name).")
+        if remaining > 0 { print("\(remaining) still held.") }
     }
 }

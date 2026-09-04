@@ -43,9 +43,16 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
             ? SSHDriveXPCInterface.cli
             : SSHDriveXPCInterface.fileProviderExtension
 
-        connection.invalidationHandler = {
+        // Section 5.3's restore has to reach every live reader, not only the one that
+        // happens to be making the current call, so an extension peer goes in the table
+        // the moment it is accepted.
+        let isExtension = !PeerExecutable.isCLI(pid: connection.processIdentifier)
+        if isExtension { ExtensionPeers.shared.add(connection) }
+
+        connection.invalidationHandler = { [weak connection] in
             // A transfer whose extension process disappears mid-way is cancelled the same
             // way as one the user cancelled (section 5.2).
+            if let connection, isExtension { ExtensionPeers.shared.remove(connection) }
             Log.agent.debug("peer connection invalidated")
         }
 

@@ -16,10 +16,13 @@ import Logging
 /// transport is one too.
 actor LocationRuntime {
     let location: Location
-    private let index: IndexWriter
-    private let transport: any SFTPTransport
-    private let indexURL: URL
-    private let backupURL: URL
+    /// Internal rather than private: the change-detection half of this actor lives in
+    /// `LocationRuntime+ChangeDetection.swift` (section 6.4), and `private` in Swift is
+    /// file-scoped even for an extension of the same type in the same module.
+    var index: IndexWriter
+    let transport: any SFTPTransport
+    let indexURL: URL
+    let backupURL: URL
 
     /// The identity the capability probe found. Milestone 3 runs the probe; the fake
     /// backend reports its own uid and gid so the derivation in section 5.4 has
@@ -34,7 +37,7 @@ actor LocationRuntime {
     /// conflict check, the conflict copy, the stale-temp rule and the delete rules. It
     /// owns the transport and the in-flight set; this actor stays the only writer of the
     /// index.
-    private var writer: RemoteWriter
+    var writer: RemoteWriter
 
     /// The two spellings of the location root a symlink target is measured against
     /// (section 5.7): the canonical one `realpath` returned, and the one the user typed -
@@ -62,7 +65,23 @@ actor LocationRuntime {
 
     /// Names in the tree that are recorded but never shown, with the reason, for
     /// `status`'s "not shown" list (section 5.4). Keyed by the path bytes.
-    private var hiddenReasons: [Data: String] = [:]
+    var hiddenReasons: [Data: String] = [:]
+
+    /// The paths the system lists in `enumeratorForPendingItems()`, refreshed at the
+    /// start of every change-detection cycle. The mass-deletion guard holds a deletion of
+    /// any of them whatever the counts say (section 6.4, S5).
+    var pendingPaths: Set<Data> = []
+
+    /// `sshdrive debug roots <name> --seed N` sets this, and nothing else does: the
+    /// system reports none of the seeded directories as materialized, so the ordinary
+    /// refresh would undo the seeding on the next cycle (section 6.5).
+    var suppressMaterializedRefresh = false
+
+    /// Section 6.4's tier ladder for this location, owned by `ChangeDetector` and kept
+    /// here so `status` can answer for a location whose detector is not running.
+    var watchState: ChangeDetectionLadder?
+    /// The last cycle's outcome, for `status`: when, which tier, how long, what it found.
+    var lastWatchCycle: [String: Any] = [:]
 
     // MARK: Spike faults and transfer accounting (S4, S6)
 
@@ -108,10 +127,16 @@ actor LocationRuntime {
     /// Section 8.1's probe as the last connection found it. Kept on the runtime rather
     /// than read off the transport, because since milestone 5 there may be no transport:
     /// `status` on an offline location still has to print what the server was (section 6.3).
-    private var serverProbeResult: ServerProbe.Result?
+    var serverProbeResult: ServerProbe.Result?
 
     /// The last transport error, for `show` and `status` (section 8).
-    private var lastTransportError: String?
+    var lastTransportError: String?
+
+    /// Section 5.3's recovery: what `IndexReconcile` found and did at start, and whether
+    /// the replica walk is still owed. The walk needs the File Provider domain to exist,
+    /// so it runs after `add(domain)` rather than inside `start()`.
+    private(set) var recoveryReport: [String: Any] = [:]
+    private var reconcileOwed = false
 
     private var concurrentFetches = 0
     private var peakConcurrentFetches = 0
@@ -160,13 +185,34 @@ actor LocationRuntime {
             identity = ServerIdentity(
                 uid: await fake.serverUID, gid: await fake.serverGID, supplementaryGroups: [])
         }
-        // An agent that starts and finds `reconciling` set redoes the walk before serving
-        // anything (section 5.3). Milestone 1 has no reconcile walk to redo, so it clears
-        // the flag and says so; the walk itself is milestone 6's reconcile work.
-        if index.isReconciling {
-            Log.agent.error(
-                "index for \(self.location.id, privacy: .public) was left reconciling; the reconcile walk is not written yet, clearing the flag")
-            try index.setReconciling(false)
+        // Section 5.3's recovery, before anything is served: an index that fails its
+        // integrity check is restored from `index.sqlite.bak` **into** the live database
+        // through the online backup API, and one SQLite cannot open at all is truncated
+        // under its own inode after the extension's reader has been asked to close. Either
+        // way the flag is left set and the replica walk below is owed. The flag also
+        // outlives a crash: an agent that starts and finds it set redoes the walk, since
+        // the extension is stalled on that flag and nothing else will clear it.
+        let wasReconciling = index.isReconciling
+        let indexPath = indexURL.path
+        let recovery = await IndexReconcile.recoverIfNeeded(
+            locationID: location.id,
+            indexURL: indexURL,
+            backupURL: backupURL,
+            writer: index,
+            wasReconciling: wasReconciling,
+            closeReader: { await ExtensionPeers.shared.closeReaders() },
+            reopenReader: { ExtensionPeers.shared.reopenReaders() },
+            reopen: { try IndexWriter(path: indexPath) })
+        if let restored = recovery.writer { index = restored }
+        recoveryReport = recovery.report.asJSON
+        // `recoverIfNeeded` never clears the flag; the walk is the only thing that does,
+        // and the walk needs the domain to exist so the replica can be read. So it runs
+        // from `DomainManager` after `add(domain)`, through `finishReconcileIfOwed`.
+        reconcileOwed = index.isReconciling
+        if reconcileOwed {
+            Log.agent.notice(
+                "\(self.location.id, privacy: .public): a reconcile against the replica is owed (\(recovery.report.state, privacy: .public))"
+            )
         }
         do {
             try await applyConnection()
@@ -274,7 +320,7 @@ actor LocationRuntime {
     /// transport is a `ReconnectingTransport` and the connection behind it comes and goes
     /// (section 6.3), so everything that used to cast the transport asks here instead and
     /// answers for "offline" as well as for "fake".
-    private func liveConnection() async -> SSHBackedTransport? {
+    func liveConnection() async -> SSHBackedTransport? {
         if let ssh = transport as? SSHBackedTransport { return ssh }
         if let reconnecting = transport as? ReconnectingTransport {
             return await reconnecting.gate.currentConnection()
@@ -332,6 +378,7 @@ actor LocationRuntime {
     func enumerateItems(container identifier: String, pageToken: String?) async throws
         -> (items: [SSHDriveItemSnapshot], nextPageToken: String?)
     {
+        try refuseWhileReconciling()
         if let pageToken {
             return continueListing(token: pageToken)
         }
@@ -377,6 +424,7 @@ actor LocationRuntime {
     func enumerateChanges(container identifier: String) async throws
         -> (items: [SSHDriveItemSnapshot], deleted: [String])
     {
+        try refuseWhileReconciling()
         guard let containerRow = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
         }
@@ -385,16 +433,20 @@ actor LocationRuntime {
         return (result.changed, result.deleted)
     }
 
-    private struct ReconcileResult {
+    struct ReconcileResult {
         var items: [SSHDriveItemSnapshot] = []
         var changed: [SSHDriveItemSnapshot] = []
         var deleted: [String] = []
+        /// Deletions the mass-deletion guard held rather than reported (section 6.4).
+        var held: [Data] = []
+        /// Holds cleared because the items came back.
+        var released: [Data] = []
     }
 
     /// One listing, diffed against the index. Every difference becomes a row change and
     /// an anchor, so the working set carries it to the system whatever else happens
     /// (section 5.3).
-    private func reconcile(directory: RelativePath, containerRow: IndexItem) async throws
+    func reconcile(directory: RelativePath, containerRow: IndexItem) async throws
         -> ReconcileResult
     {
         // Section 9.1, "never descend through a link": the container is re-`lstat`ed
@@ -528,15 +580,29 @@ actor LocationRuntime {
             }
         }
 
-        // Deleted rows are deleted: no tombstones (section 5.3). A local-only row
-        // (`hidden = 3`, a `.DS_Store` Finder wrote) is the exception: it has no remote
-        // content by definition, so a listing that does not mention it is not evidence
-        // that it went (section 5.4).
+        // Deleted rows are deleted: no tombstones (section 5.3) - but a deletion inferred
+        // from a **listing** goes through the mass-deletion guard of section 6.4 first,
+        // which holds a diff that is implausibly large and any deletion of an item the
+        // system lists as pending. A local-only row (`hidden = 3`, a `.DS_Store` Finder
+        // wrote) is outside both rules: it has no remote content by definition, so a
+        // listing that does not mention it is not evidence that it went (section 5.4).
+        var missing: [(path: Data, identifier: String)] = []
+        var knownNonHidden = 0
         for child in try index.children(ofParent: containerRow.identifier)
-        where !seenPaths.contains(child.path) && child.hidden != RowBuilder.hiddenLocalOnly {
-            try index.delete(identifier: child.identifier)
-            result.deleted.append(child.identifier)
+        where child.hidden != RowBuilder.hiddenLocalOnly {
+            if child.hidden == 0 { knownNonHidden += 1 }
+            guard !seenPaths.contains(child.path) else { continue }
+            if child.hidden == 0 {
+                missing.append((child.path, child.identifier))
+            } else {
+                // A hidden row holds a name and nothing else; the user never saw it, so
+                // there is no half-applied deletion for the guard to prevent.
+                try index.delete(identifier: child.identifier)
+            }
         }
+        try applyGuardedDeletions(
+            directory: directory, missing: missing, knownNonHidden: knownNonHidden,
+            seenPaths: seenPaths, into: &result)
         }
 
         return result
@@ -570,7 +636,7 @@ actor LocationRuntime {
     /// bump, the two bitmasks, the section 5.7 symlink check - is `RowBuilder`'s, in the
     /// package, so that none of it lives in the extension (section 5.2) and all of it is
     /// unit-testable without an app bundle.
-    private func makeRow(
+    func makeRow(
         path: RelativePath,
         attributes: SFTPFileAttributes,
         parent: IndexItem,
@@ -659,6 +725,7 @@ actor LocationRuntime {
         range: (offset: UInt64, length: UInt64)?,
         progress: @escaping @Sendable (Int64, Int64) -> Void
     ) async throws -> SSHDriveItemSnapshot {
+        try refuseWhileReconciling()
         guard let row = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
         }
@@ -677,6 +744,17 @@ actor LocationRuntime {
                 "debug fault --fetch-error cannotSynchronize: the item is held by the mass-deletion guard.")
         default:
             break
+        }
+
+        // Section 6.4: "While held, opening one of the items fetches from the server and
+        // fails. The failure is reported as `.cannotSynchronize` carrying the ENOENT,
+        // never as `.noSuchItem`" - that error tells the system the item does not exist
+        // and it would remove the item locally while the row, the pin and the hold
+        // remain, which is the half-applied deletion the guard exists to avoid.
+        if (try? index.heldRow(path: row.path)) ?? nil != nil {
+            throw SSHDriveAgentError.cannotSynchronize.asNSError(
+                "\"\(path.description)\" is missing on the server. SSH Drive is holding the deletion "
+                    + "until it can confirm it; `sshdrive accept-deletions` applies it now.")
         }
 
         // Section 5.4: a local-only item has no remote content, so a `fetchContents` for
@@ -806,6 +884,7 @@ actor LocationRuntime {
         transferID: String = UUID().uuidString,
         progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
     ) async throws -> SSHDriveItemSnapshot {
+        try refuseWhileReconciling()
         try failWritesIfFaulted()
         if createsCollide {
             Log.agent.notice(
@@ -945,6 +1024,7 @@ actor LocationRuntime {
         transferID: String = UUID().uuidString,
         progress: @escaping @Sendable (Int64, Int64) -> Void = { _, _ in }
     ) async throws -> MutationResult {
+        try refuseWhileReconciling()
         try failWritesIfFaulted()
         guard var row = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
@@ -1247,6 +1327,7 @@ actor LocationRuntime {
     /// succeeds; and the recursive walk comes from the server rather than the index,
     /// because folders Finder never opened have no rows.
     func deleteItem(identifier: String, recursive: Bool) async throws {
+        try refuseWhileReconciling()
         guard let row = try index.item(identifier: identifier) else { return }
         let path = try RelativePath.fromIndexBytes(row.path)
 
@@ -1288,6 +1369,37 @@ actor LocationRuntime {
     // MARK: Signals and maintenance
 
     func currentSequence() throws -> Int64 { try index.currentSequence() }
+
+    /// Section 5.3's reconcile against the system's replica, run after the domain exists
+    /// so `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can answer. It
+    /// clears `meta.reconciling`, which is what lifts the extension's stall.
+    @discardableResult
+    func finishReconcileIfOwed() async -> [String: Any]? {
+        guard reconcileOwed else { return nil }
+        reconcileOwed = false
+        let report = await IndexReconcile.reconcileAgainstReplica(
+            locationID: location.id, writer: index,
+            permissions: location.permissions, identity: identity)
+        recoveryReport = report.asJSON
+        return report.asJSON
+    }
+
+    /// `sshdrive debug reconcile --force`: sets the flag so the whole of section 5.3's
+    /// recovery path can be exercised on a healthy index.
+    func markReconciling() throws {
+        try index.setReconciling(true)
+        reconcileOwed = true
+    }
+
+    /// "While a reconcile runs, every enumeration and fetch for that domain is answered
+    /// with `.serverUnreachable` by the agent" (section 5.3). Reading a directory the
+    /// system considers stale triggers `enumerateItems`, and an agent with a half-built
+    /// index would mint fresh identifiers for everything in it before the walk arrived.
+    func refuseWhileReconciling() throws {
+        guard index.isReconciling else { return }
+        throw SSHDriveAgentError.serverUnreachable.asNSError(
+            "SSH Drive is rebuilding this location's index. It will be back in a moment.")
+    }
 
     /// The agent treats handing out a fresh working-set anchor exactly as it treats a
     /// reconnect: one full sweep of the root set at once, every difference becoming an
