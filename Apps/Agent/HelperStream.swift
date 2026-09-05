@@ -232,13 +232,44 @@ actor HelperStream {
 
     private func die(_ reason: String) async {
         guard state == .running else { return }
-        state = .failed(reason)
+        // What the channel had to say on its way out. Without this a helper that died on
+        // a real server left one sentence in the log - "the helper exited" - and no exit
+        // status, no signal and no stderr to say why (2026-09-05).
+        var full = reason
+        if let channel {
+            let detail = await Self.deathDetail(channel)
+            if !detail.isEmpty { full = "\(reason) (\(detail))" }
+        }
+        state = .failed(full)
         channel?.close()
         channel = nil
         beater?.cancel()
         Log.agent.error(
-            "\(self.locationID, privacy: .public): the helper stream died: \(reason, privacy: .public)")
-        await onDeath(reason)
+            "\(self.locationID, privacy: .public): the helper stream died: \(full, privacy: .public)")
+        await onDeath(full)
+    }
+
+    /// The exec channel's exit status and the tail of its stderr, once it has been reaped.
+    private static func deathDetail(_ channel: ExecChannel) async -> String {
+        var exit = channel.exitStatus()
+        if exit == nil {
+            // The mux client is usually a hair behind the EOF that brought us here.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            exit = channel.exitStatus()
+        }
+        var parts: [String] = []
+        if let exit {
+            if let signal = exit.signal {
+                parts.append("the channel was killed by signal \(signal)")
+            } else {
+                parts.append("the channel exited \(exit.status)")
+            }
+        } else {
+            parts.append("the channel is still running")
+        }
+        let stderr = channel.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stderr.isEmpty { parts.append("stderr: \(String(stderr.suffix(500)))") }
+        return parts.joined(separator: "; ")
     }
 
     // MARK: Reporting (section 8.1)

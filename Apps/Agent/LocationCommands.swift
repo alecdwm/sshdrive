@@ -186,17 +186,26 @@ enum LocationCommands {
                 "resolution": display.lines.map(\.text),
                 "jumpChain": display.jumpChain.map(\.host),
             ]
+            // Section 6.4: `add` "states this plainly in its output, after the probe has
+            // chosen the directory so the message names the real one". It is said before
+            // the upload happens, and before the report that describes its result.
+            if let sentence = await helperNotice(runtime: runtime, location: created) {
+                report["helperNotice"] = sentence
+                relay?.note(sentence)
+            }
+            // The helper is deployed by the first change-detection cycle, which starts
+            // with the location. `add` prints one capability report and the user reads it
+            // as the truth about this server, so it waits - bounded - for that first
+            // attempt to settle. Without this the report described a sweep and blamed the
+            // server for it, ten seconds before `status` said `helper 0.1.0` (2026-09-05,
+            // sections 8.1 and 6.4).
+            if let detector = await DomainManager.shared.detector(locationID: created.id) {
+                await detector.settleHelper()
+            }
             if let capability = try? await capabilityReport(
                 location: created, runtime: runtime, forceProbe: false)
             {
                 report["capabilities"] = capability.asJSON
-            }
-            // Section 6.4: `add` "states this plainly in its output, after the probe has
-            // chosen the directory so the message names the real one". It is placed here,
-            // after the probe and before the report, for that reason and no other.
-            if let sentence = await helperNotice(runtime: runtime, location: created) {
-                report["helperNotice"] = sentence
-                relay?.note(sentence)
             }
             return try ControlCommands.json(report)
         } catch {
@@ -382,7 +391,8 @@ enum LocationCommands {
             let budget = CapabilityCache.channelBudget(locationID: location.id) ?? .unrestricted
             report["capabilities"] = CapabilityReport.make(
                 probe: cached.probe, extensions: cached.extensions, location: location,
-                budget: budget, probedAt: cached.probedAt, cached: true).asJSON
+                allowsExecChannel: budget.allowsExecChannel, probedAt: cached.probedAt,
+                cached: true, helper: helperState(location: location, cached: cached.probe)).asJSON
         }
         return try ControlCommands.json(report)
     }
@@ -739,7 +749,9 @@ enum LocationCommands {
                 let budget = CapabilityCache.channelBudget(locationID: location.id) ?? .unrestricted
                 row["capabilities"] = CapabilityReport.make(
                     probe: cached.probe, extensions: cached.extensions, location: location,
-                    budget: budget, probedAt: cached.probedAt, cached: true).asJSON
+                    allowsExecChannel: budget.allowsExecChannel, probedAt: cached.probedAt,
+                    cached: true,
+                    helper: helperState(location: location, cached: cached.probe)).asJSON
                 row["channels"] = budget.asJSON
             }
             // Section 6.4: the tier in use, the cadence, the last sweep and where the
@@ -815,48 +827,73 @@ enum LocationCommands {
             }
             return CapabilityReport.make(
                 probe: cached.probe, extensions: cached.extensions, location: location,
-                budget: await runtime.channelBudgetValue(), probedAt: cached.probedAt,
-                cached: true)
+                allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,
+                probedAt: cached.probedAt, cached: true,
+                helper: helperState(location: location, cached: cached.probe))
         }
         let freeSpace = await runtime.freeSpaceDescription()
-        // Section 8.1: the tier the ladder is actually running, and the reason it fell if
-        // it fell (section 6.4).
-        var activeTier: String?
-        var downgradeNote: String?
-        var helperReport: [String: Any]?
-        if let detector = await DomainManager.shared.detector(locationID: location.id) {
-            let status = await detector.status()
-            activeTier = status["tier"] as? String
-            // Only a *running* stream describes the change-detection line. The ladder
-            // offers the tier from the probe before anything is deployed, and a report
-            // taken in that window would print `helper ? at ?` and claim rename events
-            // from a helper that has not started (2026-09-05).
-            if let helper = status["helper"] as? [String: Any] {
-                if helper["state"] as? String == "running" {
-                    helperReport = helper
-                } else if activeTier == "helper" {
-                    // The tier is offered and the stream is not up yet. Say that, rather
-                    // than the note the sweep branch would otherwise reach for.
-                    downgradeNote = (helper["reason"] as? String)
-                        ?? "the helper is starting on this connection"
-                }
-            }
-            if let downgrades = status["downgrades"] as? [[String: Any]], let last = downgrades.last {
-                downgradeNote = "dropped from \(last["from"] as? String ?? "") to "
-                    + "\(last["to"] as? String ?? "") at "
-                    + "\(Date(timeIntervalSince1970: last["at"] as? Double ?? 0)): "
-                    + "\(last["reason"] as? String ?? "")"
-            } else if let note = status["note"] as? String {
-                downgradeNote = note
-            }
-        }
+        // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
+        // to (section 6.4).
+        let status = await DomainManager.shared.detector(locationID: location.id)?.status()
         return CapabilityReport.make(
             probe: live.probe, extensions: live.extensions, location: location,
-            budget: await runtime.channelBudgetValue(),
+            allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,
             probedAt: CapabilityCache.probe(locationID: location.id)?.probedAt ?? Date(),
             cached: false, freeSpace: freeSpace,
-            activeTier: activeTier, downgradeNote: downgradeNote,
-            helper: helperReport)
+            advertisedExtensions: CapabilityCache.advertisedExtensions(locationID: location.id),
+            activeTier: status?["tier"] as? String,
+            helper: await liveHelperState(location: location, runtime: runtime, status: status))
+    }
+
+    /// Where tier 2 has got to, for a location that is up.
+    ///
+    /// Only a *running* stream describes the change-detection and rename lines as the
+    /// helper's: the ladder offers the tier from the probe before anything is deployed,
+    /// and a report taken in that window used to print the sweep branch's "the server
+    /// cannot run the remote helper" - which was false for every server that could, and
+    /// was what `add` printed on the first real install (2026-09-05).
+    private static func liveHelperState(
+        location: Location, runtime: LocationRuntime, status: [String: Any]?
+    ) async -> HelperState {
+        guard location.helper else { return .off }
+        if let helper = status?["helper"] as? [String: Any] {
+            if helper["state"] as? String == "running" {
+                return .running(
+                    version: helper["version"] as? String ?? "?",
+                    directory: helper["directory"] as? String ?? "?",
+                    mechanism: helper["mechanism"] as? String ?? "inotify")
+            }
+            if let reason = helper["reason"] as? String, !reason.isEmpty {
+                return .unavailable(reason)
+            }
+        }
+        if let downgrades = status?["downgrades"] as? [[String: Any]], let last = downgrades.last {
+            return .unavailable(
+                "dropped from \(last["from"] as? String ?? "") to "
+                    + "\(last["to"] as? String ?? "") at "
+                    + "\(Date(timeIntervalSince1970: last["at"] as? Double ?? 0)): "
+                    + "\(last["reason"] as? String ?? "")")
+        }
+        // The tier is offered and nothing has refused it yet: the binary is on its way up.
+        if status?["tier"] as? String == "helper" { return .deploying }
+        let capabilities = await DomainManager.capabilities(of: runtime, location: location)
+        if capabilities.helperAvailable { return .deploying }
+        return .unavailable(
+            capabilities.helperBlockReason ?? "the server cannot run the remote helper")
+    }
+
+    /// The same for a location that is not up: what the cached probe of section 8.1 can
+    /// honestly say. A server that could run it is never reported as one that cannot.
+    private static func helperState(location: Location, cached: ServerProbe.Result) -> HelperState {
+        guard location.helper else { return .off }
+        guard cached.hasShellAccess else {
+            return .unavailable(cached.failure)
+        }
+        guard !cached.cacheDirectory.isEmpty else {
+            return .unavailable(
+                cached.cacheNote.isEmpty ? "no writable directory for helper" : cached.cacheNote)
+        }
+        return .unavailable("not connected; the helper starts on the next connection")
     }
 
     /// "A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`

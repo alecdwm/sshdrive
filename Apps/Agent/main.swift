@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import AgentCore
 import XPCProtocols
 import Logging
 
@@ -28,6 +29,19 @@ func registerLoginItem() {
     } catch {
         Log.agent.error("SMAppService.register failed: \(error, privacy: .public)")
     }
+}
+
+/// One line per launch when our own bundle still carries `com.apple.quarantine`
+/// (section 10). The agent itself runs quarantined - launchd starts it directly - but
+/// LaunchServices registers no plugin of such a bundle until it has been assessed through
+/// a user-visible launch, so the File Provider extension is missing and every domain call
+/// fails. `sshdrive doctor`'s "quarantine" check says the same thing with the fix; this is
+/// what puts it in the log of an install nobody ran `doctor` on.
+func warnIfQuarantined() {
+    guard let value = BundleQuarantine.attributeValue(atPath: Bundle.main.bundleURL.path)
+    else { return }
+    Log.agent.warning(
+        "the bundle at \(Bundle.main.bundleURL.path, privacy: .public) is quarantined (\(value, privacy: .public)); LaunchServices will not register the File Provider extension until it is cleared - run `sshdrive doctor`")
 }
 
 switch role {
@@ -81,6 +95,7 @@ case "unregister":
 
 case "launchd":
     Log.agent.notice("agent starting from launchd")
+    warnIfQuarantined()
     registerLoginItem()
 
     let delegate = ListenerDelegate()

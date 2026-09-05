@@ -71,6 +71,26 @@ Note that the *directory* existing proves nothing: `containermanagerd` creates a
 skeleton for every installed app's group at first login. `config.json` inside it is the
 thing that means "this has run here".
 
+### `quarantine` — fail
+
+The app bundle still carries `com.apple.quarantine`, the attribute macOS puts on anything
+unpacked from a download. The agent does not care — launchd starts it directly — but
+**LaunchServices registers no plugin of a quarantined bundle that has never been assessed
+through a launch a person saw**, and `open -g` is not such a launch. The File Provider
+extension therefore does not exist as far as the system is concerned, which is the
+`extension registered` failure below.
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/SSH Drive.app"
+open -g -a "SSH Drive"
+sshdrive doctor
+```
+
+Nothing is being bypassed by that. The DMG was checked on the download path and the
+notarization ticket is stapled to the app; `spctl --assess --type execute "/Applications/SSH
+Drive.app"` says so, and the cask's `postflight` runs exactly that check before it strips
+the attribute. A build you copied out of a DMG by hand needs the two commands above.
+
 ### `extension registered` — fail
 
 PlugInKit does not know about `SSHDriveFileProvider.appex`. Launching the app from its own
@@ -81,7 +101,9 @@ open -g -a "SSH Drive"
 pluginkit -m -A -i org.shirls.sshdrive.fileprovider -vvv
 ```
 
-If it stays unregistered, the bundle is probably not where LaunchServices thinks it is.
+**Check the `quarantine` line first: a quarantined bundle is the usual cause**, and
+re-registering the appex by hand does not survive the next launch. Otherwise the bundle is
+probably not where LaunchServices thinks it is.
 
 ### `ssh` — fail
 
@@ -132,6 +154,10 @@ missed; the check says so when that applies.
 
 Informational: the domains the system currently holds for us. If a location is `mounted` in
 `sshdrive list` but missing here, `sshdrive mount <name>` re-adds it.
+
+*The application cannot be used right now* on this line is not about a location at all: the
+system cannot find our extension, and the `quarantine` and `extension registered` lines
+above say why.
 
 ---
 
@@ -233,6 +259,40 @@ location reconnects.
 
 ---
 
+## `extension registered` fails, and domains say "The application cannot be used right now"
+
+Symptom, on a machine where everything else looks installed: `sshdrive doctor` fails
+`extension registered` with "pluginkit reported nothing", `file provider domains` fails
+with *The application cannot be used right now*, `pluginkit -m` lists nothing of ours, and
+`sshdrive logs` shows fileproviderd saying
+
+```
+getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014
+```
+
+(-2001 is "provider not found", -2014 "application extension not found"). The agent is
+running and reachable, the login item is enabled, and no mount ever appears in Finder.
+
+**Cause: the bundle is still quarantined.** LaunchServices declines to register the plugins
+of a bundle carrying `com.apple.quarantine` that has never been assessed through a launch a
+person saw. Homebrew leaves the attribute on the installed app, and the postflight's
+`open -g` is not that kind of launch. `pluginkit -a "/Applications/SSH Drive.app/Contents/PlugIns/SSHDriveFileProvider.appex"`
+appears to fix it and the next launch wipes the registration again. Seen on a real Mac
+running macOS 26.6.2 on 2026-09-05; a quarantined install on a 26.4.1 VM had not shown it,
+so it is a difference between those two machines and this does not claim which half.
+
+**Fix:**
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/SSH Drive.app"
+open -g -a "SSH Drive"
+sshdrive doctor
+```
+
+That registers the extension durably. Casks from version 0.1.0 onwards do it in the
+`postflight` — after running `spctl --assess` on the installed app themselves — so a fresh
+`brew install --cask sshdrive` should never land here.
+
 ## The agent will not start after an upgrade
 
 Symptom: everything worked, the app was replaced, and now nothing can reach the agent. The
@@ -261,7 +321,8 @@ No logout is needed. Locations, domains, the cache and pending uploads all survi
 
 *"Apple could not verify "SSH Drive" is free of malware"* means the copy you have is not
 notarized — a build from source, or a release that skipped the notarization step. A cask
-install is notarized and shows only the one-time *"downloaded from the Internet"* dialog.
+install is notarized, assesses itself in the `postflight` and then clears the quarantine
+attribute, so it shows no Gatekeeper dialog at all.
 
 ```sh
 spctl --assess --type execute --verbose=4 "/Applications/SSH Drive.app"

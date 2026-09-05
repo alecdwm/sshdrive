@@ -38,15 +38,49 @@ public struct PollSchedule: Sendable, Equatable {
         return now - lastTouch <= touchWindow
     }
 
-    public static func interval(lastTouch: Double?, now: Double) -> TimeInterval {
-        isActive(lastTouch: lastTouch, now: now) ? activeInterval : idleInterval
+    /// The largest multiple of its own duration a cycle may take of the interval before
+    /// the schedule backs off: a cycle that runs for 57 s of a 60 s interval leaves the
+    /// server sweeping almost continuously and the exec channel never free.
+    public static let cycleShare: Double = 3
+    /// The slowest the backoff may make it. A location still gets the insurance full
+    /// sweep at its own cadence, so nothing goes unwatched for longer than that.
+    public static let maximumInterval: TimeInterval = insuranceInterval
+
+    /// The cycle length, backed off when the last one consumed most of it.
+    ///
+    /// Measured on a real 26.6.2 install (2026-09-05): a home directory whose sweep took
+    /// 56.8 s against a 60 s interval, so the location swept without pause. The rule is
+    /// "a cycle may have a third of its own interval", capped, and `sshdrive status` says
+    /// when it is in force (section 6.4).
+    public static func interval(
+        lastTouch: Double?, now: Double, lastCycleSeconds: Double = 0
+    ) -> TimeInterval {
+        let base = isActive(lastTouch: lastTouch, now: now) ? activeInterval : idleInterval
+        guard lastCycleSeconds > 0 else { return base }
+        return min(max(base, lastCycleSeconds * cycleShare), maximumInterval)
+    }
+
+    /// The sentence `status` prints when the backoff above is in force, or nil when the
+    /// location is on its ordinary cadence.
+    public static func backoffNote(
+        lastTouch: Double?, now: Double, lastCycleSeconds: Double
+    ) -> String? {
+        let base = isActive(lastTouch: lastTouch, now: now) ? activeInterval : idleInterval
+        let backed = interval(lastTouch: lastTouch, now: now, lastCycleSeconds: lastCycleSeconds)
+        guard backed > base else { return nil }
+        return String(
+            format: "the last cycle took %.1fs, so the interval is %.0fs rather than %.0fs",
+            lastCycleSeconds, backed, base)
     }
 
     /// The next cycle's due time, measured from the last cycle rather than from now, so a
     /// cycle that ran long does not push the schedule out by its own duration. A caller
     /// that is already late gets a time in the past, which means fire now.
-    public static func nextFire(lastCycle: Double, lastTouch: Double?, now: Double) -> Double {
-        lastCycle + interval(lastTouch: lastTouch, now: now)
+    public static func nextFire(
+        lastCycle: Double, lastTouch: Double?, now: Double, lastCycleSeconds: Double = 0
+    ) -> Double {
+        lastCycle
+            + interval(lastTouch: lastTouch, now: now, lastCycleSeconds: lastCycleSeconds)
     }
 
     /// True when the 30-minute insurance full sweep is due. It runs whatever the tier: at

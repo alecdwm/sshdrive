@@ -11,6 +11,57 @@ this file records only what happened.
 
 ## 2026-09-05 (milestone 10) - ship: Developer ID, notarization, the DMG, the cask, `logs`, and S9
 
+**2026-09-05 addendum, the first real install: Homebrew's quarantine attribute stops the
+extension registering.** `brew install --cask sshdrive` on the owner's own Mac (macOS
+26.6.2), the first install of this app on a machine that is not the build VM. Homebrew
+leaves `com.apple.quarantine` on `/Applications/SSH Drive.app`. The postflight's `open -g`
+produced no Gatekeeper dialog at all, the login item registered and the agent ran (launchd
+starts the main executable directly), so the install looked finished - and the File
+Provider extension did not exist as far as the system was concerned:
+
+```
+$ pluginkit -m                                  # nothing of ours, at all
+$ sshdrive doctor
+fail  extension registered      pluginkit reported nothing
+fail  file provider domains     The application cannot be used right now
+$ sshdrive logs --last 5m
+fileproviderd  getDomainsForProviderIdentifier((null)) failed:
+               Error FP -2001 Underlying FP -2014
+```
+
+-2001 is "provider not found" and -2014 "application extension not found".
+`pluginkit -a "/Applications/SSH Drive.app/Contents/PlugIns/SSHDriveFileProvider.appex"`
+registered it, and **the next launch wiped that registration again**. What fixed it
+durably was
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/SSH Drive.app"
+open -g -a "SSH Drive"
+```
+
+after which `pluginkit -m` listed the appex, `doctor` went green and the domain mounted.
+So LaunchServices declines to register the plugins of a quarantined bundle that has never
+been assessed through a user-visible launch, and nothing in the install path triggered
+that assessment - `open -g` is not it. The VM's fresh-user quarantine test on 26.4.1 (the
+last item of this entry) had passed, so this is a difference between 26.4 and 26.6, or
+between a VM and a real machine; which of the two is not claimed here.
+
+**The fix, shipped the same day.** The cask's `postflight` now runs
+`/usr/sbin/spctl --assess --type execute --verbose=4` on the installed app - logging the
+verdict, not failing the install on it - and then `/usr/bin/xattr -dr com.apple.quarantine`
+on the bundle, before the existing unregister and `open -g`. Nothing is bypassed: the DMG
+was assessed on the download path, the ticket is stapled to the app inside it, and the
+postflight repeats the assessment on the installed copy before the attribute goes; what is
+given up is the one-time "downloaded from the Internet" dialog, which `open -g` shows to
+nobody. `sshdrive doctor` gained a **`quarantine`** check, ordered ahead of "extension
+registered" because it is the ordinary cause of that one failing, with the two commands
+above as its remedy, and "extension registered" now names it; the agent logs the same
+warning once per launch when its own bundle is quarantined (`BundleQuarantine` in
+`AgentCore`, five unit tests: **611 package tests, 0 failures**, was 606). `README.md`, `docs/troubleshooting.md` (a new entry under
+the `extension registered` / "The application cannot be used right now" symptom),
+`docs/release.md` (a checklist step for a cask install on a real Mac) and DESIGN.md
+sections 10 and 13 say the same.
+
 **2026-09-05 addendum:** the Developer ID profile was re-issued for the certificate whose
 key is on the VM (serial `68E341F98FC5ECC8`, SHA-1 `6C055553…`). `scripts/release.sh` then
 kept `keychain-access-groups`, and notarization came back **Accepted** with no issues for
@@ -371,6 +422,138 @@ the helper off the server on the location's last connection, as section 8 says.
 
 **`sshtest`:** nothing left. No app, no group container, no domains, no download, no
 processes, login item unregistered.
+
+### Addendum 2026-09-05 - what the first real install's `add` report got wrong
+
+The owner's first cask install added a Debian server (OpenSSH_9.2p1 Debian-2+deb12u10) and
+`sshdrive add shirls` printed the helper upload notice and then **"4/8 optimal"** with
+`change detection: sweep (find -cmin over the root set)`, `note: the server cannot run the
+remote helper` and `rename detection: delete + create`. Ten seconds later `sshdrive status
+shirls` said **"6/8 optimal"**, `helper 0.1.0 at /home/alec/.cache/sshdrive (push, ~1s)`
+and `rename detection: helper move events`.
+
+**Two independent causes, one of them not a race at all.**
+
+1. **The false `note:`.** `LocationCommands.capabilityReport` never passed
+   `helperAvailable:` to `CapabilityReport.make`, so the parameter took its `= false`
+   default at all three call sites. Every report whose change-detection line reached the
+   sweep branch therefore printed "the server cannot run the remote helper", whatever the
+   server could do. Deterministic, not timing: the same sentence would have appeared on a
+   `status` taken in the same window.
+2. **The ordering.** The helper is deployed by the first change-detection cycle, which
+   `DomainManager.runtime(for:)` starts with the location; `add` built its report
+   immediately after `addDomain`, so the stream was still going up the wire. The report
+   also fell through to the sweep *level* for the same reason.
+
+**The fix.** `add` now says the upload sentence first (before the upload, which is what
+section 6.4 asks for), then waits for the first deployment attempt to settle - bounded by
+`HelperSettle.addSeconds` (6 s; the whole `add` above cost 1.3 s end to end) - and only
+then prints. The report's helper input is no longer a `Bool` plus three loose strings but a
+`HelperState` (`.running(version:directory:mechanism:)` / `.deploying` / `.unavailable(reason)`
+/ `.off`), so the three states the old code collapsed are now separate by construction:
+a deployment still in flight prints a `note:` saying it is being deployed on this
+connection and that `sshdrive status` shows it once it is up, with **no** `upgrade:` line,
+and "cannot run" is
+reachable only from a reason the ladder or the deployer actually produced.
+
+`CapabilityReport` and `ServerProbe.Result` moved from `Apps/Agent/` into
+`Packages/SSHDriveCore/Sources/AgentCore/` for this: nothing under `Apps/` is reachable
+from `swift test`, which is why a report this wrong had no test. `CapabilityReport.make`
+now takes `allowsExecChannel: Bool` rather than the agent-only `ChannelBudget`.
+
+**`fsync@openssh.com` and `limits@openssh.com`: not reproduced, and not a client bug on the
+evidence here.** The owner's report showed both as absent on `shirls` and present on
+`talisapp`, same client. Audited end to end: `SFTPClient.dispatch` parses the whole
+`SSH_FXP_VERSION` extension list (name/data pairs to the end of the packet, no cap),
+`RealSFTPTransport` and `SSHBackedTransport` expose the metadata channel's completed
+handshake, and `capabilities.json` round-trips the five names it acts on. One real bug was
+found on that path and fixed: `LocationRuntime.serverProbe()` returned
+`SFTPServerExtensions()` - an **empty** set - whenever there was a cached probe but no live
+connection, which silently costs four of the eight lines (atomic overwrite, durable writes,
+transfer sizing, collision-safe create); it now reads the recorded set from
+`CapabilityCache`. That is not the owner's shape, though: they saw exactly two lines down,
+with `collision-safe create` still `●`.
+
+Against the testbed's `deb` (2201), **which runs the same OpenSSH_9.2p1 Debian-2+deb12u10**,
+both extensions are advertised, recorded and reported. `sshdrive status --json` now carries
+`sftpExtensions` - every name the server advertised, in order - and the connect logs it at
+notice level, so the next report from `shirls` answers the question outright:
+
+```
+['posix-rename@openssh.com', 'statvfs@openssh.com', 'fstatvfs@openssh.com',
+ 'hardlink@openssh.com', 'fsync@openssh.com', 'lsetstat@openssh.com',
+ 'limits@openssh.com', 'expand-path@openssh.com', 'copy-data', 'home-directory',
+ 'users-groups-by-id@openssh.com']
+```
+
+**Proved on the VM** against `deb` (2201) with the signed build installed:
+
+```
+SSH Drive will upload a small helper binary to /home/alec/.cache/sshdrive on this server …
+
+Added m10 (BFFD0D93-…)
+  Capabilities  8/8 optimal   probed 0s ago
+  ● change detection     helper 0.1.0 at /home/alec/.cache/sshdrive (push, ~1s)
+  ● rename detection     helper move events
+  …
+  ● durable writes       fsync@openssh.com
+  ● transfer sizing      limits@openssh.com
+```
+
+`add` took 1.3 s wall clock; `status` 10 s later prints the same 8/8, the same helper line
+and the same two extension lines. The stream was watched for 100 s and stayed `running`.
+
+**627 package tests** (was 611): `CapabilityReportTests` (8) renders the report from a
+recorded probe and a recorded extension set - the OpenSSH 9.2 list, that list without
+`fsync`/`limits`, an empty set, a deploying helper, a genuinely refused one, `helper off`
+and a shell-less account - and `HelperSettleTests` (6) pins the ordering rule `add` waits
+by, plus two `PollScheduleTests` for the backoff below.
+
+### Addendum 2026-09-05 - the other three things the owner's `status` showed
+
+3. **`/home/alec/.cache/sshdrive is writable by others` on `talisapp`: fixed.** `mkdir`'s
+   attributes go through the server's umask, so a 0700 that was asked for can land as 0755;
+   `HelperLocation.helperMkdir` now asserts the mode with a `setstat` afterwards, and
+   `HelperDeployer` sets a directory that is *ours* and too open back to 0700 instead of
+   refusing it. Only a directory owned by someone else, or one that will not take the mode,
+   is still refused. Verified on `deb`: `chmod 0755 ~/.cache/sshdrive`, `helper off` then
+   `helper on`, and the directory comes back `drwx------` with the helper running.
+4. **A 56.8 s sweep cycle against a 60 s interval: fixed.** Section 6.4 said nothing about
+   it, so the rule was added to the design and to `PollSchedule`: a cycle may take a third
+   of its own interval, and where it takes more the interval becomes three times the last
+   cycle's duration, capped at the 30-minute insurance interval. `status` prints
+   `note: the last cycle took 56.8s, so the interval is 170s rather than 60s`. Only a cycle
+   that actually went to the server paces it, so a tier-2 cycle that did nothing but
+   refresh the root set does not slow anything down.
+5. **The helper dying 15 s after `ready`: not reproduced, instrumented instead.** The
+   testbed's `deb` streamed for 100 s across seven client pings without a wobble. The
+   working hypothesis in the brief - that the initial scan starves the stdin heartbeat -
+   is ruled out by the code and by the owner's own log: `Control::spawn_reader` starts the
+   stdin thread *before* `set_roots`, and `ready` is emitted *after* the scan, so the scan
+   had already finished 15 s before the death. What the log could not say is why, because
+   `HelperStream.die` recorded one sentence and nothing else. It now appends the mux
+   client's exit status or signal and the tail of its stderr - "the helper exited (the
+   channel was killed by signal 15; stderr: …)" - which distinguishes the three candidates
+   that remain: the wrapper's watchdog breaking on its first `sleep 15` tick (its stamp
+   file gone), the relay FIFO's writer closing, and the mux client itself dying. Worth one
+   `sshdrive logs shirls` from the owner after this build; a testbed reproduction needs a
+   tree big enough to matter, which `deb` is not.
+6. **Two small ones from the same listing.** The relay FIFO left behind is swept by the
+   next deployment (`HelperDeployment`'s stale-FIFO rule, tested); the live one seen on
+   `deb` is the running helper's own. The zero-byte `.sshdrive-upload-<mac8>-<uuid>` that
+   survived 20 minutes is section 5.5 working as written: the sweep runs when the agent
+   **lists** that directory, the helper's ignore list hides `.sshdrive-upload-*` from tier
+   2 entirely, and at tier 2 the next listing of an untouched root is the 30-minute
+   insurance sweep. No fix; noted here so the next sighting is not re-investigated.
+
+### Noticed in passing (VM)
+
+Replacing `/Applications/SSH Drive.app` under a live `SMAppService` registration makes
+launchd's spawn die at exec with `CODESIGNING / Launch Constraint Violation` (SIGKILL, Code
+Signature Invalid) while the same bundle launches fine by hand, and every CLI command then
+answers "the agent accepted the connection but did not answer". `SSHDRIVE_AGENT_ROLE=unregister`
+followed by `open -g -a "SSH Drive"` clears it - which is exactly the cask's postflight
+order, so the shipped path is unaffected; it is the develop-on-the-VM path that needs it.
 
 ---
 

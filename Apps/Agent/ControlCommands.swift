@@ -663,13 +663,28 @@ enum ControlCommands {
                 remedy: "The agent is missing its application-groups entitlement, or is unsigned.")
         }
 
+        // Quarantine, which is checked before the extension because it is the ordinary
+        // cause of that check failing. LaunchServices will not register the plugins of a
+        // quarantined bundle that has never been assessed through a user-visible launch:
+        // the agent runs (launchd starts it directly) while the appex does not exist as
+        // far as the system is concerned (section 10; measured 2026-09-05).
+        let quarantineValue = BundleQuarantine.attributeValue(atPath: bundleURL.path)
+        check(
+            "quarantine", quarantineValue == nil,
+            BundleQuarantine.detail(bundlePath: bundleURL.path, value: quarantineValue),
+            remedy: quarantineValue == nil ? nil : BundleQuarantine.remedy(bundlePath: bundleURL.path))
+
         // The extension, as PlugInKit sees it. `pluginkit -m -A -i <id>` prints a line
         // when the extension is registered.
         let pluginKit = pluginKitStatus()
         check(
             "extension registered", pluginKit != nil, pluginKit ?? "pluginkit reported nothing",
             remedy: pluginKit == nil
-                ? "Launch the app once from its bundle: open -g -a \"SSH Drive\"" : nil)
+                ? "Launch the app once from its bundle: open -g -a \"SSH Drive\". "
+                    + "A bundle still carrying com.apple.quarantine is the usual cause - "
+                    + "LaunchServices registers no plugin of one, and re-registering by hand "
+                    + "does not survive the next launch. See the \"quarantine\" check above."
+                : nil)
 
         // The ssh binary, always /usr/bin/ssh by absolute path (section 6.1).
         let sshVersion = SSHProcess.sshVersion()

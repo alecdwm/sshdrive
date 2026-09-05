@@ -5,28 +5,6 @@ import Logging
 import SFTP
 import SSHProcess
 
-/// The `extensions` list from the SFTP init reply, as section 8.1 shows it and as
-/// `capabilities.json` stores it. One place, so the report and the cache agree.
-enum SFTPExtensionNames {
-    static let table: [(SFTPServerExtensions, String)] = [
-        (.posixRename, "posix-rename@openssh.com"),
-        (.statvfs, "statvfs@openssh.com"),
-        (.fsync, "fsync@openssh.com"),
-        (.limits, "limits@openssh.com"),
-        (.lsetstat, "lsetstat@openssh.com"),
-    ]
-
-    static func list(_ extensions: SFTPServerExtensions) -> [String] {
-        table.filter { extensions.contains($0.0) }.map(\.1)
-    }
-
-    static func parse(_ names: [String]) -> SFTPServerExtensions {
-        var out: SFTPServerExtensions = []
-        for (flag, name) in table where names.contains(name) { out.insert(flag) }
-        return out
-    }
-}
-
 /// How many channels this server lets us hold at once, and what that costs
 /// (DESIGN.md sections 6.1 and 6.2).
 ///
@@ -249,7 +227,8 @@ enum CapabilityCache {
     /// never sees a banner (2026-09-04, section 6.1), so what is stored beside the
     /// timestamp is `uname -sm`, which is the closest thing the probe can actually read.
     static func storeProbe(
-        _ probe: ServerProbe.Result, extensions: SFTPServerExtensions, locationID: String
+        _ probe: ServerProbe.Result, extensions: SFTPServerExtensions,
+        advertised: [String] = [], locationID: String
     ) {
         merge(
             locationID: locationID,
@@ -273,6 +252,9 @@ enum CapabilityCache {
                     "cacheDirectory": probe.cacheDirectory,
                     "cacheNote": probe.cacheNote,
                     "sftpExtensions": SFTPExtensionNames.list(extensions),
+                    // Everything the server offered, so a missing `fsync@openssh.com` can
+                    // be told from a client that failed to read one (2026-09-05).
+                    "sftpExtensionsAdvertised": advertised,
                 ] as [String: Any]
             ])
     }
@@ -307,6 +289,14 @@ enum CapabilityCache {
         let extensions = SFTPExtensionNames.parse(stored["sftpExtensions"] as? [String] ?? [])
         let at = Date(timeIntervalSince1970: stored["probedAt"] as? Double ?? 0)
         return (result, extensions, at)
+    }
+
+    /// Every extension name the last connection's SSH_FXP_VERSION carried.
+    static func advertisedExtensions(locationID: String) -> [String] {
+        guard let stored = read(locationID: locationID)["probe"] as? [String: Any] else {
+            return []
+        }
+        return stored["sftpExtensionsAdvertised"] as? [String] ?? []
     }
 
     static func forgetChannelBudget(locationID: String) {

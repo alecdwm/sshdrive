@@ -75,6 +75,15 @@ public actor RealSFTPTransport: SFTPTransport {
         get async { await client.extensions }
     }
 
+    /// Every extension name the server advertised in SSH_FXP_VERSION, in the order it
+    /// sent them - not just the five this client acts on. `capabilities.json` keeps it
+    /// and `sshdrive status --json` shows it, because "the server did not advertise
+    /// fsync@openssh.com" is a claim about the server that has to be checkable from a
+    /// user's machine (2026-09-05).
+    public var extensionNames: [String] {
+        get async { await client.serverExtensionNames }
+    }
+
     public func realpath(_ path: RelativePath) async throws -> String {
         let resolved = try await client.realpath(serverPath(path))
         return String(decoding: resolved, as: UTF8.self)

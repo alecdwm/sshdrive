@@ -1,5 +1,5 @@
 import Foundation
-import AgentCore
+
 import Logging
 import SFTP
 import SSHProcess
@@ -22,43 +22,44 @@ import SSHProcess
 /// server that cannot afford the channel at all - everything below `uname` stays unknown
 /// and section 5.4's SFTP-only rule applies: full capabilities, and permission errors
 /// learned from the sync error list.
-enum ServerProbe {
+public enum ServerProbe {
 
     /// What the probe found. The identity half is section 5.4's; the rest is section 8.1's
     /// capability report.
-    struct Result: Sendable {
-        var identity: ServerIdentity = .unknown
+    public struct Result: Sendable {
+        public init() {}
+        public var identity: ServerIdentity = .unknown
         /// What the account printed before our sentinel, which section 9.2 says `status`
         /// shows.
-        var shellPrefix: String = ""
+        public var shellPrefix: String = ""
         /// Empty when the probe worked. Non-empty means no shell access.
-        var failure: String = ""
+        public var failure: String = ""
         /// `id`'s own line, for `sshdrive show`.
-        var description: String = ""
+        public var description: String = ""
 
         /// `uname -s` and `uname -m`, e.g. "Linux x86_64". Empty when there is no shell.
-        var uname: String = ""
+        public var uname: String = ""
         /// `$HOME` as the account spells it (section 5.7).
-        var home: String = ""
+        public var home: String = ""
         /// "gnu", "busybox", "bsd" or "" - what `find` is.
-        var findFlavour: String = ""
-        var findTakesCmin = false
-        var findTakesPrintf = false
+        public var findFlavour: String = ""
+        public var findTakesCmin = false
+        public var findTakesPrintf = false
         /// `sha256sum`, `shasum`, or empty. The helper's verification needs one (6.4).
-        var checksumTool: String = ""
+        public var checksumTool: String = ""
         /// A writable, executable directory for the helper, or empty with `cacheNote`
         /// saying why.
-        var cacheDirectory: String = ""
-        var cacheNote: String = ""
+        public var cacheDirectory: String = ""
+        public var cacheNote: String = ""
 
-        var hasShellAccess: Bool { failure.isEmpty }
+        public var hasShellAccess: Bool { failure.isEmpty }
     }
 
     /// NUL-delimited records so nothing a shell prints can be confused with a value, and
     /// `id` invoked three separate ways so a busybox `id` that does not take `-G` still
     /// yields the primary pair. POSIX `sh` only: this runs under dash and busybox ash as
     /// often as under bash.
-    static let script = """
+    public static let script = """
         printf '%s\\000' "$(uname -s 2>/dev/null) $(uname -m 2>/dev/null)"
         printf '%s\\000' "$(id -u 2>/dev/null)"
         printf '%s\\000' "$(id -g 2>/dev/null)"
@@ -95,9 +96,9 @@ enum ServerProbe {
         """
 
     /// How many NUL-delimited records the script above prints.
-    static let recordCount = 11
+    public static let recordCount = 11
 
-    static func run(master: SSHMaster, timeout: TimeInterval = 25) async -> Result {
+    public static func run(master: SSHMaster, timeout: TimeInterval = 25) async -> Result {
         var result = Result()
         let remote = RemoteScript(body: script)
         let channel: ExecChannel
@@ -174,7 +175,7 @@ enum ServerProbe {
     /// `--version` at all. No busybox build has `-cmin` (2026-09-04, testbed, section 6.4),
     /// so "no `--version` and no `-cmin`" is the busybox signature and everything else
     /// without a GNU banner is treated as BSD.
-    static func flavour(fromVersionText text: String, takesCmin: Bool) -> String {
+    public static func flavour(fromVersionText text: String, takesCmin: Bool) -> String {
         let lower = text.lowercased()
         if lower.contains("gnu findutils") { return "gnu" }
         if lower.contains("busybox") { return "busybox" }
