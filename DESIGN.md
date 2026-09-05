@@ -205,7 +205,7 @@ and read and written only by the agent.
 | XPC mach service (agent ↔ extension, agent ↔ CLI) | `RWGDZAYBM8.org.shirls.sshdrive.agent` (app-group prefixed so the sandboxed extension may connect) |
 | `os.Logger` subsystem | `org.shirls.sshdrive`, categories `extension`, `agent`, `cli`, `sftp`, `ssh` |
 | Finder mount root | `~/Library/CloudStorage/<derived by the system, see S3>` |
-| Homebrew cask | `ssh-drive`, in the tap `alecdwm/tap` (repo `alecdwm/homebrew-tap`, see §10.1) |
+| Homebrew cask | `sshdrive`, in the tap `alecdwm/tap` (repo `alecdwm/homebrew-tap`, see §10.1) |
 | Source repository | `https://github.com/alecdwm/sshdrive` |
 | Domain identifier | the location's UUID (§4) |
 
@@ -3605,14 +3605,14 @@ repo for Homebrew.
 | Source, this document, issues, CI | `github.com/alecdwm/sshdrive` | `DESIGN.md` at the root; user docs under `docs/`. |
 | Release binaries | GitHub Releases on the same repo | CI attaches the notarized, stapled `SSH-Drive-<version>.dmg` plus a `.sha256`. Tags `v1.2.3`. |
 | Website / user docs | GitHub Pages from `docs/` on `main` | Static site (a Markdown-driven generator such as MkDocs or plain Jekyll). Optional custom domain `sshdrive.shirls.org` via a `CNAME` file and a DNS CNAME to `alecdwm.github.io`. |
-| Homebrew tap | `github.com/alecdwm/homebrew-tap` | Must be a separate repo: `brew tap alecdwm/tap` resolves to `alecdwm/homebrew-tap` by naming convention, so the cask cannot sit inside the main repo without users typing a full URL. Contains `Casks/ssh-drive.rb`. |
+| Homebrew tap | `github.com/alecdwm/homebrew-tap` | Must be a separate repo: `brew tap alecdwm/tap` resolves to `alecdwm/homebrew-tap` by naming convention, so the cask cannot sit inside the main repo without users typing a full URL. Contains `Casks/sshdrive.rb`. |
 | Support links baked into the app | `sshdrive --help`, `sshdrive doctor` | Point at the Pages site and the issues tracker. |
 
 Install path for users:
 
 ```
 brew tap alecdwm/tap
-brew install --cask ssh-drive
+brew install --cask sshdrive
 sshdrive add nas
 ```
 
@@ -3637,7 +3637,7 @@ by a `v*` tag):
    API key stored as repository secrets) → `notarytool submit --wait` → staple
    → DMG.
 3. Upload DMG + sha256 to the GitHub Release.
-4. Render `Casks/ssh-drive.rb` from a template with the new version, URL and
+4. Render `Casks/sshdrive.rb` from a template with the new version, URL and
    sha256, and push it to `alecdwm/homebrew-tap` (a deploy key or fine-grained
    PAT for that one repo). `brew upgrade` then picks it up.
 5. Publish the docs site (Pages deploys automatically from `main`).
@@ -3685,7 +3685,7 @@ capable of costing an afternoon:
 The tap can be reused for any future casks or formulae of yours; that is why it
 is named `homebrew-tap` rather than `homebrew-sshdrive`. If the project gains
 enough users, the cask can later be submitted to the main `homebrew-cask`
-repository, at which point `brew install --cask ssh-drive` works without the
+repository, at which point `brew install --cask sshdrive` works without the
 tap.
 
 Upgrades replace the bundle under a running agent and extension. The
@@ -4200,6 +4200,9 @@ there, so that this list cannot drift from the body.
 - **The wrapper's `EXIT` trap does not run when the wrapper is
   `SIGKILL`ed,** which is every abrupt client kill, so its relay FIFO is
   swept by the next deployment rather than by itself (2026-09-05, §6.4).
+- **The cask token is `sshdrive`,** matching the command and the repository,
+  not the `ssh-drive` Homebrew would derive from the app name; that derivation
+  is enforced only for Homebrew's own tap (2026-09-05, §3.1, §10.1).
 
 ---
 

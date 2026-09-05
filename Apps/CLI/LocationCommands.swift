@@ -225,7 +225,7 @@ struct Remove: ParsableCommand {
     @Argument(help: "Nickname, host, or the start of the location id.")
     var name: String?
 
-    @Flag(help: "Every location. Run this before `brew uninstall --cask ssh-drive`.")
+    @Flag(help: "Every location. Run this before `brew uninstall --cask sshdrive`.")
     var all = false
 
     @Flag(name: .customLong("keep-files"),

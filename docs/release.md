@@ -163,7 +163,7 @@ prints.
 
 ## Then the cask
 
-`packaging/homebrew-tap/Casks/ssh-drive.rb`, which belongs in the separate repository
+`packaging/homebrew-tap/Casks/sshdrive.rb`, which belongs in the separate repository
 `alecdwm/homebrew-tap` (see `packaging/homebrew-tap/README.md`). The script prints the two
 lines to update:
 
@@ -191,7 +191,7 @@ deploy key. Until the tap exists, copy the file by hand.
    dialog once. `docs/spikes/milestone-10.md` has the exact steps.
 6. Tag `v<version>`, upload the DMG and the `.sha256` to the GitHub release.
 7. Update the cask's `version` and `sha256`, push to `alecdwm/homebrew-tap`.
-8. `brew upgrade --cask ssh-drive` on a machine that already has it, and check that the
+8. `brew upgrade --cask sshdrive` on a machine that already has it, and check that the
    sidebar entries, the cached files and any pending upload are still there.
    `scripts/release.sh install` (or `RELEASE_INSTALL=1 scripts/release.sh` to run it right
    after `all`) reproduces the same stop/replace/`unregister`+`open -g` sequence over ssh

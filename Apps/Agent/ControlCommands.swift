@@ -748,7 +748,7 @@ enum ControlCommands {
         checks.append([
             "name": "uninstall reminder",
             "status": "note",
-            "detail": "Run `sshdrive remove --all` before `brew uninstall --cask ssh-drive`: "
+            "detail": "Run `sshdrive remove --all` before `brew uninstall --cask sshdrive`: "
                 + "Homebrew cannot remove File Provider domains or keychain items for you.",
         ])
         return checks

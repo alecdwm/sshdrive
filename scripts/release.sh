@@ -415,7 +415,7 @@ if [ "$WHAT" != "build" ] && [ "$WHAT" != "install" ]; then
 		cd $MAC_DIR
 		shasum -a 256 \"dist/$DMG_NAME\" | tee \"dist/$DMG_NAME.sha256\"
 		echo
-		echo \"packaging/homebrew-tap/Casks/ssh-drive.rb wants:\"
+		echo \"packaging/homebrew-tap/Casks/sshdrive.rb wants:\"
 		echo \"  version \\\"$VERSION\\\"\"
 		echo \"  sha256 \\\"\$(shasum -a 256 \"dist/$DMG_NAME\" | cut -d\" \" -f1)\\\"\"
 	'"

@@ -8,7 +8,7 @@ There is no window. Everything is `sshdrive`, a command-line tool, and Finder.
 
 ```
 brew tap alecdwm/tap
-brew install --cask ssh-drive
+brew install --cask sshdrive
 sshdrive add nas alec@nas.local
 ```
 
@@ -44,7 +44,7 @@ client.
 
 ```sh
 brew tap alecdwm/tap
-brew install --cask ssh-drive
+brew install --cask sshdrive
 ```
 
 The cask installs `SSH Drive.app` into `/Applications`, symlinks the `sshdrive` command
@@ -136,7 +136,7 @@ cask directive reaches the keychain at all.
 Then:
 
 ```sh
-brew uninstall --cask ssh-drive     # or: brew zap --cask ssh-drive
+brew uninstall --cask sshdrive     # or: brew zap --cask sshdrive
 ```
 
 `brew zap` additionally deletes the app group container — locations, indexes and pins.

@@ -19,7 +19,7 @@ the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. T
 | XPC mach service | `RWGDZAYBM8.org.shirls.sshdrive.agent` (app-group prefixed so the sandboxed appex may connect) |
 | `os.Logger` subsystem | `org.shirls.sshdrive`; categories `extension` `agent` `cli` `sftp` `ssh` |
 | Group container | `~/Library/Group Containers/RWGDZAYBM8.org.shirls.sshdrive/` -> `config.json`, `domains/<location-id>/index.sqlite`, `capabilities.json`, `pins.json` |
-| Repo / cask | `github.com/alecdwm/sshdrive`; cask `ssh-drive` in tap `alecdwm/tap` (`alecdwm/homebrew-tap`). The cask **file** must be `Casks/ssh-drive.rb`: Homebrew resolves the token to the basename |
+| Repo / cask | `github.com/alecdwm/sshdrive`; cask `sshdrive` in tap `alecdwm/tap` (`alecdwm/homebrew-tap`). The cask **file** must be `Casks/sshdrive.rb`: Homebrew resolves the token to the basename |
 | Release signing | Developer ID Application `6C055553C6A361398A3CC48654E1FADC14660D05` (cert `T9DF89U2YU`), profile `~/Developer/SSH_Drive_Developer_ID.provisionprofile` on the VM, notarization by App Store Connect API key `~/Developer/AuthKey_*.p8` |
 | Domain identifier | the location's UUID |
 
@@ -175,8 +175,8 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 3598-3703 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
 | 3704-3720 | §11 Spikes | S1-S10, each with its question and why it matters |
 | 3721-3770 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3771-4205 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4206-4238 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 3771-4208 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4209-4241 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -368,7 +368,7 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       an **App Store Connect API key** (`--key/--key-id/--issuer`), because
       `notarytool store-credentials` cannot be run over ssh at all; the
       `--keychain-profile` form is the fallback and the missing-credentials message names
-      both. The cask is `packaging/homebrew-tap/Casks/ssh-drive.rb` (the tap is a separate
+      both. The cask is `packaging/homebrew-tap/Casks/sshdrive.rb` (the tap is a separate
       repo that does not exist yet; `packaging/homebrew-tap/README.md` says where it goes),
       `sshdrive logs [--follow] [<name>]` reads our subsystem **and** fileproviderd's lines
       for the domain, and the docs are `README.md`, `docs/troubleshooting.md` and

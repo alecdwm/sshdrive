@@ -57,7 +57,7 @@ builds `dist/SSH-Drive-<version>.dmg` with `hdiutil` (volume `SSH Drive`, the ap
 with no issues, `spctl --assess` says `accepted / source=Notarized Developer ID`. It
 authenticates to `notarytool` with an App Store Connect API key, because
 `store-credentials` cannot be run over ssh at all. Beside it: the Homebrew cask at
-`packaging/homebrew-tap/Casks/ssh-drive.rb` (staged; the tap is a separate repo that does
+`packaging/homebrew-tap/Casks/sshdrive.rb` (staged; the tap is a separate repo that does
 not exist yet), `sshdrive logs [--follow] [<name>]` over `LogQuery` in the `Logging`
 module, and the user docs - `README.md`, `docs/troubleshooting.md`, `docs/release.md`.
 Spike **S9 is answered: yes**, `add(domain)` with the same identifier and a new
@@ -548,7 +548,7 @@ stays for the one thing they cannot express, which is writing `inherit` directly
 4. ~~**Section 10 vs section 3.1: the cask `signal:` label.**~~ Settled 2026-09-04 by
    S1(g1): `launchctl list` prints only the label, never the bundle id, so the cask carries
    `signal: ["TERM", "org.shirls.sshdrive.agent"]`. Section 10 was corrected, and the cask
-   at `packaging/homebrew-tap/Casks/ssh-drive.rb` uses it. The agent gained a **SIGTERM
+   at `packaging/homebrew-tap/Casks/sshdrive.rb` uses it. The agent gained a **SIGTERM
    handler** in milestone 10 so that stanza is a clean exit rather than a crash.
 5. ~~**An `.app` whose main executable is not an `NSApplication`.**~~ Confirmed
    2026-09-04 on a fresh user and again on 2026-09-05 with the notarized Developer ID
