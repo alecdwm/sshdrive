@@ -417,6 +417,9 @@ struct Status: ParsableCommand {
                 if let note = watch["note"] as? String, !note.isEmpty {
                     print("         note: \(note)")
                 }
+                if let note = watch["intervalNote"] as? String, !note.isEmpty {
+                    print("         note: \(note)")
+                }
                 if watch["sweepUsesMmin"] as? Bool == true {
                     print("         note: this server's find has no -cmin, so the sweep uses "
                         + "-mmin and a chmod, a chown or a write that preserved mtime is only "

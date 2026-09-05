@@ -48,25 +48,26 @@ brew install --cask sshdrive
 ```
 
 The cask installs `SSH Drive.app` into `/Applications`, symlinks the `sshdrive` command
-out of the bundle onto your `PATH`, and launches the app once so it can register itself.
+out of the bundle onto your `PATH`, checks the app's notarization with `spctl --assess`
+and clears the quarantine attribute Homebrew leaves on it, and launches the app once so it
+can register itself.
 
 There is no separate download to run and nothing to open. The app is a background agent:
-launching it registers the File Provider extension and a login item, and it exits.
+launching it registers the File Provider extension and a login item, and it exits. The
+quarantine step is what lets that registration happen: macOS registers no extension
+belonging to a bundle that is still marked as downloaded and has never been opened by a
+person, and the cask has already done the verification that marking exists for.
 
 ### The prompts you will see
 
-Three, all of them from macOS, none of them avoidable, and none of them repeated.
+Two, both of them from macOS, neither avoidable, and neither repeated.
 
-1. **"SSH Drive" was downloaded from the Internet. Are you sure you want to open it?**
-   Gatekeeper, the first time the freshly downloaded bundle is opened. Click Open. It does
-   not come back.
-
-2. **Background Items Added.** A notification telling you SSH Drive registered its login
+1. **Background Items Added.** A notification telling you SSH Drive registered its login
    agent. The item is *already enabled* — this is a notification, not a request. If you
    ever want to turn the whole thing off: System Settings → General → Login Items &
    Extensions.
 
-3. **Allow "SSH Drive" to find devices on local networks?** The first time it connects to
+2. **Allow "SSH Drive" to find devices on local networks?** The first time it connects to
    a server on your own network — which is every NAS. Answer **Allow**. There is no
    entitlement that suppresses this one and no window it can be shown over, so it arrives
    in the app's name while `sshdrive add` is running.

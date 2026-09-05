@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4238 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4319 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -153,30 +153,30 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 1558-1935 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
 | 1936-2024 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
 | 2025-2091 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2092-2146 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
-| 2147-2152 | Tier 0: SFTP poll | `readdir` every root |
-| 2153-2226 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2227-2276 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
-| 2277-2392 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
-| 2393-2446 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2447-2505 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2506-2513 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2514-2617 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2618-2706 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2707-2811 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2812-2851 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2852-3016 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 3017-3167 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
-| 3168-3291 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
-| 3292-3335 | §9 Security | the security properties in one list |
-| 3336-3400 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3401-3494 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
-| 3495-3597 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3598-3703 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
-| 3704-3720 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3721-3770 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3771-4208 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4209-4241 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 2092-2152 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
+| 2153-2158 | Tier 0: SFTP poll | `readdir` every root |
+| 2159-2232 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
+| 2233-2282 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
+| 2283-2405 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
+| 2406-2459 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2460-2518 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2519-2526 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2527-2630 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2631-2719 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2720-2824 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2825-2864 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2865-3029 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 3030-3180 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
+| 3181-3318 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
+| 3319-3362 | §9 Security | the security properties in one list |
+| 3363-3427 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3428-3521 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
+| 3522-3656 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3657-3762 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
+| 3763-3779 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3780-3829 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3830-4286 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4287-4319 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -382,11 +382,25 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       agent watches its own executable and hands over on an upgrade (section 10.1's vnode
       source), the `unregister` role waits for launchd to drop the job before exiting, and
       the first start removes File Provider domains that no location claims (section 10).
-      **606 package tests** (was 592). Proved on the VM: a notarized DMG installed the way
+      **611 package tests** (was 592; 627 after the addendum below). Proved on the VM: a notarized DMG installed the way
       the cask does, an upgrade over a running install with a materialized tree and a
       pending upload, and a fresh-user install as `sshtest` with a quarantined bundle. See
       `docs/spikes/milestone-10.md` and `docs/spikes/results.md` (2026-09-05, "milestone
-      10").
+      10"). **The first real cask install, on the owner's 26.6.2 Mac, then found that
+      Homebrew's `com.apple.quarantine` keeps LaunchServices from registering the appex at
+      all** (gotcha 99): the postflight now assesses with `spctl` and strips the attribute
+      before its unregister and `open -g`, and `doctor` has a `quarantine` check.
+      **A second addendum (2026-09-05) fixes what that install's `add` report said**: the
+      capability report was built before the helper was deployed *and* was never handed
+      `helperAvailable`, so it printed "the server cannot run the remote helper" for a
+      server that could. `add` now waits (bounded) for the first deployment attempt and the
+      report takes a `HelperState` with a `deploying` case; `CapabilityReport` and
+      `ServerProbe` moved into `AgentCore` so `swift test` can reach them. Also fixed
+      there: the cached-probe path handed the report an empty extension set, the helper
+      directory is set back to 0700 rather than refused, the poll interval backs off when a
+      cycle eats it, and a dying helper stream logs the channel's exit status and stderr.
+      **627 package tests.** See `docs/spikes/results.md` (2026-09-05, the milestone 10
+      addenda).
       **The one thing not delivered: the release ships without `keychain-access-groups`.**
       The Developer ID provisioning profile on the VM was issued for the other of the
       account's two Developer ID Application certificates (`D853BADB…` rather than the
@@ -524,6 +538,8 @@ S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
 97. **A pending upload survives a bundle replacement and can be re-offered after it,** so the same write can arrive twice; the §5.5 conflict check is what makes that safe, and it produced a conflict copy rather than a loss (2026-09-05, §10, §5.5).
 
 98. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
+
+99. **LaunchServices registers no plugin of a quarantined bundle nobody has launched.** Homebrew leaves `com.apple.quarantine` on the installed app, `open -g` is not an assessed launch, and the appex then does not exist: `pluginkit -m` prints nothing, `doctor` fails "extension registered" and "file provider domains" ("The application cannot be used right now"), and `fileproviderd` logs `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014`. The agent is unaffected - launchd starts it directly - so the install looks finished. `pluginkit -a` registers it and the next launch wipes that again; `xattr -dr com.apple.quarantine` then `open -g` is durable. The cask's postflight now runs `spctl --assess` and then the strip before its unregister and open, and `doctor` has a `quarantine` check ahead of "extension registered" (2026-09-05, first real cask install on macOS 26.6.2; a fresh-user quarantined install on the 26.4.1 VM had passed, and which half of that difference matters is not claimed, §10).
 
 ## Glossary
 

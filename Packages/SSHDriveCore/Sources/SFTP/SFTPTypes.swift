@@ -97,6 +97,29 @@ public struct SFTPServerExtensions: OptionSet, Sendable {
     public static let lsetstat = SFTPServerExtensions(rawValue: 1 << 4)
 }
 
+/// The `extensions` list from the SFTP init reply, as section 8.1 shows it and as
+/// `capabilities.json` stores it. One place, so the wire, the report and the cache agree -
+/// a name that round-trips wrongly here silently costs a feature a level (2026-09-05).
+public enum SFTPExtensionNames {
+    public static let table: [(SFTPServerExtensions, String)] = [
+        (.posixRename, "posix-rename@openssh.com"),
+        (.statvfs, "statvfs@openssh.com"),
+        (.fsync, "fsync@openssh.com"),
+        (.limits, "limits@openssh.com"),
+        (.lsetstat, "lsetstat@openssh.com"),
+    ]
+
+    public static func list(_ extensions: SFTPServerExtensions) -> [String] {
+        table.filter { extensions.contains($0.0) }.map(\.1)
+    }
+
+    public static func parse(_ names: [String]) -> SFTPServerExtensions {
+        var out: SFTPServerExtensions = []
+        for (flag, name) in table where names.contains(name) { out.insert(flag) }
+        return out
+    }
+}
+
 /// The error classes the wire can actually carry (DESIGN.md section 6.2). OpenSSH's
 /// `errno_to_portable` folds ENOENT, ENOTDIR and ELOOP into NO_SUCH_FILE, EPERM and
 /// EACCES into PERMISSION_DENIED, EINVAL and ENAMETOOLONG into BAD_MESSAGE, ENOSYS into

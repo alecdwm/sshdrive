@@ -1260,7 +1260,10 @@ actor LocationRuntime {
     func serverProbe() async -> (probe: ServerProbe.Result, extensions: SFTPServerExtensions)? {
         if let ssh = await liveConnection() { return (ssh.probe, await ssh.extensions) }
         guard isRemoteBacked, let cached = serverProbeResult else { return nil }
-        return (cached, SFTPServerExtensions())
+        // The recorded set from the last connection, never an empty default: an empty one
+        // reads as "this server advertises nothing" and takes four lines of the report
+        // down with it (2026-09-05).
+        return (cached, CapabilityCache.probe(locationID: location.id)?.extensions ?? [])
     }
 
     /// `status --probe`: "re-runs the server probe instead of using the cached result"
@@ -1270,7 +1273,8 @@ actor LocationRuntime {
         guard let ssh = await liveConnection() else { return }
         let probe = await ServerProbe.run(master: ssh.master)
         CapabilityCache.storeProbe(
-            probe, extensions: await ssh.extensions, locationID: location.id)
+            probe, extensions: await ssh.extensions,
+            advertised: await ssh.extensionNames, locationID: location.id)
         if probe.identity.isKnown, location.permissions == .mode { identity = probe.identity }
         serverProbeResult = probe
     }

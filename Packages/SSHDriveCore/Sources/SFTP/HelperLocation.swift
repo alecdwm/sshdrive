@@ -86,7 +86,20 @@ extension RealSFTPTransport {
         }
         try? await client.mkdir(directory.serverPath, mode: mode)
         // Whether it existed already or was just made, it has to be there now.
-        _ = try await helperLstat(directory)
+        let attributes = try await helperLstat(directory)
+        // `mkdir`'s attributes go through the server's umask, so a 0700 that was asked for
+        // can land as 0755. Assert it (2026-09-05).
+        if attributes.mode & 0o777 != mode & 0o777 {
+            try? await helperSetstat(directory, mode: mode)
+        }
+    }
+
+    /// `chmod` on the helper's own directory. Section 6.4 wants it at 0700 and a server's
+    /// umask applies to `mkdir`'s attributes, so the mode is asserted after the fact as
+    /// well as asked for (2026-09-05).
+    public func helperSetstat(_ directory: HelperDirectory, mode: UInt32) async throws {
+        try await client.setstat(
+            directory.serverPath, SFTPSettableAttributes(permissions: mode))
     }
 
     public func helperReaddir(_ directory: HelperDirectory) async throws -> [SFTPDirectoryEntry] {

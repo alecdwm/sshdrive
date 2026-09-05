@@ -2143,6 +2143,12 @@ domain in the last 10 minutes (a File Provider request for it that was
 not a system request, or a CLI command naming it), every 10 min
 otherwise, and immediately on network-up. The helper replaces the schedule with events; a sweep still
 runs every 30 min as insurance against missed events.
+**A cycle may take at most a third of its own interval**: where the last one
+took longer, the interval becomes three times that cycle's duration, capped at
+the 30-minute insurance interval, and `sshdrive status` prints the reason on
+the watch line. Measured on a real install (2026-09-05): a home directory whose
+sweep took 56.8 s against a 60 s interval, so the location swept without pause
+and the one spare exec channel was never free for anything else.
 
 #### Tier 0: SFTP poll
 
@@ -2286,10 +2292,14 @@ is cheaper than any other push mechanism. Deployment happens over the existing c
 
 1. Probe `uname -sm` and a writable, executable directory:
    `$XDG_CACHE_HOME/sshdrive`, else `~/.cache/sshdrive`, else
-   `/tmp/sshdrive-<uid>`. The directory is created with `mkdir -m 700` and
-   used only if it is owned by the account and writable by nobody else;
-   `/tmp/sshdrive-<uid>` is a predictable name on a shared host, and a
-   directory someone else pre-created there is refused, not adopted.
+   `/tmp/sshdrive-<uid>`. The directory is created with `mkdir -m 700`, and
+   the mode is **asserted with a `setstat` afterwards**, because `mkdir`'s
+   attributes go through the server's umask and a 0700 that was asked for can
+   land as 0755 (2026-09-05). It is used only if it is owned by the account;
+   one that is ours and too open is set back to 0700 rather than refused, since
+   we may. A directory that is **not** ours is refused, not adopted, and so is
+   one that will not take the mode: `/tmp/sshdrive-<uid>` is a predictable name
+   on a shared host.
    "Executable" is tested by actually running the uploaded binary with
    `--version`, which catches `noexec` mounts.
 2. Upload `sshdrive-helper-<version>-<os>-<arch>` over SFTP if
@@ -2385,7 +2395,10 @@ directory so the message names the real one ("SSH Drive will upload a
 small helper binary to ~/.cache/sshdrive on this server to watch for
 changes; disable with `sshdrive set <name> helper off`"), and `sshdrive
 status` shows the
-exact remote path and version in use. `helper off` stops it and removes the
+exact remote path and version in use. `add` says it **before** the upload and
+then waits, bounded, for that first deployment attempt to settle before it
+prints its capability report, so the one report `add` gives and the `status` a
+moment later cannot disagree (§8, §8.1; 2026-09-05). `helper off` stops it and removes the
 binary on the next connection; `helper on` re-enables it. Deployment
 failures are never fatal: the location silently continues at the next tier
 and the status report says why the helper is not running.
@@ -3266,6 +3279,15 @@ Rules that keep the format stable across permutations:
 - A user-forced `watch-mode` below the best available shows `◐` with
   `note: forced by watch-mode <x>` and no `upgrade:` line, since the user
   chose it.
+- **While the helper is being deployed** - the tier is chosen and the binary
+  is still going up the wire, which is exactly where `sshdrive add` writes its
+  one report - the line shows the sweep level with `note: the helper is being
+  deployed on this connection; \`sshdrive status\` shows it once it is up` and
+  **no `upgrade:` line**: there is nothing for the user to do, and the note a
+  server that genuinely cannot run it would carry is a claim about the server
+  that is not true yet. `add` waits a few seconds for that first attempt to
+  settle before printing at all (§8), so the state is rare; the wait is bounded
+  and this is what is printed when it runs out (2026-09-05).
 - When the helper is not the active tier on a server with shell access, the
   change-detection line carries a `note:` saying why: `helper off (user
   setting)`, `helper unsupported: <os>/<arch>`, `no writable directory for
@@ -3283,7 +3305,12 @@ Rules that keep the format stable across permutations:
   it shows `◐` and `note: forced by permissions none`, like a forced
   watch-mode.
 - `--json` emits the same data: an array of `{feature, level, best, glyph,
-  upgrade, note}` objects plus the probe timestamp, for scripting.
+  upgrade, note}` objects plus the probe timestamp, for scripting, and
+  `sftpExtensions`: **every** name the server advertised in `SSH_FXP_VERSION`,
+  in the order it sent them, not only the five levels above depend on. A line
+  saying the server did not advertise `fsync@openssh.com` is a claim about the
+  server, and this is what makes it checkable from the user's own machine
+  rather than believed (2026-09-05).
 - When offline, the cached probe is shown with "(cached; offline)" and no
   guesses are made about what changed.
 
@@ -3503,18 +3530,48 @@ So:
   restricted entitlements, so their being bare executables reached through
   a symlink is fine.
 - Homebrew cask: installs `SSH Drive.app` and links `sshdrive` from inside the
-  bundle via the cask `binary` stanza. The cask's `postflight`, and
-  `sshdrive doctor`, run `open -g -a "SSH Drive"` once. Launching the app is
+  bundle via the cask `binary` stanza. The cask's `postflight` runs four
+  steps in this order - **assess, strip the quarantine attribute,
+  unregister, open** - and `sshdrive doctor` runs the last of them,
+  `open -g -a "SSH Drive"`, on its own. Launching the app is
   what registers both the extension with PlugInKit and the login item
   through `SMAppService`, and both must be done from the app's own bundle,
   which a symlinked CLI cannot do. The app, on launch, registers its login
   item (unconditionally, below), notices the launchd-managed instance
   already holds the mach service, and exits. macOS posts a notification that a background
   item was added, with the item already enabled and a switch to turn it
-  off under Login Items, and Gatekeeper shows its one-time "downloaded
-  from the internet" dialog when the postflight opens the quarantined
-  bundle; that notification and that dialog are the only "UI" the user
+  off under Login Items; that notification is the only "UI" the user
   ever sees.
+- **The quarantine attribute has to be removed, or the extension is never
+  registered.** Homebrew leaves `com.apple.quarantine` on the installed
+  bundle, and LaunchServices declines to register the *plugins* of a
+  quarantined bundle that has never been assessed through a launch a person
+  saw - which `open -g` is not. Nothing else shows it: the agent runs,
+  because launchd starts the main executable directly, and the login item
+  registers, so the install looks finished while `pluginkit -m` prints
+  nothing of ours, `doctor` fails "extension registered" and "file provider
+  domains" ("The application cannot be used right now"), and `fileproviderd`
+  logs `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying
+  FP -2014` - provider not found, application extension not found.
+  `pluginkit -a <appex>` registers it and the next launch wipes that
+  registration again; `xattr -dr com.apple.quarantine` followed by `open -g`
+  registers it durably. Measured on the owner's Mac (macOS 26.6.2) on the
+  first real `brew install --cask sshdrive`, 2026-09-05; the same
+  quarantined install run as a fresh user on the 26.4.1 build VM had passed,
+  so this is a difference between 26.4 and 26.6 or between a VM and a real
+  machine, and nothing here claims which. So the `postflight` runs
+  `/usr/sbin/spctl --assess --type execute` on the installed app first,
+  logging its verdict and not failing the install on it, and then
+  `/usr/bin/xattr -dr com.apple.quarantine` on the bundle. That is not a
+  bypass of Gatekeeper but a relocation of it: the DMG was assessed on the
+  download path, the notarization ticket is stapled to the app inside it,
+  and the postflight repeats the assessment on the installed copy before
+  the attribute goes. What is given up is the one-time "downloaded from the
+  Internet" dialog, which `open -g` shows to nobody anyway. `sshdrive
+  doctor` carries a **`quarantine`** check, ordered before "extension
+  registered" because it is the ordinary cause of that one failing, whose
+  remedy is the two commands above; the agent logs the same thing once per
+  launch when its own bundle is quarantined.
 - Homebrew runs a cask's `uninstall` directives on `brew upgrade` and
   `brew reinstall` as well as on `brew uninstall`, so nothing destructive
   may live there. The `uninstall` stanza only stops the agent, with
@@ -3553,7 +3610,9 @@ So:
   **unregister, then register**: the cask's `postflight` runs the new
   bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
   `SMAppService.unregister()` and exits, before the `open -g` that
-  registers it again. The same two steps are what a developer replacing
+  registers it again - both of them after the assess-and-strip pair
+  above, since a quarantined bundle registers no plugin however many
+  times it is opened. The same two steps are what a developer replacing
   the bundle by hand has to run.
   Locations, domains, the local replica and pending uploads all survive
   an upgrade untouched, and S1 checks that the agent is reachable after
@@ -4203,6 +4262,25 @@ there, so that this list cannot drift from the body.
 - **The cask token is `sshdrive`,** matching the command and the repository,
   not the `ssh-drive` Homebrew would derive from the app name; that derivation
   is enforced only for Homebrew's own tap (2026-09-05, §3.1, §10.1).
+- **LaunchServices registers no plugin of a quarantined bundle that no
+  person has launched,** so the cask's `postflight` assesses the installed
+  app with `spctl` and then strips `com.apple.quarantine` before it opens
+  it; without that the agent runs while the appex does not exist and
+  `fileproviderd` answers `FP -2001 / -2014`. `doctor` gained a
+  `quarantine` check ahead of "extension registered" (2026-09-05, §10).
+- **`add` waits for the first helper deployment before it prints its report,**
+  and a deployment still in flight is reported as `deploying` rather than as a
+  server that cannot run the helper; the wait is bounded and `add` never blames
+  a server for a state of our own (2026-09-05, §6.4, §8.1).
+- **The capability report reads the recorded SFTP extension set,** never an
+  empty default, and `--json` carries every name the server advertised
+  (2026-09-05, §8.1).
+- **A helper directory that is ours and too open is set back to 0700,** not
+  refused; the mode is asserted with a `setstat` after `mkdir` because the
+  server's umask applies to `mkdir`'s attributes (2026-09-05, §6.4).
+- **A polling cycle may take a third of its interval,** and the schedule backs
+  off to three times the last cycle's duration when it takes more, capped at the
+  insurance interval and reported in `status` (2026-09-05, §6.4).
 
 ---
 

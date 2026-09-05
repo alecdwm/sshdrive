@@ -95,13 +95,25 @@ enum HelperDeployer {
         // on a shared host, and a directory someone else pre-created there is refused, not
         // adopted" (section 6.4).
         try await sftp.helperMkdir(directory, mode: 0o700)
-        let directoryAttributes = try await sftp.helperLstat(directory)
+        var directoryAttributes = try await sftp.helperLstat(directory)
         if probe.identity.isKnown, directoryAttributes.uid != probe.identity.uid {
             throw Failure.unavailable(
                 "\(directory.path) is owned by uid \(directoryAttributes.uid), not by this account")
         }
+        // Ours but too open - a server umask that widened our `mkdir`, or a directory an
+        // older build left at 0755. Section 6.4 wants 0700 and we may set it, so it is set
+        // rather than made a refusal; only a directory that is not ours, or that will not
+        // take the mode, is refused (2026-09-05).
+        if directoryAttributes.mode & 0o077 != 0 {
+            try? await sftp.helperSetstat(directory, mode: 0o700)
+            directoryAttributes = (try? await sftp.helperLstat(directory)) ?? directoryAttributes
+            Log.agent.notice(
+                "\(locationID, privacy: .public): tightened \(directory.path, privacy: .public) to 0700"
+            )
+        }
         if directoryAttributes.mode & 0o022 != 0 {
-            throw Failure.unavailable("\(directory.path) is writable by others")
+            throw Failure.unavailable(
+                "\(directory.path) is writable by others and would not take mode 0700")
         }
 
         var evidence = HelperDeployment.RemoteEvidence()

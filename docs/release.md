@@ -187,11 +187,20 @@ deploy key. Until the tap exists, copy the file by hand.
    `CFBundleShortVersionString` from it) and in `Apps/CLI/SSHDriveCommand.swift`.
 4. `scripts/release.sh` end to end; the run must say `embedded …provisionprofile`, and the
    final `spctl --assess` must say `accepted / source=Notarized Developer ID`.
-5. Install the DMG on a **second** account or machine, quarantined, and answer Gatekeeper's
-   dialog once. `docs/spikes/milestone-10.md` has the exact steps.
-6. Tag `v<version>`, upload the DMG and the `.sha256` to the GitHub release.
-7. Update the cask's `version` and `sha256`, push to `alecdwm/homebrew-tap`.
-8. `brew upgrade --cask sshdrive` on a machine that already has it, and check that the
+5. Install the DMG on a **second** account or machine, quarantined.
+   `docs/spikes/milestone-10.md` has the exact steps.
+6. **Install through the cask on a real Mac, and check the extension registers.** This is
+   the step the VM cannot stand in for: `brew install --cask sshdrive`, then
+   `sshdrive doctor` — `quarantine` and `extension registered` must both be `ok` and
+   `file provider domains` must not say *The application cannot be used right now*.
+   LaunchServices registers no plugin of a bundle still carrying `com.apple.quarantine`
+   that no person has ever launched, which is why the cask's `postflight` assesses the app
+   with `spctl` and then strips the attribute; a fresh-user quarantined install on the
+   26.4.1 VM did not reproduce it and a 26.6.2 Mac did (2026-09-05). Also check
+   `xattr -p com.apple.quarantine "/Applications/SSH Drive.app"` prints nothing afterwards.
+7. Tag `v<version>`, upload the DMG and the `.sha256` to the GitHub release.
+8. Update the cask's `version` and `sha256`, push to `alecdwm/homebrew-tap`.
+9. `brew upgrade --cask sshdrive` on a machine that already has it, and check that the
    sidebar entries, the cached files and any pending upload are still there.
    `scripts/release.sh install` (or `RELEASE_INSTALL=1 scripts/release.sh` to run it right
    after `all`) reproduces the same stop/replace/`unregister`+`open -g` sequence over ssh

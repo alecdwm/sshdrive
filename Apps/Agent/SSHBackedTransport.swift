@@ -236,8 +236,13 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
             // Section 8.1: the probe's result is cached in
             // `domains/<id>/capabilities.json` with a timestamp, beside the channel budget
             // that `CapabilityCache` already owns.
+            let advertised = await transport.extensionNames
+            Log.sftp.notice(
+                "\(location.id, privacy: .public): SFTP extensions advertised: \(advertised.joined(separator: " "), privacy: .public)"
+            )
             CapabilityCache.storeProbe(
-                probe, extensions: await transport.extensions, locationID: location.id)
+                probe, extensions: await transport.extensions, advertised: advertised,
+                locationID: location.id)
 
             return SSHBackedTransport(
                 locationID: location.id, master: master, channel: channel, inner: transport,
@@ -309,6 +314,11 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
 
     var extensions: SFTPServerExtensions {
         get async { await inner.extensions }
+    }
+
+    /// Every name the metadata channel's handshake recorded (section 8.1).
+    var extensionNames: [String] {
+        get async { await inner.extensionNames }
     }
 
     func realpath(_ path: RelativePath) async throws -> String {

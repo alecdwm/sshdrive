@@ -55,6 +55,9 @@ actor ChangeDetector {
     private var helperDeployment: HelperDeployer.Deployment?
     /// Why the helper is not running, when the ladder needs to say so.
     private var helperNote: String?
+    /// How long the last cycle took. A cycle that consumed most of its own interval backs
+    /// the schedule off (section 6.4, 2026-09-05).
+    private var lastCycleSeconds: Double = 0
     /// Set by an `overflow` event: section 6.4 answers one with a sweep.
     private var helperOverflowPending = false
     /// Serialises `ensureHelper` against itself, since a cycle and a reconnect can both
@@ -101,7 +104,9 @@ actor ChangeDetector {
 
     private func secondsUntilNextCycle(now: Double = Date().timeIntervalSince1970) -> Double {
         guard !paused else { return 5 }
-        let due = PollSchedule.nextFire(lastCycle: lastCycle, lastTouch: lastTouch, now: now)
+        let due = PollSchedule.nextFire(
+            lastCycle: lastCycle, lastTouch: lastTouch, now: now,
+            lastCycleSeconds: lastCycleSeconds)
         return max(0, due - now)
     }
 
@@ -270,6 +275,11 @@ actor ChangeDetector {
         if let sweepNote { outcome["note"] = sweepNote }
         if !application.errors.isEmpty { outcome["errors"] = application.errors }
         lastOutcome = outcome
+        // Only a cycle that actually went to the server paces the schedule; a tier-2 cycle
+        // that did nothing but refresh the root set is not evidence of a slow server.
+        if !handledByHelper || full {
+            lastCycleSeconds = Date().timeIntervalSince(started)
+        }
         await runtime.recordWatchCycle(outcome)
         return application
     }
@@ -337,6 +347,33 @@ actor ChangeDetector {
                 Log.agent.error(
                     "\(self.locationID, privacy: .public): the helper would not start (\(reason, privacy: .public)); dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
                 )
+            }
+        }
+    }
+
+    /// What `sshdrive add` waits for: the first deployment attempt, settled.
+    ///
+    /// `add` prints one capability report and the user reads it as the truth about this
+    /// server (section 8.1), so it must not be written in the window between the ladder
+    /// choosing tier 2 and the binary arriving. Bounded by `HelperSettle`: a server that
+    /// never answers costs `add` a few seconds, and the report then says `deploying`
+    /// rather than blaming the server (2026-09-05).
+    @discardableResult
+    func settleHelper(timeout: TimeInterval = HelperSettle.addSeconds) async -> Bool {
+        let started = Date()
+        while true {
+            var running = false
+            if let helper { running = await helper.state == .running }
+            let step = HelperSettle.step(
+                tierIsHelper: ladder.tier == .helper, streamRunning: running,
+                refusal: helperNote, elapsed: Date().timeIntervalSince(started),
+                timeout: timeout)
+            switch step {
+            case .done: return running
+            case .giveUp: return false
+            case .wait:
+                if !helperStarting { await ensureHelper() }
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
     }
@@ -510,11 +547,18 @@ actor ChangeDetector {
             "watchMode": watchMode.rawValue,
             "cycles": cycles,
             "intervalSeconds": PollSchedule.interval(
-                lastTouch: lastTouch, now: Date().timeIntervalSince1970),
+                lastTouch: lastTouch, now: Date().timeIntervalSince1970,
+                lastCycleSeconds: lastCycleSeconds),
             "active": PollSchedule.isActive(lastTouch: lastTouch, now: Date().timeIntervalSince1970),
             "sweepUsesMmin": ladder.sweepUsesMmin,
             "paused": paused,
         ]
+        if let backoff = PollSchedule.backoffNote(
+            lastTouch: lastTouch, now: Date().timeIntervalSince1970,
+            lastCycleSeconds: lastCycleSeconds)
+        {
+            out["intervalNote"] = backoff
+        }
         if let note = ladder.note { out["note"] = note }
         if let note = helperNote, ladder.note == nil { out["note"] = note }
         if clockSkewSeconds != 0 { out["clockSkewSeconds"] = clockSkewSeconds }
