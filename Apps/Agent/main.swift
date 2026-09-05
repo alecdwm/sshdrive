@@ -48,6 +48,35 @@ case "unregister":
         Log.agent.error("SMAppService.unregister failed: \(error, privacy: .public)")
         exit(1)
     }
+    // `unregister()` returns, and `status` reports `notRegistered`, before launchd has
+    // finished tearing the job down - and the difference is the whole reason this role
+    // exists. launchd goes on spawning the *old* registration for a second or two, and a
+    // `register()` that lands inside that window leaves the job holding a launch
+    // constraint (LWCR) captured from the previous bundle's signature. Every spawn then
+    // dies with `Launch Constraint Violation` / `EXC_CRASH (SIGKILL (Code Signature
+    // Invalid))`, launchd retries on a 10 s throttle for ever, and the mach service never
+    // comes back. Measured 2026-09-05, replacing an Apple Development build with a
+    // Developer ID one; the same shape as any `brew upgrade`.
+    //
+    // `SMAppService.status` cannot see this, so the job itself is asked: `launchctl print`
+    // answers non-zero once the service is gone from the GUI domain. Waiting here is what
+    // makes the cask's "unregister, then open -g" postflight safe, since Homebrew runs the
+    // two back to back (section 10).
+    let label = "gui/\(getuid())/\(SSHDriveIdentifiers.agentLabel)"
+    var gone = false
+    for _ in 0 ..< 150 {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        probe.arguments = ["print", label]
+        probe.standardOutput = FileHandle.nullDevice
+        probe.standardError = FileHandle.nullDevice
+        try? probe.run()
+        probe.waitUntilExit()
+        if probe.terminationStatus != 0 { gone = true; break }
+        Thread.sleep(forTimeInterval: 0.2)
+    }
+    Log.agent.notice(
+        "login item teardown \(gone ? "finished" : "did not finish in 30 s", privacy: .public)")
     exit(0)
 
 case "launchd":
@@ -65,9 +94,10 @@ case "launchd":
         await DomainManager.shared.start()
     }
 
-    // TODO milestone 10: watch our own executable with a vnode dispatch source and exit
-    // cleanly when the bundle is replaced, so an upgrade hands over to the new build
-    // (section 10).
+    // Section 10: a TERM from the cask's `uninstall` stanza exits 0 with every master shut
+    // down, and the vnode watch on our own executable hands over to a bundle an upgrade
+    // put in our place (section 10.1).
+    AgentLifecycle.install()
     dispatchMain()
 
 default:

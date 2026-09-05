@@ -82,14 +82,45 @@ final class AddArgumentsTests: XCTestCase {
         XCTAssertEqual(try LocationSettingKey.named("identityFile"), .identity)
     }
 
-    func testNicknameRecreatesTheDomainAndRemotePathDropsTheIndex() {
-        // Section 8 and section 13's caveat: the sidebar name is fixed at domain creation
-        // unless S9 says otherwise, and a new root invalidates every path in the index.
-        XCTAssertTrue(LocationSettingKey.nickname.recreatesDomain)
+    /// S9 (2026-09-05) measured that `add(domain)` with an identifier the system already
+    /// holds and a new `displayName` renames the domain in place: the mount directory is
+    /// renamed, nothing is re-fetched, and an upload the system was holding is still
+    /// pending and still flushes. So the nickname half of section 13's data-loss caveat is
+    /// gone, and only remote-path re-creates the domain - a new root invalidates every
+    /// path in the index, so there is nothing there to keep.
+    func testNicknameRenamesInPlaceAndOnlyRemotePathRecreatesTheDomain() {
+        XCTAssertTrue(LocationSettingKey.nickname.renamesDomainInPlace)
+        XCTAssertFalse(LocationSettingKey.nickname.recreatesDomain)
+        XCTAssertFalse(LocationSettingKey.nickname.dropsIndex)
+
         XCTAssertTrue(LocationSettingKey.remotePath.recreatesDomain)
         XCTAssertTrue(LocationSettingKey.remotePath.dropsIndex)
-        XCTAssertFalse(LocationSettingKey.nickname.dropsIndex)
+        XCTAssertFalse(LocationSettingKey.remotePath.renamesDomainInPlace)
+
         XCTAssertFalse(LocationSettingKey.cacheTTL.recreatesDomain)
+        // Exactly one key renames, and it is not one that also re-creates: the two paths
+        // are mutually exclusive, because removing the domain first is the thing that
+        // would throw the cache away.
+        let renaming = LocationSettingKey.allCases.filter(\.renamesDomainInPlace)
+        XCTAssertEqual(renaming, [.nickname])
+        XCTAssertTrue(LocationSettingKey.allCases.allSatisfy {
+            !($0.renamesDomainInPlace && $0.recreatesDomain)
+        })
+    }
+
+    /// The domain's `displayName` is the bare nickname (section 4), so what `set nickname`
+    /// hands `add(domain)` is exactly what `displayName` computes - there is no second
+    /// place that decides the sidebar name.
+    func testTheNicknameIsTheDisplayNameTheRenameWillUse() throws {
+        var location = Location(id: UUID().uuidString, host: "nas.example")
+        XCTAssertEqual(location.displayName, "nas.example")
+        try LocationSettingKey.nickname.apply("homelab", to: &location)
+        XCTAssertEqual(location.nickname, "homelab")
+        XCTAssertEqual(location.displayName, "homelab")
+        // And it is trimmed, not taken raw, because it becomes a directory name.
+        try LocationSettingKey.nickname.apply("  media  ", to: &location)
+        XCTAssertEqual(location.displayName, "media")
+        XCTAssertThrowsError(try LocationSettingKey.nickname.apply("   ", to: &location))
     }
 
     func testTheFourKeysThatRekeySecretsReRunTheCollectConnection() {

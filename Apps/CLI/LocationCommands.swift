@@ -278,9 +278,11 @@ struct SetCommand: ParsableCommand {
             Keys: nickname, cache-ttl, remote-path, host, port, user, identity, watch-mode,
             helper, permissions, create-check, and `option add|remove KEYWORD=VALUE`.
 
-            nickname and remote-path re-create the File Provider domain, so the cache is
-            dropped; host, user, port and identity re-run the connection check before the
-            change is saved.
+            nickname renames the Finder sidebar entry, and the folder under
+            ~/Library/CloudStorage with it, in place: cached files and pending uploads are
+            kept. remote-path re-creates the File Provider domain, so the cache is dropped
+            and every path in the index is invalidated. host, user, port and identity re-run
+            the connection check before the change is saved.
             """)
 
     @Argument var name: String

@@ -53,6 +53,7 @@ let package = Package(
         // rules, and section 6.2's transfer scheduler.
         .target(name: "AgentCore", dependencies: ["Logging", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
 
+        .testTarget(name: "LoggingTests", dependencies: ["Logging"]),
         .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
         .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),

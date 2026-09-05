@@ -49,6 +49,28 @@ runbook is `docs/spikes/milestone-9.md` and the results entry is 2026-09-05,
 "milestone 9". **S7's helper half is answered; its FreeBSD kqueue and armv7 rows are not,
 and cannot be from here.**
 
+**Milestone 10**, ship, landed on 2026-09-05 and is the first one whose output is an
+artefact rather than a feature: `scripts/release.sh` produces a Release build signed with
+the **Developer ID Application** identity and the hardened runtime, embeds the helper,
+builds `dist/SSH-Drive-<version>.dmg` with `hdiutil` (volume `SSH Drive`, the app plus an
+`/Applications` symlink), and **notarizes and staples** the app and then the DMG - Accepted
+with no issues, `spctl --assess` says `accepted / source=Notarized Developer ID`. It
+authenticates to `notarytool` with an App Store Connect API key, because
+`store-credentials` cannot be run over ssh at all. Beside it: the Homebrew cask at
+`packaging/homebrew-tap/Casks/ssh-drive.rb` (staged; the tap is a separate repo that does
+not exist yet), `sshdrive logs [--follow] [<name>]` over `LogQuery` in the `Logging`
+module, and the user docs - `README.md`, `docs/troubleshooting.md`, `docs/release.md`.
+Spike **S9 is answered: yes**, `add(domain)` with the same identifier and a new
+`displayName` renames the domain in place, so `set nickname` no longer re-creates it.
+Five agent-lifecycle fixes went in with it (`AgentLifecycle.swift`: SIGTERM, the vnode
+watch on our own executable; `DomainManager.shutdownAll()`; the orphan sweep's kill; the
+`unregister` role's wait for launchd; and the removal of File Provider domains no location
+claims). The runbook is `docs/spikes/milestone-10.md` and the results entry is 2026-09-05,
+"milestone 10". **The one thing not delivered is `keychain-access-groups` in the release**:
+the Developer ID provisioning profile on the VM names the wrong one of the account's two
+Developer ID certificates, `release.sh` detects that and drops the entitlement rather than
+shipping a bundle AMFI kills at exec, and re-creating the profile is the whole fix.
+
 Built and tested on macOS 26.4.1 arm64, Xcode 26.4, Swift 6.3 (Swift 5 language mode),
 xcodegen 2.46. `scripts/mac-build.sh` does the sync, generate, `swift test` and
 `xcodebuild` loop; the Mac used for it has no signing identities, so it builds ad-hoc
@@ -107,10 +129,11 @@ signed build.
 | `Packages/.../SFTP` | `RelativePath` (the section 9.1 chokepoint, byte components), `SFTPTransport`, the section 6.2 error classes, and `FakeTransport`: an in-memory tree with list, fetch, write, rename (non-overwriting), posix-rename, delete, symlink, statvfs, plus the mutation hook. Since 2026-09-04 (milestone 2) also the real thing: the SFTP v3 wire codec, `SFTPClient` with pipelining, per-request deadlines and the OpenSSH extensions, and `RealSFTPTransport`, which is the only place a `RelativePath` becomes an absolute server path. It sits on `SSHProcess`'s `ByteStream`. |
 | `Packages/.../SSHProcess` | Real since 2026-09-04 (milestone 2): `SSHCommandBuilder` (every `ssh` command line of section 6.1), `SSHMaster` (the `-N` ControlMaster, its `SFTPChannel` and `ExecChannel` mux clients, the askpass token it mints per spawn), `ProxyChainBuilder`, `RemoteScript` with the section 9.2 sentinel and the section 6.4 heartbeat wrapper, `LoginShellSnapshot`, `SSHExitClassifier`, `IdentityAgentCheck`, `ControlSocket` and its orphan sweep, and `Spawn` (`posix_spawn` with a real `argv[0]`). |
 | `Packages/.../Secrets` | Real since 2026-09-04 (milestone 2): `KeychainSecretsStore` on the data-protection keychain, `AskpassBroker` (the section 4.2 token protocol and the answer table), `AskpassPromptClassifier`, `SSHGResolver`, `ProcessAncestry`, and the `AskpassHarness` seam the tests drive it through. |
-| `Packages/.../Logging` | The section 3.1 subsystem and categories. |
+| `Packages/.../Logging` | The section 3.1 subsystem and categories, and since milestone 10 `LogQuery`: the `sshdrive logs` predicate - ours plus the fileproviderd lines about our domains - and the `log show` / `log stream` argv, as a pure string builder so it is testable off a Mac. |
 | `Apps/Agent` | `LocationCommands` (section 8's user-facing half), `CollectConnection` (section 4.2's verification connection, and the `AddFlow.AttemptRunning` the state machine drives), `CLIRelay` (the terminal, as the agent sees it), `ServerProbe` (section 8.1's one-script probe: `uname`, `id`, `$HOME`, the `find` flavour, a checksum tool and a cache directory), `CapabilityReport` (section 8.1's eight features and their glyphs), `PeerExecutable` (which of our four executables a peer is), and: two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker) with `LocationRuntime+ChangeDetection` (the guard-aware listing diff, the `held` table, `accept-deletions`, the root-set refresh, the tier 0 cycle and the sweep's application to the index), `ChangeDetector` (one per location: the cadence, the tier, the full sweep on reconnect/wake/network-up/anchor-expiry, and the 30-minute insurance pass), `ReplicaEnumerators` (the system's own materialized and pending sets, which only an unsandboxed process can usefully drive), `IndexReconcile` (section 5.3's health check, the restore **into** the live database through `sqlite3_backup_init`, the truncate-under-its-own-inode path and the walk against the replica), `ExtensionPeers` (every live reader, so the restore can ask them all to close), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
 | `Apps/FileProvider` | `NSFileProviderReplicatedExtension` with `item(for:)` answered from the read-only index reader and an XPC fallback, container and working-set enumerators, `fetchContents` over a `FileHandle` with a cancellable `Progress`, `createItem`/`modifyItem`/`deleteItem`, `disconnect(reason:)`/`reconnect()` on an unreachable agent, and the agent-error to `NSFileProviderError` mapping. |
-| `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, `accept-deletions`, plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
+| `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, `accept-deletions`, `logs` (milestone 10, `LogsCommand.swift`: the one command that `execv`s `/usr/bin/log` rather than asking the agent), plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
+| `Apps/Agent` (milestone 10) | `AgentLifecycle` - the two ways the launchd agent is asked to leave that are not `agent stop`: a **SIGTERM** from the cask's `uninstall` stanza (handled, so it exits 0 rather than dying by signal, which `KeepAlive` would read as a crash) and the **vnode watch** on our own executable of section 10.1, which waits for a readable bundle with a parseable `Info.plist` and a different inode before handing over. `DomainManager` gained `shutdownAll()` (every detector, evictor, gate and transport, concurrently, with a 20 s backstop) and `removeStrandedDomains(keeping:)` (section 10's "the app on its first launch removes every domain whose identifier is not in `config.json`"). |
 | `Apps/Askpass` | `sshdrive-askpass`: reads the token, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`), calls the agent over the askpass-only interface, prints the answer. An empty line is "skip this identity"; a non-zero exit fails the prompt. |
 
 ## Stubbed, with the milestone named
@@ -170,14 +193,24 @@ signed build.
   merged rather than overwritten, so an offline `status` prints the cached report.
   `evict` (with `--all` and `--unpin-all`), `pin`, `unpin` and `pins` (with
   `--export` and `--import`) are real since 2026-09-05, and `set cache-ttl`
-  reaches the running eviction loop. Still missing from section 8: **`passwd`**
+  reaches the running eviction loop. **`logs` is real since 2026-09-05**
+  (milestone 10): `LogQuery` in `Logging` builds the predicate - ours **and**
+  the `fileproviderd` lines about our domains, narrowed to one location by its
+  domain identifier or its display name - and `Apps/CLI/LogsCommand.swift`
+  `execv`s `/usr/bin/log show|stream`, so it is the one command that is not a
+  request to the agent and the one that still works when the agent will not
+  start. Still missing from section 8: **`passwd`**
   (the collect flow is there - it is `CollectConnection` plus `AddFlow`, which
   `set host|user|port|identity` already re-runs - so `passwd` is a command, not a
-  mechanism), **`test`**, `--password` / `--password-stdin`, and `logs` (10).
+  mechanism), **`test`**, and `--password` / `--password-stdin`.
   `accept-deletions` is real since 2026-09-04, and `set <name> helper on|off`
   and `set <name> watch-mode helper` reach the running detector since
   2026-09-05: `off` stops the stream and takes the binary off the server on the
   spot, `on` re-uploads and climbs back.
+
+Test count by milestone: 33 (skeleton) -> 214 (2) -> 295 (3) -> 355 (4) -> 381 (5) ->
+503 (6) -> 548 (7/8) -> 592 (9) -> **606 (10)**, 40 of them skipped without the spike
+testbed.
 
 ## `sshdrive debug` hooks, exact syntax
 
@@ -197,6 +230,9 @@ sshdrive debug ttl <name> [--seconds N] [--off]   # milestone 7: the cache TTL i
 sshdrive debug index dump <name> [--table items|anchors|roots] [--limit N]
 sshdrive debug signal <name> [--container PATH]
 sshdrive debug keychain [--key K] [--value V]
+
+# Added 2026-09-05 for milestone 10 / spike S9:
+sshdrive debug domain rename <name> <display-name>
 
 # Added 2026-09-04 for milestone 2 / spike S2 (the askpass token protocol):
 sshdrive debug secrets [store|lookup|delete|list|classify|connect]
@@ -463,6 +499,17 @@ makes an edit in the mount stay in the system's pending set, which is the input 
 mass-deletion guard's pending rule needs; and **`materialized <name> --pending`** is how to
 see that set. Turn `--writes` off again before leaving the VM.
 
+### The 2026-09-05 hook (milestone 10: `debug domain rename`)
+
+- **`domain rename <name> <display-name>`** - `NSFileProviderManager.add(domain)` with the
+  identifier the system already holds and a different `displayName`, and nothing else: no
+  `remove` first, and `config.json` is not written. There is no rename call on
+  `NSFileProviderManager`, so this *is* the experiment spike S9 asks for. The reply carries
+  the domain list before and after and the size of the materialized set beforehand, so the
+  answer is visible without Finder. **S9 passed** (2026-09-05): the mount directory is
+  renamed, the replica and any pending upload come with it, and `sshdrive set <name>
+  nickname` is the product path that now does the same thing.
+
 ### The 2026-09-05 hook (milestones 7 and 8: `debug ttl`)
 
 - **`ttl <name> [--seconds N] [--off]`** - the cache TTL in seconds, for this agent process
@@ -498,18 +545,24 @@ stays for the one thing they cannot express, which is writing `inherit` directly
    `MachServices`, `AssociatedBundleIdentifiers` and an `EnvironmentVariables` entry
    (`SSHDRIVE_AGENT_ROLE=launchd`, which is how the same binary tells its two roles
    apart) is written from the documentation, not from a working registration.
-4. **Section 10 vs section 3.1: the cask `signal:` label.** Section 10 writes
-   `signal: ["TERM", "org.shirls.sshdrive"]` while section 3.1 gives the launchd label as
-   `org.shirls.sshdrive.agent`. Not resolved here, as instructed: this repo's plist uses
-   `Label = org.shirls.sshdrive.agent`. Homebrew matches the bundle id against
-   `launchctl list` output, so S1(g) is what decides which string the cask must carry.
-5. **An `.app` whose main executable is not an `NSApplication`.** `open -g -a "SSH Drive"`
-   is assumed to launch it, let it register and let it exit 0. If LaunchServices objects,
-   the fix is `LSBackgroundOnly` or a minimal `NSApplication`.
+4. ~~**Section 10 vs section 3.1: the cask `signal:` label.**~~ Settled 2026-09-04 by
+   S1(g1): `launchctl list` prints only the label, never the bundle id, so the cask carries
+   `signal: ["TERM", "org.shirls.sshdrive.agent"]`. Section 10 was corrected, and the cask
+   at `packaging/homebrew-tap/Casks/ssh-drive.rb` uses it. The agent gained a **SIGTERM
+   handler** in milestone 10 so that stanza is a clean exit rather than a crash.
+5. ~~**An `.app` whose main executable is not an `NSApplication`.**~~ Confirmed
+   2026-09-04 on a fresh user and again on 2026-09-05 with the notarized Developer ID
+   build: `open -g` returns 0, the app registers the login item and the extension and
+   exits. `open -g` **also** returns non-zero and says `Launchd job spawn failed` when AMFI
+   refuses the bundle, which is worth knowing before blaming LaunchServices.
 6. **Restricted entitlements.** `keychain-access-groups` needs a Developer ID
    provisioning profile embedded in the bundle, and
    `com.apple.developer.fileprovider.testing-mode` needs to be accepted for debug builds.
-   Neither is exercised by an ad-hoc build.
+   Neither is exercised by an ad-hoc build. Exercised for real on 2026-09-05 and it found
+   the sharper rule: the profile must have been issued **for the certificate the bundle is
+   signed with**, or every restricted entitlement is unsatisfied and AMFI kills the agent
+   at exec - after notarizing and stapling perfectly. `scripts/release.sh` checks the
+   profile's `DeveloperCertificates` before signing.
 7. **The extension's read-only WAL reader from inside the sandbox** (S3), including that
    a read-only connection may open `-shm` for writing in the group container, and the
    reader-vs-XPC measurement that decides whether the reader survives at all.

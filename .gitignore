@@ -25,3 +25,6 @@ Local.xcconfig
 helper/target/
 # A locally built helper embedded into the bundle by scripts/mac-build.sh
 Resources/helper/
+
+# The Homebrew tap is its own repository (alecdwm/homebrew-tap), checked out here for convenience.
+packaging/homebrew-tap/

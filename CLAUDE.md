@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4111 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4238 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -19,7 +19,8 @@ the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. T
 | XPC mach service | `RWGDZAYBM8.org.shirls.sshdrive.agent` (app-group prefixed so the sandboxed appex may connect) |
 | `os.Logger` subsystem | `org.shirls.sshdrive`; categories `extension` `agent` `cli` `sftp` `ssh` |
 | Group container | `~/Library/Group Containers/RWGDZAYBM8.org.shirls.sshdrive/` -> `config.json`, `domains/<location-id>/index.sqlite`, `capabilities.json`, `pins.json` |
-| Repo / cask | `github.com/alecdwm/sshdrive`; cask `ssh-drive` in tap `alecdwm/tap` (`alecdwm/homebrew-tap`) |
+| Repo / cask | `github.com/alecdwm/sshdrive`; cask `ssh-drive` in tap `alecdwm/tap` (`alecdwm/homebrew-tap`). The cask **file** must be `Casks/ssh-drive.rb`: Homebrew resolves the token to the basename |
+| Release signing | Developer ID Application `6C055553C6A361398A3CC48654E1FADC14660D05` (cert `T9DF89U2YU`), profile `~/Developer/SSH_Drive_Developer_ID.provisionprofile` on the VM, notarization by App Store Connect API key `~/Developer/AuthKey_*.p8` |
 | Domain identifier | the location's UUID |
 
 Platform facts a coder must respect (§2): minimum macOS **14** (develop/test on 14/15). The appex is
@@ -53,7 +54,12 @@ Processes and modules (§3):
 tier 2; `cargo test` runs on this Linux box, `scripts/build-helper.sh` emits
 `Resources/helper/` which `mac-build.sh` copies into the bundle, and neither is in git) ·
 `.github/workflows/helper.yml` (the cross-compile job of §10.1) · `docs/` (spike runbooks and
-results; also the Pages site) · `scripts/` (build/sign/notarize, later milestones).
+results, `troubleshooting.md`, `release.md`; also the Pages site) · `scripts/`
+(`mac-build.sh`, `build-helper.sh`, `release.sh`) · `packaging/homebrew-tap/`
+(the cask, staged: the tap is the separate repo `alecdwm/homebrew-tap`, which does not
+exist yet) · `README.md` (the user-facing one) · `dist/` on the Mac only, never in git:
+`release.sh` writes `SSH-Drive-<version>.dmg` there and `mac-build.sh`'s `--delete` rsync
+wipes it.
 
 ## Working rules
 
@@ -131,46 +137,46 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 77-107 | §2 Platform facts | the File Provider / OpenSSH / launchd facts every design choice rests on; minimum macOS 14 |
 | 108-193 | §3 Components | process split, why the agent owns everything, group-container layout |
 | 194-230 | §3.1 Identifiers | the table above, plus per-target entitlements |
-| 231-278 | §4 Location model | `config.json` location schema field by field |
-| 279-322 | §4.1 Reusing `~/.ssh/config` | `ssh -G` resolution, attribution by diffing against `-F /dev/null`, the fixed override set |
-| 323-596 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline (300 s for the collect connection) and its re-arm |
-| 597-626 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
-| 627-628 | §5 The File Provider extension | (heading) |
-| 629-665 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
-| 666-779 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
-| 780-1057 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors and why the working set never reports an empty change set, no tombstones (and the local-only exception), backup + restore-into-live + reconcile-against-replica and when the walk runs |
-| 1058-1228 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
-| 1229-1377 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
-| 1378-1414 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
-| 1415-1552 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
-| 1553-1554 | §6 The background agent | (heading) |
-| 1555-1918 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
-| 1919-2007 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
-| 2008-2074 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2075-2129 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
-| 2130-2135 | Tier 0: SFTP poll | `readdir` every root |
-| 2136-2209 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2210-2259 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
-| 2260-2375 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
-| 2376-2429 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2430-2488 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2489-2496 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2497-2600 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2601-2689 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2690-2794 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2795-2834 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2835-2999 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 3000-3120 | §8 The CLI | every command and flag, verbatim |
-| 3121-3244 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
-| 3245-3288 | §9 Security | the security properties in one list |
-| 3289-3353 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3354-3447 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
-| 3448-3550 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3551-3616 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming |
-| 3617-3633 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3634-3682 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3683-4078 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4079-4111 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 231-281 | §4 Location model | `config.json` location schema field by field; `displayName` renames in place (S9) |
+| 282-325 | §4.1 Reusing `~/.ssh/config` | `ssh -G` resolution, attribution by diffing against `-F /dev/null`, the fixed override set |
+| 326-599 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline (300 s for the collect connection) and its re-arm |
+| 600-629 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
+| 630-631 | §5 The File Provider extension | (heading) |
+| 632-668 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
+| 669-782 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
+| 783-1060 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors and why the working set never reports an empty change set, no tombstones (and the local-only exception), backup + restore-into-live + reconcile-against-replica and when the walk runs |
+| 1061-1231 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
+| 1232-1380 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
+| 1381-1417 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
+| 1418-1555 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
+| 1556-1557 | §6 The background agent | (heading) |
+| 1558-1935 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
+| 1936-2024 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
+| 2025-2091 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
+| 2092-2146 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
+| 2147-2152 | Tier 0: SFTP poll | `readdir` every root |
+| 2153-2226 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
+| 2227-2276 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
+| 2277-2392 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
+| 2393-2446 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2447-2505 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2506-2513 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2514-2617 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2618-2706 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2707-2811 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2812-2851 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2852-3016 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 3017-3167 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
+| 3168-3291 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
+| 3292-3335 | §9 Security | the security properties in one list |
+| 3336-3400 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3401-3494 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
+| 3495-3597 | §10 Packaging and install | targets, CI, cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3598-3703 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
+| 3704-3720 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3721-3770 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3771-4205 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4206-4238 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -352,7 +358,46 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       `docs/spikes/results.md` (2026-09-05, "milestone 9"). Not answered and not
       claimable from here: **FreeBSD kqueue** (no BSD in the testbed) and **armv7**
       (links only, no hardware).*
-- [ ] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
+- [x] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
+      *Done 2026-09-05, and **notarization is done**: `scripts/release.sh` builds Release,
+      signs with the Developer ID identity and the hardened runtime, embeds the helper,
+      builds the DMG with `hdiutil` (volume `SSH Drive`, the app plus an `/Applications`
+      symlink), and notarizes and staples the app and then the DMG - `xcrun notarytool
+      submit --wait` returned **Accepted** with no issues, `stapler validate` passed and
+      `spctl --assess` says `accepted / source=Notarized Developer ID`. It notarizes with
+      an **App Store Connect API key** (`--key/--key-id/--issuer`), because
+      `notarytool store-credentials` cannot be run over ssh at all; the
+      `--keychain-profile` form is the fallback and the missing-credentials message names
+      both. The cask is `packaging/homebrew-tap/Casks/ssh-drive.rb` (the tap is a separate
+      repo that does not exist yet; `packaging/homebrew-tap/README.md` says where it goes),
+      `sshdrive logs [--follow] [<name>]` reads our subsystem **and** fileproviderd's lines
+      for the domain, and the docs are `README.md`, `docs/troubleshooting.md` and
+      `docs/release.md`. **S9 is answered: yes** - `add(domain)` with the same identifier
+      and a new `displayName` renames the domain in place, keeping the mount directory's
+      contents, the materialized set and a pending upload, so `set nickname` renames in
+      place and section 13's data-loss caveat is gone. Also fixed here: `agent stop` shuts
+      every location's masters and mux clients down first, the orphan sweep kills the
+      process that owned the socket it removes, the agent handles **SIGTERM** (it had no
+      handler, and the default is death by signal, which `KeepAlive` reads as a crash), the
+      agent watches its own executable and hands over on an upgrade (section 10.1's vnode
+      source), the `unregister` role waits for launchd to drop the job before exiting, and
+      the first start removes File Provider domains that no location claims (section 10).
+      **606 package tests** (was 592). Proved on the VM: a notarized DMG installed the way
+      the cask does, an upgrade over a running install with a materialized tree and a
+      pending upload, and a fresh-user install as `sshtest` with a quarantined bundle. See
+      `docs/spikes/milestone-10.md` and `docs/spikes/results.md` (2026-09-05, "milestone
+      10").
+      **The one thing not delivered: the release ships without `keychain-access-groups`.**
+      The Developer ID provisioning profile on the VM was issued for the other of the
+      account's two Developer ID Application certificates (`D853BADB…` rather than the
+      `6C055553…` in the keychain), and a profile whose certificate does not match makes
+      AMFI kill the agent at exec - after notarizing perfectly. `release.sh` detects it,
+      drops the entitlement with a loud warning and carries on, so the shipped build runs,
+      mounts and syncs but cannot use a stored password or key passphrase and `doctor`
+      says so. The owner re-creating the profile against certificate `T9DF89U2YU` and
+      re-running the script is the whole fix; no code changes. Also not done: `brew style`
+      and `brew audit` (no Homebrew on either machine - `ruby -c` is what ran), and
+      `passwd`, `test` and `--password-stdin`, which no milestone has claimed.*
 
 Spike-to-milestone summary: S1/S3/S4/S6 -> M1 (S3's containment half -> M3), S2 -> M2, S8/S10 -> M4,
 S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
@@ -464,7 +509,21 @@ S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
 
 90. **`aarch64-unknown-freebsd` has no prebuilt `rust-std`** - `rustup target add` refuses it - so it cannot be built or even `cargo check`ed, and the helper's FreeBSD target is x86_64 only. The three musl targets need no `cross` and no C toolchain: `rust-lld` with `-C link-self-contained=yes` (2026-09-05, §10.1).
 
-91. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
+91. **A provisioning profile only authorises the certificate it was issued for.** A profile carries its `DeveloperCertificates`, and AMFI matches on them: one created against a *different* Developer ID Application certificate than the signing one makes **every** restricted entitlement unsatisfied (`taskgated-helper: Unsatisfied entitlements: keychain-access-groups`, `amfid: -413 "No matching profile found"`), and the agent is SIGKILLed at exec with a `Launch Constraint Violation` - `open -g` says `Launchd job spawn failed`. It signs, verifies, **notarizes and staples** first: notarization never looks at profiles. Adding `com.apple.application-identifier` to "match properly" makes it worse and is the key S1 a1 forbids anyway. `scripts/release.sh` compares the hashes before signing (2026-09-05, §10.1, §3.1).
+
+92. **`xcrun notarytool store-credentials` cannot run over ssh** - "User interaction is not allowed", with the login keychain unlocked - so a headless release notarizes with an App Store Connect API key (`--key`, `--key-id`, `--issuer`). A read-only key notarizes fine but **cannot create a provisioning profile** (`403 FORBIDDEN_ERROR`) (2026-09-05, §10.1).
+
+93. **`SMAppService.unregister()` returns before launchd has dropped the job,** and `status` says `notRegistered` while launchd is still spawning the old record. A `register()` inside that window leaves the job carrying the previous bundle's launch constraint and every spawn dies `EXC_CRASH (SIGKILL (Code Signature Invalid))` on a 10 s retry, for ever. The `unregister` role polls `launchctl print` until the service is gone before exiting, which is what makes the cask's back-to-back postflight safe (2026-09-05, §10).
+
+94. **The agent had no SIGTERM handler, and the default disposition would have made the cask's `signal:` stanza a crash.** Death by signal is an unsuccessful exit, `KeepAlive` with `SuccessfulExit` false restarts at once, and mid-upgrade that is the old bundle. TERM now runs the same shutdown as `agent stop` and exits 0 (2026-09-05, §10).
+
+95. **`add(domain)` can report `NSCocoaErrorDomain 4099` ("connection to com.apple.FileProvider was invalidated") after the call has landed.** Seen on `set nickname` and on the first location start after an upgrade. The domain list is the authority: `addDomain` re-reads `NSFileProviderManager.domains()` before believing the error (2026-09-05, §5.2, §10).
+
+96. **`sshdrive logs` reads fileproviderd's lines too.** Everything the *system* decides about a domain is under Apple's subsystem and never reaches ours, and `--info` must be passed or `log show` hides most of the transport. `/usr/bin/log` is spelled absolutely: zsh has a `log` builtin (§8).
+
+97. **A pending upload survives a bundle replacement and can be re-offered after it,** so the same write can arrive twice; the §5.5 conflict check is what makes that safe, and it produced a conflict copy rather than a loss (2026-09-05, §10, §5.5).
+
+98. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
 
 ## Glossary
 

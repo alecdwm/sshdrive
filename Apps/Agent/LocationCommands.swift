@@ -506,9 +506,8 @@ enum LocationCommands {
 
         var notes: [String] = []
         if key.recreatesDomain {
-            // Section 8, and section 13's caveat: the sidebar name is fixed at domain
-            // creation unless S9 says otherwise, and S9 has not been answered, so the
-            // documented behaviour is what runs - the domain is removed and re-added.
+            // Section 8: a new root invalidates every path in the index, so the domain goes
+            // and comes back and the cache with it.
             if arguments["force"] != "true",
                 let runtime = await DomainManager.shared.startedRuntime(locationID: location.id),
                 await runtime.pendingUploadCount() > 0
@@ -520,6 +519,17 @@ enum LocationCommands {
             notes.append(
                 "\(key.rawValue) re-creates the File Provider domain, so the local cache is "
                     + "dropped and every file is downloaded again on demand.")
+        }
+        if key.renamesDomainInPlace {
+            // S9 (2026-09-05): `add(domain)` with the identifier the system already holds
+            // and a new displayName renames the domain in place. The mount directory under
+            // ~/Library/CloudStorage is renamed, nothing is re-fetched, and an upload the
+            // system was holding is still pending and still flushes afterwards. So this is
+            // not refused while uploads are pending and drops no cache; the one thing it
+            // does is move the folder, which anything holding a path to it will notice.
+            notes.append(
+                "the Finder sidebar entry and the folder under ~/Library/CloudStorage are "
+                    + "renamed in place; cached files and pending uploads are kept.")
         }
 
         if key.requiresCollectConnection {
@@ -553,6 +563,9 @@ enum LocationCommands {
         let wasMounted = location.mounted
         await DomainManager.shared.dropRuntime(locationID: location.id)
         if key.recreatesDomain || key.requiresCollectConnection {
+            // Deliberately not `renamesDomainInPlace`: removing the domain first is exactly
+            // what would throw the cache and the pending uploads away, and S9 says the
+            // system does not need it (2026-09-05).
             try? await DomainManager.shared.removeDomain(for: location)
         }
         if key.dropsIndex, let url = try? GroupContainer.domainURL(locationID: location.id) {

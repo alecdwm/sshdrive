@@ -61,8 +61,15 @@ actor DomainManager {
         if !swept.isEmpty {
             Log.ssh.notice("swept \(swept.count, privacy: .public) orphaned control socket(s)")
         }
+        // A master whose socket is already gone leaves the sweep above nothing to iterate
+        // over, so the command line is the other way in. Nothing of ours is connected yet.
+        let strays = ControlSocket.killStrayMasters()
+        if !strays.isEmpty {
+            Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) at start")
+        }
         do {
             let file = try await config.load()
+            await removeStrandedDomains(keeping: file.locations)
             for location in file.locations where location.mounted {
                 do {
                     let started = try await runtime(for: location)
@@ -85,6 +92,43 @@ actor DomainManager {
             Log.agent.notice("agent ready with \(file.locations.count) location(s)")
         } catch {
             Log.agent.error("cannot read config.json: \(error, privacy: .public)")
+            // No config at all - a `brew zap` deleted the group container, or this is a
+            // reinstall over a removal that never ran `sshdrive remove --all`. Section 10:
+            // the app on its first launch removes every domain of ours when the container
+            // is gone too, because nothing else can. A domain we cannot serve shows in the
+            // sidebar as unavailable for ever otherwise.
+            await removeStrandedDomains(keeping: [])
+        }
+    }
+
+    /// Section 10: "when the app on its first launch removes every domain whose identifier
+    /// is not in `config.json`, or every domain of ours when the container is gone too".
+    ///
+    /// `zap` runs after Homebrew has already deleted the app, so by then there is no
+    /// `sshdrive` and no provider left to call `NSFileProviderManager.remove(domain)`, and
+    /// domain removal cannot be automated from the cask at all. This is where that debt is
+    /// paid: the next install's first start clears whatever the last uninstall stranded.
+    ///
+    /// `NSFileProviderManager.domains()` only ever returns our own provider's domains, so
+    /// nothing here can reach another app's.
+    private func removeStrandedDomains(keeping locations: [Location]) async {
+        let known = Set(locations.map(\.id))
+        guard let domains = try? await Deadline.run("listing the File Provider domains", {
+            try await NSFileProviderManager.domains()
+        }) else { return }
+        for domain in domains where !known.contains(domain.identifier.rawValue) {
+            do {
+                try await Deadline.run("removing a stranded File Provider domain") {
+                    try await NSFileProviderManager.remove(domain)
+                }
+                Log.agent.notice(
+                    "removed stranded domain \(domain.identifier.rawValue, privacy: .public) (\(domain.displayName, privacy: .public)): no such location in config.json"
+                )
+            } catch {
+                Log.agent.error(
+                    "could not remove stranded domain \(domain.identifier.rawValue, privacy: .public): \(error, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -263,6 +307,48 @@ actor DomainManager {
         // `-O exit` on the master and the channel with it, so removing a location does
         // not leave an `ssh` behind (section 6.1).
         await runtime.shutdownTransport()
+    }
+
+    /// Everything this agent started on a server, shut down, before the process exits.
+    ///
+    /// `sshdrive agent stop` used to exit 0.2 s after replying and leave every location's
+    /// `ssh -N` master behind: the next start's orphan sweep unlinked the stale socket but
+    /// had no pid to kill, so the old `ssh` held a connection open for ever against a
+    /// socket that no longer existed (docs/spikes/results.md, 2026-09-05). `remove`
+    /// already did this per location through `dropRuntime`; stop now does it for all of
+    /// them. The sweep's kill (`ControlSocket.sweepOrphans`) is the other half - this is
+    /// the clean exit, that is the crash.
+    ///
+    /// Runs the locations concurrently, and each `-O exit` is bounded by `Spawn`'s own
+    /// timeout, so a server that has stopped answering cannot hold the exit open.
+    func shutdownAll() async {
+        let detectors = Array(self.detectors.values)
+        let evictors = Array(self.evictors.values)
+        let gates = Array(self.gates.values)
+        let runtimes = Array(self.runtimes.values)
+        self.detectors.removeAll()
+        self.evictors.removeAll()
+        self.gates.removeAll()
+        self.runtimes.removeAll()
+
+        await withTaskGroup(of: Void.self) { group in
+            for detector in detectors { group.addTask { await detector.stop() } }
+            for evictor in evictors { group.addTask { await evictor.stop() } }
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for gate in gates { group.addTask { await gate.shutdown() } }
+            for runtime in runtimes { group.addTask { await runtime.shutdownTransport() } }
+        }
+        // And whatever is left. `SSHMaster.shutdown()` kills the child it spawned, so this
+        // finds only masters the agent had lost track of - a restarted location can hold
+        // two, and the second has no socket for the sweep to find on the next start
+        // (2026-09-05). Safe here and only here, because every transport above is down.
+        let strays = ControlSocket.killStrayMasters()
+        if !strays.isEmpty {
+            Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) on exit")
+        }
+        Log.agent.notice(
+            "shut down \(runtimes.count, privacy: .public) location(s) before exiting")
     }
 
     // MARK: Section 6.1's sleep and wake, section 6.3's path gate, section 4.2's re-arm
@@ -447,8 +533,27 @@ actor DomainManager {
         // materializing a container we do not serve; anything that stats `.Trash`, such
         // as `ls -la`, waits on that loop (docs/spikes/results.md, 2026-09-04).
         domain.supportsSyncingTrash = false
-        try await Deadline.run("adding the File Provider domain") {
-            try await NSFileProviderManager.add(domain)
+        do {
+            try await Deadline.run("adding the File Provider domain") {
+                try await NSFileProviderManager.add(domain)
+            }
+        } catch {
+            // `add(domain)` on an identifier the system already holds is how a location is
+            // renamed (S9, 2026-09-05), and it is also what runs on every start. Both
+            // reach fileproviderd while it is re-reading its domain list, and the reply can
+            // be lost even though the call landed: `NSCocoaErrorDomain 4099, "The
+            // connection to service named com.apple.FileProvider was invalidated"`. Seen
+            // during `set nickname` and again on the first location start after an upgrade
+            // (2026-09-05). The domain list is the authority, so ask it before believing
+            // the error; only a domain that really is not there is a failure.
+            let domains = (try? await NSFileProviderManager.domains()) ?? []
+            guard domains.contains(where: {
+                $0.identifier.rawValue == location.id && $0.displayName == location.displayName
+            }) else { throw error }
+            Log.agent.notice(
+                "add(domain) for \(location.id, privacy: .public) reported \(error.localizedDescription, privacy: .public), but the domain is present as \(location.displayName, privacy: .public)"
+            )
+            return
         }
         Log.agent.notice(
             "added domain \(location.id, privacy: .public) as \(location.displayName, privacy: .public)")

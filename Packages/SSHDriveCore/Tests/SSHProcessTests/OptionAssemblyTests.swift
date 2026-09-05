@@ -200,4 +200,39 @@ final class OptionAssemblyTests: XCTestCase {
             FileManager.default.fileExists(atPath: path),
             "and must certainly not be deleted")
     }
+
+    /// The sweep unlinking a socket is not enough: the `ssh -N` that owned it lives on,
+    /// holding a connection to the server for ever, and `-O exit` can no longer reach it
+    /// through a socket that is gone (docs/spikes/results.md, 2026-09-05). `ssh -O check`
+    /// naming the pid is the only route from a socket to its process.
+    func testMasterPIDIsParsedFromTheCheckReply() {
+        XCTAssertEqual(ControlSocket.parseMasterPID("Master running (pid=48213)\r\n"), 48213)
+        XCTAssertEqual(ControlSocket.parseMasterPID("Master running (pid=2)"), 2)
+    }
+
+    func testNoMasterMeansNoPID() {
+        XCTAssertNil(ControlSocket.parseMasterPID(""))
+        XCTAssertNil(
+            ControlSocket.parseMasterPID(
+                "Control socket connect(/tmp/sshdrive-1a2b): No such file or directory"))
+        // pid 1 is launchd and pid 0 is the kernel; neither is ever an orphaned master,
+        // and signalling either would be a bug with consequences.
+        XCTAssertNil(ControlSocket.parseMasterPID("Master running (pid=1)"))
+        XCTAssertNil(ControlSocket.parseMasterPID("Master running (pid=0)"))
+        XCTAssertNil(ControlSocket.parseMasterPID("Master running (pid=)"))
+    }
+
+    /// A pid read from a socket left in `$TMPDIR` by an earlier boot can have been reused
+    /// by anything, so the sweep checks the process's name before signalling it.
+    func testTerminateRefusesAProcessThatIsNotAnSSH() {
+        var signalled = false
+        let delivered = ControlSocket.terminate(pid: 999_999, isLiveSSH: { _ in
+            signalled = true
+            return false
+        })
+        XCTAssertFalse(delivered)
+        XCTAssertTrue(signalled, "the name check must actually run")
+        // And this process is certainly alive and certainly not named ssh.
+        XCTAssertFalse(ControlSocket.isLiveSSH(getpid()))
+    }
 }

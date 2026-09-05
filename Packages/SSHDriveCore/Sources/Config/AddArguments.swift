@@ -107,11 +107,21 @@ public enum LocationSettingKey: String, CaseIterable, Sendable {
     case permissions
     case createCheck = "create-check"
 
-    /// "nickname and remote-path re-create the domain … so they are refused while uploads
-    /// are pending and warn that the cache is dropped otherwise" (section 8). The sidebar
-    /// name is fixed at domain creation unless S9 says otherwise, and S9 has not been
-    /// answered, so the documented behaviour is what runs.
-    public var recreatesDomain: Bool { self == .nickname || self == .remotePath }
+    /// "remote-path re-creates the domain … so it is refused while uploads are pending and
+    /// warns that the cache is dropped otherwise" (section 8). A new root invalidates every
+    /// path in the index, so there is nothing to keep.
+    ///
+    /// **Nickname no longer does.** S9 asked whether `NSFileProviderManager.add(domain)`
+    /// with an identifier the system already holds and a new `displayName` renames the
+    /// domain in place, and it does (2026-09-05): the mount directory is renamed under
+    /// `~/Library/CloudStorage`, the materialized set is untouched, no file is re-fetched,
+    /// and an upload the system was holding is still pending afterwards and still flushes.
+    /// So a nickname change is `renamesDomainInPlace`, costs nothing, and is not refused.
+    public var recreatesDomain: Bool { self == .remotePath }
+
+    /// The nickname is the domain's `displayName` (section 4), and changing it is one
+    /// `add(domain)` on the same identifier (S9, 2026-09-05).
+    public var renamesDomainInPlace: Bool { self == .nickname }
 
     /// "host, user, port and identity change what the stored secrets are keyed on or which
     /// key is offered, so they re-run the collect connection exactly as passwd does"

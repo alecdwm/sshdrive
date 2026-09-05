@@ -42,8 +42,24 @@ enum ControlCommands {
             // launchd leaves the agent down until the next mach lookup, which any CLI
             // command or extension call causes, so stop is a pause, not a disable
             // (section 8, section 10).
+            //
+            // Every location's master and its mux clients go first. Exiting without that
+            // leaves an `ssh -N` per location holding a connection to a server with a
+            // control socket the next start will unlink out from under it
+            // (docs/spikes/results.md, 2026-09-05). The reply is sent before the shutdown
+            // runs - the CLI is waiting on it, and `-O exit` against an unreachable server
+            // can take seconds per location - so `stopping` means "accepted", as it always
+            // did, and the exit still follows.
             Log.agent.notice("exiting on request from the CLI")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { exit(0) }
+            Task {
+                await DomainManager.shared.shutdownAll()
+                exit(0)
+            }
+            // A server that has gone away must not be able to keep the agent alive.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+                Log.agent.error("shutdown did not finish in 20 s; exiting anyway")
+                exit(0)
+            }
             return try json(["stopping": true])
 
         case "debug.fake.add":
@@ -520,6 +536,34 @@ enum ControlCommands {
         case "debug.secrets":
             return try await AgentSecretsDebug.run(arguments)
 
+        case "debug.domain.rename":
+            // Spike S9 (section 11): does `NSFileProviderManager.add(domain)` with an
+            // existing identifier and a new displayName rename the domain in place,
+            // keeping the cache and the pending uploads? `add` is the only call there is -
+            // there is no `rename` on NSFileProviderManager - so the experiment is to make
+            // it with the same identifier and see what the system does. Nothing is removed
+            // first, deliberately: that is the whole question.
+            let location = try await resolveLocation(arguments)
+            guard let display = arguments["displayName"], !display.isEmpty else {
+                throw SSHDriveAgentError.notImplemented.asNSError(
+                    "debug domain rename needs a display name.")
+            }
+            let before = try await DomainManager.existingDomainDescriptions()
+            let materializedBefore = await ReplicaEnumerators.materializedIdentifiers(
+                locationID: location.id)?.count
+            var renamed = location
+            renamed.nickname = display
+            try await DomainManager.shared.addDomain(for: renamed)
+            let after = try await DomainManager.existingDomainDescriptions()
+            return try json([
+                "id": location.id,
+                "displayNameBefore": location.displayName,
+                "displayNameAfter": display,
+                "domainsBefore": before,
+                "domainsAfter": after,
+                "materializedBefore": materializedBefore as Any,
+            ])
+
         case "debug.signal":
             let location = try await resolveLocation(arguments)
             if arguments["errorResolved"] == "true" {
@@ -667,8 +711,12 @@ enum ControlCommands {
             "keychain", keychain.ok, keychain.detail,
             remedy: keychain.ok
                 ? nil
-                : "The agent needs its embedded provisioning profile for "
-                    + "keychain-access-groups; an ad-hoc signed build cannot have one.")
+                : "The agent reaches the keychain only through the "
+                    + "keychain-access-groups entitlement, which needs an embedded "
+                    + "provisioning profile issued for the certificate the bundle was "
+                    + "signed with. An ad-hoc build cannot have one, and a profile made "
+                    + "for a different Developer ID certificate does not count. Passwords "
+                    + "and key passphrases are all that stop working. See docs/release.md.")
 
         // The login shell snapshot (section 6.1): `PATH` and `SSH_AUTH_SOCK` as a fresh
         // login shell has them, which is what makes a key agent socket exported from
@@ -778,7 +826,14 @@ enum ControlCommands {
         do { try process.run() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        // `pluginkit -m -A` prints a one-character enabled flag before the identifier
+        // ("+   org.shirls.sshdrive.fileprovider(0.1.0)"), which reads as noise in a
+        // doctor line. The flag is not the answer to this check - a line at all is - so it
+        // is trimmed off.
+        var text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = text.first, "+-?!".contains(first) {
+            text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
         return text.isEmpty ? nil : text
     }
 

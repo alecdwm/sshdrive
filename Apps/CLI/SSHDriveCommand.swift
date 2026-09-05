@@ -7,9 +7,9 @@ import Logging
 ///
 /// Milestone 3 adds section 8's user-facing half: `add` with the `ssh -G` display and the
 /// relayed prompts of section 4.2, `list`, `show`, `remove`, `set`, `mount`, `unmount` and
-/// `status` with section 8.1's capability report. `passwd`, `test`, `evict`, `pin`,
-/// `pins`, `logs` and `accept-deletions` arrive with the milestone that gives each
-/// something to do.
+/// `status` with section 8.1's capability report. `evict`, `pin`, `pins` and
+/// `accept-deletions` arrived with milestones 6 to 8, and `logs` with milestone 10.
+/// `passwd` and `test` are still to come.
 @main
 struct SSHDrive: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -19,12 +19,12 @@ struct SSHDrive: ParsableCommand {
             Docs: https://github.com/alecdwm/sshdrive
             Run `sshdrive doctor` if a location does not appear in Finder.
             """,
-        version: "0.1.0 (milestone 8)",
+        version: "0.1.0 (milestone 10)",
         subcommands: [
             Add.self, ListCommand.self, Show.self, Status.self, SetCommand.self,
             Mount.self, Unmount.self, Remove.self, AcceptDeletions.self,
             Evict.self, Pin.self, Unpin.self, Pins.self,
-            Doctor.self, Agent.self, Debug.self,
+            Logs.self, Doctor.self, Agent.self, Debug.self,
         ])
 }
 

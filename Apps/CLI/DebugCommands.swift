@@ -16,7 +16,7 @@ struct Debug: ParsableCommand {
             DebugEvict.self, DebugTTL.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
             Stabilize.self, Testing.self, Transport.self,
             Breaker.self, Power.self, Presence.self, Rearm.self, Calls.self, Row.self,
-            Watch.self, Roots.self, Held.self, Reconcile.self,
+            Watch.self, Roots.self, Held.self, Reconcile.self, DomainGroup.self,
         ])
 }
 
@@ -140,6 +140,41 @@ struct Mutate: ParsableCommand {
         if let target { arguments["target"] = target }
         if recursive { arguments["recursive"] = "true" }
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.mutate", arguments: arguments))
+    }
+}
+
+// MARK: the domain itself (spike S9)
+
+struct DomainGroup: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "domain",
+        abstract: "File Provider domain hooks.", subcommands: [DomainRename.self])
+}
+
+struct DomainRename: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Call add(domain) with the same identifier and a new display name.",
+        discussion: """
+            Spike S9. There is no rename call on NSFileProviderManager, so the question is
+            whether `add` with an identifier the system already holds renames the domain in
+            place - keeping the mount, the cached content and the pending uploads - or
+            whether it fails, or replaces the domain and takes the replica with it.
+
+            Nothing is removed first, and config.json is not written: this hook makes the
+            call and reports what the system says. `sshdrive set <name> nickname` is the
+            product path, and what it does depends on this answer.
+            """)
+
+    @Argument var name: String
+    @Argument(help: "The new display name (the bare nickname; the system prefixes it).")
+    var displayName: String
+
+    func run() throws {
+        AgentClient.prettyPrint(
+            try AgentClient.send(
+                command: "debug.domain.rename",
+                arguments: ["name": name, "displayName": displayName]))
     }
 }
 

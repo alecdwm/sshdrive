@@ -257,7 +257,10 @@ Entitlements per target:
 
 Display name = nickname ?? host, **never prefixed**: the system prepends the
 app name itself, in the mount directory and in the sidebar label alike
-(S3, 2026-09-04; §2).
+(S3, 2026-09-04; §2). It is not fixed at creation: `add(domain)` with the
+same identifier and a different `displayName` renames the domain in place,
+mount directory included, keeping the cache and any pending upload (S9,
+2026-09-05; §8).
 
 Notes on the spec:
 
@@ -1721,8 +1724,22 @@ install as failing (2026-09-04). Each candidate is `lstat`ed, never
   live on with their sockets in place, and `ControlMaster=yes` against an
   existing socket disables multiplexing and leaves later mux clients
   attaching to the orphan. So before its first connection the agent runs
-  `-O exit` against every `sshdrive-*` socket in `$TMPDIR` and unlinks
-  whatever is left. The location's socket path is also unlinked before
+  `-O exit` against every `sshdrive-*` socket in `$TMPDIR`, unlinks
+  whatever is left, **and kills the process that owned it**. The kill is
+  not belt and braces: `-O exit` only reaches a master *through* its
+  socket, so a master whose socket has already gone - or one that has
+  stopped serving it - cannot be asked to leave at all, and unlinking the
+  socket merely makes it unreachable while it goes on holding a TCP
+  connection to the server, its mux clients and its share of the server's
+  `MaxSessions` for ever. The pid comes from `ssh -O check`, which prints
+  `Master running (pid=NNNN)` and is the only route there is from a socket
+  to its process; the process is checked to still be named `ssh` before it
+  is signalled, because a pid read from a socket left behind by an earlier
+  boot may have been reused by anything, and then it gets TERM and, half a
+  second later, KILL (2026-09-05). The complementary half is that
+  `sshdrive agent stop` shuts every location's masters and mux clients down
+  before the agent exits (§8), so the ordinary case never reaches the
+  sweep. The location's socket path is also unlinked before
   every spawn, not only at startup: a master that died without `-O exit`
   leaves its socket behind, and `ssh` moves a new socket into place with
   `link`, which fails on an existing path and silently disables
@@ -3060,11 +3077,16 @@ sshdrive mount <name> / unmount <name>
                                   add/remove the File Provider domain without
                                   forgetting the location
 sshdrive set <name> nickname|cache-ttl|remote-path|host|port|user|identity|watch-mode|helper|permissions|create-check <value>
-                                  nickname and remote-path re-create the domain (the
-                                  sidebar name is fixed at domain creation unless S9 says
-                                  otherwise; a new root invalidates every path in the index),
-                                  so they are refused while uploads are pending and warn
-                                  that the cache is dropped otherwise;
+                                  nickname renames the domain **in place**: one
+                                  `add(domain)` on the identifier the system already holds,
+                                  which renames the mount directory under
+                                  `~/Library/CloudStorage` and the sidebar entry, keeps every
+                                  cached file and leaves a pending upload pending (S9,
+                                  2026-09-05), so it is not refused and drops nothing;
+                                  remote-path re-creates the domain, since a new root
+                                  invalidates every path in the index, so it is refused while
+                                  uploads are pending and warns that the cache is dropped
+                                  otherwise;
                                   host, user, port and identity change what the stored
                                   secrets are keyed on or which key is offered, so they
                                   re-run the collect connection exactly as passwd does
@@ -3098,9 +3120,25 @@ sshdrive unpin <name> <remote-path>
                                   inherits a pin from a folder above (§7.1.1)
 sshdrive pins [<name>] [--export | --import FILE]
                                   tree of pins and exclusions with cached size and file counts
-sshdrive logs [--follow]          our subsystem's unified log, through `/usr/bin/log show` and
+sshdrive logs [--follow] [<name>] [--last 1h] [--debug]
+                                  our subsystem's unified log, through `/usr/bin/log show` and
                                   `log stream` with a subsystem predicate, since `OSLogStore`'s
-                                  local store is not open to a standard user
+                                  local store is not open to a standard user. The predicate is
+                                  not only ours: everything the *system* decides about a domain
+                                  is logged by `fileproviderd` under Apple's subsystem and never
+                                  reaches ours, so the query is
+                                  `subsystem == "org.shirls.sshdrive"` **or** a `fileproviderd`
+                                  line naming us, and a `<name>` narrows both halves to that
+                                  location - ours by the domain identifier or the display name,
+                                  since our lines carry one or the other, and fileproviderd's by
+                                  the identifier, which is all it knows. `--info` is always
+                                  passed, because `log show` hides the info level and most of the
+                                  transport's detail is there. The CLI `exec`s `log`, so Ctrl-C
+                                  ends a `--follow`; it is the one command that is not a request
+                                  to the agent, and it asks the agent only which location a
+                                  `<name>` means, falling back to matching that text when the
+                                  agent is not running - which is exactly when someone wants the
+                                  log
 sshdrive doctor                   checks: app in /Applications, extension registered
                                   (pluginkit), login item enabled and agent reachable,
                                   app group container writable, CLI on PATH, ssh version,
@@ -3111,6 +3149,15 @@ sshdrive agent start|stop|restart
                                   until the next mach lookup, which any CLI command or extension
                                   call causes, so stop is a pause, not a disable (§10). Disabling
                                   is the Login Items switch in System Settings.
+                                  **stop shuts every location's master and mux clients down
+                                  before exiting**, the same thing `remove` does per location:
+                                  exiting without it leaves an `ssh -N` per location holding a
+                                  connection to a server, with a control socket the next start
+                                  unlinks out from under it, and the sweep then has nothing to
+                                  ask (§6.1). The reply is sent first - the CLI is waiting on it,
+                                  and `-O exit` against an unreachable server takes seconds - and
+                                  a 20 s backstop exits anyway. A TERM from the cask's
+                                  `uninstall` stanza takes the same path and exits 0 (§10).
 ```
 
 `<name>` resolves nickname, then host, then id prefix.
@@ -3595,6 +3642,46 @@ by a `v*` tag):
    PAT for that one repo). `brew upgrade` then picks it up.
 5. Publish the docs site (Pages deploys automatically from `main`).
 
+Two things about the Apple material, both measured on 2026-09-05 and both
+capable of costing an afternoon:
+
+- **The provisioning profile has to name the certificate the bundle is
+  signed with.** A profile carries the `DeveloperCertificates` it was
+  issued for and AMFI matches on them, not only on the entitlements. A
+  Developer ID profile created against a *different* Developer ID
+  Application certificate than the signing one is not ignored: every
+  restricted entitlement becomes unsatisfied, `taskgated-helper` logs
+  `Unsatisfied entitlements: keychain-access-groups` and `Disallowing:
+  org.shirls.sshdrive`, `amfid` answers `-413 "No matching profile
+  found"`, and the agent is SIGKILLed at exec - `open -g` returns
+  `Launchd job spawn failed`. Such a build signs, verifies, **notarizes
+  and staples**, and then will not launch: notarization does not look at
+  provisioning profiles at all. Adding
+  `com.apple.application-identifier` to match the profile "properly" does
+  not help and cannot be done anyway (S1 a1). So `scripts/release.sh`
+  compares the profile's certificate hashes against the signing identity
+  *before* signing, and drops `keychain-access-groups` with a loud
+  warning rather than embedding a profile that will kill the agent.
+- **The disk image is signed as well as stapled.** A DMG that carries a
+  notarization ticket but no signature of its own is refused on the
+  download path: `spctl --assess --type open --context
+  context:primary-signature` answers `rejected / source=no usable
+  signature` however good the ticket is. Homebrew never sees it - it
+  reads the app out of the image - but a person who double-clicks the
+  download does, so `release.sh` `codesign`s the DMG with the same
+  Developer ID identity before submitting it (2026-09-05).
+- **`notarytool store-credentials` cannot be run over ssh.** It writes an
+  item to the login keychain through an interactive authorisation and
+  fails with "User interaction is not allowed" from an ssh session even
+  with the keychain explicitly unlocked. A headless release therefore
+  authenticates with an **App Store Connect API key** - `--key`,
+  `--key-id`, `--issuer`, the `.p8` left on the build machine and never
+  copied into the repository, the bundle or the DMG - and the
+  `--keychain-profile` form is the fallback for a profile someone created
+  at the console. A read-only API key is enough to notarize; it is not
+  enough to create a provisioning profile (`403 FORBIDDEN_ERROR`), which
+  stays a web-UI job.
+
 The tap can be reused for any future casks or formulae of yours; that is why it
 is named `homebrew-tap` rather than `homebrew-sshdrive`. If the project gains
 enough users, the cask can later be submitted to the main `homebrew-cask`
@@ -3626,7 +3713,7 @@ held by the system and survive.
 | S6 | Flip a folder's `contentPolicy` to `.downloadEagerlyAndKeepDownloaded` at runtime: does the system download the whole subtree after a working-set signal, does it enumerate subfolders that have never been opened in Finder (the offline claim in §7.1 depends on it), does it accept a chain of never-enumerated ancestors reported through the working set, which `sshdrive pin` on an unseen path depends on (§7.1), do new files added remotely get fetched on the next poll, and does `evictItem` correctly refuse? Does an explicit `.downloadLazily` on a child override an eager ancestor (needed for exclusions, §7.1.1)? Record exactly which built-in menu items Finder shows for pinned vs unpinned items, that an item returned without `allowsEvicting` gets no "Remove Download" entry and that no other route evicts it (§7.2), and whether custom actions with `userInfo`-based activation rules appear at the top level of the context menu or in an app submenu. Also: does the eager policy on the item returned for `.rootContainer` download the whole location, and do custom actions appear when right-clicking the background of the location's top-level window or its sidebar entry, with the root as the selected item (§7.1.2)? How many `fetchContents` calls the system keeps open at once for an eager subtree, which bounds the transfer scheduler's backlog (§6.2). | Pinning (§7.1) depends on the policy being honoured dynamically; the Finder menu design (§7.2) depends on how the system entry behaves on pinned items. |
 | S7 | **Tiers 0-1 answered in milestone 6, the helper's half in milestone 9; the FreeBSD kqueue row is still open, and so is armv7 - the testbed is Linux containers on an arm64 Mac and there is no BSD or 32-bit ARM to run either on (2026-09-05).** Run tier 1 and the helper (§6.4) over `ControlMaster` exec channels alongside SFTP traffic: does a long-running helper stream coexist with two SFTP channels on one connection, and how long does the `find -cmin` sweep take on a 1M-file tree with 200 roots? Check `-cmin` and `-printf` across GNU, BSD and busybox `find`, including the busybox on a real Synology DSM box and the `-mmin` fallback (§6.4), the server-clock sweep window against a server whose clock is five minutes behind, and the `sh -s` stdin-script mechanism (§9.2) under bash, zsh, fish and csh login shells, each with an rc file that prints to stdout, confirming the sentinel discards it, plus the `env -0` shell snapshot (§6.1) under fish and the `-ic` form under tcsh, and an rc file that leaves a background child holding stdout, confirming the closing sentinel returns the snapshot before the timeout. Kill the client abruptly with `ClientAliveInterval` unset on the server and record whether a bare background process survives, and whether the heartbeat wrapper (§6.4) kills it within a minute under dash, busybox and bash. Run the probe against an account whose login shell prints on startup and whose sshd uses an external `sftp-server`, confirming the exec-channel `sftp-server` fallback (§9.2), and against a `ForceCommand internal-sftp` account, confirming it is reported as no shell rather than unusable output. On FreeBSD, measure the helper's kqueue directory watch plus 60 s sweep on a 100,000-file tree (§6.4 tier 2). Measure a tier 0 cycle with 5,000 `materialized`-only roots under the rotation (§6.5). | Decides whether tier 1 and the helper are practical on one connection, sets the default poll interval, proves the quoting design, and proves that nothing we start outlives the connection. |
 | S8 | Return an item with `contentType = .symbolicLink` and `symlinkTargetPath`: does the system create a real symlink under CloudStorage, does Finder badge it, does a relative target resolve inside the mount, how does Finder present a dangling one, does `ln -s` inside the mount reach `createItem` with the target intact so escaping targets can be refused? | Confirms §5.7 end to end. |
-| S9 | Does calling `NSFileProviderManager.add(domain)` with an existing identifier and a new `displayName` rename the domain in place, keeping cache and pending uploads? | If yes, `set nickname` stops re-creating the domain and the §13 data-loss caveat goes away. |
+| S9 | **Answered 2026-09-05: yes.** Does calling `NSFileProviderManager.add(domain)` with an existing identifier and a new `displayName` rename the domain in place, keeping cache and pending uploads? Measured on a real mount with four materialized items and an upload the system was holding: the directory under `~/Library/CloudStorage` was renamed, the materialized set was unchanged, no file was re-fetched (`last_fetch` did not move and nothing turned dataless), and the pending upload was still pending afterwards and flushed to the server on the next `signalErrorResolved`. | If yes, `set nickname` stops re-creating the domain and the §13 data-loss caveat goes away — which is what happened (§8, §4). |
 | S10 | Finder tags on an item whose extension returns `extendedAttributes` from local storage: does tagging round-trip, and does the xattr hash in the metadata version (§5.3) stop the system re-offering the `modifyItem`? Also check what happens if the version is deliberately left unchanged, to know what the hash is protecting against. | Confirms the local-xattr policy (§5.4) does not produce a retry loop. |
 
 ---
@@ -3676,7 +3763,8 @@ held by the system and survive.
    abrupt client kill - is answered here rather than in milestone 6,
    which had no tier 2 to answer it with.
 10. **Ship** — notarized DMG, Homebrew cask with postflight and uninstall,
-    `logs`, docs. Spike S9 applied to `set nickname` if it passed.
+    `logs`, docs. Spike S9 applied to `set nickname` if it passed — it
+    passed, so `set nickname` renames in place (§8).
 
 ---
 
@@ -3858,10 +3946,49 @@ there, so that this list cannot drift from the body.
 - **An upgrade unregisters the login item before registering it,** since
   `SMAppService.register()` reports success but does not repair a
   registration whose bundle was deleted and replaced (2026-09-04, §10).
+- **…and it has to wait for launchd to drop the job before registering
+  again.** `unregister()` returns, and `status` says `notRegistered`,
+  while launchd is still spawning the old record; a `register()` inside
+  that window leaves the job carrying the previous bundle's launch
+  constraint and every spawn dies `Launch Constraint Violation` on a
+  10 s retry, for ever. The `unregister` role polls `launchctl print`
+  until the service is gone (2026-09-05, §10).
+- **A provisioning profile must name the certificate the bundle is signed
+  with,** or every restricted entitlement is unsatisfied, `amfid` answers
+  `-413 "No matching profile found"` and the agent is SIGKILLed at exec -
+  after notarizing and stapling perfectly, since notarization never looks
+  at profiles (2026-09-05, §10.1, §3.1).
+- **`notarytool store-credentials` cannot be run over ssh,** so a headless
+  release notarizes with an App Store Connect API key (`--key`,
+  `--key-id`, `--issuer`) and the keychain profile is the fallback
+  (2026-09-05, §10.1).
+- **The DMG is signed as well as stapled,** because a stapled but unsigned
+  disk image is `rejected / source=no usable signature` on the download
+  path (2026-09-05, §10.1).
+- **The agent removes File Provider domains no location claims** at its
+  first start, and every domain of ours when `config.json` cannot be read
+  at all, because `zap` runs after Homebrew has already deleted the app
+  (2026-09-05, §10).
+- **The orphan sweep kills the process that owned the socket it removes,**
+  and `sshdrive agent stop` shuts every location's masters down before
+  exiting, because `-O exit` only reaches a master through a socket that
+  still exists (2026-09-05, §6.1, §8).
+- **`sshdrive logs` reads fileproviderd's lines as well as ours,** because
+  everything the system decides about a domain is logged under Apple's
+  subsystem and never reaches ours; a named location matches our lines by
+  identifier or display name and fileproviderd's by identifier alone
+  (2026-09-05, §8).
 - **The helper is built in a Linux job** and the darwin binary on the
   macOS job (§10.1).
-- **Nickname and remote-path changes re-create the domain,** refused
-  while uploads are pending; S9 may lift the nickname half (§8).
+- **A remote-path change re-creates the domain,** refused while uploads
+  are pending, because a new root invalidates every path in the index
+  (§8).
+- **A nickname change renames the domain in place.** S9: `add(domain)`
+  with an identifier the system already holds and a new `displayName`
+  renames the mount directory under `~/Library/CloudStorage`, keeps the
+  materialized set, re-fetches nothing, and leaves an upload the system
+  was holding still pending and still able to flush - so `set nickname`
+  is neither refused nor cache-dropping (2026-09-05, S9, §8, §4).
 - **Remote path defaults to the account's home;** multiple locations on
   one host are allowed, each with its own connection (§4, §6.1).
 - **Minimum macOS is 14** (§2).

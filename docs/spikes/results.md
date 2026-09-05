@@ -3,8 +3,374 @@
 One entry per sub-question, newest date first. Steps and expected answers are in
 `milestone-1.md` (S1, S3, S4, S6), `milestone-2.md` (S2), `milestone-4.md` (S8, S10 and the
 write matrix), `milestone-5.md` (S5), `milestone-6.md` (S7, tiers 0 and 1),
-`milestone-7-8.md` (eviction and pinning) and `milestone-9.md` (S7's helper half, tier 2);
+`milestone-7-8.md` (eviction and pinning), `milestone-9.md` (S7's helper half, tier 2) and
+`milestone-10.md` (S9, the release, the cask and the docs);
 this file records only what happened.
+
+---
+
+## 2026-09-05 (milestone 10) - ship: Developer ID, notarization, the DMG, the cask, `logs`, and S9
+
+**2026-09-05 addendum:** the Developer ID profile was re-issued for the certificate whose
+key is on the VM (serial `68E341F98FC5ECC8`, SHA-1 `6C055553…`). `scripts/release.sh` then
+kept `keychain-access-groups`, and notarization came back **Accepted** with no issues for
+both the app and the DMG (`spctl`: `accepted / source=Notarized Developer ID`), sha256
+`be1c283d952413affab846ae2be8add8acab706d589081e57019738f9ae6a16f` for
+`SSH-Drive-0.1.0.dmg`. Installed through the upgrade path, `sshdrive doctor` reported the
+keychain reachable: the shipped build has keychain access.
+
+Milestone 10 end to end, and spike **S9**. Same headless VM (macOS 26.4.1 arm64, Xcode
+26.4, `OpenSSH_10.2p1`), the Docker testbed on the Mac that hosts it, and for the first
+time a **Release** build signed with the **Developer ID Application** identity, notarized
+by Apple and installed out of a DMG the way the Homebrew cask would. Steps are in
+`milestone-10.md`.
+
+**606 package tests, 0 failures** (was 592; 40 skipped without the testbed). New: ten in
+`LoggingTests/LogQueryTests` for the `sshdrive logs` predicate, two in
+`ConfigTests/AddArgumentsTests` for the nickname flow S9 settled, and three in
+`SSHProcessTests/OptionAssemblyTests` for the orphan sweep's new kill.
+
+### What was built
+
+**`scripts/release.sh`** - sync, `xcodegen`, `xcodebuild -configuration Release` unsigned,
+embed `Resources/helper/`, sign inside out with the Developer ID identity and the hardened
+runtime and a real `--timestamp`, `codesign --verify --deep --strict`, `spctl --assess`,
+`hdiutil create` (volume `SSH Drive`, the app plus an `/Applications` symlink, UDZO), then
+`notarytool submit --wait` and `stapler staple` on the app and on the DMG, and the sha256
+the cask needs. `build`, `dmg` and `notarize` run the three parts on their own.
+
+**`packaging/homebrew-tap/Casks/ssh-drive.rb`** and a README saying it belongs in the
+separate repo `alecdwm/homebrew-tap`, which does not exist yet. The filename is the cask
+token, so it is `ssh-drive.rb` and not `sshdrive.rb`.
+
+**`sshdrive logs [--follow] [<name>] [--last 1h] [--debug]`** - `LogQuery` in the `Logging`
+module builds the predicate, `Apps/CLI/LogsCommand.swift` `execv`s `/usr/bin/log`.
+
+**Docs** - `README.md`, `docs/troubleshooting.md` (organised by `doctor`'s check lines),
+`docs/release.md` (the procedure and the Apple material it needs).
+
+**Five agent-lifecycle fixes**, all of them things section 10 assumed and nothing had
+tested: `AgentLifecycle` (SIGTERM, and section 10.1's vnode watch on our own executable),
+`DomainManager.shutdownAll()`, `ControlSocket`'s kill of a socket's owner and of stray
+masters, the `unregister` role's wait for launchd, and `removeStrandedDomains`.
+
+### The release: signed, notarized, stapled - and, the first time, dead on arrival
+
+`spctl --assess` on the finished app says `accepted / source=Notarized Developer ID`, and
+`notarytool` returned **Accepted** with `"issues": null` on every submission
+(`8ceecf10-…`, `7a06842c-…`, and the later rebuilds). 17 ticket entries: the app, the CLI,
+askpass and the appex, x86_64 and arm64 each, plus the DMG.
+
+The first such build **would not launch**. `open -g` answered
+`Launchd job spawn failed` (`RBSRequestErrorDomain` 5, POSIX 163), a direct run exited 137,
+and the crash report says `EXC_CRASH (SIGKILL (Code Signature Invalid))`,
+`"namespace":"CODESIGNING", "indicator":"Launch Constraint Violation"`. The log:
+
+```
+taskgated-helper  Checking profile: SSH Drive Developer ID
+taskgated-helper  org.shirls.sshdrive: Unsatisfied entitlements: keychain-access-groups
+taskgated-helper  Disallowing: org.shirls.sshdrive
+amfid             not valid: AppleMobileFileIntegrityError Code=-413 "No matching profile found"
+kernel (AMFI)     Code has restricted entitlements, but the validation of its code
+                  signature failed. Unsatisfied Entitlements: keychain-access-groups
+```
+
+The embedded profile grants exactly that entitlement (`keychain-access-groups =>
+["RWGDZAYBM8.*"]`, identical to the development profile's). **What differs is the
+certificate.** A profile carries the `DeveloperCertificates` it was issued for and AMFI
+matches on them:
+
+| profile | its certificate | in the login keychain |
+|---|---|---|
+| `SSH_Drive.provisionprofile` (development) | `C50D92F1…C13` | yes - and it works |
+| `SSH_Drive_Developer_ID.provisionprofile` | `D853BADB…F6` | **no** |
+| signing identity used by `release.sh` | `6C055553…D05` | yes |
+
+The account holds two Developer ID Application certificates - `BNRD3V55JA` (`D853BADB…`)
+and `T9DF89U2YU` (`6C055553…`), both issued 2027-02-01 - and the profile names the one
+whose private key is not on this Mac.
+
+Three things were tried:
+
+- **Adding `com.apple.application-identifier` and `com.apple.developer.team-identifier`**
+  to the signed entitlements to "match the profile properly": strictly worse -
+  `Unsatisfied entitlements: com.apple.developer.team-identifier, keychain-access-groups`.
+  A profile whose certificate does not match is not partly applicable, it is not
+  applicable, and *every* restricted entitlement in the bundle goes unsatisfied. That key
+  is also the one S1(a1) found makes AMFI refuse to let **launchd** start the agent at all.
+- **The control**: the same Release binary, the same entitlements file, signed with the
+  Apple Development identity and the development profile - launches, `rc=0`, keychain
+  reachable. Nothing about Release, Developer ID or the hardened runtime is at fault.
+- **Creating the right profile from the API key**: `GET /v1/certificates` and
+  `GET /v1/bundleIds` both answer 200, `POST /v1/profiles` answers
+  `403 FORBIDDEN_ERROR`. A notarization-grade key reads; it cannot create a profile.
+
+So `scripts/release.sh` now compares the profile's certificate hashes against the signing
+identity **before** signing, and when they do not intersect prints both hashes, says what
+to do, drops `keychain-access-groups` and carries on. The shipped state of this milestone
+is a notarized Developer ID build **without keychain access**: it runs, mounts, browses,
+fetches, writes and watches, and `sshdrive doctor` says
+`[ fail ] keychain … A required entitlement isn't present`. Re-creating the Developer ID
+profile against certificate `T9DF89U2YU` and re-running the script is the entire fix; no
+code changes.
+
+The order of discovery is the point worth keeping: this build **notarized and stapled
+perfectly** first. Notarization does not look at provisioning profiles at all.
+
+### Notarization credentials
+
+Section 10's plan was a `notarytool` keychain profile named `sshdrive-notary`.
+**`xcrun notarytool store-credentials` cannot be run over ssh**: it writes to the login
+keychain through an interactive authorisation and fails with `User interaction is not
+allowed` even with the keychain explicitly unlocked. The headless route is an App Store
+Connect API key (`--key ~/Developer/AuthKey_<KEYID>.p8 --key-id … --issuer …`), which is
+what `release.sh` prefers; `--keychain-profile` is the fallback, and with neither the
+script prints both recipes and stops **cleanly** after the DMG without failing the run.
+The `.p8` never leaves the VM.
+
+### The DMG
+
+7.6 MB, `hdiutil verify` VALID, mounts with `SSH Drive.app` and an `Applications` symlink.
+Installed with `hdiutil attach` + `ditto` to `/Applications`, which is what the cask does;
+`spctl --assess` on the installed copy: `accepted / source=Notarized Developer ID`, and no
+quarantine xattr (a `ditto` out of a mounted image sets none).
+
+**The image is signed as well as stapled, and it has to be.** A DMG with a notarization
+ticket and no signature of its own is refused on the download path -
+`spctl --assess --type open --context context:primary-signature` answers
+`rejected / source=no usable signature` while `stapler validate` says the ticket is fine
+and `codesign -dvv` says `code object is not signed at all`. Homebrew never sees that (it
+reads the app out of the image) but a person who double-clicks the download does, so
+`release.sh` `codesign`s the image before submitting it. The finished artefact then
+assesses `accepted / source=Notarized Developer ID` as a disk image too.
+
+### S9: does `add(domain)` rename a domain in place? **Yes**
+
+Measured on a real mount of `alec@192.168.64.1:2201` (`deb`, key auth) with a materialized
+tree and an upload the system was holding.
+
+Making a pending write took two attempts, and the first is worth recording: **killing the
+master is not enough.** The agent reconnects on the breaker's backoff unprompted (S5), and
+the write reached the server before anything could observe it. `debug fault <name> --writes
+on` - every `modifyItem` answered `.serverUnreachable` - is what holds a write in the
+system's pending set.
+
+State before: 4 materialized (`""`, `m10`, `m10/edit.txt`, `m10/keep.txt`), 1 pending
+(`m10/edit.txt`), mount at `~/Library/CloudStorage/SSHDrive-s9`, server still on the old
+bytes. Then one `NSFileProviderManager.add(domain)` with the same identifier and
+`displayName` `s9-renamed`:
+
+```
+domainsBefore ["s9 (D8F9449C-1BD6-44C5-87C3-7345E303107A)"]
+domainsAfter  ["s9-renamed (D8F9449C-1BD6-44C5-87C3-7345E303107A)"]
+~/Library/CloudStorage/SSHDrive-s9          gone
+~/Library/CloudStorage/SSHDrive-s9-renamed  present, with m10/ and both files
+materialized 4  (unchanged)      pending 1  (unchanged)
+debug stat m10/keep.txt -> dataless false, indexLastFetch unchanged: nothing re-fetched
+```
+
+and afterwards `--writes off` plus `signalErrorResolved` flushed the held upload to the
+server, so the pending write was still the system's own upload. **Nothing was re-created,
+nothing was re-downloaded and nothing was lost.**
+
+Confirmed twice more through the product path: the agent's own start re-added the domain
+under the config's nickname and renamed the directory back, and `sshdrive set <name>
+nickname` renamed it again with the four materialized items and the cached bytes intact.
+
+So `LocationSettingKey.nickname` is no longer `recreatesDomain`; it is
+`renamesDomainInPlace`, the domain is **not** removed first (removing it is exactly what
+would throw the replica away), the pending-uploads refusal is gone and so is the "the cache
+is dropped" warning. Section 13's data-loss caveat on nickname is replaced with a dated
+entry.
+
+One wrinkle found on the way: `add(domain)` can report `NSCocoaErrorDomain 4099`
+*"connection to service named com.apple.FileProvider was invalidated"* **after the call has
+landed** - seen on `set nickname` and on the first location start after an upgrade.
+`addDomain` now re-reads `NSFileProviderManager.domains()` before believing the error, and
+logs the discrepancy.
+
+### `agent stop`, SIGTERM and the orphan sweep
+
+Milestone 7/8 left this open: `agent stop` exited 0.2 s after replying and left every
+location's `ssh -N` master running, with a socket the next start unlinked out from under
+it. Fixed in three places, and each half was needed:
+
+- **`DomainManager.shutdownAll()`** stops every detector, evictor, gate and transport
+  before the process exits, concurrently, with a 20 s backstop. The reply is sent first.
+- **`ControlSocket.sweepOrphans`** now takes the pid from `ssh -O check`
+  (`Master running (pid=NNNN)`), and if that process is still alive after `-O exit` it gets
+  TERM and then KILL. The pid is checked to still be a process named `ssh` first, because
+  a pid read from a socket left over from an earlier boot can have been reused.
+- **`ControlSocket.killStrayMasters()`**, because the first two are not enough. A `TERM`
+  and a clean shutdown left **two** `ssh -N` masters alive with **no socket at all**: a
+  location that was restarted can hold two masters (the second finds the first's socket in
+  place, prints "ControlSocket already exists, disabling multiplexing" and runs without
+  one), and `SSHMaster.shutdown()` unlinks the path on its way out, so the socket-based
+  sweep has nothing to iterate over. The command line is the other way in: a process named
+  `ssh`, owned by this uid, whose argv contains `ControlPath=$TMPDIR/sshdrive-`. Run at the
+  agent's start, before any connection, and at its exit, after every transport is down.
+
+**SIGTERM had no handler at all**, and the default disposition is death by signal - which
+launchd reads as an unsuccessful exit and `KeepAlive` with `SuccessfulExit` false restarts
+at once, from whatever bundle is at the path, which mid-upgrade is the old one about to be
+deleted. Section 10 says "the agent exits with status 0 on TERM"; now it does, through the
+same shutdown. Measured: `kill -TERM` on the agent left `launchctl list` showing
+`-	0	org.shirls.sshdrive.agent` and **zero** of the location's four `ssh` processes.
+
+### The upgrade path
+
+Simulated exactly as `brew upgrade` does it, over a running install with a real location, 4
+materialized items and a held upload: the cask's `uninstall` `signal:` (TERM by launchd
+label), `rm -rf` the app, `ditto` the new one out of the DMG, then the `postflight` -
+`SSHDRIVE_AGENT_ROLE=unregister` on the app's own executable, then `open -g`.
+
+**Result: the login item comes back with no logout, and nothing was lost.** The new inode
+differs, `unregister rc=0`, `open rc=0`, `launchctl print` shows `state = running`,
+`runs = 1`, `last exit code = (never exited)`, `doctor` is green apart from the keychain
+line above and the `CLI on PATH` warning, the domain is back, the cached files are still
+cached and the held upload reached the server.
+
+Two things this pass found that section 10 did not have:
+
+- **The unregister has to wait for launchd to drop the job.** `unregister()` returns, and
+  `SMAppService.status` says `notRegistered`, while launchd is still spawning the old
+  record: the very next spawn crashed with `Launch Constraint Violation`, and the
+  `register()` that followed 200 ms later left the job carrying the *previous* bundle's
+  launch constraint (LWCR) - `launchctl print` showed `runs = 10`,
+  `last exit code = 78: EX_CONFIG`, `job state = spawn failed`, retrying on a 10 s throttle
+  for ever, with the mach service accepting connections and answering nothing. Doing the
+  same three commands with five seconds between them worked first time. The `unregister`
+  role now polls `launchctl print` until the service is gone before it exits, which is what
+  makes the cask's back-to-back postflight safe.
+- **A pending upload survives the replacement and can be re-offered afterwards.** The
+  system handed the same `modifyItem` to the new extension instance, by which time the
+  bytes were already on the server, and section 5.5's conflict check did its job:
+  `conflict on m10/edit.txt: base 56-…, server 51-…` → a conflict copy holding the local
+  content, the remote item returned, and the copy evicted and re-signalled on attempt 1.
+  Nothing was lost; the same write simply arrived twice.
+
+The vnode watch fired as designed - `my own executable was replaced; waiting for the new
+bundle` - and the TERM that `SMAppService.unregister()` sends to the running job is what
+actually took the old agent down, cleanly, with its masters.
+
+### The fresh-user install, quarantined
+
+The second local account `sshtest` (uid 502, admin, no sudo, console login by fast user
+switching so `gui/502` exists). The 2026-09-04 pass installed by `rsync`, so its bundle
+carried no `com.apple.quarantine` xattr at all and said nothing about Gatekeeper; this one
+downloads the DMG the way a browser would.
+
+```sh
+cp <the notarized dmg> ~/Downloads/
+xattr -w com.apple.quarantine "0083;<hex-time>;Safari;<uuid>" ~/Downloads/SSH-Drive-0.1.0.dmg
+spctl --assess --type open --context context:primary-signature -v ~/Downloads/SSH-Drive-0.1.0.dmg
+hdiutil attach …; ditto "/Volumes/SSH Drive/SSH Drive.app" "/Applications/SSH Drive.app"
+xattr -w -r com.apple.quarantine "0083;…;Safari;<uuid>" "/Applications/SSH Drive.app"
+spctl --assess --type execute --verbose=4 "/Applications/SSH Drive.app"
+SSHDRIVE_AGENT_ROLE=unregister … ; open -g "/Applications/SSH Drive.app"
+```
+
+**Result: both accepted, and the install still needs no visit to System Settings.**
+
+```
+the quarantined DMG:     accepted / source=Notarized Developer ID
+the quarantined bundle:  accepted / source=Notarized Developer ID
+unregister rc=0   open rc=0
+launchctl print gui/502/…: state = running, runs = 1, last exit code = (never exited)
+the com.apple.quarantine xattr is still on the bundle after the launch
+doctor: green apart from [ fail ] keychain and the CLI-on-PATH warning
+file provider domains: none
+```
+
+So a notarized, stapled build opens from a quarantined bundle with `open -g` returning 0
+and no dialog to answer, on an account that has never opened System Settings. The one-time
+"downloaded from the Internet" dialog belongs to a Finder double-click, which a headless VM
+cannot produce; `open -g` from a script does not raise it, and that is as far as this
+machine can settle it.
+
+The **pre-notarization** state, recorded for contrast: `spctl --assess` on the freshly
+Developer ID-signed app before submission says `rejected / source=Unnotarized Developer
+ID`, and an ad-hoc re-signed copy of the same notarized bundle says `rejected` outright.
+
+**The stranded-domain cleanup was proved here too.** `sshtest` still had the fake `nas`
+domain and its group container from 2026-09-04. Deleting `config.json` and starting the new
+agent removed the domain and its `~/Library/CloudStorage/SSHDrive-nas` directory by itself,
+which is section 10's "the app on its first launch removes every domain whose identifier is
+not in `config.json`, or every domain of ours when the container is gone too" - written in
+section 10 since the beginning and implemented by nothing until now.
+
+### `sshdrive logs`
+
+The predicate as shipped:
+
+```
+sshdrive logs        (subsystem == 'org.shirls.sshdrive')
+                     OR (process == 'fileproviderd'
+                         AND eventMessage CONTAINS 'org.shirls.sshdrive')
+sshdrive logs nas    (subsystem == 'org.shirls.sshdrive'
+                      AND (eventMessage CONTAINS[c] '<domain-uuid>'
+                           OR eventMessage CONTAINS[c] 'nas'))
+                     OR (process == 'fileproviderd'
+                         AND eventMessage CONTAINS 'org.shirls.sshdrive')
+```
+
+**The system half is deliberately not narrowed to one domain, because it cannot be.**
+The first version filtered fileproviderd's lines on the domain identifier and matched
+**0** of them, against 511 for the provider identifier over the same twenty minutes:
+fileproviderd obfuscates domain UUIDs in its own messages (`uuid:63...0B`,
+`domain: 1{34}1 (n{1}s)`) and prints the provider bundle id in the clear. So naming a
+location narrows our half and leaves the system's whole, and the doc comment says why.
+
+`--info` is always passed - `log show` hides the info level and most of the transport's
+detail is `Log.ssh.info`. `/usr/bin/log` is spelled absolutely, because zsh has a `log`
+builtin. The CLI `execv`s rather than piping, so `--follow` streams and Ctrl-C ends it, and
+it is the one command that still works when the agent will not start: it asks the agent
+only which location a `<name>` means, and falls back to matching that text.
+
+### The cask
+
+`brew style` and `brew audit` **could not be run**: there is no Homebrew on the Linux box
+and none on the VM. `ruby -c` on the VM (ruby 2.6.10) answers `Syntax OK`, and that is the
+whole of the automated checking this milestone can claim. `brew audit --new --cask` before
+the first release is on the checklist in `docs/release.md`.
+
+Section 10's stanzas as written held up, with one correction already made on 2026-09-04
+(the `signal:` label) and one gap this pass filled: section 10 says the app on its first
+launch removes every domain whose identifier is not in `config.json`, and nothing did.
+`DomainManager.removeStrandedDomains(keeping:)` does now, at start and again when
+`config.json` cannot be read at all, which is the `brew zap` case.
+
+### Noticed in passing, and not milestone 10's to fix
+
+**`sshdrive remove --all` run against a cold agent leaves the helper binary on the
+server.** Section 8's removal is guarded by `DomainManager.shared.detector(locationID:)`
+being present, and after an `agent stop` the very next CLI command is what starts the agent
+again - so a `remove --all` issued immediately can arrive before the location's
+`ChangeDetector` is up, and `~/.cache/sshdrive/sshdrive-helper-*` is left behind. The same
+sequence with the agent already running removes the binary and its directory, as section 8
+says. Seen once, cleaned by hand. The fix belongs with the milestone 9 cleanup path: fall
+back to `HelperCleanup` on the runtime when there is no detector, or wait for the location
+to finish starting before removing it.
+
+### State the VM was left in
+
+**`alec`:** no locations, no File Provider domains, no `~/Library/CloudStorage` entries, no
+`ssh` processes, no `sshdrive-*` control socket in `$TMPDIR`; `/tmp/m10`,
+`/tmp/sshdrive-release` and `/tmp/sshdrive-dmg` removed. The **notarized Developer ID
+Release build is installed at `/Applications/SSH Drive.app`** and the agent is running -
+`spctl`: `accepted / source=Notarized Developer ID`, `stapler validate`: "The validate
+action worked!", `launchctl list`: one line for `org.shirls.sshdrive.agent`.
+`dist/SSH-Drive-0.1.0.dmg` and its `.sha256` are on the Mac (and `scripts/mac-build.sh`'s
+`--delete` rsync will wipe them, as it always has).
+
+`sshdrive doctor` is green apart from the two expected lines: `[ warn ] CLI on PATH` (the
+cask is what symlinks it) and `[ fail ] keychain` (the profile certificate mismatch above).
+
+**The servers:** `~/m10` removed from `deb`, `~/.cache/sshdrive` empty - `remove --all` took
+the helper off the server on the location's last connection, as section 8 says.
+
+**`sshtest`:** nothing left. No app, no group container, no domains, no download, no
+processes, login item unregistered.
 
 ---
 
