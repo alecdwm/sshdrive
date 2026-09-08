@@ -1,4 +1,6 @@
-import FileProvider
+#if canImport(FileProvider)
+    import FileProvider
+#endif
 import XCTest
 @testable import XPCProtocols
 
@@ -9,22 +11,37 @@ import XCTest
 final class TrashTests: XCTestCase {
 
     /// The identifier is written out in XPCProtocols so the module does not link
-    /// FileProvider. If Apple ever changes the constant, this is what says so.
-    func testContainerIdentifierMatchesTheFrameworkConstant() {
-        XCTAssertEqual(
-            SSHDriveTrash.containerIdentifier,
-            NSFileProviderItemIdentifier.trashContainer.rawValue)
-    }
+    /// FileProvider. If Apple ever changes the constant, this is what says so. macOS
+    /// only: it is an assertion about Apple's constant, which is step 4's
+    /// `AppleConstantsTests` (docs/testing-architecture.md section 8).
+    #if canImport(FileProvider)
+        func testContainerIdentifierMatchesTheFrameworkConstant() {
+            XCTAssertEqual(
+                SSHDriveTrash.containerIdentifier,
+                NSFileProviderItemIdentifier.trashContainer.rawValue)
+        }
 
-    func testOnlyTheTrashContainerIsRefusedByIdentifier() {
-        XCTAssertTrue(
-            SSHDriveTrash.isTrash(identifier: NSFileProviderItemIdentifier.trashContainer.rawValue))
-        XCTAssertFalse(
-            SSHDriveTrash.isTrash(identifier: NSFileProviderItemIdentifier.rootContainer.rawValue))
-        XCTAssertFalse(
-            SSHDriveTrash.isTrash(identifier: NSFileProviderItemIdentifier.workingSet.rawValue))
-        XCTAssertFalse(SSHDriveTrash.isTrash(identifier: UUID().uuidString))
-    }
+        func testOnlyTheTrashContainerIsRefusedByIdentifier() {
+            XCTAssertTrue(
+                SSHDriveTrash.isTrash(
+                    identifier: NSFileProviderItemIdentifier.trashContainer.rawValue))
+            XCTAssertFalse(
+                SSHDriveTrash.isTrash(
+                    identifier: NSFileProviderItemIdentifier.rootContainer.rawValue))
+            XCTAssertFalse(
+                SSHDriveTrash.isTrash(identifier: NSFileProviderItemIdentifier.workingSet.rawValue))
+            XCTAssertFalse(SSHDriveTrash.isTrash(identifier: UUID().uuidString))
+        }
+    #else
+        func testOnlyTheTrashContainerIsRefusedByIdentifier() {
+            XCTAssertTrue(SSHDriveTrash.isTrash(identifier: SSHDriveTrash.containerIdentifier))
+            XCTAssertFalse(
+                SSHDriveTrash.isTrash(identifier: "NSFileProviderRootContainerItemIdentifier"))
+            XCTAssertFalse(
+                SSHDriveTrash.isTrash(identifier: "NSFileProviderWorkingSetContainerItemIdentifier"))
+            XCTAssertFalse(SSHDriveTrash.isTrash(identifier: UUID().uuidString))
+        }
+    #endif
 
     /// The local replica is case-insensitive and normalisation-insensitive (section 5.4),
     /// so every spelling that would land on the system's own `.Trash` is refused, and
@@ -46,6 +63,8 @@ final class TrashTests: XCTestCase {
         let error = SSHDriveTrash.unsupportedError
         XCTAssertEqual(error.domain, NSCocoaErrorDomain)
         XCTAssertEqual(error.code, NSFeatureUnsupportedError)
-        XCTAssertNotEqual(error.domain, NSFileProviderErrorDomain)
+        #if canImport(FileProvider)
+            XCTAssertNotEqual(error.domain, NSFileProviderErrorDomain)
+        #endif
     }
 }

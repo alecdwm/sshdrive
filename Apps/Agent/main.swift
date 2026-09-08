@@ -1,6 +1,7 @@
 import Foundation
 import ServiceManagement
 import AgentCore
+import XPCInterfaces
 import XPCProtocols
 import Logging
 

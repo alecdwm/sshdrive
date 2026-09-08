@@ -89,7 +89,7 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
             let stop = closedFlag
             lock.unlock()
             if stop { return }
-            let n = chunk.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
+            let n = chunk.withUnsafeMutableBytes { sshRead(readFD, $0.baseAddress, $0.count) }
             if n > 0 {
                 deliver(bytes: Array(chunk[0 ..< n]), eof: false, error: nil)
                 continue
@@ -222,7 +222,7 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
                 var offset = 0
                 while offset < bytes.count {
                     let n = bytes.withUnsafeBytes {
-                        Darwin.write(fd, $0.baseAddress!.advanced(by: offset), bytes.count - offset)
+                        sshWrite(fd, $0.baseAddress!.advanced(by: offset), bytes.count - offset)
                     }
                     if n > 0 { offset += n; continue }
                     if errno == EINTR { continue }
@@ -238,7 +238,7 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
         let fd = writeFD
         writeFD = -1
         lock.unlock()
-        if fd >= 0 { Darwin.close(fd) }
+        if fd >= 0 { sshClose(fd) }
     }
 
     public func close() {
@@ -252,7 +252,7 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
         waiter = nil
         lock.broadcast()
         lock.unlock()
-        Darwin.close(readFD)
+        sshClose(readFD)
         pending?.continuation.resume(throwing: ByteStreamError.closed)
     }
 }

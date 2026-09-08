@@ -38,9 +38,31 @@ public enum GroupContainer {
         }
     }
 
+    /// How the container is found. On macOS this is the app-group entitlement's own
+    /// answer and nothing else; off Darwin it is `SSHDRIVE_GROUP_CONTAINER`, so the
+    /// package's tests can point it at a temp directory
+    /// (`Sources/Config/GroupContainerLocating.swift`).
+    #if canImport(Darwin)
+        public static let defaultLocator: any GroupContainerLocating = SystemGroupContainerLocator()
+    #else
+        public static let defaultLocator: any GroupContainerLocating =
+            EnvironmentGroupContainerLocator()
+    #endif
+
+    nonisolated(unsafe) private static var currentLocator: any GroupContainerLocating =
+        defaultLocator
+
+    public static var locator: any GroupContainerLocating {
+        get { currentLocator }
+        set { currentLocator = newValue }
+    }
+
+    /// Restores `defaultLocator`. For tests; nothing in the product replaces the locator.
+    public static func resetLocator() { currentLocator = defaultLocator }
+
     /// The container URL, or nil when the calling process has no app-group entitlement.
     public static var url: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)
+        locator.containerURL(forGroupIdentifier: identifier)
     }
 
     public static func requireURL() throws -> URL {

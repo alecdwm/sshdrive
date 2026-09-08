@@ -482,6 +482,14 @@ actor ConnectionGate {
         connection = nil
         consecutiveDeadlineMisses = 0
         breaker.connectionLost()
+        // Section 6.1's channel budget is measured on one connection and cached for ever,
+        // and a measurement taken while a connection was dying is the wrong answer kept
+        // for good: a location that probed in that moment reported "MaxSessions 1,
+        // SFTP-only" against a healthy server, with no helper, across every later restart
+        // (2026-09-08). An abrupt loss of a connection that was up is exactly the moment
+        // that produces one, so the cached answer stops being evidence here and the next
+        // connect probes again.
+        CapabilityCache.markChannelBudgetSuspect(locationID: location.id)
         Log.ssh.notice(
             "\(self.location.id, privacy: .public): dropping the master - \(reason, privacy: .public)")
         await live.shutdown()

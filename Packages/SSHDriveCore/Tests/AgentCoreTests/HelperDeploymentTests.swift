@@ -191,4 +191,27 @@ final class HelperDeploymentTests: XCTestCase {
         let name = HelperDeployment.temporaryName(macID: "0123456789abcdef", uuid: "UUID")
         XCTAssertEqual(name, ".sshdrive-upload-01234567-UUID")
     }
+
+    // MARK: The permanence of a post-upload verification failure (2026-09-08)
+
+    /// A hash that came back and disagreed is section 6.4's "hash mismatch after redeploy".
+    func testAHashThatDisagreedIsPermanent() {
+        XCTAssertTrue(
+            HelperDeployment.uploadFailureIsPermanent(
+                after: HelperDeployment.RemoteEvidence(size: 10, sha256: "deadbeef")))
+        XCTAssertTrue(
+            HelperDeployment.uploadFailureIsPermanent(
+                after: HelperDeployment.RemoteEvidence(size: 10, reportedDigest: "deadbeef")))
+    }
+
+    /// Nothing vouching for the file at all is a statement about the exec channel, not
+    /// about the server: the location retries on the ladder's backoff rather than losing
+    /// the tier for the session.
+    func testNoEvidenceAtAllIsTransient() {
+        XCTAssertFalse(
+            HelperDeployment.uploadFailureIsPermanent(
+                after: HelperDeployment.RemoteEvidence(size: 443_216)))
+        XCTAssertFalse(
+            HelperDeployment.uploadFailureIsPermanent(after: HelperDeployment.RemoteEvidence()))
+    }
 }

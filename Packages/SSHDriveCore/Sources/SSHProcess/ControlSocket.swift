@@ -9,12 +9,15 @@ public enum ControlSocket {
     /// directly rather than from the environment, since a launchd agent's environment is
     /// not guaranteed to carry it.
     public static func temporaryDirectory() -> String {
-        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
-        let length = confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count)
-        if length > 0, length <= buffer.count {
-            let path = String(cString: buffer)
-            if !path.isEmpty { return (path as NSString).standardizingPath }
-        }
+        #if canImport(Darwin)
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            let length = confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count)
+            if length > 0, length <= buffer.count {
+                let path = String(cString: buffer)
+                if !path.isEmpty { return (path as NSString).standardizingPath }
+            }
+        #endif
+        // Off Darwin there is no per-user `confstr` directory; `$TMPDIR` is the answer.
         return NSTemporaryDirectory()
     }
 
@@ -141,14 +144,18 @@ public enum ControlSocket {
     /// `KERN_PROC_PID` rather than `ps`: no subprocess, and the answer is the kernel's.
     public static func isLiveSSH(_ pid: pid_t) -> Bool {
         guard pid > 1 else { return false }
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
-        let name = withUnsafeBytes(of: &info.kp_proc.p_comm) { raw -> String in
-            String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
-        }
-        return name == "ssh"
+        #if canImport(Darwin)
+            var info = kinfo_proc()
+            var size = MemoryLayout<kinfo_proc>.stride
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+            guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
+            let name = withUnsafeBytes(of: &info.kp_proc.p_comm) { raw -> String in
+                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            }
+            return name == "ssh"
+        #else
+            return ProcFS.processName(of: pid) == "ssh"
+        #endif
     }
 
     /// Every live `ssh` of ours, found by its command line rather than by a socket.
@@ -166,40 +173,52 @@ public enum ControlSocket {
     /// own `ssh`.
     public static func liveMasterPIDs() -> [pid_t] {
         let needle = "ControlPath=\((temporaryDirectory() as NSString).appendingPathComponent(namePrefix))"
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_UID, Int32(bitPattern: getuid())]
-        var size = 0
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
-        let count = size / MemoryLayout<kinfo_proc>.stride
-        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count + 16)
-        size = procs.count * MemoryLayout<kinfo_proc>.stride
-        guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0 else { return [] }
-        let found = size / MemoryLayout<kinfo_proc>.stride
+        #if canImport(Darwin)
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_UID, Int32(bitPattern: getuid())]
+            var size = 0
+            guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+            let count = size / MemoryLayout<kinfo_proc>.stride
+            var procs = [kinfo_proc](repeating: kinfo_proc(), count: count + 16)
+            size = procs.count * MemoryLayout<kinfo_proc>.stride
+            guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0 else { return [] }
+            let found = size / MemoryLayout<kinfo_proc>.stride
 
-        var pids: [pid_t] = []
-        for index in 0 ..< min(found, procs.count) {
-            var entry = procs[index]
-            let pid = entry.kp_proc.p_pid
-            guard pid > 1 else { continue }
-            let name = withUnsafeBytes(of: &entry.kp_proc.p_comm) { raw -> String in
-                String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+            var pids: [pid_t] = []
+            for index in 0 ..< min(found, procs.count) {
+                var entry = procs[index]
+                let pid = entry.kp_proc.p_pid
+                guard pid > 1 else { continue }
+                let name = withUnsafeBytes(of: &entry.kp_proc.p_comm) { raw -> String in
+                    String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+                }
+                guard name == "ssh" else { continue }
+                if commandLine(of: pid)?.contains(needle) == true { pids.append(pid) }
             }
-            guard name == "ssh" else { continue }
-            if commandLine(of: pid)?.contains(needle) == true { pids.append(pid) }
-        }
-        return pids
+            return pids
+        #else
+            return ProcFS.pids().filter { pid in
+                pid > 1 && ProcFS.processName(of: pid) == "ssh"
+                    && ProcFS.isOwnedByThisUser(pid)
+                    && commandLine(of: pid)?.contains(needle) == true
+            }
+        #endif
     }
 
     /// `KERN_PROCARGS2`, the same call askpass uses to read its parent `ssh`'s argv
     /// (section 4.2). Returned as one string with NULs turned into spaces, because all
     /// this needs is a substring test.
     static func commandLine(of pid: pid_t) -> String? {
-        var size = 0
-        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
-        var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > 4 else { return nil }
-        let bytes = buffer.prefix(size).dropFirst(4)  // argc
-        return String(decoding: bytes.map { $0 == 0 ? UInt8(ascii: " ") : $0 }, as: UTF8.self)
+        #if canImport(Darwin)
+            var size = 0
+            var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+            guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+            var buffer = [UInt8](repeating: 0, count: size)
+            guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0, size > 4 else { return nil }
+            let bytes = buffer.prefix(size).dropFirst(4)  // argc
+            return String(decoding: bytes.map { $0 == 0 ? UInt8(ascii: " ") : $0 }, as: UTF8.self)
+        #else
+            return ProcFS.commandLine(of: pid)
+        #endif
     }
 
     /// Kill every `ssh` of ours that is still running. Safe **only** where nothing of ours

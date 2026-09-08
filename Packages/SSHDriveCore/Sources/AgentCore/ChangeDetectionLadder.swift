@@ -84,14 +84,44 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         public var to: Tier
         public var reason: String
         public var at: Double
+        /// Whether it cost the tier for the session or only for a backoff. `status` says
+        /// so, because a transient downgrade the location has already climbed out of
+        /// otherwise reads as a tier it is still stuck at (2026-09-08).
+        public var permanence: Permanence
 
-        public init(from: Tier, to: Tier, reason: String, at: Double) {
+        public init(from: Tier, to: Tier, reason: String, at: Double,
+                    permanence: Permanence = .permanent) {
             self.from = from
             self.to = to
             self.reason = reason
             self.at = at
+            self.permanence = permanence
         }
     }
+
+    /// Whether a runtime failure is one section 6.4 counts as permanent.
+    ///
+    /// Section 6.4 used to drop a tier "for the rest of the session" whatever went wrong,
+    /// and that read a *network outage* as a verdict about the server: the helper's stream
+    /// dies with every connection, so a tailnet that blinked left the location at sweep
+    /// until the agent was restarted (2026-09-08). The permanent list is now exactly the
+    /// things that will still be true on the next connection - no shell, no exec channel,
+    /// an unsupported architecture, a `noexec` directory, a hash that did not match after a
+    /// redeploy - and everything else is transient, held down for a bounded backoff and
+    /// then tried again.
+    public enum Permanence: String, Sendable, Equatable {
+        case permanent
+        case transient
+    }
+
+    /// The first transient hold, doubling to `retryCapSeconds`. Small, because the common
+    /// transient failure is "the link went away and came back" and the user is watching a
+    /// mount that has stopped updating.
+    public static let firstRetrySeconds: Double = 2
+    public static let retryCapSeconds: Double = 60
+    /// How long a tier has to run without dying before its transient failures are
+    /// forgotten, so a server that is fine again does not carry a 60 s backoff for ever.
+    public static let stabilitySeconds: Double = 120
 
     public private(set) var tier: Tier
     public private(set) var downgrades: [Downgrade]
@@ -103,16 +133,22 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     public private(set) var capabilities: ServerCapabilities
     public private(set) var watchMode: WatchMode
 
-    /// The best tier a runtime failure has left available. Section 6.4's downgrade lasts
-    /// "for the rest of the session", so a later probe may lower the tier but never raise
-    /// it back over a failure this session already saw.
-    private var sessionCeiling: Tier
+    /// The best tier a **permanent** runtime failure has left available. A later probe may
+    /// lower the tier but never raise it back over one of those.
+    private var permanentCeiling: Tier
+    /// The best tier a **transient** failure is holding the location to, and until when.
+    /// Cleared by `climbBack` once the hold expires, and by `noteConnected`, because a
+    /// connection that came up is the evidence the outage is over.
+    private var transientCeiling: Tier?
+    private var transientUntil: Double = 0
+    private var transientFailures = 0
+    private var transientReason: String?
 
     public init(watchMode: WatchMode, capabilities: ServerCapabilities, now: Double) {
         self.watchMode = watchMode
         self.capabilities = capabilities
         self.downgrades = []
-        self.sessionCeiling = .helper
+        self.permanentCeiling = .helper
         let selected = ChangeDetectionLadder.select(watchMode: watchMode, capabilities: capabilities)
         self.tier = selected
         self.note = ChangeDetectionLadder.note(tier: selected, watchMode: watchMode, capabilities: capabilities)
@@ -183,49 +219,127 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     // MARK: Runtime failures
 
     /// A tier that failed while running: `find` is missing after all, the helper's stream
-    /// died with something that is not a network error, the shell's output was unusable.
+    /// died, the shell's output was unusable.
     ///
-    /// The drop lasts for the rest of the session, because a tier that failed once on this
-    /// server will fail again on the next cycle and re-trying it every minute would turn
-    /// one broken server into a stream of failures instead of a working `poll`. Returns
-    /// true when the tier actually moved; at `poll` there is nowhere to go, so the reason
-    /// is kept for `status` and the answer is false.
+    /// A **permanent** failure lasts for the rest of the session, because it will be just
+    /// as true on the next connection and re-trying it every minute would turn one broken
+    /// server into a stream of failures instead of a working `poll`. A **transient** one -
+    /// an outage, a channel that went with the connection, a helper that did not answer
+    /// this time - holds the tier down for a bounded backoff (2 s, doubling to 60 s) and is
+    /// then tried again, because the alternative measured in production was a mount left at
+    /// the sweep tier by a network blink until something restarted the agent (2026-09-08).
+    ///
+    /// Returns true when the tier actually moved; at `poll` there is nowhere to go, so the
+    /// reason is kept for `status` and the answer is false.
     @discardableResult
-    public mutating func recordRuntimeFailure(reason: String, now: Double) -> Bool {
+    public mutating func recordRuntimeFailure(
+        reason: String, permanence: Permanence = .permanent, now: Double
+    ) -> Bool {
         guard let lower = tier.oneLower else {
             note = "poll failed: \(reason)"
             return false
         }
         let from = tier
-        downgrades.append(Downgrade(from: from, to: lower, reason: reason, at: now))
-        tier = lower
-        sessionCeiling = lower
-        note = "\(from.rawValue) failed: \(reason)"
-        return true
+        downgrades.append(
+            Downgrade(from: from, to: lower, reason: reason, at: now, permanence: permanence))
+        switch permanence {
+        case .permanent:
+            permanentCeiling = min(permanentCeiling, lower)
+            transientCeiling = nil
+            transientReason = nil
+        case .transient:
+            transientFailures += 1
+            transientCeiling = min(transientCeiling ?? .helper, lower)
+            transientUntil = now + retryBackoffSeconds
+            transientReason = reason
+        }
+        recompute(now: now)
+        note = permanence == .permanent
+            ? "\(from.rawValue) failed: \(reason)"
+            : "\(from.rawValue) failed: \(reason); retrying in \(Int(retryBackoffSeconds.rounded())) s"
+        return tier < from
+    }
+
+    /// The hold the failure just recorded will run for.
+    public var retryBackoffSeconds: Double {
+        let exponent = max(0, transientFailures - 1)
+        return min(Self.firstRetrySeconds * pow(2, Double(exponent)), Self.retryCapSeconds)
+    }
+
+    /// True while a transient failure is holding the tier below what the server can do.
+    public var isHeldByTransientFailure: Bool { transientCeiling != nil }
+
+    /// When the hold expires, for `sshdrive status`.
+    public var transientHoldExpiresAt: Double? { transientCeiling == nil ? nil : transientUntil }
+
+    /// Lets the tier climb back once a transient hold has expired. Called at the top of
+    /// every detector cycle and on every reconnect. Returns true when the tier rose, which
+    /// is the detector's cue to start the stream the tier now names.
+    @discardableResult
+    public mutating func climbBack(now: Double) -> Bool {
+        guard transientCeiling != nil, now >= transientUntil else { return false }
+        let from = tier
+        transientCeiling = nil
+        transientReason = nil
+        recompute(now: now)
+        return tier > from
+    }
+
+    /// A connection came up. Section 6.4's outage case ends here: the stream died with the
+    /// link, the link is back, so the hold is dropped and the backoff starts again from the
+    /// bottom. A helper that then dies on this connection is a fresh transient failure and
+    /// pays the 2 s hold again, and the connection itself is already bounded by the
+    /// breaker's own backoff (section 6.3), so nothing here can spin.
+    @discardableResult
+    public mutating func noteConnected(now: Double) -> Bool {
+        transientFailures = 0
+        guard transientCeiling != nil else { return false }
+        let from = tier
+        transientCeiling = nil
+        transientReason = nil
+        transientUntil = 0
+        recompute(now: now)
+        return tier > from
+    }
+
+    /// The current tier has been running for `stabilitySeconds`, so the failures that
+    /// preceded it are forgotten and the next one starts at the 2 s hold again.
+    public mutating func noteTierHealthy(now: Double) {
+        transientFailures = 0
+    }
+
+    /// The tier the ladder can serve right now: what the capabilities allow, held down by
+    /// whatever ceiling is binding.
+    private mutating func recompute(now: Double) {
+        let selected = ChangeDetectionLadder.select(watchMode: watchMode, capabilities: capabilities)
+        var ceiling = permanentCeiling
+        if let transientCeiling { ceiling = min(ceiling, transientCeiling) }
+        if selected <= ceiling {
+            tier = selected
+            note = ChangeDetectionLadder.note(
+                tier: selected, watchMode: watchMode, capabilities: capabilities)
+        } else {
+            tier = ceiling
+            if let transientReason {
+                note = "\(selected.rawValue) failed: \(transientReason); retrying in "
+                    + "\(Int(max(0, transientUntil - now).rounded(.up))) s"
+            } else if note == nil {
+                note = ChangeDetectionLadder.note(
+                    tier: ceiling, watchMode: watchMode, capabilities: capabilities)
+            }
+        }
     }
 
     // MARK: A new probe
 
     /// Re-evaluated when a reconnect brings a different server, or when the user changes
     /// `watchMode`. The ladder is recomputed from the new capabilities, but never above
-    /// what a runtime failure this session already ruled out: the drop of section 6.4 is
-    /// "for the rest of the session", and a reconnect is not a new session.
+    /// what a **permanent** runtime failure this session already ruled out, nor above a
+    /// transient hold that has not expired yet.
     public mutating func applyCapabilities(_ capabilities: ServerCapabilities, watchMode: WatchMode, now: Double) {
         self.capabilities = capabilities
         self.watchMode = watchMode
-        let selected = ChangeDetectionLadder.select(watchMode: watchMode, capabilities: capabilities)
-        if selected <= sessionCeiling {
-            tier = selected
-            note = ChangeDetectionLadder.note(tier: selected, watchMode: watchMode, capabilities: capabilities)
-        } else {
-            // The ceiling is what is binding, so the failure note still says why and is
-            // left alone.
-            tier = sessionCeiling
-            if note == nil {
-                note = ChangeDetectionLadder.note(
-                    tier: sessionCeiling, watchMode: watchMode, capabilities: capabilities)
-            }
-        }
+        recompute(now: now)
     }
 
     // MARK: Reporting

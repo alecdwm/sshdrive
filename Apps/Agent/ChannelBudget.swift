@@ -101,6 +101,11 @@ enum ChannelProbe {
     /// refused session ever gives (`mux_client_request_session: session request failed`).
     struct Refusal: Error {
         let diagnostics: String
+        /// Whether the server refused a session or the connection died under the open.
+        /// Only the first may be turned into a cached budget (section 6.1, 2026-09-08).
+        let verdict: ChannelProbeVerdict
+
+        var connectionDied: Bool { verdict == .connectionDied }
     }
 
     /// Spawns one SFTP mux client and completes the SFTP handshake on it, which is the
@@ -113,7 +118,11 @@ enum ChannelProbe {
         do {
             channel = try await master.openSFTPChannel()
         } catch {
-            return .failure(Refusal(diagnostics: "\(error)"))
+            return .failure(
+                Refusal(
+                    diagnostics: "\(error)",
+                    verdict: ChannelProbeVerdict.classify(
+                        diagnostics: "\(error)", masterIsRunning: await master.isRunning)))
         }
         var configuration = SFTPClient.Configuration()
         configuration.metadataDeadline = .seconds(handshakeSeconds)
@@ -125,7 +134,12 @@ enum ChannelProbe {
         } catch {
             let diagnostics = channel.stderrText
             channel.close()
-            return .failure(Refusal(diagnostics: diagnostics.isEmpty ? "\(error)" : diagnostics))
+            let text = diagnostics.isEmpty ? "\(error)" : diagnostics
+            return .failure(
+                Refusal(
+                    diagnostics: text,
+                    verdict: ChannelProbeVerdict.classify(
+                        diagnostics: text, masterIsRunning: await master.isRunning)))
         }
     }
 
@@ -133,13 +147,24 @@ enum ChannelProbe {
     ///
     /// Returns the budget and, when the server allowed it, the bulk channel itself - the
     /// probe's second channel *is* the bulk channel, so nothing is opened twice.
+    ///
+    /// A **nil** budget means the connection died under the probe rather than the server
+    /// refusing a session. Nothing is recorded then: the caller fails the connect attempt
+    /// and section 6.3's breaker tries again, because a budget measured on a dying
+    /// connection is cached for ever and there is nothing that re-probes (2026-09-08).
     static func probe(
         master: SSHMaster, root: String, uploadTag: String, locationID: String
-    ) async -> (budget: ChannelBudget, bulk: Opened?) {
+    ) async -> (budget: ChannelBudget?, bulk: Opened?) {
         // Channel 2: the bulk channel.
         let second = await openVerifiedChannel(master: master, root: root, uploadTag: uploadTag)
         guard case .success(let bulk) = second else {
             if case .failure(let refusal) = second {
+                if refusal.connectionDied {
+                    Log.ssh.notice(
+                        "\(locationID, privacy: .public): the connection died while probing the second channel (\(refusal.diagnostics, privacy: .public)); recording no budget"
+                    )
+                    return (nil, nil)
+                }
                 Log.ssh.notice(
                     "\(locationID, privacy: .public): a second channel was refused (\(refusal.diagnostics, privacy: .public))"
                 )
@@ -157,6 +182,14 @@ enum ChannelProbe {
             Log.ssh.notice("\(locationID, privacy: .public): three channels held; full budget")
             return (.unrestricted, bulk)
         case .failure(let refusal):
+            if refusal.connectionDied {
+                Log.ssh.notice(
+                    "\(locationID, privacy: .public): the connection died while probing the third channel (\(refusal.diagnostics, privacy: .public)); recording no budget"
+                )
+                await bulk.transport.shutdown()
+                bulk.channel.close()
+                return (nil, nil)
+            }
             Log.ssh.notice(
                 "\(locationID, privacy: .public): a third channel was refused (\(refusal.diagnostics, privacy: .public)); dropping the bulk channel"
             )
@@ -207,6 +240,10 @@ enum CapabilityCache {
         guard let stored = read(locationID: locationID)["channels"] as? [String: Any],
             let channels = stored["concurrentChannels"] as? Int
         else { return nil }
+        // Measured while the connection was going away, or measured before one did: either
+        // way it is not evidence any more, and the next connect re-probes. The values stay
+        // in the file so an offline `status` still has something to print (2026-09-08).
+        if stored["suspect"] as? Bool == true { return nil }
         return ChannelBudget(
             concurrentChannels: channels,
             hasBulkChannel: (stored["bulkChannel"] as? Bool) ?? (channels >= 3),
@@ -219,7 +256,25 @@ enum CapabilityCache {
     static func store(_ budget: ChannelBudget, locationID: String) {
         var values = budget.asJSON
         values["probedAt"] = Date().timeIntervalSince1970
+        values["suspect"] = false
         merge(locationID: locationID, ["channels": values])
+    }
+
+    /// Marks the cached budget as no longer evidence, so the next connect probes again.
+    ///
+    /// Called on every abrupt loss of a connection that was up - a master that died, two
+    /// consecutive deadline misses, a path that went away, the will-sleep drop. Section 6.1
+    /// says the cache's "only invalidation" is an explicit re-probe; that was written when
+    /// the only way to get a wrong answer was a server that changed its mind, and it left
+    /// a location that probed in a bad moment stuck at that answer for the life of the
+    /// install (2026-09-08). Two extra channel opens on the next connect is the whole cost.
+    static func markChannelBudgetSuspect(locationID: String) {
+        guard var channels = read(locationID: locationID)["channels"] as? [String: Any] else {
+            return
+        }
+        guard channels["suspect"] as? Bool != true else { return }
+        channels["suspect"] = true
+        merge(locationID: locationID, ["channels": channels])
     }
 
     /// Section 8.1's own half of the file: "the result is cached in

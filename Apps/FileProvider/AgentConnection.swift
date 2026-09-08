@@ -1,7 +1,9 @@
 import FileProvider
 import Foundation
-import XPCProtocols
 import Logging
+import ProviderCore
+import XPCInterfaces
+import XPCProtocols
 
 /// The extension's XPC client (DESIGN.md section 5.2).
 ///
@@ -9,26 +11,19 @@ import Logging
 /// agent on demand if it is registered, so the extension does not care whether the agent
 /// was already running.
 ///
-/// If the connection cannot be made, which in practice means the user disabled the login
-/// item in System Settings > General > Login Items, the extension calls
-/// `NSFileProviderManager.disconnect(reason:)` on its domain and every call returns
-/// serverUnreachable. It reconnects, and lifts the disconnect, the next time the
-/// connection succeeds. (Whether `disconnect(reason:)` can be called from inside the
-/// extension at all is one of S5's questions; if it cannot, the message lives only in
-/// `sshdrive doctor`.)
+/// Nothing here decides anything: whether a failed call means the domain should be
+/// disconnected, and whether a reply means it should be reconnected, are
+/// `ProviderService`'s rules (`MQ-073`, `MQ-074`). This class owns the socket and calls
+/// those rules through `onUnreachable`.
 final class AgentConnection: NSObject {
-    static let agentMissingMessage =
-        "SSH Drive's background agent is not running. Enable it in Login Items or run "
-        + "`sshdrive doctor`."
-
-    private let domain: NSFileProviderDomain
     private let callbacks: ExtensionCallbacks
     private var connection: NSXPCConnection?
-    private var disconnected = false
     private let lock = NSLock()
 
-    init(domain: NSFileProviderDomain, callbacks: ExtensionCallbacks) {
-        self.domain = domain
+    /// Called when a call actually fails, which is the only evidence of a missing agent.
+    var onUnreachable: (() -> Void)?
+
+    init(callbacks: ExtensionCallbacks) {
         self.callbacks = callbacks
     }
 
@@ -55,13 +50,14 @@ final class AgentConnection: NSObject {
         }
 
         return connection?.remoteObjectProxyWithErrorHandler { [weak self] error in
-            self?.reportAgentMissing()
+            Log.extensionLog.error("the agent is unreachable: \(error, privacy: .public)")
+            self?.onUnreachable?()
             onError(error)
         } as? SSHDriveAgentProtocol
     }
 
-    /// The connection dropped. That is *not* on its own a missing agent: the system
-    /// kills an idle extension instance, and the invalidation that follows our own
+    /// The connection dropped. That is *not* on its own a missing agent: the system kills
+    /// an idle extension instance (`MQ-073`), and the invalidation that follows our own
     /// teardown used to call `disconnect(reason:)` on the way out, which left the domain
     /// disconnected for every later instance and answered every request
     /// `.serverUnreachable` for good (docs/spikes/results.md, 2026-09-04 signed pass).
@@ -73,69 +69,296 @@ final class AgentConnection: NSObject {
         lock.unlock()
     }
 
-    /// The one case where the extension, not the agent, changes domain state (section 3).
-    private func reportAgentMissing() {
-        guard !disconnected else { return }
-        disconnected = true
-        guard let manager = NSFileProviderManager(for: domain) else { return }
-        manager.disconnect(reason: Self.agentMissingMessage, options: []) { error in
-            if let error {
-                Log.extensionLog.error(
-                    "disconnect(reason:) failed: \(error, privacy: .public)")
-            }
-        }
-    }
-
-    /// The agent answered, so lift any disconnect on this domain.
-    ///
-    /// Unconditional, not guarded on this instance having set it: the disconnect survives
-    /// the instance that set it, so a fresh instance has to clear one it never made. It
-    /// is one call to fileproviderd per instance launch, on the reply to `indexReady`.
-    func noteAgentReachable() {
-        lock.lock()
-        disconnected = false
-        lock.unlock()
-        guard let manager = NSFileProviderManager(for: domain) else { return }
-        manager.reconnect { error in
-            if let error {
-                Log.extensionLog.error("reconnect() failed: \(error, privacy: .public)")
-            }
-        }
-    }
-
     func invalidate() {
         lock.lock()
         defer { lock.unlock() }
         connection?.invalidate()
         connection = nil
     }
+}
 
-    /// Every agent error becomes an NSFileProviderError before it reaches the system
-    /// (section 5.1). A connection failure is serverUnreachable, so the system queues and
-    /// retries rather than showing an error.
-    static func fileProviderError(from error: Error) -> Error {
-        let nsError = error as NSError
-        // An error the agent raised in the system's own domain - `.syncAnchorExpired` off
-        // the working-set fallback - is already the answer and must survive the trip.
-        if nsError.domain == NSFileProviderErrorDomain { return nsError }
-        guard let agentError = nsError.sshDriveAgentError else {
-            return NSFileProviderError(.serverUnreachable)
+/// `NSFileProviderManager`'s three calls, behind `ProviderDomainSignalling`.
+final class ManagerSignalling: ProviderDomainSignalling {
+    private let manager: NSFileProviderManager?
+
+    init(domain: NSFileProviderDomain) {
+        self.manager = NSFileProviderManager(for: domain)
+    }
+
+    func signalErrorResolved(_ failure: ProviderFailure) {
+        guard let manager else { return }
+        manager.signalErrorResolved(AppleMapping.nsError(failure)) { error in
+            if let error {
+                Log.extensionLog.error(
+                    "signalErrorResolved failed: \(error, privacy: .public)")
+            }
         }
-        switch agentError {
-        case .serverUnreachable, .interfaceVersionMismatch, .unknownDomain:
-            return NSFileProviderError(.serverUnreachable)
-        case .notAuthenticated:
-            return NSFileProviderError(.notAuthenticated)
-        case .noSuchItem:
-            return NSFileProviderError(.noSuchItem)
-        case .filenameCollision:
-            return NSFileProviderError(.filenameCollision)
-        case .insufficientQuota:
-            return NSFileProviderError(.insufficientQuota)
-        case .deletionRejected:
-            return NSFileProviderError(.deletionRejected)
-        case .versionMismatch, .cannotSynchronize, .permissionDenied, .notImplemented:
-            return NSFileProviderError(.cannotSynchronize)
+    }
+
+    func disconnect(reason: String) {
+        guard let manager else { return }
+        manager.disconnect(reason: reason, options: []) { error in
+            if let error {
+                Log.extensionLog.error("disconnect(reason:) failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    func reconnect() {
+        guard let manager else { return }
+        manager.reconnect { error in
+            if let error {
+                Log.extensionLog.error("reconnect() failed: \(error, privacy: .public)")
+            }
+        }
+    }
+}
+
+/// `AgentChannel` over NSXPC: one method each, argument for argument, with
+/// `AppleMapping.failure(from:)` at every failure edge.
+final class XPCAgentChannel: AgentChannel {
+    private let connection: AgentConnection
+    private let domainIdentifier: String
+    private let displayName: String
+
+    init(connection: AgentConnection, domainIdentifier: String, displayName: String) {
+        self.connection = connection
+        self.domainIdentifier = domainIdentifier
+        self.displayName = displayName
+    }
+
+    private func view(_ snapshot: SSHDriveItemSnapshot) -> ItemView {
+        ItemView(snapshot: snapshot, rootDisplayName: displayName)
+    }
+
+    /// One place turning "there is no proxy" and "the call failed" into the same answer.
+    private func withProxy(
+        _ onUnreachable: @escaping () -> Void, _ body: (SSHDriveAgentProtocol) -> Void
+    ) {
+        guard let proxy = connection.proxy(onError: { _ in onUnreachable() }) else {
+            onUnreachable()
+            return
+        }
+        body(proxy)
+    }
+
+    private func itemReply(
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) -> (SSHDriveItemSnapshot?, Error?) -> Void {
+        { [weak self] snapshot, error in
+            guard let self else { return }
+            if let snapshot {
+                completion(.success(self.view(snapshot)))
+            } else {
+                completion(.failure(error.map(AppleMapping.failure(from:)) ?? .serverUnreachable))
+            }
+        }
+    }
+
+    private func pageReply(
+        _ completion: @escaping (Result<ProviderItemPage, ProviderFailure>) -> Void
+    ) -> (SSHDriveItemPage?, Error?) -> Void {
+        { [weak self] page, error in
+            guard let self else { return }
+            if let error {
+                completion(.failure(AppleMapping.failure(from: error)))
+                return
+            }
+            completion(
+                .success(
+                    ProviderItemPage(
+                        items: (page?.items ?? []).map(self.view),
+                        deletedIdentifiers: (page?.deletedIdentifiers ?? []).map {
+                            ProviderItemIdentifier($0)
+                        },
+                        nextPageToken: page?.nextPageToken,
+                        anchor: page?.anchor ?? "",
+                        moreComing: page?.moreComing ?? false)))
+        }
+    }
+
+    // MARK: Handshake
+
+    func indexReady(_ completion: @escaping (Bool?) -> Void) {
+        withProxy({ completion(nil) }) { proxy in
+            proxy.indexReady(domainIdentifier: domainIdentifier) { completion($0) }
+        }
+    }
+
+    // MARK: Enumeration
+
+    func enumerateItems(
+        container: ProviderItemIdentifier, pageToken: ProviderPageToken?,
+        _ completion: @escaping (Result<ProviderItemPage, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.enumerateItems(
+                domainIdentifier: domainIdentifier, containerIdentifier: container.rawValue,
+                pageToken: pageToken, reply: pageReply(completion))
+        }
+    }
+
+    func enumerateChanges(
+        container: ProviderItemIdentifier, anchor: ProviderSyncAnchor,
+        _ completion: @escaping (Result<ProviderItemPage, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.enumerateChanges(
+                domainIdentifier: domainIdentifier, containerIdentifier: container.rawValue,
+                anchor: anchor.rawValue, reply: pageReply(completion))
+        }
+    }
+
+    func enumerateWorkingSetChanges(
+        anchor: ProviderSyncAnchor,
+        _ completion: @escaping (Result<ProviderItemPage, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.enumerateWorkingSetChanges(
+                domainIdentifier: domainIdentifier, anchor: anchor.rawValue,
+                reply: pageReply(completion))
+        }
+    }
+
+    func currentAnchor(_ completion: @escaping (String?) -> Void) {
+        withProxy({ completion(nil) }) { proxy in
+            proxy.currentAnchor(domainIdentifier: domainIdentifier) { anchor, _ in
+                completion(anchor)
+            }
+        }
+    }
+
+    func item(
+        identifier: ProviderItemIdentifier,
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.item(
+                domainIdentifier: domainIdentifier, itemIdentifier: identifier.rawValue,
+                reply: itemReply(completion))
+        }
+    }
+
+    // MARK: Transfers
+
+    func fetchContents(
+        identifier: ProviderItemIdentifier, requestedVersion: String?,
+        isFileViewerRequest: Bool, isSystemRequest: Bool, into destination: FileHandle,
+        transferID: String,
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.fetchContents(
+                domainIdentifier: domainIdentifier, itemIdentifier: identifier.rawValue,
+                requestedVersion: requestedVersion, isFileViewerRequest: isFileViewerRequest,
+                isSystemRequest: isSystemRequest, into: destination, transferID: transferID,
+                reply: itemReply(completion))
+        }
+    }
+
+    func fetchPartialContents(
+        identifier: ProviderItemIdentifier, offset: Int64, length: Int64,
+        into destination: FileHandle, transferID: String,
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.fetchPartialContents(
+                domainIdentifier: domainIdentifier, itemIdentifier: identifier.rawValue,
+                offset: offset, length: length, into: destination, transferID: transferID,
+                reply: itemReply(completion))
+        }
+    }
+
+    // MARK: Mutations
+
+    func createItem(
+        template: ItemTemplate, contents: FileHandle?, transferID: String,
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.createItem(
+                domainIdentifier: domainIdentifier,
+                parentIdentifier: template.parentIdentifier.rawValue,
+                filename: template.filename,
+                isDirectory: template.isDirectory,
+                symlinkTarget: template.symlinkTarget,
+                fileSystemFlags: template.fileSystemFlags.map { NSNumber(value: $0) },
+                modificationDate: template.modificationDate.map { NSNumber(value: $0) },
+                extendedAttributes: template.extendedAttributes,
+                tagData: template.tagData,
+                contents: contents,
+                transferID: transferID,
+                reply: itemReply(completion))
+        }
+    }
+
+    func modifyItem(
+        identifier: ProviderItemIdentifier, baseVersion: String?,
+        changedFields: ProviderItemFields, changes: ItemChanges, contents: FileHandle?,
+        transferID: String,
+        _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
+    ) {
+        withProxy({ completion(.failure(.serverUnreachable)) }) { proxy in
+            proxy.modifyItem(
+                domainIdentifier: domainIdentifier,
+                itemIdentifier: identifier.rawValue,
+                baseVersion: baseVersion,
+                changedFields: UInt64(changedFields.rawValue),
+                newParentIdentifier: changes.newParentIdentifier?.rawValue,
+                newFilename: changes.newFilename,
+                newFileSystemFlags: changes.newFileSystemFlags.map { NSNumber(value: $0) },
+                newModificationDate: changes.newModificationDate.map { NSNumber(value: $0) },
+                newExtendedAttributes: changes.newExtendedAttributes,
+                newTagData: changes.newTagData,
+                newSymlinkTarget: changes.newSymlinkTarget,
+                contents: contents,
+                transferID: transferID,
+                reply: itemReply(completion))
+        }
+    }
+
+    func deleteItem(
+        identifier: ProviderItemIdentifier, baseVersion: String?, recursive: Bool,
+        _ completion: @escaping (ProviderFailure?) -> Void
+    ) {
+        withProxy({ completion(.serverUnreachable) }) { proxy in
+            proxy.deleteItem(
+                domainIdentifier: domainIdentifier, itemIdentifier: identifier.rawValue,
+                baseVersion: baseVersion, recursive: recursive
+            ) { error in
+                completion(error.map(AppleMapping.failure(from:)))
+            }
+        }
+    }
+
+    func cancelTransfer(transferID: String) {
+        withProxy({}) { $0.cancelTransfer(transferID: transferID) }
+    }
+
+    // MARK: Signals
+
+    func materializedItemsDidChange() {
+        withProxy({}) { $0.materializedItemsDidChange(domainIdentifier: domainIdentifier) }
+    }
+
+    func workingSetAnchorExpired(freshAnchor: String) {
+        withProxy({}) {
+            $0.workingSetAnchorExpired(
+                domainIdentifier: domainIdentifier, freshAnchor: freshAnchor)
+        }
+    }
+
+    func performAction(
+        actionIdentifier: String, itemIdentifiers: [ProviderItemIdentifier],
+        _ completion: @escaping (ProviderFailure?) -> Void
+    ) {
+        withProxy({ completion(.serverUnreachable) }) { proxy in
+            proxy.performAction(
+                domainIdentifier: domainIdentifier, actionIdentifier: actionIdentifier,
+                itemIdentifiers: itemIdentifiers.map(\.rawValue)
+            ) { error in
+                completion(error.map(AppleMapping.failure(from:)))
+            }
         }
     }
 }

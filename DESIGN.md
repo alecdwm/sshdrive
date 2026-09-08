@@ -1724,8 +1724,22 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   "once per server banner", re-probing when the banner changes: the agent
   never sees one. Its `ssh` runs at `LogLevel=ERROR`, which prints no
   remote version, and a mux client speaks to the master's socket rather
-  than to the server, so the cache is keyed by the location and an
-  explicit re-probe is its only invalidation (2026-09-04). The one `ssh`
+  than to the server, so the cache is keyed by the location. An
+  explicit re-probe used to be its only invalidation, and that was written
+  when the only way to hold a wrong answer was a server that changed its
+  mind. There is a second way: `ssh` fails a channel open just as readily
+  because the master it was speaking to has gone, and the probe recorded
+  that as the server's answer. A real install that had `ssh` killed under it
+  came up reporting "the server allows one channel at a time (MaxSessions
+  1) ... SFTP-only", with no shell and no helper, against a healthy Debian,
+  and stayed that way across every later restart. So the probe now tells a
+  refused session from a dead connection - the refusal `ssh` actually
+  prints, against a master that is still running - and **records nothing at
+  all** when the connection is what failed, failing the connect attempt
+  instead so §6.3's breaker tries again; and an abrupt loss of a connection
+  that was up marks the cached answer as no longer evidence, so the next
+  connect probes again (2026-09-08). The values stay in the file for an
+  offline `status` to print. The one `ssh`
   the agent runs that *is* neither a master nor a mux client - the collect
   connection of §4.2 - raises `LogLevel` to `DEBUG1` for that connection
   alone and reads the identification string once, which is where §8.1's
@@ -2166,14 +2180,32 @@ the life of the connection. At a `MaxSessions` of 2 there is exactly one
 spare channel and the probe, `sshdrive test` and the 30-minute insurance
 sweep below all want it, so a helper that never gave it back would cost
 the location all three; the channel budget of §6.1 therefore answers "may
-I hold one open", not only "may I open one" (2026-09-05). A tier that fails at runtime
-(the helper's stream dies with a non-network error, `find` is missing)
-drops the location one tier down for the
-rest of the session and records why, which `sshdrive status` shows. Setting
+I hold one open", not only "may I open one" (2026-09-05). A tier that fails at runtime drops
+the location one tier down and records why, which `sshdrive status` shows -
+but **for how long depends on what failed**. A failure that will be just as
+true on the next connection costs the tier for the rest of the session: no
+shell, no exec channel, an unsupported OS or arch, a `noexec` directory, a
+hash that did not match after a redeploy, a `find` that is missing. Everything
+else is transient and costs the tier for a bounded backoff only - 2 s,
+doubling to 60 s - after which the ladder climbs back, and a connection that
+comes up clears the hold and the backoff outright, because the link being
+back is the evidence the outage is over. The distinction is not a refinement:
+the helper's stream dies with **every** connection, so reading its death as a
+verdict about the server left a location at the sweep tier after any network
+blink until something restarted the agent, which is what a repeated
+down/up/down/up cycle produced in production (2026-09-08). `status` says
+which of the two a downgrade is and, for a transient one, when the higher
+tier is tried again. Setting
 `watchMode` to a specific tier disables the fallback ladder except to `poll`,
 which always works. On reconnect after any outage every tier first runs one
 full sweep (tier 1, or tier 0 if exec is unavailable) so changes made while
-disconnected are caught, then resumes streaming. A "full sweep" is the
+disconnected are caught, then resumes streaming. **Resuming is part of the
+reconnect, not of the next cycle**: the helper's stream runs on an exec
+channel of the connection that just went, so it is re-opened by the same path
+that re-opens the SFTP channels and immediately after it, since both sit on
+the master that path rebuilt. Leaving it to the next poll cycle is up to 60 s
+on a location the user has touched and up to 10 minutes on one they have not
+(2026-09-08). A "full sweep" is the
 tier 1 sweep with its window opened back to the last server timestamp
 the index recorded, unbounded when there is none (a fresh or rebuilt
 index), or at tier 0 a `readdir` of every root with the rotation of
@@ -4411,6 +4443,24 @@ there, so that this list cannot drift from the body.
   and states missing `fsync@openssh.com`/`limits@openssh.com` as facts about a
   server known not to be OpenSSH rather than as upgrades (2026-09-08, §8.1,
   §6.1).
+- **A runtime tier failure is permanent only for the reasons §6.4 lists as
+  permanent;** everything else, an outage above all, holds the tier for a
+  bounded backoff and then climbs back, and a connection coming up clears the
+  hold at once. The helper's stream dies with every connection, so the old
+  rule turned a network blink into a mount stuck at the sweep tier until the
+  agent was restarted (2026-09-08, §6.4).
+- **The helper's stream is re-opened by the reconnect path itself,** in the
+  same `applyConnection` that re-opens the SFTP channels and strictly after
+  it, because both are channels of the master that path rebuilt; leaving it
+  to the next poll cycle cost up to ten minutes of no push detection, and on
+  a location a runtime failure had dropped, for ever (2026-09-08, §6.4,
+  §5.6).
+- **A channel that did not open is evidence about the server only while the
+  master was alive:** the `MaxSessions` probe records nothing when the
+  connection died under it, and an abrupt loss of a connection that was up
+  invalidates the cached budget so the next connect re-probes. A budget
+  measured in a broken moment used to outlive the moment for the life of the
+  install (2026-09-08, §6.1, §8.1).
 - **Tests encode measured behaviour and run on Linux; the VM only seeds them.**
   Every decision moves out of `Apps/` into the package behind named protocols,
   a `SystemModel` (fileproviderd + Finder + launchd) and a `ServerModel`

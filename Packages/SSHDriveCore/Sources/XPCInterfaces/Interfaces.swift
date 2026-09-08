@@ -1,4 +1,7 @@
+#if canImport(Darwin)
+
 import Foundation
+import XPCProtocols
 
 /// The configured NSXPCInterfaces. NSXPC refuses any collection or custom class that was
 /// not whitelisted for the exact argument it appears in, so both ends build their
@@ -77,3 +80,5 @@ public enum SSHDriveXPCInterface {
         NSXPCInterface(with: SSHDriveExtensionProtocol.self)
     }
 }
+
+#endif

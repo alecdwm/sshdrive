@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import XPCInterfaces
 import XPCProtocols
 
 /// The terminal, exported to the agent for the length of one command (DESIGN.md

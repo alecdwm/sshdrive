@@ -197,14 +197,22 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
                     case .success(let opened): bulk = opened
                     case .failure(let refusal):
                         // The cache said three were affordable and two are not. Believe
-                        // the server, not the cache, and re-probe from scratch.
+                        // the server, not the cache, and re-probe from scratch - unless
+                        // what failed was the connection, in which case there is nothing
+                        // to believe either way.
+                        guard !refusal.connectionDied else {
+                            throw SFTPError.connectionLost
+                        }
                         Log.ssh.notice(
                             "\(location.id, privacy: .public): cached budget no longer holds (\(refusal.diagnostics, privacy: .public)); re-probing"
                         )
                         let probed = await ChannelProbe.probe(
                             master: master, root: root, uploadTag: uploadTag,
                             locationID: location.id)
-                        budget = probed.budget
+                        // A probe that failed because the connection died records nothing:
+                        // the attempt fails and the breaker tries again (2026-09-08).
+                        guard let measured = probed.budget else { throw SFTPError.connectionLost }
+                        budget = measured
                         bulk = probed.bulk
                         CapabilityCache.store(budget, locationID: location.id)
                     }
@@ -212,7 +220,8 @@ final class SSHBackedTransport: SFTPTransport, @unchecked Sendable {
             } else {
                 let probed = await ChannelProbe.probe(
                     master: master, root: root, uploadTag: uploadTag, locationID: location.id)
-                budget = probed.budget
+                guard let measured = probed.budget else { throw SFTPError.connectionLost }
+                budget = measured
                 bulk = probed.bulk
                 CapabilityCache.store(budget, locationID: location.id)
             }

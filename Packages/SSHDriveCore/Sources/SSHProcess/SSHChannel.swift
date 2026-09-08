@@ -14,7 +14,7 @@ final class StderrCollector: @unchecked Sendable {
         let thread = Thread { [weak self] in
             var chunk = [UInt8](repeating: 0, count: 8 * 1024)
             while true {
-                let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                let n = chunk.withUnsafeMutableBytes { sshRead(fd, $0.baseAddress, $0.count) }
                 if n > 0 {
                     self?.append(Array(chunk[0 ..< n]))
                     continue

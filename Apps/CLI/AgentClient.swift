@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import XPCInterfaces
 import XPCProtocols
 import Logging
 

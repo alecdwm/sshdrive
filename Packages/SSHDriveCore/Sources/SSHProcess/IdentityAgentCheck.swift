@@ -47,7 +47,12 @@ public enum IdentityAgentCheck {
     public static func probe(_ path: String?) -> Result {
         guard let path, !path.isEmpty else { return .ok }
         guard FileManager.default.fileExists(atPath: path) else { return .missing(path) }
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #if canImport(Darwin)
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        #else
+            // Glibc types SOCK_STREAM as `__socket_type`, not `Int32`.
+            let fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        #endif
         guard fd >= 0 else { return .refusing(path, errno: errno) }
         defer { close(fd) }
         var address = sockaddr_un()
@@ -58,10 +63,13 @@ public enum IdentityAgentCheck {
         withUnsafeMutableBytes(of: &address.sun_path) { destination in
             destination.baseAddress?.copyMemory(from: bytes, byteCount: bytes.count)
         }
-        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        #if canImport(Darwin)
+            // BSD's length byte; Linux's sockaddr_un has no such field.
+            address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        #endif
         let result = withUnsafePointer(to: &address) { pointer -> Int32 in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                sshConnect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
         if result != 0 {

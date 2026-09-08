@@ -74,7 +74,7 @@ targets:
             subpath: Contents/Library/LaunchAgents
     dependencies:
       - package: SSHDriveCore
-        products: [AgentCore, Config, Secrets, SFTP, SSHProcess, Index, XPCProtocols, Logging]
+        products: [AgentCore, Config, Secrets, SFTP, SSHProcess, Index, ProviderCore, XPCProtocols, XPCInterfaces, Logging]
       - target: SSHDriveFileProvider
         embed: true
         codeSign: true
@@ -107,7 +107,7 @@ targets:
         excludes: ["*.entitlements", "Info.plist"]
     dependencies:
       - package: SSHDriveCore
-        products: [Config, Index, XPCProtocols, Logging]
+        products: [ProviderCore, XPCProtocols, XPCInterfaces, Logging]
       - sdk: FileProvider.framework
     settings:
       base:
@@ -128,7 +128,7 @@ targets:
         excludes: ["*.entitlements", "Info.plist"]
     dependencies:
       - package: SSHDriveCore
-        products: [Config, XPCProtocols, Logging]
+        products: [Config, XPCProtocols, XPCInterfaces, Logging]
       - package: ArgumentParser
         product: ArgumentParser
     settings:
@@ -151,7 +151,7 @@ targets:
         excludes: ["*.entitlements", "Info.plist"]
     dependencies:
       - package: SSHDriveCore
-        products: [XPCProtocols, Logging]
+        products: [XPCProtocols, XPCInterfaces, Logging]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.shirls.sshdrive.askpass

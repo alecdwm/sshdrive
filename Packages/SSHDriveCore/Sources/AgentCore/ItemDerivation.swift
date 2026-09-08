@@ -1,5 +1,5 @@
 import Foundation
-import FileProvider
+import ProviderCore
 import Index
 import Config
 import SFTP
@@ -69,8 +69,8 @@ public enum ItemDerivation {
         permissions: PermissionsMode,
         identity: ServerIdentity,
         kept: Bool
-    ) -> NSFileProviderItemCapabilities {
-        var capabilities: NSFileProviderItemCapabilities = [.allowsReading]
+    ) -> ProviderCapabilities {
+        var capabilities: ProviderCapabilities = [.allowsReading]
 
         let writable: Bool
         let parentWritable: Bool
@@ -126,10 +126,10 @@ public enum ItemDerivation {
         gid: UInt32,
         permissions: PermissionsMode,
         identity: ServerIdentity,
-        capabilities: NSFileProviderItemCapabilities,
+        capabilities: ProviderCapabilities,
         filename: String
-    ) -> NSFileProviderFileSystemFlags {
-        var flags: NSFileProviderFileSystemFlags = [.userReadable]
+    ) -> ProviderFileSystemFlags {
+        var flags: ProviderFileSystemFlags = [.userReadable]
         if capabilities.contains(.allowsWriting) { flags.insert(.userWritable) }
         if type == .directory {
             flags.insert(.userExecutable)

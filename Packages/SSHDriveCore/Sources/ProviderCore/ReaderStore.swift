@@ -1,15 +1,13 @@
-import FileProvider
 import Foundation
 import Config
 import Index
-import XPCProtocols
 import Logging
 
 /// The extension's own read-only view of the domain's index (DESIGN.md section 5.2).
 ///
 /// One rule governs every failure here: any SQLite error, a corrupt page, a
 /// not-a-database header during the truncate window, a missing table, is answered as
-/// serverUnreachable, never as noSuchItem, so a rebuild in progress can never look like a
+/// "ask the agent", never as noSuchItem, so a rebuild in progress can never look like a
 /// deletion (section 5.3).
 ///
 /// **Readiness is not a latch.** It used to be: an instance asked the agent `indexReady`
@@ -17,35 +15,40 @@ import Logging
 /// runtime is not up yet, and for any index it cannot read at that instant - left that
 /// instance answering the working set `.serverUnreachable` for the whole of its life,
 /// with nothing that would ever re-ask. fileproviderd throttles a change enumeration that
-/// keeps failing, so a few seconds of "not ready" during a domain restart became an
-/// event stream backed off to tens of minutes and a mount that took no server-side change
-/// at all (2026-09-08). The rule now lives in `IndexReaderReadiness`, which is a value and
-/// has tests; here it is wired to an XPC round trip and to the file `doctor` reads.
-///
-/// Every method that cannot answer returns nil rather than throwing, because the caller
-/// has somewhere else to go: the agent has the same rows.
-final class IndexReaderStore {
+/// keeps failing (`MQ-005`), so a few seconds of "not ready" during a domain restart became
+/// an event stream backed off to tens of minutes and a mount that took no server-side
+/// change at all (2026-09-08). The rule lives in `IndexReaderReadiness`, which is a value
+/// and has tests; here it is wired to an XPC round trip and to the file `doctor` reads.
+public final class IndexReaderStore: ReaderStoring {
     private let locationID: String
+    private let rootDisplayName: String
+    private let clock: ProviderClock
     private var reader: IndexReader?
     private let lock = NSLock()
     /// False forces every read through the agent, which is the fallback path anyway.
-    var useReader = true
-    private var readiness = IndexReaderReadiness(retryInterval: 2)
+    public private(set) var useReader = true
+    private var readiness: IndexReaderReadiness
     private var lastGeneration: Int64?
     private var writtenState: String?
-    private var lastWriteAt: Date?
-    /// How the store asks the agent again. Set by the extension, which owns the proxy.
+    private var lastWriteAt: Double?
+    /// How the store asks the agent again. Set by the provider, which owns the channel.
     /// The answer is `nil` when the agent could not be reached at all.
-    var askAgent: ((@escaping (Bool?) -> Void) -> Void)?
+    public var askAgent: ((@escaping (Bool?) -> Void) -> Void)?
 
-    init(locationID: String) {
+    public init(
+        locationID: String, rootDisplayName: String, clock: ProviderClock = SystemProviderClock(),
+        retryInterval: Double = 2
+    ) {
         self.locationID = locationID
+        self.rootDisplayName = rootDisplayName
+        self.clock = clock
+        self.readiness = IndexReaderReadiness(retryInterval: retryInterval)
     }
 
     /// The agent's answer to `indexReady`.
-    func markReady(_ ready: Bool?) {
+    public func markReady(_ ready: Bool?) {
         lock.lock()
-        readiness.answered(ready, at: Date().timeIntervalSince1970)
+        readiness.answered(ready, at: clock.now())
         if readiness.canRead {
             // Read `meta.generation` here rather than only on the first row, so the state
             // file says something useful about an index nothing has read yet.
@@ -63,17 +66,17 @@ final class IndexReaderStore {
         publishState()
     }
 
-    var isReady: Bool {
+    public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
         return useReader && readiness.canRead
     }
 
-    var stateName: String {
+    public var stateName: String {
         lock.lock(); defer { lock.unlock() }
         return useReader ? readiness.state.rawValue : "\(readiness.state.rawValue) (reader off)"
     }
 
-    func close() {
+    public func close() {
         lock.lock()
         reader?.close()
         reader = nil
@@ -84,7 +87,7 @@ final class IndexReaderStore {
         publishState()
     }
 
-    func reopen() {
+    public func reopen() {
         lock.lock()
         reader = nil
         readiness.reopen()
@@ -99,7 +102,7 @@ final class IndexReaderStore {
     /// during a domain restart recovers by itself.
     private func askAgainIfDue() {
         lock.lock()
-        let due = readiness.shouldAsk(at: Date().timeIntervalSince1970)
+        let due = readiness.shouldAsk(at: clock.now())
         let ask = askAgent
         lock.unlock()
         guard due, let ask else { return }
@@ -117,25 +120,25 @@ final class IndexReaderStore {
     /// A read that failed. The reader is dropped and the agent is asked again; the caller
     /// falls back to the agent for this call.
     private func failed(_ error: Error) {
-        readiness.failed(String(describing: error), at: Date().timeIntervalSince1970)
+        readiness.failed(String(describing: error), at: clock.now())
         reader = nil
     }
 
     /// Reads one row, or nil when the reader is not usable and the caller should ask the
     /// agent instead. Throws only what the system should see: `.noSuchItem`, which is a
     /// real answer about a real identifier.
-    func item(identifier: String) throws -> SSHDriveItemSnapshot? {
+    public func item(identifier: ProviderItemIdentifier) throws -> ItemView? {
         askAgainIfDue()
         lock.lock()
         defer { lock.unlock() }
         guard useReader, readiness.canRead else { return nil }
         do {
             let reader = try open()
-            let row = try reader.item(identifier: identifier)
+            let row = try reader.item(identifier: identifier.rawValue)
             lastGeneration = try? reader.generation()
-            return row.snapshot
+            return ItemView(snapshot: row.snapshot, rootDisplayName: rootDisplayName)
         } catch IndexError.noSuchItem {
-            throw NSFileProviderError(.noSuchItem)
+            throw ProviderFailure.noSuchItem
         } catch IndexError.schemaTooNew {
             // A mid-upgrade mismatch degrades to the slow path rather than failing.
             useReader = false
@@ -159,10 +162,7 @@ final class IndexReaderStore {
     /// Returns nil when the reader cannot answer at all, which is the caller's cue to ask
     /// the agent. The only error it throws is `.syncAnchorExpired`, which is a real answer
     /// about the anchor the system holds and not a failure of this reader.
-    func changes(since anchor: Int64, limit: Int = 500) throws
-        -> (entries: [IndexAnchorEntry], items: [SSHDriveItemSnapshot], deleted: [String],
-            newAnchor: Int64, hasMore: Bool)?
-    {
+    public func changes(since anchor: Int64, limit: Int = 500) throws -> ReaderChangePage? {
         askAgainIfDue()
         lock.lock()
         defer { lock.unlock() }
@@ -171,25 +171,28 @@ final class IndexReaderStore {
             let reader = try open()
             let result = try reader.changes(since: anchor, limit: limit)
             lastGeneration = try? reader.generation()
-            var items: [SSHDriveItemSnapshot] = []
-            var deleted: [String] = []
+            var items: [ItemView] = []
+            var deleted: [ProviderItemIdentifier] = []
             for entry in result.entries {
                 switch entry.kind {
                 case .deleted:
-                    deleted.append(entry.identifier)
+                    deleted.append(ProviderItemIdentifier(entry.identifier))
                 case .modified:
                     // An anchor whose identifier no longer has a row is reported as a
                     // deletion: only a deletion removes a row (section 5.3).
                     if let row = try? reader.item(identifier: entry.identifier) {
-                        items.append(row.snapshot)
+                        items.append(
+                            ItemView(snapshot: row.snapshot, rootDisplayName: rootDisplayName))
                     } else {
-                        deleted.append(entry.identifier)
+                        deleted.append(ProviderItemIdentifier(entry.identifier))
                     }
                 }
             }
-            return (result.entries, items, deleted, result.newAnchor, result.hasMore)
+            return ReaderChangePage(
+                items: items, deleted: deleted, newAnchor: result.newAnchor,
+                hasMore: result.hasMore)
         } catch IndexError.syncAnchorExpired {
-            throw NSFileProviderError(.syncAnchorExpired)
+            throw ProviderFailure.syncAnchorExpired
         } catch IndexError.reconciling {
             failed(IndexError.reconciling)
             return nil
@@ -198,8 +201,8 @@ final class IndexReaderStore {
             readiness.foundSchemaTooNew("the index schema is newer than this build")
             reader = nil
             return nil
-        } catch let error as NSError where error.domain == NSFileProviderErrorDomain {
-            throw error
+        } catch let failure as ProviderFailure {
+            throw failure
         } catch {
             Log.extensionLog.error("index reader failed: \(error, privacy: .public)")
             failed(error)
@@ -207,7 +210,7 @@ final class IndexReaderStore {
         }
     }
 
-    func currentSequence() -> Int64? {
+    public func currentSequence() -> Int64? {
         askAgainIfDue()
         lock.lock()
         defer { lock.unlock() }
@@ -235,20 +238,21 @@ final class IndexReaderStore {
         lock.lock()
         let fingerprint =
             "\(readiness.state.rawValue)|\(useReader)|\(readiness.lastError ?? "")|\(lastGeneration ?? -1)"
-        let stale = lastWriteAt.map { Date().timeIntervalSince($0) > 60 } ?? true
+        let now = clock.now()
+        let stale = lastWriteAt.map { now - $0 > 60 } ?? true
         guard fingerprint != writtenState || stale else {
             lock.unlock()
             return
         }
         writtenState = fingerprint
-        lastWriteAt = Date()
+        lastWriteAt = now
         let payload: [String: Any] = [
             "state": readiness.state.rawValue,
             "useReader": useReader,
             "path": (try? GroupContainer.indexURL(locationID: locationID))?.path ?? "",
             "generation": lastGeneration ?? -1,
             "lastError": readiness.lastError ?? "",
-            "at": Date().timeIntervalSince1970,
+            "at": now,
             "pid": ProcessInfo.processInfo.processIdentifier,
         ]
         lock.unlock()

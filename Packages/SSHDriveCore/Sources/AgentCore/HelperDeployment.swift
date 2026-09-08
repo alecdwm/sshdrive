@@ -94,6 +94,18 @@ public enum HelperDeployment {
         return .upload(reason: "the server could not verify the helper's contents")
     }
 
+    /// Whether a verification that failed **after** an upload is section 6.4's permanent
+    /// "hash mismatch after redeploy", or an outage wearing its message.
+    ///
+    /// A hash that came back and disagreed is about the file. No hash coming back at all -
+    /// neither `sha256sum`/`shasum` nor the binary's own `--version` - is about the exec
+    /// channel that would have produced one, and a connection going away is how that
+    /// happens. Treating the second as permanent left a location at the sweep tier for the
+    /// session against a server that was fine a minute later (2026-09-08).
+    public static func uploadFailureIsPermanent(after evidence: RemoteEvidence) -> Bool {
+        evidence.sha256 != nil || evidence.reportedDigest != nil
+    }
+
     /// The temp name an upload goes to. Section 5.5's shape, so a half-written helper is
     /// as recognisable as a half-written file of the user's, and the same
     /// `.sshdrive-upload-*` ignore rule covers it inside the helper directory too.

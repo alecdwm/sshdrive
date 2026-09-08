@@ -47,11 +47,21 @@ public enum Spawn {
         // Our ends must never raise SIGPIPE: writing a script to a mux client whose
         // socket has just gone is an ordinary, expected EPIPE, not a reason to kill the
         // agent.
-        for fd in [inPipe[1], outPipe[0], errPipe[0]] where fd >= 0 {
-            _ = fcntl(fd, F_SETNOSIGPIPE, 1)
-        }
+        #if canImport(Darwin)
+            for fd in [inPipe[1], outPipe[0], errPipe[0]] where fd >= 0 {
+                _ = fcntl(fd, F_SETNOSIGPIPE, 1)
+            }
+        #else
+            // Linux has no per-descriptor equivalent, so the signal is ignored process
+            // wide instead. Same effect at these call sites: the write returns EPIPE.
+            _ = ignoreSIGPIPEOnce
+        #endif
 
-        var actions: posix_spawn_file_actions_t?
+        #if canImport(Darwin)
+            var actions: posix_spawn_file_actions_t?
+        #else
+            var actions = posix_spawn_file_actions_t()
+        #endif
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
         if wantsStdin {
@@ -72,7 +82,11 @@ public enum Spawn {
             posix_spawn_file_actions_addclose(&actions, errPipe[1])
         }
 
-        var attributes: posix_spawnattr_t?
+        #if canImport(Darwin)
+            var attributes: posix_spawnattr_t?
+        #else
+            var attributes = posix_spawnattr_t()
+        #endif
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
         if newProcessGroup {
@@ -164,7 +178,7 @@ public enum Spawn {
             DispatchQueue.global().async {
                 var chunk = [UInt8](repeating: 0, count: 32 * 1024)
                 while true {
-                    let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                    let n = chunk.withUnsafeMutableBytes { sshRead(fd, $0.baseAddress, $0.count) }
                     if n > 0 {
                         lock.lock()
                         if isOut { out.append(contentsOf: chunk[0 ..< n]) } else { err.append(contentsOf: chunk[0 ..< n]) }
@@ -199,3 +213,11 @@ public enum Spawn {
         return (code, o, e)
     }
 }
+
+#if !canImport(Darwin)
+    /// `SIGPIPE` ignored once, in place of Darwin's per-descriptor `F_SETNOSIGPIPE`.
+    private let ignoreSIGPIPEOnce: Bool = {
+        signal(SIGPIPE, SIG_IGN)
+        return true
+    }()
+#endif

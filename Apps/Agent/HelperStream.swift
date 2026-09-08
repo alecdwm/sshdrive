@@ -135,10 +135,15 @@ actor HelperStream {
             opened.close()
             channel = nil
             let stderr = opened.stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Not permanent: the commonest way to get here is a channel that went with
+            // the connection between the deployment and the `ready` line, and a server
+            // that genuinely cannot execute the binary was already refused by the
+            // `--version` run in the deployment (section 6.4, step 1).
             throw HelperDeployer.Failure.unavailable(
                 stderr.isEmpty
                     ? "the helper did not start on the server"
-                    : "the helper did not start on the server: \(stderr)")
+                    : "the helper did not start on the server: \(stderr)",
+                permanent: false)
         }
         version = ready.version
         mechanism = ready.mechanism

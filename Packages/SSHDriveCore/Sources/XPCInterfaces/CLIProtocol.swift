@@ -1,3 +1,5 @@
+#if canImport(Darwin)
+
 import Foundation
 
 /// The CLI's own exported interface, for the one thing the agent has to ask a terminal
@@ -51,3 +53,5 @@ extension SSHDriveXPCInterface {
         NSXPCInterface(with: SSHDriveCLIProtocol.self)
     }
 }
+
+#endif

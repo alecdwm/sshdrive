@@ -3,6 +3,7 @@ import FileProvider
 import Index
 import AgentCore
 import SFTP
+import XPCInterfaces
 import XPCProtocols
 import Logging
 

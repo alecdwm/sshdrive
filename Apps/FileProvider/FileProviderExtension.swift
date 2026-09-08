@@ -1,183 +1,77 @@
 import FileProvider
 import Foundation
+import ProviderCore
 import UniformTypeIdentifiers
-import Index
 import XPCProtocols
-import Logging
 
 /// The File Provider extension (DESIGN.md section 5).
 ///
 /// One instance per domain; the system may host several instances in one process, so
 /// nothing here is global. It holds no state of its own, opens no sockets and never
-/// writes the index. Its only file I/O is the index it reads and the temp file the system
-/// gives it for fetched content, whose handle it passes to the agent to fill (section 3).
+/// writes the index.
+///
+/// **This file contains no decision.** Every rule the extension used to carry -
+/// which source answers the working set, which error a reader that cannot answer
+/// deserves, the trash refusal, the readiness window, item construction, the two Finder
+/// actions - lives in `ProviderCore.ProviderService`, where it compiles on Linux and is
+/// driven by `SystemModel.FileProviderD` (`docs/testing-architecture.md` section 2.2).
+/// What is left is one forwarding call per protocol method, plus the file I/O that only
+/// the appex can do: the temp file the system gives it for fetched content, whose handle
+/// it passes to the agent to fill (section 5.2).
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     let domain: NSFileProviderDomain
     let domainIdentifier: String
     let displayName: String
-    let readerStore: IndexReaderStore
 
     private let callbacks = ExtensionCallbacks()
     private let connection: AgentConnection
     private let manager: NSFileProviderManager?
+    private let service: ProviderService
 
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         self.domainIdentifier = domain.identifier.rawValue
         self.displayName = domain.displayName
-        self.readerStore = IndexReaderStore(locationID: domain.identifier.rawValue)
-        self.connection = AgentConnection(domain: domain, callbacks: callbacks)
+        self.connection = AgentConnection(callbacks: callbacks)
         self.manager = NSFileProviderManager(for: domain)
+
+        let reader = IndexReaderStore(
+            locationID: domain.identifier.rawValue, rootDisplayName: domain.displayName)
+        let channel = XPCAgentChannel(
+            connection: connection, domainIdentifier: domain.identifier.rawValue,
+            displayName: domain.displayName)
+        self.service = ProviderService(
+            domainIdentifier: domain.identifier.rawValue,
+            displayName: domain.displayName,
+            reader: reader,
+            agent: channel,
+            signalling: ManagerSignalling(domain: domain))
         super.init()
 
-        callbacks.onReaderClose = { [weak self] in self?.readerStore.close() }
-        callbacks.onReaderReopen = { [weak self] in self?.readerStore.reopen() }
+        callbacks.onReaderClose = { [weak self] in self?.service.reader.close() }
+        callbacks.onReaderReopen = { [weak self] in self?.service.reader.reopen() }
+        connection.onUnreachable = { [weak self] in self?.service.noteAgentUnreachable() }
 
-        // How the store asks the agent whether the index is ready to be read
-        // (section 5.3). It is asked once at launch and again by any read that finds the
-        // answer was no, rate limited: a `false` covers a window - a domain restart, an
-        // agent mid-restore - and an instance that could never ask again would answer the
-        // working set nothing for the rest of its life (2026-09-08).
-        //
-        // A `nil` answer means the agent could not be reached at all, which leaves the
-        // instance free to open the reader, since a missing agent is the case the direct
-        // reader exists for.
-        readerStore.askAgent = { [weak self] done in
-            guard let self else { return done(nil) }
-            guard let proxy = self.agentProxy({ _ in done(nil) }) else { return done(nil) }
-            proxy.indexReady(domainIdentifier: self.domainIdentifier) { [weak self] ready in
-                // A reply of any kind is proof the agent is there, so lift a disconnect a
-                // previous instance may have left on the domain (section 5.2).
-                self?.connection.noteAgentReachable()
-                done(ready)
-            }
-        }
-        readerStore.askAgent?({ [weak self] ready in self?.readerStore.markReady(ready) })
-
-        Log.extensionLog.notice(
-            "extension instance for \(self.displayName, privacy: .public) started")
-    }
-
-    // MARK: The working set's error state
-
-    private let workingSetLock = NSLock()
-    private var workingSetFailing = false
-
-    /// A working-set change enumeration answered normally. If the last one did not,
-    /// fileproviderd is holding this domain's event stream on a throttle that only
-    /// `signalErrorResolved` clears - a signalled enumerator is re-scheduled, not
-    /// un-throttled - so one call goes out here, once per recovery (2026-09-08).
-    func noteWorkingSetSucceeded() {
-        workingSetLock.lock()
-        let recovering = workingSetFailing
-        workingSetFailing = false
-        workingSetLock.unlock()
-        guard recovering, let manager else { return }
-        Log.extensionLog.notice(
-            "workingSet recovered; clearing the domain's serverUnreachable throttle")
-        manager.signalErrorResolved(NSFileProviderError(.serverUnreachable)) { error in
-            if let error {
-                Log.extensionLog.error(
-                    "signalErrorResolved failed: \(error, privacy: .public)")
-            }
-        }
-    }
-
-    func noteWorkingSetFailed() {
-        workingSetLock.lock()
-        workingSetFailing = true
-        workingSetLock.unlock()
+        service.start()
     }
 
     func invalidate() {
         connection.invalidate()
-        readerStore.close()
-    }
-
-    /// The proxy, with a single place that turns a dead connection into an error the
-    /// system understands.
-    func agentProxy(_ onError: @escaping (Error) -> Void) -> SSHDriveAgentProtocol? {
-        connection.proxy { error in
-            Log.extensionLog.error("the agent is unreachable: \(error, privacy: .public)")
-            onError(NSFileProviderError(.serverUnreachable))
-        }
-    }
-
-    /// The newest sync anchor: the reader when it can answer, the agent when it cannot.
-    ///
-    /// The old version was `readerStore.currentSequence() ?? 0`, and the `0` is a trap -
-    /// it is an expired anchor as soon as the oldest surviving row is past it, so a
-    /// readiness race turned into an expiry and a full sweep.
-    func currentAnchor(_ completion: @escaping (String) -> Void) {
-        if let sequence = readerStore.currentSequence() {
-            completion(String(sequence))
-            return
-        }
-        guard let proxy = agentProxy({ _ in completion("0") }) else {
-            completion("0")
-            return
-        }
-        proxy.currentAnchor(domainIdentifier: domainIdentifier) { anchor, _ in
-            completion(anchor ?? "0")
-        }
-    }
-
-    /// The extension tells the agent it has answered `.syncAnchorExpired` and handed out
-    /// a fresh anchor, one call per expiry (section 5.3).
-    func reportAnchorExpired(freshAnchor: String) {
-        agentProxy({ _ in })?.workingSetAnchorExpired(
-            domainIdentifier: domainIdentifier, freshAnchor: freshAnchor)
+        service.invalidate()
     }
 
     // MARK: item(for:)
 
-    /// Answered from the index by the extension itself, with no agent involved, because
-    /// the system issues this in bulk and it must be answered from local state
-    /// (sections 2, 5.2).
     func item(
         for identifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        let agentIdentifier = SSHDriveItemIdentifiers.agentIdentifier(for: identifier)
-
-        // No trash (section 5.4). Answered here, from nothing, so that neither the reader
-        // nor the agent is asked for a row that can never exist: a domain added before
-        // `supportsSyncingTrash = false` still has a trash the system may stat, and a
-        // slow answer to that is what a `ls -la` waits on.
-        if SSHDriveTrash.isTrash(identifier: agentIdentifier) {
-            completionHandler(nil, NSFileProviderError(.noSuchItem))
+        service.item(for: AppleMapping.identifier(identifier)) { result in
             progress.completedUnitCount = 1
-            return progress
-        }
-
-        do {
-            if let snapshot = try readerStore.item(identifier: agentIdentifier) {
-                completionHandler(Item(snapshot: snapshot, rootDisplayName: displayName), nil)
-                progress.completedUnitCount = 1
-                return progress
-            }
-        } catch {
-            completionHandler(nil, error)
-            progress.completedUnitCount = 1
-            return progress
-        }
-
-        // No reader, or a schema this build does not understand: ask the agent
-        // (section 5.2).
-        guard let proxy = agentProxy({ completionHandler(nil, $0) }) else {
-            completionHandler(nil, NSFileProviderError(.serverUnreachable))
-            progress.completedUnitCount = 1
-            return progress
-        }
-        proxy.item(domainIdentifier: domainIdentifier, itemIdentifier: agentIdentifier) {
-            [weak self] snapshot, error in
-            guard let self else { return }
-            progress.completedUnitCount = 1
-            if let snapshot {
-                completionHandler(Item(snapshot: snapshot, rootDisplayName: self.displayName), nil)
-            } else {
-                completionHandler(nil, AgentConnection.fileProviderError(from: error ?? NSFileProviderError(.serverUnreachable)))
+            switch result {
+            case .success(let view): completionHandler(Item(view: view), nil)
+            case .failure(let failure): completionHandler(nil, AppleMapping.nsError(failure))
             }
         }
         return progress
@@ -185,51 +79,63 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     // MARK: Content
 
-    /// The extension creates the target file in its own temp directory, opens it for
-    /// writing and sends the handle; the agent writes through it and never needs to
-    /// resolve, or be allowed to reach, a path inside the extension's container
-    /// (section 5.2).
     func fetchContents(
-        for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?,
+        for itemIdentifier: NSFileProviderItemIdentifier,
+        version requestedVersion: NSFileProviderItemVersion?,
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
-        fetch(
-            itemIdentifier, version: requestedVersion, range: nil, request: request,
-            completionHandler: { url, item, error in completionHandler(url, item, error) })
+        // Section 6.2's two classes are read straight off the request and travel to the
+        // agent unchanged.
+        transfer(completionHandler) { [self] handle, transferID, done in
+            service.fetchContents(
+                identifier: AppleMapping.identifier(itemIdentifier),
+                requestedVersion: requestedVersion.map {
+                    String(decoding: $0.contentVersion, as: UTF8.self)
+                },
+                isFileViewerRequest: request.isFileViewerRequest,
+                isSystemRequest: request.isSystemRequest,
+                into: handle, transferID: transferID, done)
+        }
     }
 
     /// Range requests, for large media (section 5.1). Always a foreground transfer under
     /// the scheduler of section 6.2.
     func fetchPartialContents(
-        for itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion,
+        for itemIdentifier: NSFileProviderItemIdentifier,
+        version requestedVersion: NSFileProviderItemVersion,
         request: NSFileProviderRequest, minimalRange: NSRange, aligningTo alignment: Int,
         options: NSFileProviderFetchContentsOptions = [],
-        completionHandler: @escaping (URL?, NSFileProviderItem?, NSRange, NSFileProviderMaterializationFlags, Error?) -> Void
+        completionHandler: @escaping (
+            URL?, NSFileProviderItem?, NSRange, NSFileProviderMaterializationFlags, Error?
+        ) -> Void
     ) -> Progress {
-        // The range is widened to the alignment the system asked for, which is what lets
-        // it stitch neighbouring windows together rather than re-fetching them.
-        let stride = max(alignment, 1)
-        let start = (minimalRange.location / stride) * stride
-        let end = ((minimalRange.location + minimalRange.length + stride - 1) / stride) * stride
-        let aligned = NSRange(location: start, length: max(end - start, stride))
-        return fetch(
-            itemIdentifier, version: requestedVersion, range: aligned, request: request
-        ) { url, item, error in
+        let widened = ProviderService.alignedRange(
+            location: minimalRange.location, length: minimalRange.length, alignment: alignment)
+        let aligned = NSRange(location: widened.location, length: widened.length)
+        return transfer({ url, item, error in
             completionHandler(url, item, aligned, [], error)
+        }) { [self] handle, transferID, done in
+            service.fetchPartialContents(
+                identifier: AppleMapping.identifier(itemIdentifier),
+                alignedOffset: Int64(aligned.location), alignedLength: Int64(aligned.length),
+                into: handle, transferID: transferID, done)
         }
     }
 
-    private func fetch(
-        _ itemIdentifier: NSFileProviderItemIdentifier, version requestedVersion: NSFileProviderItemVersion?,
-        range: NSRange?, request: NSFileProviderRequest,
-        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
+    /// The extension creates the target file in its own temp directory, opens it for
+    /// writing and sends the handle; the agent writes through it and never needs to
+    /// resolve, or be allowed to reach, a path inside the extension's container
+    /// (section 5.2).
+    private func transfer(
+        _ completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void,
+        _ start: (FileHandle, String, @escaping (Result<ItemView, ProviderFailure>) -> Void) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
         let transferID = UUID().uuidString
 
         guard let manager else {
-            completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
+            completionHandler(nil, nil, AppleMapping.nsError(.serverUnreachable))
             return progress
         }
 
@@ -238,7 +144,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let directory = try manager.temporaryDirectoryURL()
             temporaryURL = directory.appendingPathComponent(UUID().uuidString)
             guard FileManager.default.createFile(atPath: temporaryURL.path, contents: nil) else {
-                throw NSFileProviderError(.cannotSynchronize)
+                throw AppleMapping.nsError(.cannotSynchronize)
             }
         } catch {
             completionHandler(nil, nil, error)
@@ -253,126 +159,68 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return progress
         }
 
-        guard let proxy = agentProxy({ completionHandler(nil, nil, $0) }) else {
-            completionHandler(nil, nil, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
         callbacks.register(progress, for: transferID)
         // Cancelling the Progress sends a cancel for that transfer's id over the same
         // connection; the agent abandons the SFTP requests in flight (section 5.2).
         progress.cancellationHandler = { [weak self] in
-            self?.agentProxy({ _ in })?.cancelTransfer(transferID: transferID)
+            self?.service.agent.cancelTransfer(transferID: transferID)
         }
 
-        let done: @Sendable (SSHDriveItemSnapshot?, Error?) -> Void = { [weak self] snapshot, error in
-            guard let self else { return }
+        start(handle, transferID) { [weak self] result in
             try? handle.close()
-            self.callbacks.unregister(transferID: transferID)
-            if let snapshot {
-                completionHandler(
-                    temporaryURL, Item(snapshot: snapshot, rootDisplayName: self.displayName), nil)
-            } else {
+            self?.callbacks.unregister(transferID: transferID)
+            switch result {
+            case .success(let view):
+                completionHandler(temporaryURL, Item(view: view), nil)
+            case .failure(let failure):
                 try? FileManager.default.removeItem(at: temporaryURL)
-                completionHandler(
-                    nil, nil,
-                    AgentConnection.fileProviderError(from: error ?? NSFileProviderError(.serverUnreachable)))
+                completionHandler(nil, nil, AppleMapping.nsError(failure))
             }
         }
-
-        if let range {
-            proxy.fetchPartialContents(
-                domainIdentifier: domainIdentifier,
-                itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemIdentifier),
-                offset: Int64(range.location),
-                length: Int64(range.length),
-                into: handle,
-                transferID: transferID,
-                reply: done)
-            return progress
-        }
-
-        // Section 6.2's two classes, read straight off the request: a file-viewer request,
-        // or anything that is not a system request, is the user or an app opening the
-        // file and goes in the foreground.
-        proxy.fetchContents(
-            domainIdentifier: domainIdentifier,
-            itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemIdentifier),
-            requestedVersion: requestedVersion.map { String(decoding: $0.contentVersion, as: UTF8.self) },
-            isFileViewerRequest: request.isFileViewerRequest,
-            isSystemRequest: request.isSystemRequest,
-            into: handle,
-            transferID: transferID,
-            reply: done)
         return progress
     }
 
     // MARK: Mutations
 
     func createItem(
-        basedOn itemTemplate: NSFileProviderItem, fields: NSFileProviderItemFields, contents url: URL?,
-        options: NSFileProviderCreateItemOptions = [], request: NSFileProviderRequest,
-        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+        basedOn itemTemplate: NSFileProviderItem, fields: NSFileProviderItemFields,
+        contents url: URL?, options: NSFileProviderCreateItemOptions = [],
+        request: NSFileProviderRequest,
+        completionHandler: @escaping (
+            NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?
+        ) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-        let transferID = UUID().uuidString
-
-        // With `supportsSyncingTrash = false` the system decides how to handle a trashing
-        // operation, and the header does not guarantee what it decides. Whatever it is, it
-        // is not a `.Trash` directory of ours on someone's server (section 5.4).
-        if itemTemplate.parentItemIdentifier == .rootContainer,
-            SSHDriveTrash.isTrash(filename: itemTemplate.filename)
-        {
-            completionHandler(nil, [], false, SSHDriveTrash.unsupportedError)
-            return progress
-        }
-
         var handle: FileHandle?
-        if let url {
-            handle = try? FileHandle(forReadingFrom: url)
-        }
+        if let url { handle = try? FileHandle(forReadingFrom: url) }
 
-        guard let proxy = agentProxy({ completionHandler(nil, [], false, $0) }) else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        let isDirectory = itemTemplate.contentType == .folder
-        let isSymlink = itemTemplate.contentType == .symbolicLink
-
-        proxy.createItem(
-            domainIdentifier: domainIdentifier,
-            parentIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: itemTemplate.parentItemIdentifier),
+        let template = ItemTemplate(
+            parentIdentifier: AppleMapping.identifier(itemTemplate.parentItemIdentifier),
             filename: itemTemplate.filename,
-            isDirectory: isDirectory,
-            symlinkTarget: isSymlink ? itemTemplate.symlinkTargetPath ?? nil : nil,
+            isDirectory: itemTemplate.contentType == .folder,
+            isSymlink: itemTemplate.contentType == .symbolicLink,
+            symlinkTarget: itemTemplate.contentType == .symbolicLink
+                ? itemTemplate.symlinkTargetPath ?? nil : nil,
             // Section 5.5: the temp file is opened with the Mac file's permission bits,
             // 0755 when the local one is executable, and the modification date is set
             // back after the rename.
-            fileSystemFlags: (itemTemplate.fileSystemFlags?.rawValue).map {
-                NSNumber(value: UInt64($0))
-            },
-            modificationDate: (itemTemplate.contentModificationDate ?? nil).map {
-                NSNumber(value: $0.timeIntervalSince1970)
-            },
+            fileSystemFlags: (itemTemplate.fileSystemFlags?.rawValue).map { UInt64($0) },
+            modificationDate: (itemTemplate.contentModificationDate ?? nil)?.timeIntervalSince1970,
             extendedAttributes: fields.contains(.extendedAttributes)
                 ? (itemTemplate.extendedAttributes ?? [:]) : nil,
             // Section 5.4: tags never arrive as an xattr; they are the item's own
             // `tagData`, and an item that returns none loses them on the next
             // re-download.
-            tagData: fields.contains(.tagData) ? (itemTemplate.tagData ?? nil) : nil,
-            contents: handle,
-            transferID: transferID
-        ) { [weak self] snapshot, error in
-            guard let self else { return }
+            tagData: fields.contains(.tagData) ? (itemTemplate.tagData ?? nil) : nil)
+
+        service.createItem(
+            template: template, contents: handle, transferID: UUID().uuidString
+        ) { result in
             try? handle?.close()
-            if let snapshot {
-                completionHandler(
-                    Item(snapshot: snapshot, rootDisplayName: self.displayName), [], false, nil)
-            } else {
-                completionHandler(
-                    nil, [], false,
-                    AgentConnection.fileProviderError(from: error ?? NSFileProviderError(.serverUnreachable)))
+            switch result {
+            case .success(let view): completionHandler(Item(view: view), [], false, nil)
+            case .failure(let failure):
+                completionHandler(nil, [], false, AppleMapping.nsError(failure))
             }
         }
         return progress
@@ -382,49 +230,36 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         _ item: NSFileProviderItem, baseVersion version: NSFileProviderItemVersion,
         changedFields: NSFileProviderItemFields, contents newContents: URL?,
         options: NSFileProviderModifyItemOptions = [], request: NSFileProviderRequest,
-        completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void
+        completionHandler: @escaping (
+            NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?
+        ) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 100)
-        let transferID = UUID().uuidString
-
         var handle: FileHandle?
-        if let newContents {
-            handle = try? FileHandle(forReadingFrom: newContents)
-        }
+        if let newContents { handle = try? FileHandle(forReadingFrom: newContents) }
 
-        guard let proxy = agentProxy({ completionHandler(nil, [], false, $0) }) else {
-            completionHandler(nil, [], false, NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-
-        proxy.modifyItem(
-            domainIdentifier: domainIdentifier,
-            itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: item.itemIdentifier),
-            baseVersion: String(decoding: version.contentVersion, as: UTF8.self),
-            changedFields: UInt64(changedFields.rawValue),
+        let changes = ItemChanges(
             newParentIdentifier: changedFields.contains(.parentItemIdentifier)
-                ? SSHDriveItemIdentifiers.agentIdentifier(for: item.parentItemIdentifier) : nil,
+                ? AppleMapping.identifier(item.parentItemIdentifier) : nil,
             newFilename: changedFields.contains(.filename) ? item.filename : nil,
-            newFileSystemFlags: (item.fileSystemFlags?.rawValue).map { NSNumber(value: UInt64($0)) },
-            newModificationDate: (item.contentModificationDate ?? nil).map {
-                NSNumber(value: $0.timeIntervalSince1970)
-            },
+            newFileSystemFlags: (item.fileSystemFlags?.rawValue).map { UInt64($0) },
+            newModificationDate: (item.contentModificationDate ?? nil)?.timeIntervalSince1970,
             newExtendedAttributes: changedFields.contains(.extendedAttributes)
                 ? (item.extendedAttributes ?? [:]) : nil,
             newTagData: changedFields.contains(.tagData) ? (item.tagData ?? nil) : nil,
-            newSymlinkTarget: item.symlinkTargetPath ?? nil,
-            contents: handle,
-            transferID: transferID
-        ) { [weak self] snapshot, error in
-            guard let self else { return }
+            newSymlinkTarget: item.symlinkTargetPath ?? nil)
+
+        service.modifyItem(
+            identifier: AppleMapping.identifier(item.itemIdentifier),
+            baseVersion: String(decoding: version.contentVersion, as: UTF8.self),
+            changedFields: ProviderItemFields(rawValue: changedFields.rawValue),
+            changes: changes, contents: handle, transferID: UUID().uuidString
+        ) { result in
             try? handle?.close()
-            if let snapshot {
-                completionHandler(
-                    Item(snapshot: snapshot, rootDisplayName: self.displayName), [], false, nil)
-            } else {
-                completionHandler(
-                    nil, [], false,
-                    AgentConnection.fileProviderError(from: error ?? NSFileProviderError(.serverUnreachable)))
+            switch result {
+            case .success(let view): completionHandler(Item(view: view), [], false, nil)
+            case .failure(let failure):
+                completionHandler(nil, [], false, AppleMapping.nsError(failure))
             }
         }
         return progress
@@ -436,18 +271,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        guard let proxy = agentProxy({ completionHandler($0) }) else {
-            completionHandler(NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-        proxy.deleteItem(
-            domainIdentifier: domainIdentifier,
-            itemIdentifier: SSHDriveItemIdentifiers.agentIdentifier(for: identifier),
+        service.deleteItem(
+            identifier: AppleMapping.identifier(identifier),
             baseVersion: String(decoding: version.contentVersion, as: UTF8.self),
             recursive: options.contains(.recursive)
-        ) { error in
+        ) { failure in
             progress.completedUnitCount = 1
-            completionHandler(error.map { AgentConnection.fileProviderError(from: $0) })
+            completionHandler(failure.map(AppleMapping.nsError))
         }
         return progress
     }
@@ -457,27 +287,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     func enumerator(
         for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        if containerItemIdentifier == .workingSet {
-            return WorkingSetEnumerator(extensionInstance: self)
+        do {
+            return EnumeratorAdapter(
+                core: try service.enumerator(for: AppleMapping.identifier(containerItemIdentifier)))
+        } catch let failure as ProviderFailure {
+            throw AppleMapping.nsError(failure)
         }
-        if containerItemIdentifier == .trashContainer {
-            // No trash (section 5.4). NSFeatureUnsupportedError is what
-            // NSFileProviderReplicatedExtension.h prescribes for an extension that does
-            // not support trashing. It must not be `noSuchItem`: the system reads that as
-            // "the container was deleted", tries to delete it from disk, fails because the
-            // trash is its own, and retries about once a second for ever, which is the
-            // hang `ls -la` used to sit in (docs/spikes/results.md, 2026-09-04).
-            throw SSHDriveTrash.unsupportedError
-        }
-        return ContainerEnumerator(container: containerItemIdentifier, extensionInstance: self)
     }
 
     // MARK: Signals
 
-    /// Forwarded so the agent can refresh its root set (section 6.5) and the pin safety
-    /// net (section 7.2).
     func materializedItemsDidChange(completionHandler: @escaping () -> Void) {
-        agentProxy({ _ in })?.materializedItemsDidChange(domainIdentifier: domainIdentifier)
+        service.materializedItemsDidChange()
         completionHandler()
     }
 }
@@ -485,11 +306,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 // MARK: Section 7.2's context-menu entries
 
 /// "Keep Downloaded" and "Don't Keep Downloaded", declared in the appex's Info.plist with
-/// the activation rules that read `userInfo.kept`, and handled here (section 7.2).
-///
-/// The extension does nothing of its own: it holds no state and cannot write the index
-/// (section 3), so the action is forwarded to the agent, which is where every pin change
-/// from the CLI lands too - one writer, one code path, no second store to keep in sync.
+/// the activation rules that read `userInfo.kept`, and forwarded here (section 7.2).
 extension FileProviderExtension: NSFileProviderCustomAction {
     func performAction(
         identifier actionIdentifier: NSFileProviderExtensionActionIdentifier,
@@ -497,26 +314,12 @@ extension FileProviderExtension: NSFileProviderCustomAction {
         completionHandler: @escaping (Error?) -> Void
     ) -> Progress {
         let progress = Progress(totalUnitCount: 1)
-        Log.extensionLog.notice(
-            "performAction \(actionIdentifier.rawValue, privacy: .public) on \(itemIdentifiers.count, privacy: .public) item(s)"
-        )
-        guard let proxy = agentProxy({ error in
-            progress.completedUnitCount = 1
-            completionHandler(error)
-        }) else {
-            progress.completedUnitCount = 1
-            completionHandler(NSFileProviderError(.serverUnreachable))
-            return progress
-        }
-        proxy.performAction(
-            domainIdentifier: domainIdentifier,
+        service.performAction(
             actionIdentifier: actionIdentifier.rawValue,
-            itemIdentifiers: itemIdentifiers.map {
-                SSHDriveItemIdentifiers.agentIdentifier(for: $0)
-            }
-        ) { error in
+            itemIdentifiers: itemIdentifiers.map(AppleMapping.identifier)
+        ) { failure in
             progress.completedUnitCount = 1
-            completionHandler(error.map { AgentConnection.fileProviderError(from: $0) })
+            completionHandler(failure.map(AppleMapping.nsError))
         }
         return progress
     }

@@ -193,9 +193,13 @@ actor DomainManager {
             await gate.setOnConnected { [weak self] id, connected in
                 await self?.connectionCameUp(locationID: id, connected: connected)
             }
-            await gate.setOnDisconnected { id, reason in
+            await gate.setOnDisconnected { [weak self] id, reason in
                 Log.agent.notice(
                     "\(id, privacy: .public) is offline: \(reason, privacy: .public)")
+                // The helper's exec channel went with the master. Letting the stream find
+                // out for itself leaves a dead channel held until its next read or ping,
+                // and `status` claiming a tier that is not running (section 6.4).
+                await self?.connectionWentAway(locationID: id, reason: reason)
             }
             transport = ReconnectingTransport(gate: gate, locationID: location.id)
         }
@@ -452,6 +456,10 @@ actor DomainManager {
 
     /// The extension handed out a fresh working-set anchor, or a connection came back:
     /// either way one full sweep at once (sections 5.3, 6.4).
+    private func connectionWentAway(locationID: String, reason: String) async {
+        await detectors[locationID]?.connectionWentAway(reason: reason)
+    }
+
     func requestFullSweep(locationID: String, reason: String) async {
         await detectors[locationID]?.requestFullSweep(reason: reason)
     }
@@ -465,34 +473,52 @@ actor DomainManager {
     /// the documented fallback and is sent either way, since it costs one call and the
     /// working set needs it regardless.
     private func connectionCameUp(locationID: String, connected: ConnectionGate.Connected) async {
-        if let runtime = runtimes[locationID] {
-            do {
-                try await runtime.applyConnection(
-                    budget: connected.budget, probe: connected.probe,
-                    sharesMetadataChannel: connected.sharesMetadataChannel)
-            } catch {
-                Log.agent.error(
-                    "\(locationID, privacy: .public): could not apply the new connection: \(error, privacy: .public)")
-            }
-            // Section 6.4: "On reconnect after any outage every tier first runs one full
-            // sweep so changes made while disconnected are caught, then resumes streaming."
-            // A server can also come back as a different one - a NAS whose busybox replaced
-            // a GNU find - so the ladder is re-evaluated from the new probe first.
-            if let detector = detectors[locationID] {
+        let suppressed = await gates[locationID]?.suppressRecoverySignals ?? false
+        if suppressed {
+            Log.agent.notice(
+                "\(locationID, privacy: .public): recovery signals suppressed by a debug hook")
+        }
+        // `ReconnectSequence` in `AgentCore` owns the order, because the order is the part
+        // that was wrong: section 6.4's helper stream runs on an exec channel opened
+        // against the master the SFTP channels sit on, so it is re-opened *after*
+        // `applyConnection`, and it is re-opened *here* rather than being left to the next
+        // poll cycle (2026-09-08).
+        for step in ReconnectSequence.steps {
+            switch step {
+            case .applyConnection:
+                guard let runtime = runtimes[locationID] else { continue }
+                do {
+                    try await runtime.applyConnection(
+                        budget: connected.budget, probe: connected.probe,
+                        sharesMetadataChannel: connected.sharesMetadataChannel)
+                } catch {
+                    Log.agent.error(
+                        "\(locationID, privacy: .public): could not apply the new connection: \(error, privacy: .public)"
+                    )
+                }
+            case .applyCapabilities:
+                guard let runtime = runtimes[locationID], let detector = detectors[locationID]
+                else { continue }
+                // A server can come back as a different one - a NAS whose busybox replaced
+                // a GNU find - so the ladder is re-evaluated from the new probe first.
                 await detector.applyCapabilities(
                     await DomainManager.capabilities(of: runtime, location: runtime.location),
                     watchMode: runtime.location.watchMode)
-                await runtime.setWatchTier(await detector.currentTier().rawValue)
-                await detector.requestFullSweep(reason: "reconnect")
+            case .reopenHelperStream:
+                guard let detector = detectors[locationID] else { continue }
+                // Section 6.4: "On reconnect after any outage every tier first runs one
+                // full sweep so changes made while disconnected are caught, then resumes
+                // streaming." Both halves live in `connectionCameUp`.
+                await detector.connectionCameUp()
+                await runtimes[locationID]?.setWatchTier(await detector.currentTier().rawValue)
+            case .signalErrorResolved:
+                guard !suppressed else { continue }
+                await signalErrorResolved(locationID: locationID)
+            case .signalWorkingSet:
+                guard !suppressed else { continue }
+                await signalWorkingSet(locationID: locationID)
             }
         }
-        if let gate = gates[locationID], await gate.suppressRecoverySignals {
-            Log.agent.notice(
-                "\(locationID, privacy: .public): recovery signals suppressed by a debug hook")
-            return
-        }
-        await signalErrorResolved(locationID: locationID)
-        await signalWorkingSet(locationID: locationID)
     }
 
     /// `NSFileProviderManager.signalErrorResolved(.serverUnreachable)`: the system's cue to

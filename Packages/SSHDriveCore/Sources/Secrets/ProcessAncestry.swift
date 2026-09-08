@@ -32,7 +32,9 @@ extension ProcessAncestryChecking {
     }
 }
 
-/// The real check, over `sysctl(KERN_PROC_PID)`.
+/// The real check, over `sysctl(KERN_PROC_PID)` - and over `/proc/<pid>/status` off
+/// Darwin, which is the same question asked of the other kernel. macOS uses the sysctl it
+/// always has.
 public final class SysctlProcessAncestry: ProcessAncestryChecking, @unchecked Sendable {
     public init() {}
 
@@ -46,6 +48,16 @@ public final class SysctlProcessAncestry: ProcessAncestryChecking, @unchecked Se
             let parent = info.kp_eproc.e_ppid
             return parent > 0 ? parent : nil
         #else
+            guard
+                let text = try? String(
+                    contentsOfFile: "/proc/\(pid)/status", encoding: .utf8)
+            else { return nil }
+            for line in text.split(separator: "\n") where line.hasPrefix("PPid:") {
+                let fields = line.split(whereSeparator: { $0 == "\t" || $0 == " " })
+                if fields.count > 1, let parent = Int32(fields[1]), parent > 0 {
+                    return parent
+                }
+            }
             return nil
         #endif
     }

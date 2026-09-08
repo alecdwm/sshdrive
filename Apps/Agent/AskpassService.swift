@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import Secrets
 import SSHProcess
+import XPCInterfaces
 import XPCProtocols
 import Logging
 

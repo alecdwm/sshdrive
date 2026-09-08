@@ -1,5 +1,9 @@
 import Foundation
-import SQLite3
+#if canImport(SQLite3)
+    import SQLite3
+#else
+    import CSQLite
+#endif
 import Logging
 
 /// The agent's connection to a domain's index. The agent is the only writer

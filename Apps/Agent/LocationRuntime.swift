@@ -1,6 +1,7 @@
 import Foundation
 import FileProvider
 import AgentCore
+import ProviderCore
 import Config
 import Index
 import SFTP

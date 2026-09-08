@@ -1,6 +1,5 @@
 import Foundation
 import Config
-import FileProvider
 import Index
 import SFTP
 import XPCProtocols

@@ -1,5 +1,9 @@
 import Foundation
-import SQLite3
+#if canImport(SQLite3)
+    import SQLite3
+#else
+    import CSQLite
+#endif
 import Logging
 
 /// A thin wrapper over the system SQLite. Deliberately small: the index is the only

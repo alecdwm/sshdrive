@@ -1,111 +1,78 @@
 import FileProvider
 import Foundation
+import ProviderCore
 import UniformTypeIdentifiers
-import XPCProtocols
 
-/// An NSFileProviderItem built by a field-by-field copy from a finished row or from the
-/// snapshot the agent sent (DESIGN.md section 5.2). No ancestor walk, no access to
-/// capabilities.json, no second copy of the rules in sections 5.4, 5.7 or 7.
+/// `NSFileProviderItem` over an `ItemView` (DESIGN.md section 5.2).
+///
+/// Nothing is computed here. Every field was decided in `ProviderCore.ItemView` - which
+/// itself is a field-by-field copy from a finished row, with no ancestor walk and no
+/// second copy of the rules in sections 5.4, 5.7 or 7 - and this class is the Apple coat
+/// over it.
 final class Item: NSObject, NSFileProviderItemDecorating {
-    private let snapshot: SSHDriveItemSnapshot
-    /// The root's filename is the domain's display name; every other item's is its own.
-    private let rootDisplayName: String
+    private let view: ItemView
 
-    init(snapshot: SSHDriveItemSnapshot, rootDisplayName: String) {
-        self.snapshot = snapshot
-        self.rootDisplayName = rootDisplayName
+    init(view: ItemView) {
+        self.view = view
     }
 
-    var itemIdentifier: NSFileProviderItemIdentifier {
-        snapshot.identifier == SSHDriveItemIdentifiers.root
-            ? .rootContainer : NSFileProviderItemIdentifier(snapshot.identifier)
-    }
+    var itemIdentifier: NSFileProviderItemIdentifier { AppleMapping.identifier(view.identifier) }
 
     var parentItemIdentifier: NSFileProviderItemIdentifier {
-        snapshot.parentIdentifier == SSHDriveItemIdentifiers.root
-            ? .rootContainer : NSFileProviderItemIdentifier(snapshot.parentIdentifier)
+        AppleMapping.identifier(view.parentIdentifier)
     }
 
-    var filename: String {
-        snapshot.filename.isEmpty ? rootDisplayName : snapshot.filename
-    }
+    var filename: String { view.filename }
 
     var contentType: UTType {
-        if snapshot.isDirectory { return .folder }
-        if snapshot.isSymlink { return .symbolicLink }
-        let ext = (filename as NSString).pathExtension
-        if !ext.isEmpty, let type = UTType(filenameExtension: ext) { return type }
-        return .data
+        switch view.contentTypeHint {
+        case .folder: return .folder
+        case .symbolicLink: return .symbolicLink
+        case .filenameExtension(let ext):
+            return UTType(filenameExtension: ext) ?? .data
+        case .data: return .data
+        }
     }
 
     var capabilities: NSFileProviderItemCapabilities {
-        NSFileProviderItemCapabilities(rawValue: UInt(truncatingIfNeeded: snapshot.capabilities))
+        NSFileProviderItemCapabilities(rawValue: view.capabilities.rawValue)
     }
 
     var fileSystemFlags: NSFileProviderFileSystemFlags {
-        NSFileProviderFileSystemFlags(rawValue: UInt(truncatingIfNeeded: snapshot.fileSystemFlags))
+        NSFileProviderFileSystemFlags(rawValue: view.fileSystemFlags.rawValue)
     }
 
-    var documentSize: NSNumber? {
-        snapshot.isDirectory ? nil : NSNumber(value: snapshot.size)
-    }
+    var documentSize: NSNumber? { view.documentSize.map { NSNumber(value: $0) } }
 
     var contentModificationDate: Date? {
-        Date(timeIntervalSince1970: TimeInterval(snapshot.mtime))
+        Date(timeIntervalSince1970: view.contentModificationDate)
     }
 
     var itemVersion: NSFileProviderItemVersion {
         NSFileProviderItemVersion(
-            contentVersion: Data(snapshot.contentVersion.utf8),
-            metadataVersion: Data(snapshot.metadataVersion.utf8))
+            contentVersion: Data(view.contentVersion.utf8),
+            metadataVersion: Data(view.metadataVersion.utf8))
     }
 
-    var symlinkTargetPath: String? { snapshot.linkTarget }
+    var symlinkTargetPath: String? { view.symlinkTargetPath }
 
-    var extendedAttributes: [String: Data] { snapshot.extendedAttributes }
+    var extendedAttributes: [String: Data] { view.extendedAttributes }
 
-    /// Finder tags (section 5.4). They are not an xattr: the system excludes
-    /// `com.apple.metadata:_kMDItemUserTags` from `extendedAttributes` deliberately and
-    /// rebuilds that xattr from this on every update, so an item that returns nothing
-    /// here loses the user's tags on the next re-download (S4, 2026-09-04).
-    var tagData: Data? { snapshot.tagData }
+    var tagData: Data? { view.tagData }
 
-    /// Pinning declares itself per item through contentPolicy (section 2, section 7.1.1).
     var contentPolicy: NSFileProviderContentPolicy {
-        switch SSHDriveContentPolicy(rawValue: snapshot.contentPolicyRawValue) ?? .unset {
+        switch view.contentPolicy {
         case .downloadEagerlyAndKeepDownloaded: return .downloadEagerlyAndKeepDownloaded
         case .downloadLazily: return .downloadLazily
-        case .inherited: return .inherited
-        case .unset: return .inherited
+        case .inherited, .unset: return .inherited
         }
     }
 
-    /// `userInfo.kept` is what the Finder action's activation rule tests (section 7.2).
-    var userInfo: [AnyHashable: Any]? {
-        ["kept": snapshot.kept]
-    }
+    var userInfo: [AnyHashable: Any]? { ["kept": view.userInfoKept] }
 
-    /// Section 7.2's pin badge: "kept items also get a decoration ... so kept folders are
-    /// visibly different in Finder". The identifier is declared under
-    /// `NSFileProviderDecorations` in the appex's `NSExtension` dictionary; an item that
-    /// returns one that is not declared there gets no badge and no error, which is why the
-    /// spelling lives in `SSHDriveIdentifiers` and is used from both places.
-    ///
-    /// It follows the *kept* state, not the marker: an excluded folder inside a kept one
-    /// shows no badge and its kept parent still does (section 7.1.1).
     var decorations: [NSFileProviderItemDecorationIdentifier]? {
-        snapshot.kept ? [NSFileProviderItemDecorationIdentifier(SSHDriveIdentifiers.keptDecorationID)] : nil
-    }
-}
-
-/// The one identifier both sides must spell the same way.
-enum SSHDriveItemIdentifiers {
-    /// What the index calls the root row (`IndexWriter.rootIdentifier`). It is written
-    /// out rather than imported so the extension does not link the Index module's writer.
-    static let root = "NSFileProviderRootContainerItemIdentifier"
-
-    /// The agent speaks in row identifiers; the system speaks in NSFileProviderItemIdentifier.
-    static func agentIdentifier(for identifier: NSFileProviderItemIdentifier) -> String {
-        identifier == .rootContainer ? root : identifier.rawValue
+        let identifiers = view.decorations
+        return identifiers.isEmpty
+            ? nil : identifiers.map { NSFileProviderItemDecorationIdentifier($0) }
     }
 }

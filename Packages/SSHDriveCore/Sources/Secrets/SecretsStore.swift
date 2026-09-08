@@ -1,29 +1,9 @@
 import Foundation
-import Security
 import Logging
 
-/// Something the keychain refused. `status` is the raw `OSStatus` so the CLI can print
-/// the exact code; the common ones get a sentence.
-public struct SecretsError: Error, CustomStringConvertible {
-    public let status: OSStatus
-    public let operation: String
-
-    public init(status: OSStatus, operation: String) {
-        self.status = status
-        self.operation = operation
-    }
-
-    public var description: String {
-        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
-        switch status {
-        case errSecMissingEntitlement:
-            return
-                "\(operation) failed: missing entitlement. Only the agent, as the app bundle's main executable with an embedded provisioning profile, carries keychain-access-groups (section 3.1)."
-        default:
-            return "\(operation) failed: \(detail) (\(status))"
-        }
-    }
-}
+#if canImport(Security)
+    import Security
+#endif
 
 /// The keychain wrapper. Only the agent has the `keychain-access-groups` entitlement, so
 /// only the agent ever holds an instance of this (sections 2, 3.1).
@@ -47,6 +27,31 @@ extension SecretsStore {
     /// The accounts that parse as section 4.2 keys, in a stable order.
     public func keys() throws -> [SecretKey] {
         try accounts().compactMap(SecretKey.init(account:)).sorted { $0.account < $1.account }
+    }
+}
+
+#if canImport(Security)
+
+/// Something the keychain refused. `status` is the raw `OSStatus` so the CLI can print
+/// the exact code; the common ones get a sentence.
+public struct SecretsError: Error, CustomStringConvertible {
+    public let status: OSStatus
+    public let operation: String
+
+    public init(status: OSStatus, operation: String) {
+        self.status = status
+        self.operation = operation
+    }
+
+    public var description: String {
+        let detail = SecCopyErrorMessageString(status, nil) as String? ?? "OSStatus \(status)"
+        switch status {
+        case errSecMissingEntitlement:
+            return
+                "\(operation) failed: missing entitlement. Only the agent, as the app bundle's main executable with an embedded provisioning profile, carries keychain-access-groups (section 3.1)."
+        default:
+            return "\(operation) failed: \(detail) (\(status))"
+        }
     }
 }
 
@@ -152,9 +157,13 @@ public final class KeychainSecretsStore: SecretsStore, @unchecked Sendable {
     }
 }
 
+#endif
+
 /// An in-memory store, for tests, for the fake backend, and for the collect connection's
 /// in-flight answers, which are only written to the keychain once the connection has
-/// succeeded (section 4.2).
+/// succeeded (section 4.2). Off Darwin there is no keychain at all, so this is the only
+/// `SecretsStore` there is - which is exactly what the Linux suite wants
+/// (docs/testing-architecture.md section 2.3).
 public final class InMemorySecretsStore: SecretsStore, @unchecked Sendable {
     private var storage: [String: String] = [:]
     private let lock = NSLock()

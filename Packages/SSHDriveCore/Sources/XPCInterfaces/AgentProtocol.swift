@@ -1,8 +1,7 @@
-import Foundation
+#if canImport(Darwin)
 
-/// Version of the XPC interface. A mismatched agent and extension (mid upgrade) is
-/// reported as `.serverUnreachable` until the agent restarts (DESIGN.md section 5.2).
-public let sshDriveXPCInterfaceVersion = 4
+import Foundation
+import XPCProtocols
 
 /// The agent's interface, exported to the extension, the CLI and askpass alike. One
 /// interface rather than three keeps the peer check in one place; what a peer may
@@ -206,3 +205,5 @@ public let sshDriveXPCInterfaceVersion = 4
         reply: @escaping (Data?, Error?) -> Void
     )
 }
+
+#endif

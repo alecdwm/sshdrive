@@ -44,12 +44,26 @@ enum HelperDeployer {
     }
 
     enum Failure: Error, LocalizedError {
-        /// The reason `status` prints on the change-detection line (section 8.1).
-        case unavailable(String)
+        /// The reason `status` prints on the change-detection line (section 8.1), and
+        /// whether it will still be true on the next connection.
+        ///
+        /// `permanent` is section 6.4's own list - no shell, no exec channel, no writable
+        /// or executable directory, an unsupported architecture, a hash that did not match
+        /// after a redeploy - and it is what costs the location the tier for the session. A
+        /// helper that simply did not answer this time is `permanent: false`: it is retried
+        /// on a bounded backoff, because reading an outage as a verdict about the server is
+        /// what left production mounts at the sweep tier (2026-09-08).
+        case unavailable(String, permanent: Bool = true)
 
         var errorDescription: String? {
             switch self {
-            case .unavailable(let reason): return reason
+            case .unavailable(let reason, _): return reason
+            }
+        }
+
+        var isPermanent: Bool {
+            switch self {
+            case .unavailable(_, let permanent): return permanent
             }
         }
     }
@@ -149,7 +163,17 @@ enum HelperDeployer {
                 reportedVersion: answers.version)
             if case .upload(let why) = HelperDeployment.verdict(for: binary, evidence: after) {
                 try? await sftp.helperRemove(target)
-                throw Failure.unavailable("helper upload failed: \(why)")
+                // A hash that came back and disagreed is §6.4's "hash mismatch after
+                // redeploy" and is permanent. **No** hash coming back at all is not: the
+                // channel that would have run `sha256sum` or `--version` is the suspect,
+                // and a connection going away is exactly how that happens. Measured on the
+                // VM (2026-09-08): a location whose exec channel was broken by an orphaned
+                // master reported "the server could not verify the helper's contents" and,
+                // as a permanent failure, sat at the sweep tier for the session on a
+                // server that was fine a minute later.
+                throw Failure.unavailable(
+                    "helper upload failed: \(why)",
+                    permanent: HelperDeployment.uploadFailureIsPermanent(after: after))
             }
             verifiedBy = answers.checksum != nil ? answers.tool
                 : (answers.digest != nil ? "--version" : "size")

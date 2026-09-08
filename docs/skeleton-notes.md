@@ -37,6 +37,23 @@ matrix, local xattrs and Finder tags through `tagData` (section 5.4),
 **S8 and S10 are answered**; the runbook is `docs/spikes/milestone-4.md` and the
 results entry is 2026-09-04, "milestone 4".
 
+**2026-09-08, tier 2's second addendum.** The helper stopped delivering after a while and
+repeated network down/up cycles left a location at the sweep tier. Three things were wrong
+and they are one thing: `ChangeDetector.ensureHelper` was reachable only from `runCycle`,
+so the stream came back at the next poll cycle rather than with the connection it belongs
+to; `ChangeDetectionLadder` had a single session ceiling that only went down, so an outage
+that killed the stream cost the tier for good; and `ChannelProbe` recorded a channel that
+failed to open as the server's `MaxSessions` answer, even when what failed was the
+connection. New in `AgentCore`: **`ReconnectSequence`** (the order `DomainManager` drives a
+reconnect in, with the helper's stream after the SFTP channels it shares a master with),
+the ladder's **`Permanence`** split with its bounded climb-back (2 s doubling to 60 s, and
+cleared outright by a connection coming up), **`ChannelProbeVerdict`** (a refused session
+against a dead master, on `ssh`'s own wording plus whether the master is running) and
+**`HelperDeployment.uploadFailureIsPermanent(after:)`**. In the agent: the gate's
+disconnected hook stops the stream, an abrupt loss marks the cached channel budget suspect
+so the next connect re-probes, and the detector's loop can be woken so a 2 s hold is 2 s.
+The results entry is 2026-09-08, the second addendum.
+
 **Milestone 9**, the remote helper, landed on 2026-09-05 and is the first milestone with
 code outside Swift: the Rust crate under `helper/`, `sshdrive-helper`, one static binary
 with `libc` as its only dependency, cross-compiled for the five targets section 6.4 names.
@@ -131,7 +148,9 @@ signed build.
 | `Packages/.../Secrets` | Real since 2026-09-04 (milestone 2): `KeychainSecretsStore` on the data-protection keychain, `AskpassBroker` (the section 4.2 token protocol and the answer table), `AskpassPromptClassifier`, `SSHGResolver`, `ProcessAncestry`, and the `AskpassHarness` seam the tests drive it through. |
 | `Packages/.../Logging` | The section 3.1 subsystem and categories, and since milestone 10 `LogQuery`: the `sshdrive logs` predicate - ours plus the fileproviderd lines about our domains - and the `log show` / `log stream` argv, as a pure string builder so it is testable off a Mac. |
 | `Apps/Agent` | `LocationCommands` (section 8's user-facing half), `CollectConnection` (section 4.2's verification connection, and the `AddFlow.AttemptRunning` the state machine drives), `CLIRelay` (the terminal, as the agent sees it), `ServerProbe` (section 8.1's one-script probe: `uname`, `id`, `$HOME`, the `find` flavour, a checksum tool and a cache directory), `CapabilityReport` (section 8.1's eight features and their glyphs), `PeerExecutable` (which of our four executables a peer is), and: two-role `main.swift` (launchd agent vs `open -g` registrar), `SMAppService` registration, the `NSXPCListener` on the group-prefixed mach service with `setCodeSigningRequirement`, `DomainManager` (`NSFileProviderManager.add`/`remove`/`signalEnumerator`), `LocationRuntime` (listing reconcile against the index, fetch through the peer's `FileHandle`, create/modify/delete, catch-up sweep, pin marker) with `LocationRuntime+ChangeDetection` (the guard-aware listing diff, the `held` table, `accept-deletions`, the root-set refresh, the tier 0 cycle and the sweep's application to the index), `ChangeDetector` (one per location: the cadence, the tier, the full sweep on reconnect/wake/network-up/anchor-expiry, and the 30-minute insurance pass), `ReplicaEnumerators` (the system's own materialized and pending sets, which only an unsandboxed process can usefully drive), `IndexReconcile` (section 5.3's health check, the restore **into** the live database through `sqlite3_backup_init`, the truncate-under-its-own-inode path and the walk against the replica), `ExtensionPeers` (every live reader, so the restore can ask them all to close), `ItemDerivation` (section 5.4 capabilities and `fileSystemFlags`, stable metadata version), `ControlCommands` (`doctor` plus the debug hooks), and `SpikeHooks` (the File Provider calls S4 and S6 need: `evictItem`, the materialized and pending sets, `getUserVisibleURL` plus `lstat`, the stabilization barrier and the testing-mode scheduler). |
-| `Apps/FileProvider` | `NSFileProviderReplicatedExtension` with `item(for:)` answered from the read-only index reader and an XPC fallback, container and working-set enumerators, `fetchContents` over a `FileHandle` with a cancellable `Progress`, `createItem`/`modifyItem`/`deleteItem`, `disconnect(reason:)`/`reconnect()` on an unreachable agent, and the agent-error to `NSFileProviderError` mapping. |
+| `Packages/.../ProviderCore` | **Everything the extension decides** (moved out of `Apps/FileProvider` on 2026-09-08, step 1.3 of `docs/testing-architecture.md`), so it compiles and is tested on Linux: `ProviderService` (the identifier mapping, the trash refusal in all three of its places, the working-set health counters and the one `signalErrorResolved` that lifts a backoff, the reader-or-agent choice, the `currentAnchor` rule that must never answer 0, the partial-fetch alignment, the agent-presence latch, and the two Finder actions), `ContainerEnumeration` and `WorkingSetEnumeration` (with its fallback to the agent - `.serverUnreachable` is reserved for an agent that genuinely cannot be reached), `IndexReaderStore` (the read-only WAL reader, the readiness window over `Index.IndexReaderReadiness`, and the `reader-state.json` `doctor` reads), and `ItemView`/`ItemTemplate`/`ItemChanges`. Behind the protocols `ProviderFailure`, `EnumerationObserving`, `ChangeObserving`, `ProviderEnumerating`, `AgentChannel`, `ReaderStoring`, `ProviderClock` and `ProviderDomainSignalling`, with neutral mirrors of Apple's identifiers, capabilities, `fileSystemFlags`, `changedFields`, content policy and error codes - each asserted against Apple's own by a macOS-only test. |
+| `Packages/.../SystemModel` | The simulated fileproviderd (2026-09-08): `FileProviderD`/`ModelDomain` (domains, the replica, sync anchors per enumerator, the enumerate-once-ever rule, a fresh instance per working-set signal, and the fetch-event-stream throttle on the measured 27-errors/47-minute schedule with its dropped signals), `Replica`, `ErrorThrottle`, `ModelAgent` (an `AgentChannel` over a real `IndexWriter`, so the working set's fallback runs the same `IndexChangeStream` the agent does), `VirtualClock`, and the `Quirk`/`QuirkTable` catalogue keyed on `docs/quirks/macos.md` with a column per macOS version. Every rule cites its quirk id. |
+| `Apps/FileProvider` | Five adapter files and no decision (2026-09-08): `FileProviderExtension` (the `NSFileProviderReplicatedExtension` conformance, forwarding every call, plus the temp file only the appex can make), `Enumerators` (an `NSFileProviderEnumerator` wrapper and the two observer adapters), `Item` (`NSFileProviderItem` over an `ItemView`), `AgentConnection` (the `NSXPCConnection`, the `AgentChannel` over it, and the three `NSFileProviderManager` calls behind `ProviderDomainSignalling`) and `AppleMapping` (the one function each way between `ProviderFailure` and `NSError`). |
 | `Apps/CLI` | `sshdrive` on ArgumentParser: section 8's `add`, `list`, `show`, `status`, `set`, `mount`, `unmount`, `remove`, `accept-deletions`, `logs` (milestone 10, `LogsCommand.swift`: the one command that `execv`s `/usr/bin/log` rather than asking the agent), plus `doctor`, `agent start|stop|restart` and the `debug` group. Pure XPC client, with the `open -g` relaunch of section 8. `PromptService` is the terminal the agent relays the collect connection's prompts to (section 4.2): it exports `SSHDriveCLIProtocol` on the same connection, reads secrets with a hidden tty read and the host-key question visibly, and falls back to a plain line read on a pipe so the CLI is scriptable. |
 | `Apps/Agent` (milestone 10) | `AgentLifecycle` - the two ways the launchd agent is asked to leave that are not `agent stop`: a **SIGTERM** from the cask's `uninstall` stanza (handled, so it exits 0 rather than dying by signal, which `KeepAlive` would read as a crash) and the **vnode watch** on our own executable of section 10.1, which waits for a readable bundle with a parseable `Info.plist` and a different inode before handing over. `DomainManager` gained `shutdownAll()` (every detector, evictor, gate and transport, concurrently, with a 20 s backstop) and `removeStrandedDomains(keeping:)` (section 10's "the app on its first launch removes every domain whose identifier is not in `config.json`"). |
 | `Apps/Askpass` | `sshdrive-askpass`: reads the token, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`), calls the agent over the askpass-only interface, prints the answer. An empty line is "skip this identity"; a non-zero exit fails the prompt. |
@@ -212,7 +231,8 @@ Test count by milestone: 33 (skeleton) -> 214 (2) -> 295 (3) -> 355 (4) -> 381 (
 503 (6) -> 548 (7/8) -> 592 (9) -> **606 (10)**, 40 of them skipped without the spike
 testbed. The milestone 10 addenda took it to 627, and 2026-09-08's Tailscale SSH work -
 the heartbeat wrapper's process-group kill, and section 8.1 naming the server software -
-to **635**.
+to 635. The working-set addendum of the same day took it to 661, and the tier 2
+reconnect work below to **679**, 41 of them skipped without the spike testbed.
 
 ## `sshdrive debug` hooks, exact syntax
 
@@ -298,9 +318,10 @@ Notes for whoever writes the runbook:
   `.downloadEagerlyAndKeepDownloaded` and drops `allowsEvicting`, which is what S6 needs.
 - `index dump` prints identifiers, paths, both versions, the derived bitmasks and the
   pin/kept state.
-- `Apps/FileProvider/IndexReaderStore.useReader` is the switch for S3's reader-vs-XPC
-  measurement. It is a stored property with no CLI hook yet; add one, or flip it in the
-  debugger, when running that measurement.
+- `IndexReaderStore.useReader` is the switch for S3's reader-vs-XPC measurement. It moved to
+  `Packages/SSHDriveCore/Sources/ProviderCore/ReaderStore.swift` on 2026-09-08 and is a
+  read-only property there, flipped by the schema-too-new path; a scenario that wants the
+  agent's answer instead hands `ProviderService` a `ReaderStoring` that says no.
 
 ### The 2026-09-04 hooks (milestone 2: `debug secrets`)
 

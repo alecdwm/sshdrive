@@ -1,5 +1,5 @@
 import XCTest
-import FileProvider
+import ProviderCore
 import Config
 import SFTP
 @testable import AgentCore
@@ -19,7 +19,7 @@ final class PermissionMappingTests: XCTestCase {
         permissions: PermissionsMode = .mode,
         identity: ServerIdentity? = nil,
         kept: Bool = false
-    ) -> NSFileProviderItemCapabilities {
+    ) -> ProviderCapabilities {
         let parent = parent ?? writableDirectory
         return ItemDerivation.capabilities(
             type: type, mode: mode, uid: uid, gid: gid,
@@ -127,7 +127,7 @@ final class PermissionMappingTests: XCTestCase {
         type: SFTPFileType = .file, mode: UInt32, uid: UInt32 = 1000, gid: UInt32 = 1000,
         permissions: PermissionsMode = .mode, identity: ServerIdentity? = nil,
         filename: String = "script.sh"
-    ) -> NSFileProviderFileSystemFlags {
+    ) -> ProviderFileSystemFlags {
         let identity = identity ?? account
         let capabilities = ItemDerivation.capabilities(
             type: type, mode: mode, uid: uid, gid: gid,
@@ -203,3 +203,4 @@ final class PermissionMappingTests: XCTestCase {
         XCTAssertEqual(ItemDerivation.fnv1a(Data("a".utf8)), 0xaf63_dc4c_8601_ec8c)
     }
 }
+

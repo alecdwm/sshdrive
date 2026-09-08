@@ -293,4 +293,133 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertEqual(ladder.tier, .helper)
         XCTAssertTrue(ladder.sweepUsesMmin)
     }
+
+    // MARK: Transient failures and the climb back (2026-09-08)
+
+    /// The production failure: a network outage kills the helper's stream, and before this
+    /// the location stayed at sweep until the agent was restarted.
+    func testATransientFailureHoldsTheTierOnlyForItsBackoff() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertTrue(
+            ladder.recordRuntimeFailure(
+                reason: "the helper exited", permanence: .transient, now: 100))
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertTrue(ladder.isHeldByTransientFailure)
+        XCTAssertEqual(ladder.transientHoldExpiresAt, 102)
+        XCTAssertEqual(ladder.note, "helper failed: the helper exited; retrying in 2 s")
+
+        // Not yet.
+        XCTAssertFalse(ladder.climbBack(now: 101))
+        XCTAssertEqual(ladder.tier, .sweep)
+        // And now.
+        XCTAssertTrue(ladder.climbBack(now: 102))
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.note)
+        XCTAssertFalse(ladder.isHeldByTransientFailure)
+    }
+
+    /// 2 s, 4 s, 8 s … and never past the cap, so a server whose helper dies the moment it
+    /// starts is retried on a bounded schedule rather than every cycle for ever.
+    func testTheTransientBackoffDoublesAndIsCapped() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        var seen: [Double] = []
+        var now: Double = 0
+        for _ in 0..<8 {
+            ladder.recordRuntimeFailure(
+                reason: "the helper exited", permanence: .transient, now: now)
+            seen.append(ladder.retryBackoffSeconds)
+            now += ladder.retryBackoffSeconds
+            ladder.climbBack(now: now)
+        }
+        XCTAssertEqual(seen, [2, 4, 8, 16, 32, 60, 60, 60])
+        XCTAssertLessThanOrEqual(seen.max() ?? 0, ChangeDetectionLadder.retryCapSeconds)
+    }
+
+    /// Section 6.3 brings the connection back on its own schedule, and that is the evidence
+    /// the outage is over: the hold goes and the backoff starts again at 2 s. This is what
+    /// makes repeated down/up cycles converge on the helper within one cycle of the link
+    /// being stable rather than one per doubling.
+    func testAConnectionComingUpClearsTheHoldAndTheBackoff() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        for round in 0..<4 {
+            let at = Double(round) * 120
+            ladder.recordRuntimeFailure(
+                reason: "connectionLost", permanence: .transient, now: at)
+            XCTAssertEqual(ladder.tier, .sweep)
+            XCTAssertTrue(ladder.noteConnected(now: at + 1))
+            XCTAssertEqual(ladder.tier, .helper, "round \(round)")
+            XCTAssertEqual(ladder.retryBackoffSeconds, 2, "round \(round)")
+        }
+    }
+
+    /// A permanent failure is still permanent, and a reconnect does not lift it: the
+    /// section 6.4 list is no shell, no exec channel, an unsupported architecture, a
+    /// `noexec` directory and a hash that did not match after a redeploy.
+    func testAPermanentFailureSurvivesAConnectionAndAClimbBack() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(
+            reason: "helper unsupported: Linux mips", permanence: .permanent, now: 10)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertFalse(ladder.isHeldByTransientFailure)
+        XCTAssertFalse(ladder.climbBack(now: 10_000))
+        XCTAssertFalse(ladder.noteConnected(now: 10_000))
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.note, "helper failed: helper unsupported: Linux mips")
+    }
+
+    /// A transient failure below a permanent one climbs back only to the permanent ceiling.
+    func testAClimbBackNeverPassesAPermanentCeiling() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(reason: "no helper for this arch", permanence: .permanent, now: 1)
+        XCTAssertEqual(ladder.tier, .sweep)
+        ladder.recordRuntimeFailure(reason: "the sweep was cut off", permanence: .transient, now: 2)
+        XCTAssertEqual(ladder.tier, .poll)
+        XCTAssertTrue(ladder.climbBack(now: 100))
+        XCTAssertEqual(ladder.tier, .sweep)
+    }
+
+    /// A tier that has run for `stabilitySeconds` forgets the failures before it, so a
+    /// server that is well again does not carry a 60 s hold for the rest of the session.
+    func testAHealthyTierResetsTheBackoff() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        for i in 0..<5 {
+            ladder.recordRuntimeFailure(reason: "flap", permanence: .transient, now: Double(i))
+            ladder.climbBack(now: Double(i) + 100)
+        }
+        XCTAssertEqual(ladder.retryBackoffSeconds, 32)
+        ladder.noteTierHealthy(now: 1_000)
+        ladder.recordRuntimeFailure(reason: "flap", permanence: .transient, now: 1_001)
+        XCTAssertEqual(ladder.retryBackoffSeconds, 2)
+    }
+
+    /// `status` has to say a downgrade is temporary and when it ends, or it reads as a
+    /// verdict about the server.
+    func testTheNoteCountsTheHoldDownFromWhereItIsRead() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(reason: "connectionLost", permanence: .transient, now: 0)
+        ladder.recordRuntimeFailure(reason: "connectionLost", permanence: .transient, now: 0)
+        XCTAssertEqual(ladder.retryBackoffSeconds, 4)
+        ladder.applyCapabilities(gnuServer(helperAvailable: true), watchMode: .auto, now: 1)
+        XCTAssertEqual(ladder.note, "helper failed: connectionLost; retrying in 3 s")
+    }
+
+    /// A transient downgrade is kept in the history marked as one, so `status` can say the
+    /// location has already climbed out of it.
+    func testTheHistoryRecordsWhichKindOfDowngradeItWas() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(reason: "the stream died", permanence: .transient, now: 1)
+        ladder.climbBack(now: 100)
+        ladder.recordRuntimeFailure(reason: "find is missing", permanence: .permanent, now: 200)
+        XCTAssertEqual(ladder.downgrades.map(\.permanence), [.transient, .permanent])
+        XCTAssertEqual(ladder.tier, .sweep)
+    }
 }

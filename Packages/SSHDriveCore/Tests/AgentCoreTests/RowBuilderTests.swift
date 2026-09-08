@@ -1,6 +1,6 @@
 import XCTest
+import ProviderCore
 import Config
-import FileProvider
 import Index
 import SFTP
 import XPCProtocols
@@ -53,7 +53,7 @@ final class RowBuilderTests: XCTestCase {
         // A kept item drops allowsEvicting (section 7.2); the eager policy is what actually
         // refuses the eviction, but the bit is part of the metadata version.
         XCTAssertEqual(
-            row.capabilities & Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue), 0)
+            row.capabilities & Int64(ProviderCapabilities.allowsEvicting.rawValue), 0)
     }
 
     func testANewRowInsideAnExcludedFolderIsNotKept() throws {
@@ -65,7 +65,7 @@ final class RowBuilderTests: XCTestCase {
             parent: excluded, existing: nil).row
         XCTAssertFalse(row.kept)
         XCTAssertNotEqual(
-            row.capabilities & Int64(NSFileProviderItemCapabilities.allowsEvicting.rawValue), 0)
+            row.capabilities & Int64(ProviderCapabilities.allowsEvicting.rawValue), 0)
     }
 
     func testAnExplicitMarkerOnTheRowBeatsTheParent() throws {
@@ -250,7 +250,7 @@ final class RowBuilderTests: XCTestCase {
             path: try RelativePath(string: "ro/locked.txt"), attributes: attributes,
             parent: readOnlyParent, existing: nil
         ).row
-        let capabilities = NSFileProviderItemCapabilities(
+        let capabilities = ProviderCapabilities(
             rawValue: UInt(truncatingIfNeeded: row.capabilities))
         XCTAssertFalse(capabilities.contains(.allowsWriting))
         XCTAssertFalse(capabilities.contains(.allowsDeleting))

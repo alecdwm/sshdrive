@@ -425,14 +425,23 @@ struct Status: ParsableCommand {
                         + "-mmin and a chmod, a chown or a write that preserved mtime is only "
                         + "found by the 30-minute full sweep")
                 }
+                if let retry = watch["retryingHigherTierInSeconds"] as? Double {
+                    print("         note: this downgrade is temporary; the higher tier is "
+                        + "tried again in \(Int(retry))s, and at once when the connection "
+                        + "comes back")
+                }
                 if let skew = watch["clockSkewSeconds"] as? Int, skew != 0 {
                     print("         note: the sweep's server-clock reference is shifted by "
                         + "\(skew)s by a debug hook")
                 }
                 for downgrade in watch["downgrades"] as? [[String: Any]] ?? [] {
+                    // A transient one is history, not a state: say so, or a location that
+                    // has already climbed back reads as one that is still down a tier.
+                    let temporary = (downgrade["permanence"] as? String) == "transient"
                     print("         note: dropped from \(downgrade["from"] as? String ?? "") to "
                         + "\(downgrade["to"] as? String ?? "") - "
-                        + "\(downgrade["reason"] as? String ?? "")")
+                        + "\(downgrade["reason"] as? String ?? "")"
+                        + (temporary ? " (temporary)" : ""))
                 }
                 if let last = watch["lastCycle"] as? [String: Any] {
                     let seconds = last["seconds"] as? Double ?? 0

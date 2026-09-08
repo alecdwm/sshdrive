@@ -28,14 +28,20 @@ public enum BundleQuarantine {
     /// is reported as "not quarantined": this is a diagnosis, and the checks that care
     /// whether the bundle is there at all are elsewhere.
     public static func attributeValue(atPath path: String) -> String? {
-        let size = getxattr(path, attributeName, nil, 0, 0, 0)
-        guard size > 0 else { return nil }
-        var bytes = [UInt8](repeating: 0, count: size)
-        let read = getxattr(path, attributeName, &bytes, size, 0, 0)
-        guard read > 0 else { return nil }
-        let value = String(decoding: bytes[0 ..< read], as: UTF8.self)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
-        return value.isEmpty ? attributeName : value
+        #if canImport(Darwin)
+            let size = getxattr(path, attributeName, nil, 0, 0, 0)
+            guard size > 0 else { return nil }
+            var bytes = [UInt8](repeating: 0, count: size)
+            let read = getxattr(path, attributeName, &bytes, size, 0, 0)
+            guard read > 0 else { return nil }
+            let value = String(decoding: bytes[0 ..< read], as: UTF8.self)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+            return value.isEmpty ? attributeName : value
+        #else
+            // `com.apple.quarantine` is LaunchServices'; nothing off Darwin carries it.
+            // The decision above takes its answer as a parameter, so it is still tested.
+            return nil
+        #endif
     }
 
     /// The seam: `read` answers the attribute's value for a path, or nil.

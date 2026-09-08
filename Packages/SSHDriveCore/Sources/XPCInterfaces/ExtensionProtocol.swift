@@ -1,3 +1,5 @@
+#if canImport(Darwin)
+
 import Foundation
 
 /// The extension's exported object: the callbacks the agent makes on an established
@@ -16,3 +18,5 @@ import Foundation
     /// The rebuild is finished; the reader may open again.
     func reopenIndexReader()
 }
+
+#endif

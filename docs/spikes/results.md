@@ -9,6 +9,204 @@ this file records only what happened.
 
 ---
 
+## 2026-09-08 (addendum) - the helper stops delivering and does not come back: an outage was being read as a verdict
+
+A second field report from the same install: the remote helper stops delivering after some
+time, and repeated network down/up/down/up cycles leave the location at the sweep tier, or
+dead, until something else kicks it. Three things were already recorded and none of them
+had been chased:
+
+- "the helper stream dies with the agent and needs a detector cycle to return" (2026-09-08,
+  the working-set addendum above);
+- "killing `ssh` under the agent poisons the cached `MaxSessions` probe" (same entry);
+- milestone 5's "a genuine outage reads as a tier downgrade with note `connectionLost`".
+
+They are one failure told three ways, and all three reproduce on the VM.
+
+### The reproduction, on the shipped code
+
+One location, `proj` -> `alec@spike-deb:2201` (root `/home/alec/proj`), mounted, tier 2,
+helper 0.1.0 over inotify, 8/8 optimal. Four scenarios, each timed from the moment of the
+kill to the moment `sshdrive status` says `helper: running` again.
+
+| Scenario | Before |
+|---|---|
+| (a) `kill -9` the `-N` master | **40.7 s** (and 95 s in the milestone 9 run: it is the poll cadence, so 60 s on a touched location and up to 10 min on an idle one) |
+| (b) `sshdrive agent restart` | 1.3 s - already fine, because a detector's first cycle runs immediately |
+| (c) `kill -STOP` the master and its mux clients for 90 s, `-CONT`, four rounds with 30 s between | **never**. Every one of the four rounds ended at `sweep` with `helper failed: the helper exited (the channel exited 255)` and stayed there; 150 s of waiting per round, four times, no return |
+| (d) `kill -9` a mux client | 32.9 s when the client was an SFTP channel (the master went with it and the next cycle rebuilt everything); a **session-long** downgrade when it was the helper's own exec channel |
+
+The `capabilities.json` half of (d) did not fall out of a kill storm - `pkill -9 -x ssh`
+twenty times at 1.5 s, and again during a forced re-probe, left `concurrentChannels: 3`
+each time - because the window is only the moment between the metadata channel coming up
+and the probe's second channel opening. The consequence is deterministic, though, and it
+is what the field report saw: with the file holding the poisoned shape by hand,
+
+```
+after restart:         tier=poll  note="the account has no shell access"  channels 1/False
+killed the master; waiting 90 s
+after kill+reconnect:  tier=poll  note="the account has no shell access"  channels 1/False
+```
+
+A location that measured its channel budget in a bad moment is SFTP-only for the life of
+the install: `status` blames the account for having no shell, against a `deb` whose sshd is
+healthy, and nothing re-probes. `remove` and `add` were the field report's fix and
+`sshdrive debug transport reprobe` is the other one; neither is something a user knows to
+do.
+
+### The three causes
+
+**1. The helper's stream is re-opened by the poll cycle, not by the reconnect.** The stream
+is per connection (§6.4), so a master that died, an agent that restarted, a wake, or a
+network path change all end it. `ChangeDetector.ensureHelper` was called from `runCycle`
+and from nowhere else, and `DomainManager`'s connected hook re-derived the identity, the
+channel budget, both SFTP channels and the root row - and then left tier 2 to whenever the
+next cycle happened to run. On a touched location that is up to 60 s; on an idle one, up to
+10 minutes; and on a location a runtime failure had dropped to `sweep`, never.
+
+**2. Every runtime failure was permanent.** §6.4 said a tier that fails at runtime "drops
+the location one tier down for the rest of the session", and `ChangeDetectionLadder` had
+one `sessionCeiling` that only ever went down. But the helper's stream dies with **every**
+connection, and `helperDied` asked only whether the transport still believed itself
+connected. During a 90-second stall it does: the master is alive, the helper on the server
+has passed its own 60 s heartbeat timeout and exited, and the exec channel comes back exit
+255. That is scenario (c) exactly - one downgrade per outage, none of them recoverable, and
+`status` reporting a network blink as a fact about the server.
+
+**3. A channel that did not open was read as the server's answer.** `ChannelProbe` turned
+any failed channel open into `ChannelBudget.forConcurrentChannels(1)` or `(2)` and cached
+it. `ssh` fails a channel open just as readily because the master has gone -
+`Control socket connect: No such file or directory`, `mux_client_hello_exchange: … Broken
+pipe`, or nothing at all - and §6.1's cache has no invalidation but an explicit re-probe.
+So one connect attempt made in a bad moment is a permanent "MaxSessions 1", which also
+takes the exec channel, the identity, the sweep and the helper with it.
+
+### The fix
+
+1. **The helper is re-established by the reconnect path itself.** `ReconnectSequence` in
+   `AgentCore` now owns the order of a reconnect - `applyConnection`, `applyCapabilities`,
+   `reopenHelperStream`, `signalErrorResolved`, `signalWorkingSet` - and `DomainManager`
+   drives it step by step. The stream is re-opened after the SFTP channels because both are
+   channels of the master that step rebuilt, and it is started on the detector's own actor
+   rather than awaited, because `DomainManager` is where every File Provider request
+   serialises and a deployment plus the helper's `ready` handshake is seconds of remote
+   work. The gate's disconnected hook stops the old stream, so nothing holds a dead channel
+   or reports a tier that is not running.
+2. **A runtime failure is permanent only for the reasons §6.4 lists as permanent** - no
+   shell, no exec channel, an unsupported OS or arch, a `noexec` directory, a hash that did
+   not match after a redeploy, a `find` that is missing. Everything else holds the tier for
+   2 s, doubling to 60 s, and then climbs back; a connection coming up clears the hold and
+   the backoff outright, since the link being back is the evidence the outage is over; and a
+   tier that has run for two minutes forgets the failures before it. `status` says which of
+   the two a downgrade is and counts down to the retry, and a transient one is marked
+   `(temporary)` in the history it prints, so a location that has already climbed back does
+   not read as one that is still down a tier.
+3. **The `MaxSessions` probe records nothing when the connection died under it.**
+   `ChannelProbeVerdict` (pure, in `AgentCore`) tells a refused session from a dead
+   connection: the refusal `ssh` actually prints, on a master that is still running, is a
+   refusal; a dead master is never one, whatever the text says; and an unfamiliar refusal
+   on a live master is still a refusal, because a location that cannot settle on a tier is
+   worse than one that settles pessimistically. A probe that met a dying connection fails
+   the connect attempt instead, and §6.3's breaker tries again. Beside that, **an abrupt
+   loss of a connection that was up marks the cached budget suspect**, so the next connect
+   re-probes; the values stay in `capabilities.json` for an offline `status` to print.
+4. **The detector's loop can be woken.** The 2 s hold was right and nothing was awake to act
+   on it: the loop was asleep for the rest of its 60 s interval, which measured as a 21 s
+   climb back. Its sleep is now a task a transient failure cancels.
+5. **Every tier transition is logged at the default level** with its reason and, for a
+   transient one, its backoff - the downgrade, the climb back, the connection that cleared
+   the hold, and the stream that was re-opened by the reconnect.
+
+### The same four scenarios, fixed
+
+| Scenario | Before | After |
+|---|---|---|
+| (a) `kill -9` the master | 40.7 s | **0.8 s, 0.9 s, 0.8 s** (three runs) |
+| (b) `sshdrive agent restart` | 1.3 s | **1.3 s, 1.8 s** - unchanged, and it was never the broken path |
+| (c) four 90 s stalls, 30 s apart | never (4 of 4 rounds ended at `sweep` for good) | **4 of 4 rounds back at tier 2, and already back before the link was restored**: the location is at `helper` again 31.3 s after the stall begins, which is the two deadline misses plus one reconnect, so `-CONT` finds it streaming (0.0 s) |
+| (d) `kill -9` the helper's exec mux client | a session-long downgrade to `sweep` | **0.5 s, 0.6 s** |
+| (d) `kill -9` an SFTP mux client | 32.9 s | **~20 s**, which is the two deadline misses that find the dead channel; the stream is back **0.5 s** after the reconnect, and the budget is re-probed on the way (`probedAt` moves, `3/True` again) |
+| (d) a poisoned channel budget | never re-probed; poll/1 across every restart and reconnect | **corrected by the first reconnect**: poll, `channels 1/False` -> helper, `channels 3/True` |
+
+The transient downgrade is visible while it runs, which is the other half of the fix:
+
+```
++2s:  tier=sweep  helper=not running
+      note: helper failed: the helper exited (the channel was killed by signal 9); retrying in 0 s
+```
+
+
+### One assumption that failed, in the new code
+
+**"helper upload failed" is not one thing.** The first cut put every post-upload
+verification failure on the permanent list, reading §6.4's "hash mismatch after redeploy"
+as covering all of them. It does not: `HelperDeployment.verdict` also answers "the server
+could not verify the helper's contents" when the size matched and **nothing** could vouch
+for the file - which is what an exec channel that will not run `sha256sum` or `--version`
+produces, and a connection going away is how that happens. Measured here: a location whose
+exec channel had been broken by an orphaned master (a leftover of scenario (c)'s
+`SIGSTOP`) reported exactly that, took the permanent downgrade, and sat at `sweep` for the
+session against a server that was fine a minute later. The split is now in `AgentCore`
+(`HelperDeployment.uploadFailureIsPermanent(after:)`) with tests: a hash that came back and
+disagreed is about the file and is permanent; no hash at all is about the channel and is
+transient.
+
+### The milestone 9 proof again, on the fixed build
+
+`deb` (2201, OpenSSH_9.2p1, glibc, GNU `find`), `alp` (2206, OpenSSH_9.7, musl, busybox)
+and the testbed's Tailscale node `sshdrive-testbed` (`tailscaled`'s own SSH, Go `pkg/sftp`),
+each a separate `ssh` making every change, the mount polled every 100 ms:
+
+| Step | `proj` on `deb` | `m9a` on `alp` | `m9t` on Tailscale |
+|---|---|---|---|
+| create -> visible | 110 ms | 110 ms | 102 ms |
+| modify -> new content | 111 ms | 113 ms | 110 ms |
+| rename -> new name visible | 111 ms | 107 ms | 113 ms |
+| rename -> old name gone | 0 ms | 0 ms | 0 ms |
+| chmod -> mode changes | 118 ms | 106 ms | 113 ms |
+| delete -> gone | 111 ms | 112 ms | 108 ms |
+
+**18 of 18 steps seen**, every one at the harness's own 100 ms polling floor. The capability
+reports are unchanged: `deb` and `alp` **8/8 optimal** naming `OpenSSH_9.2p1
+Debian-2+deb12u10` and `OpenSSH_9.7`, the Tailscale node **6/8** naming `Tailscale   SFTP:
+Go pkg/sftp` with the two reworded `fsync`/`limits` lines.
+
+The stability run on Tailscale, shortened from ten minutes to five: **30 of 30 events, 0
+missed, median 110 ms**, with a forced full sweep in the middle that left the stream running
+(`helper, running` before and after), and `helper, running` at the end.
+
+And the check the faster reconnect could have broken - two helpers on one server - does not:
+`kill -9` on every `ssh` the agent owns left **one** helper process on `deb` ten seconds
+later (its wrapper and it, `pgrep -c` 2 -> 1 -> 2), and the reconnect started exactly one
+more.
+
+### State the VM was left in
+
+One location, `proj` -> `alec@spike-deb:2201`, root `/home/alec/proj`, mounted, tier 2,
+`channels 3 at a time`, 8/8 optimal. The `m9a` (`alp`) and `m9t` (Tailscale) locations used
+for the regression proof were removed; `~/.cache/sshdrive` is gone from both servers and no
+helper is running on either (the Tailscale node keeps one **zombie** per killed session,
+which is the pre-existing cosmetic thing the 2026-09-08 entry records: `containerboot` is
+PID 1 and does not reap). The signed Debug build is installed at `/Applications/SSH
+Drive.app` and the agent is running. New harnesses beside the existing ones:
+`~/repro.py` (the four scenarios, plus the kill-storm and exec-channel variants),
+`~/tier.sh`/`~/tier.py` (one line of tier, stream state and channel budget), `~/lat.py`
+(the five-step latency table against any mount), `~/stab.py` (the timed stability run) and
+`~/poison.py` (the hand-poisoned channel budget).
+
+### Not answered here
+
+- **The poisoning itself is a race and was not caught live.** Twenty `pkill -9 -x ssh` in a
+  row and a kill storm during a forced re-probe both left the budget at 3. What is proved
+  on the VM is the consequence (a poisoned file is permanent before the fix and corrected
+  on the first reconnect after it) and, in the package, the decision that produces it
+  (`ChannelProbeVerdictTests`).
+- **Whether the owner's install had a poisoned budget or a stuck ladder.** Both produce
+  "the helper stopped delivering"; `sshdrive status` now separates them, because a
+  transient downgrade says so and names its retry.
+
+---
+
 ## 2026-09-08 (addendum) - nothing from the server reaches Finder: the working set had one answer for a reader it could not use
 
 A field report from a real install: files created on the server appear in the agent's index

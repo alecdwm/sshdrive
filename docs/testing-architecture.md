@@ -76,9 +76,17 @@ Darwin-only import. From the source we already know what it will name:
 `IOKit`, `ServiceManagement`, `CoreGraphics`, `Network` and `FileProvider` proper appear only
 under `Apps/`, which is the right place for them and where they stay.
 
-**2026-09-08: `Logging` is ported** (§8 step 1.1), so the build now reaches `XPCProtocols` and
-`Config` — the two modules directly above it, which fail in parallel. The walk continues from
-there.
+**2026-09-08: the whole package is ported** (§8 steps 1.1 and 1.2). Every row of the table
+above is closed and `swift build` and `swift test` run to completion on this box: **663 tests,
+0 failures, 41 skipped** (the testbed-gated ones), against **667** on the Mac. Nothing under
+`Packages/` needs Darwin any more; the walk continues at `Apps/`, which is step 1.3.
+
+**2026-09-08, later: step 1.3 is done too.** `Apps/FileProvider` is five adapter files and
+holds no decision; everything it used to decide is `ProviderCore`, and `SystemModel`'s
+fileproviderd drives it on Linux. **697 tests here**, 41 skipped, and **706 on the Mac**
+(the nine extra are the macOS-only mirrored-constant assertions), with all four Xcode
+targets still building and signing. `Apps/Agent` is what is left outside the package, and
+that is step 8.
 
 ## 2. (a) The seams
 
@@ -95,12 +103,15 @@ surface. Two new logic modules and two new simulation modules are added.
 ```
 Packages/SSHDriveCore/Sources/
   Logging/          + LogFacade.swift            (os.Logger on Darwin, stderr elsewhere)
-  XPCProtocols/     value types only, no @objc
-  XPCInterfaces/    NEW, macOS-only: the @objc protocols, NSXPCInterface whitelists,
-                    SecStaticCode peer requirement. Referenced only from Apps/.
-  ProviderCore/     NEW: everything Apps/FileProvider decides
+  XPCProtocols/     value types only, no @objc                      (done 2026-09-08)
+  XPCInterfaces/    macOS-only: the @objc protocols and the NSXPCInterface whitelists,
+                    referenced only from Apps/. The peer requirement stayed in
+                    XPCProtocols: it is a string, and the SecStaticCode call that
+                    applies it is in Apps/Agent                       (done 2026-09-08)
+  ProviderCore/     everything Apps/FileProvider decides               (done 2026-09-08)
   AgentRuntime/     NEW: everything Apps/Agent decides
-  SystemModel/      NEW: simulated fileproviderd + Finder + launchd, quirk-driven
+  SystemModel/      simulated fileproviderd + Finder + launchd, quirk-driven
+                    (fileproviderd's enumeration and working-set half done 2026-09-08)
   ServerModel/      NEW: simulated ssh, sftp-server, shells and find flavours
 ```
 
@@ -111,7 +122,7 @@ split:
 
 | Today | Moves to | Left in `Apps/FileProvider` |
 |---|---|---|
-| `Enumerators.swift` (275 lines) | `ProviderCore/ContainerEnumeration.swift`, `ProviderCore/WorkingSetEnumeration.swift` | two `NSFileProviderEnumerator` adapters that wrap the system's observers and forward |
+| `Enumerators.swift` (275 lines) | `ProviderCore/ContainerEnumeration.swift`, `ProviderCore/WorkingSetEnumeration.swift` | one `NSFileProviderEnumerator` adapter and the two observer adapters (done 2026-09-08; one adapter proved to be enough, because which enumerator a container gets is decided in `ProviderService.enumerator(for:)`) |
 | `FileProviderExtension.swift` (523) | `ProviderCore/ProviderService.swift` — identifier mapping, the trash refusal, the working-set health counters, the reader/agent choice, error selection | `FileProviderExtension.swift`, an `NSFileProviderReplicatedExtension` that forwards each call |
 | `IndexReaderStore.swift` (303) | `ProviderCore/ReaderStore.swift` unchanged but for the `import FileProvider` | nothing |
 | `Item.swift` (111) | `ProviderCore/ItemView.swift`, a plain struct | `Item.swift`, an `NSFileProviderItem` over an `ItemView` |
@@ -512,6 +523,11 @@ the part that is modellable (see §7).
 
 ### Suite A — the working set, anchors and enumeration
 
+**Implemented 2026-09-08** in `Tests/SystemModelTests/WorkingSetScenarios.swift` (eleven
+tests: A2 is three, adding the bite-proof against a copy of the 0.1.2 enumerator and the
+recovery that makes the `signalErrorResolved` call). They run on Linux against a real index
+and the shipping `ProviderCore`.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | A1 | Empty change set at the held anchor | A domain with rows; the reader deliberately not usable | Delete a file on the server, apply it to the index, signal the working set | The provider **never** answers `finishEnumeratingChanges(upTo: theSameAnchor)` with nothing; the deletion reaches the replica within one signal | S |
@@ -578,6 +594,9 @@ the part that is modellable (see §7).
 | F4 | A queued write is re-offered for ever | A faulted write | Twelve minutes of model time | The doubling schedule is followed and never gives up; each retry lands on a fresh instance | S |
 | F5 | A call waits for the attempt in flight | Two reads three seconds apart during a 20 s connect | Both | Both wait for the one attempt and both succeed, bounded by that attempt's own remaining deadline, not 60 s from now | SV |
 | F6 | Sleep drops, wake reconnects | Two locations, masters up | will-sleep, then did-wake | Both masters dropped by `-O exit`, no reconnect scheduled, the message acknowledged within the 5 s cap; new masters after wake | SV |
+| F7 | The reconnect re-opens the helper stream | Tier 2 running, the master `kill -9`ed | The reconnect | The stream is re-opened by the reconnect path itself, in `ReconnectSequence` order — after `applyConnection`, before the signals — and **not** at the next poll cycle; a location that is idle (10 min cadence) is back at tier 2 in seconds | SV |
+| F8 | An outage is not a tier verdict | Tier 2 running; the connection stalls until the helper's 60 s heartbeat lapses and the stream dies with the master still nominally up | The stall, then the link back | The downgrade is transient: held for 2 s, doubling to 60 s, cleared outright the moment a connection comes up. It never becomes the session-long downgrade §6.4 reserves for no shell, no exec channel, an unsupported arch, `noexec` and a hash mismatch after a redeploy | SV |
+| F9 | Repeated down/up cycles converge | Four outages in a row with 30 s of link between them | Each recovery | Every round ends at tier 2 within one cycle of the link being stable; the breaker's own backoff stays capped at 60 s and the ladder's at 60 s; neither compounds across rounds | SV |
 
 ### Suite G — eviction and pinning
 
@@ -641,6 +660,8 @@ the part that is modellable (see §7).
 | K9 | stderr says nothing about a key agent | Missing, dead and locked agents | Three connects | All three produce the same bare `Permission denied (publickey)`; only the pre-spawn socket probe distinguishes them | V |
 | K10 | The collect connection runs to 300 s | A three-hop chain with a human at the keyboard | `add` | The collect connection is bounded at 300 s and the master `add` brings up afterwards at 60 s | S |
 | K11 | CRLF stderr | `ssh -v` output ending every line with CRLF | Parse it | Line endings are normalised on **unicode scalars** before splitting; the captured version is one token, not the whole transcript | U |
+| K13 | A dying connection records no budget | The master killed between the metadata channel and the `MaxSessions` probe | The probe | Nothing is written to `capabilities.json`; the connect attempt fails and §6.3's breaker retries. A refusal `ssh` actually prints, on a master that is still running, is still recorded | U |
+| K14 | An abrupt loss makes the cached budget suspect | A cached budget of 3, then a master that died | The next connect | The cache is not believed; the probe runs again; a hand-poisoned "MaxSessions 1" is corrected by the first reconnect rather than surviving every restart | SV |
 | K12 | The server is identified | `.tailscaleSSH` and `.debian` | `add` | The identification string is taken from the collect connection at `DEBUG1` and the `debug1:` lines stripped before the classifier; the extension fingerprint names Go `pkg/sftp` or OpenSSH; "not OpenSSH" and "not identified" stay different answers | V |
 
 ### Suite L — paths, names and attributes
@@ -840,31 +861,125 @@ target depends on `Logging`.
      rendering, the line format and one compiled mirror of every call form in the tree:
      **25 LoggingTests green on Linux and on macOS** (one skipped on Darwin), and the Mac's
      `swift test` is unchanged at 661.
-  2. **Next blocker (2026-09-08):** `Logging` now compiles on Linux and the build stops at the
-     two modules directly above it, `XPCProtocols`
-     (`Sources/XPCProtocols/AgentProtocol.swift:15:2: error: Objective-C interoperability is
-     disabled`, at `@objc public protocol SSHDriveAgentProtocol`) and `Config`
-     (`Sources/Config/GroupContainer.swift:43:29: error: value of type 'FileManager' has no member
-     'containerURL'`). `swift build` again and fix what it names next, module by module, in
-     dependency order:
-     `XPCProtocols` (split the `@objc`/`NSXPCInterface`/`SecStaticCode` half into a macOS-only
-     `XPCInterfaces` target), `Config`, `Index` (a `CSQLite` system-library target with a module
-     map so `import SQLite3` becomes portable), `SFTP`, `Secrets` (`SecretsStoring` protocol +
-     `#if canImport(Security)` keychain impl; `ProcessAncestry` behind
-     `ProcessAncestryReading`), `SSHProcess` (`#if canImport(Darwin)` around the imports),
-     `AgentCore` (drop `import FileProvider` from `ItemDerivation` and `RowBuilder`).
-     Agents can now iterate here directly: `. ~/.local/share/swiftly/env.sh && swift build` and
-     `swift test` work on this box for every module that compiles.
-  3. `ProviderCore` with `ProviderFailure`, `EnumerationObserving`, `ChangeObserving`,
-     `AgentChannel`, `ReaderStoring`, `ItemView`; move the bodies of `Enumerators.swift` and
-     the decision half of `FileProviderExtension.swift` into it; leave adapters in
-     `Apps/FileProvider`.
-  4. `SystemModel` v0: the domain, the replica, the anchor bookkeeping, the fresh-instance-
-     per-signal rule, the empty-change-set rule and **the error throttler with the measured 27/47
-     schedule**.
-  5. Scenarios **A1-A9**, plus `MQ-001` to `MQ-007` in the catalog.
+  2. **[x] Done 2026-09-08.** The rest of the walk, module by module in dependency order.
+     `swift build` and `swift test` now run to completion on this box: **663 tests, 0
+     failures, 41 skipped**, per target LoggingTests 25, XPCProtocolsTests 14, ConfigTests
+     25, IndexTests 44, SFTPTests 49, SecretsTests 57, SSHProcessTests 119, AgentCoreTests
+     330. The Mac is **667** (the same suite plus the two macOS-only constant assertions
+     below and one framework-constant test), green, and the Xcode build of all four targets
+     still succeeds. What moved:
 
-  Done when A2 fails on the 0.1.2 code and passes on today's.
+     - **`XPCProtocols` split.** The `@objc` protocols and the configured
+       `NSXPCInterface`s - `AgentProtocol`, `AskpassProtocol`, `CLIProtocol`,
+       `ExtensionProtocol`, `Interfaces` - are a new target **`XPCInterfaces`**, whose file
+       bodies are `#if canImport(Darwin)` and which only the four app targets link
+       (`project.yml` lists it beside `XPCProtocols` for each). The eleven files under
+       `Apps/` that name those types gained one `import XPCInterfaces` and nothing else.
+       What stays in `XPCProtocols` is the values: `Identifiers`, `ItemSnapshot`/`ItemPage`,
+       `AgentError`, `XPCError`, `AskpassEnvironment`, `LocalAttributes`, `Trash`,
+       `CodeRequirement` (a string; the `SecStaticCode` call that applies it is in
+       `Apps/Agent`), plus `InterfaceVersion.swift` and `ProcessArguments.swift`, which came
+       out of the two files that moved.
+     - **`Config` gained `GroupContainerLocating`** (`Sources/Config/GroupContainerLocating.swift`):
+       `SystemGroupContainerLocator` is the unchanged
+       `containerURL(forSecurityApplicationGroupIdentifier:)` and stays the default on
+       Darwin; off Darwin the default is `EnvironmentGroupContainerLocator`, reading
+       `SSHDRIVE_GROUP_CONTAINER`, and `FixedGroupContainerLocator` takes a directory
+       directly. `GroupContainer.locator` is settable and `resetLocator()` puts it back.
+     - **`Index`** got a `CSQLite` system-library target (module map plus a `shim.h`
+       including `<sqlite3.h>`), depended on **only on Linux**, so `import SQLite3` is
+       still Darwin's on macOS. The Linux box needed `libsqlite3-dev`; `IndexTests` runs
+       against real SQLite there.
+     - **`Secrets`**: `SecretsError` and `KeychainSecretsStore` are behind
+       `#if canImport(Security)`; the `SecretsStore` protocol and `InMemorySecretsStore`
+       are platform-free, so off Darwin the in-memory store is the only one, which is what
+       §2.3's table asks for. `SysctlProcessAncestry` answers from `/proc/<pid>/status`
+       off Darwin, so the askpass ancestry rule is exercised on Linux too.
+     - **`SSHProcess`**: `Platform.swift` wraps the four `Darwin.`-qualified libc calls;
+       `ControlSocket`'s `$TMPDIR`, `isLiveSSH`, `liveMasterPIDs` and `commandLine` keep
+       their `sysctl` on Darwin and read `/proc` elsewhere (`ProcFS.swift`); `Spawn`'s
+       `posix_spawn` handles and `F_SETNOSIGPIPE` are branched;
+       `IdentityAgentCheck` branches `SOCK_STREAM`'s type and `sun_len`.
+     - **`AgentCore`** dropped `import FileProvider`. The capability and `fileSystemFlags`
+       bitmasks are `ProviderCapabilities` and `ProviderFileSystemFlags` in
+       `Sources/AgentCore/ProviderCapabilities.swift` - the file §2.2 puts in `ProviderCore`
+       at step 1.3, where it moved verbatim on the same day; `AgentCore` now depends on
+       `ProviderCore` for it. `BundleQuarantine`'s `getxattr` is Darwin's
+       or nil. A macOS-only `MirroredProviderConstantsTests` asserts each mirrored bit
+       against Apple's, which is step 4's `AppleConstantsTests` in miniature.
+
+     **Next blocker (2026-09-08): none in the package - the compiler names nothing.** The
+     next thing in the way is that `Apps/FileProvider` and `Apps/Agent` are still outside
+     the package, so `swift test` cannot see them; that is step 1.3 (`ProviderCore`) and
+     step 8 (`AgentRuntime`), not a port.
+
+  3. **[x] Done 2026-09-08.** `ProviderCore`, and `Apps/FileProvider` down to five adapter
+     files with no branch worth testing in them. The whole of the old extension moved:
+     `Enumerators.swift` became `ProviderCore/ContainerEnumeration.swift` and
+     `WorkingSetEnumeration.swift`, `IndexReaderStore.swift` became
+     `ProviderCore/ReaderStore.swift` (its readiness rule already lived in
+     `Index.IndexReaderReadiness`), `Item.swift`'s field-by-field copy became
+     `ProviderCore/ItemView.swift`, and `FileProviderExtension.swift`'s decisions - the
+     identifier mapping, the trash refusal in all three of its places, the working-set
+     health counters and their `signalErrorResolved`, the reader/agent choice, the
+     `currentAnchor` rule, the partial-fetch alignment, the agent-presence latch and the two
+     Finder actions - became `ProviderCore/ProviderService.swift`.
+
+     Protocols as §2.2 names them: `ProviderFailure`, `EnumerationObserving`,
+     `ChangeObserving`, `ProviderEnumerating`, `AgentChannel`, `ReaderStoring`,
+     `ProviderClock` and `ProviderDomainSignalling` (the three `NSFileProviderManager`
+     calls the extension makes on its own domain). Beside them the neutral mirrors:
+     `ProviderItemIdentifier` (with the three well-known container literals),
+     `ProviderSyncAnchor`, `ProviderPageToken`, `ItemView`/`ItemTemplate`/`ItemChanges`,
+     `ProviderCapabilities` and `ProviderFileSystemFlags` (moved from `AgentCore`
+     verbatim), `ProviderItemFields`, `ProviderContentPolicy` and
+     `ProviderContentTypeHint`.
+
+     What is left under `Apps/FileProvider`: `FileProviderExtension.swift` (the
+     `NSFileProviderReplicatedExtension` conformance, forwarding every call, plus the temp file
+     only the appex can make), `Enumerators.swift` (an `NSFileProviderEnumerator` wrapper
+     and the two observer adapters), `Item.swift` (`NSFileProviderItem` over an `ItemView`),
+     `AgentConnection.swift` (the `NSXPCConnection`, the `AgentChannel` over it and the
+     `NSFileProviderManager` half) and `AppleMapping.swift` (the one function each way
+     between `ProviderFailure` and `NSError`, built from Apple's symbols and never from a
+     number).
+
+     `Tests/ProviderCoreTests/MirroredProviderConstantsTests.swift` is the macOS-only guard:
+     one assert per mirrored constant - the three container identifier literals, ten
+     capability bits, five `fileSystemFlags` bits, eleven `changedFields` bits (including
+     the three the quirk table names as numbers) and every `ProviderFailure`'s domain and
+     code. It found five wrong error codes the first time it ran, which is exactly the drift
+     it exists for.
+  4. **[x] Done 2026-09-08.** `SystemModel`: `VirtualClock` (nothing sleeps),
+     `MacOSVersion`/`Quirk`/`QuirkMeasurement`/`QuirkTable` with the 26.4 and 26.6 columns
+     and the "refuses to resolve an unmeasured id" rule, `Replica`, `ErrorThrottle`,
+     `ModelAgent` (an `AgentChannel` over a **real** `IndexWriter`, so the fallback runs the
+     same `IndexChangeStream` the agent does) and `FileProviderD`/`ModelDomain`. The rules,
+     each citing its quirk id in the code: enumerate-once-ever (`MQ-001`), the working set as
+     a change stream only (`MQ-002`), a fresh instance per signal (`MQ-003`), the
+     empty-change-set-at-the-held-anchor counter (`MQ-004`), the fetch-event-stream throttle
+     on the measured schedule and its dropped signals (`MQ-005`), anchor expiry re-asked from
+     a fresh anchor (`MQ-006`), no timeout on a 60 s `enumerateItems` (`MQ-007`),
+     `.noSuchItem` from `item(for:)` deleting the user's file (`MQ-011`), believing returned
+     versions (`MQ-013`), `signalErrorResolved` as the only thing that lifts a backoff
+     (`MQ-037`), and killing an idle instance (`MQ-073`). The throttle's curve is fitted
+     through both measured points - 7 errors / 1 min 34 s and 27 errors / 47 min - and
+     clamped to the measured 47 minutes at the threshold.
+  5. **[x] Done 2026-09-08.** Scenarios **A1-A9** in `Tests/SystemModelTests`, eleven tests
+     (A2 is three: the fixed behaviour, the bite-proof, and the recovery that makes the
+     `signalErrorResolved` call).
+
+  **Done when A2 fails on the 0.1.2 code and passes on today's - and it does.** A copy of
+  the 0.1.2 working-set enumerator lives in the test file as
+  `LegacyWorkingSetEnumeration` and is handed to fileproviderd through the model's
+  `workingSetEnumeratorOverride`. Run `A2`'s own assertions against it and they fail:
+  `backingOff(nextRetryIn: 2820.0)` against `.none`, 40 consecutive errors against 0, and
+  0 of 40 rows in the replica against 40. Nothing in `Sources/` knows that copy exists.
+
+  **Next: step 2**, the quirk machinery - the JSON mirror of `docs/quirks/`, the
+  Markdown/JSON consistency test, `SSHDRIVE_MACOS` on the environment, and the A suite
+  parameterised over the matrix. `SystemModel`'s table is already shaped for it; what it
+  lacks is the mirror and the `check-quirks.sh` guard.
 
 **Step 2 — the quirk machinery.** `Quirk`, `Measurement`, `MacOSVersion`, `QuirkTable`, the
 JSON mirror, the "unmeasured quirk on a supported version fails loudly" rule, and the

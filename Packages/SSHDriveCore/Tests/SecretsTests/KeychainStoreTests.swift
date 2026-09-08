@@ -42,23 +42,32 @@ final class SecretsStoreContractTests: XCTestCase {
         XCTAssertEqual(try store.accounts().count, 2)
     }
 
-    func testTheAccessGroupAndServiceAreTheOnesSection31Fixes() {
-        XCTAssertEqual(KeychainSecretsStore().accessGroup, "RWGDZAYBM8.org.shirls.sshdrive")
-        XCTAssertEqual(KeychainSecretsStore.service, "org.shirls.sshdrive")
-    }
+    /// macOS only: off Darwin there is no `Security` and so no keychain store at all
+    /// (`Sources/Secrets/SecretsStore.swift`).
+    #if canImport(Security)
+        func testTheAccessGroupAndServiceAreTheOnesSection31Fixes() {
+            XCTAssertEqual(KeychainSecretsStore().accessGroup, "RWGDZAYBM8.org.shirls.sshdrive")
+            XCTAssertEqual(KeychainSecretsStore.service, "org.shirls.sshdrive")
+        }
+    #endif
 
     /// Runs only where the entitlement exists. Left in so a future signed test host, or a
     /// developer running the binary from inside the bundle, exercises the real thing.
     func testTheRealKeychainRoundTrip() throws {
-        guard ProcessInfo.processInfo.environment["SSHDRIVE_KEYCHAIN_TESTS"] == "1" else {
-            throw XCTSkip("needs the keychain-access-groups entitlement; use `sshdrive debug secrets`")
-        }
-        let store = KeychainSecretsStore()
-        let key = SecretKey.passphrase(path: "/tmp/sshdrive-test-\(UUID().uuidString)")
-        try store.setSecret("value", for: key)
-        XCTAssertEqual(try store.secret(for: key), "value")
-        try store.removeSecret(for: key)
-        XCTAssertNil(try store.secret(for: key))
+        #if canImport(Security)
+            guard ProcessInfo.processInfo.environment["SSHDRIVE_KEYCHAIN_TESTS"] == "1" else {
+                throw XCTSkip(
+                    "needs the keychain-access-groups entitlement; use `sshdrive debug secrets`")
+            }
+            let store = KeychainSecretsStore()
+            let key = SecretKey.passphrase(path: "/tmp/sshdrive-test-\(UUID().uuidString)")
+            try store.setSecret("value", for: key)
+            XCTAssertEqual(try store.secret(for: key), "value")
+            try store.removeSecret(for: key)
+            XCTAssertNil(try store.secret(for: key))
+        #else
+            throw XCTSkip("no keychain off Darwin")
+        #endif
     }
 }
 

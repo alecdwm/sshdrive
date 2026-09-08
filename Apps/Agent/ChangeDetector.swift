@@ -21,6 +21,8 @@ actor ChangeDetector {
     private var watchMode: WatchMode
 
     private var loop: Task<Void, Never>?
+    /// The loop's current sleep, so a transient hold can end it early (`nudge`).
+    private var sleeper: Task<Void, Never>?
     /// Section 6.4: "every 60 s while the user has touched the domain in the last 10
     /// minutes ... every 10 min otherwise". A touch is a File Provider request that was
     /// not a system request, or a CLI command naming the location.
@@ -83,7 +85,7 @@ actor ChangeDetector {
                 guard let self else { return }
                 let wait = await self.secondsUntilNextCycle()
                 if wait > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(min(wait, 60) * 1_000_000_000))
+                    await self.sleepBeforeNextCycle(seconds: min(wait, 60))
                     continue
                 }
                 _ = await self.runCycle()
@@ -97,16 +99,44 @@ actor ChangeDetector {
     func stop() {
         loop?.cancel()
         loop = nil
+        sleeper?.cancel()
+        sleeper = nil
         let stream = helper
         helper = nil
         Task { await stream?.stop() }
     }
 
+    /// The loop's sleep, held where `nudge()` can cancel it.
+    private func sleepBeforeNextCycle(seconds: Double) async {
+        let task = Task<Void, Never> {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        }
+        sleeper = task
+        await task.value
+        sleeper = nil
+    }
+
+    /// Ends the loop's current sleep so the schedule is re-read now.
+    ///
+    /// A transient tier hold is two seconds, and the loop is normally asleep for the rest
+    /// of a 60 s (or 10 min) poll interval when one is recorded. Without this the climb
+    /// back to tier 2 was measured at 21 s after a 2 s hold - the backoff was right and
+    /// nothing was awake to act on it (2026-09-08).
+    private func nudge() {
+        sleeper?.cancel()
+        sleeper = nil
+    }
+
     private func secondsUntilNextCycle(now: Double = Date().timeIntervalSince1970) -> Double {
         guard !paused else { return 5 }
-        let due = PollSchedule.nextFire(
+        var due = PollSchedule.nextFire(
             lastCycle: lastCycle, lastTouch: lastTouch, now: now,
             lastCycleSeconds: lastCycleSeconds)
+        // A transient downgrade is held for seconds, not for a poll interval, so the loop
+        // wakes when the hold expires rather than at the next 60 s (or 10 min) boundary.
+        // Without this the 2 s backoff would be read as "some time in the next ten
+        // minutes", which is the delay the fix exists to remove (2026-09-08).
+        if let expires = ladder.transientHoldExpiresAt { due = min(due, expires) }
         return max(0, due - now)
     }
 
@@ -121,6 +151,49 @@ actor ChangeDetector {
     func requestFullSweep(reason: String) {
         fullSweepPending = true
         fullSweepReason = reason
+    }
+
+    /// The connection came up. Called by `DomainManager` from the gate's connected hook,
+    /// **after** `LocationRuntime.applyConnection` has re-derived the identity, the channel
+    /// budget and the SFTP channels, because the helper's exec channel is opened on the
+    /// same master those channels sit on and a stream started before them would be started
+    /// on the connection that is going away.
+    ///
+    /// Section 6.4 says the helper's stream is per connection, so a reconnect is exactly
+    /// when it has to be re-opened. It used to be left to the next poll cycle, which is up
+    /// to 60 s away on a touched location and up to 10 min on an idle one - and on a
+    /// location a transient failure had dropped to sweep, never (2026-09-08).
+    func connectionCameUp() async {
+        let now = Date().timeIntervalSince1970
+        if ladder.noteConnected(now: now) {
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): the connection is back; climbing to \(self.ladder.tier.rawValue, privacy: .public)"
+            )
+            await runtime.setWatchTier(ladder.tier.rawValue)
+        }
+        // The stream that died with the old connection is not reusable, whatever it still
+        // says about itself.
+        if let helper {
+            self.helper = nil
+            await helper.stop()
+        }
+        requestFullSweep(reason: "reconnect")
+        guard ladder.tier == .helper else { return }
+        // Started on this actor but not awaited by the caller: `DomainManager` is the
+        // agent's serialisation point and every File Provider request passes through it,
+        // while a deployment plus the helper's `ready` handshake is seconds of remote work
+        // with a 20 s deadline behind it. The detector is an actor, so this still runs
+        // after everything above, and `helperStarting` keeps it single.
+        Task { [weak self] in await self?.ensureHelper() }
+    }
+
+    /// The connection went away. The stream went with it; nothing is a tier failure here,
+    /// because the reconnect of section 6.3 is what answers an outage.
+    func connectionWentAway(reason: String) async {
+        guard let helper else { return }
+        self.helper = nil
+        await helper.stop()
+        helperNote = "the connection went away (\(reason)); the stream restarts on reconnect"
     }
 
     /// A new connection may be a different server: a NAS that came back with a busybox
@@ -161,6 +234,22 @@ actor ChangeDetector {
         guard !cycleInProgress else { return LocationRuntime.ChangeApplication() }
         cycleInProgress = true
         defer { cycleInProgress = false; lastCycle = Date().timeIntervalSince1970 }
+
+        // A transient failure holds the tier down for a bounded backoff and no longer; the
+        // cycle is where the hold is noticed to have expired (section 6.4, 2026-09-08).
+        if ladder.climbBack(now: now) {
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): the transient failure has expired; climbing back to \(self.ladder.tier.rawValue, privacy: .public)"
+            )
+            await runtime.setWatchTier(ladder.tier.rawValue)
+        }
+        // A tier that has been running long enough to be believed forgets the failures
+        // that preceded it, so the next backoff starts at 2 s again.
+        if let started = await helper?.startedAt,
+            now - started >= ChangeDetectionLadder.stabilitySeconds
+        {
+            ladder.noteTierHealthy(now: now)
+        }
 
         var full = forceFull || fullSweepPending
         var reason = full ? fullSweepReason : "cycle"
@@ -228,7 +317,8 @@ actor ChangeDetector {
                     Log.agent.notice(
                         "\(self.locationID, privacy: .public): \(sweepNote!, privacy: .public)")
                 } else {
-                    ladder.recordRuntimeFailure(reason: text, now: now)
+                    // `find` missing or unusable is about the server, not about the link.
+                    ladder.recordRuntimeFailure(reason: text, permanence: .permanent, now: now)
                     await runtime.setWatchTier(ladder.tier.rawValue)
                     Log.agent.error(
                         "\(self.locationID, privacy: .public): the sweep failed (\(text, privacy: .public)); dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
@@ -309,10 +399,24 @@ actor ChangeDetector {
             // next tier and the status report says why the helper is not running."
             let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             helperNote = reason
+            let now = Date().timeIntervalSince1970
+            guard ChangeDetector.permanence(of: error) == .permanent else {
+                // A deployment that met a dying connection says nothing about the server,
+                // and writing it into the capabilities would keep the helper refused on
+                // every later connect until something re-probed (2026-09-08). Hold the
+                // tier for the backoff instead and try again.
+                ladder.recordRuntimeFailure(reason: reason, permanence: .transient, now: now)
+                await runtime.setWatchTier(ladder.tier.rawValue)
+                nudge()
+                Log.agent.notice(
+                    "\(self.locationID, privacy: .public): the helper could not be deployed this time - \(reason, privacy: .public); retrying in \(Int(self.ladder.retryBackoffSeconds), privacy: .public) s"
+                )
+                return
+            }
             var capabilities = ladder.capabilities
             capabilities.helperAvailable = false
             capabilities.helperBlockReason = reason
-            ladder.applyCapabilities(capabilities, watchMode: watchMode, now: Date().timeIntervalSince1970)
+            ladder.applyCapabilities(capabilities, watchMode: watchMode, now: now)
             await runtime.setWatchTier(ladder.tier.rawValue)
             Log.agent.notice(
                 "\(self.locationID, privacy: .public): the helper is not available - \(reason, privacy: .public)"
@@ -340,12 +444,18 @@ actor ChangeDetector {
             let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             helperNote = reason
             // A stream that would not start on a shell that answered is a runtime failure
-            // of the tier, and section 6.4 drops the location one tier down for the rest of
-            // the session when that happens.
-            if ladder.recordRuntimeFailure(reason: reason, now: Date().timeIntervalSince1970) {
+            // of the tier. Whether it costs the location the tier for the session or only
+            // for a bounded backoff is section 6.4's permanent list, not the fact that it
+            // failed: a `ready` line that never arrived because the channel died is an
+            // outage, and an outage is not a verdict (2026-09-08).
+            let permanence = ChangeDetector.permanence(of: error)
+            if ladder.recordRuntimeFailure(
+                reason: reason, permanence: permanence, now: Date().timeIntervalSince1970)
+            {
                 await runtime.setWatchTier(ladder.tier.rawValue)
-                Log.agent.error(
-                    "\(self.locationID, privacy: .public): the helper would not start (\(reason, privacy: .public)); dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
+                if permanence == .transient { nudge() }
+                Log.agent.notice(
+                    "\(self.locationID, privacy: .public): the helper would not start (\(reason, privacy: .public)); dropping to \(self.ladder.tier.rawValue, privacy: .public) \(permanence == .permanent ? "for this session" : "for \(Int(self.ladder.retryBackoffSeconds)) s", privacy: .public)"
                 )
             }
         }
@@ -445,18 +555,40 @@ actor ChangeDetector {
         helperNote = reason
         let connected = await runtime.isConnected()
         guard connected else {
+            // The connection is what took it. The gate is already reconnecting on section
+            // 6.3's schedule, and `connectionCameUp` starts a new stream the moment it
+            // does, so the tier is left where it is.
             Log.agent.notice(
-                "\(self.locationID, privacy: .public): the helper stream ended with the connection; it restarts on the next cycle"
+                "\(self.locationID, privacy: .public): the helper stream ended with the connection; it restarts on the reconnect"
             )
             return
         }
-        if ladder.recordRuntimeFailure(reason: reason, now: Date().timeIntervalSince1970) {
+        // A stream that died while the connection is still up is a runtime failure of the
+        // tier - but a transient one. Section 6.4's permanent list is about the server, and
+        // a channel that was killed, a helper that was reaped or a wrapper whose heartbeat
+        // lapsed says nothing about whether the server can run one. Before 2026-09-08 this
+        // was always permanent, which is how a 90-second network stall left a location at
+        // sweep until the agent was restarted.
+        let now = Date().timeIntervalSince1970
+        if ladder.recordRuntimeFailure(reason: reason, permanence: .transient, now: now) {
             await runtime.setWatchTier(ladder.tier.rawValue)
             requestFullSweep(reason: "the helper stream died")
-            Log.agent.error(
-                "\(self.locationID, privacy: .public): dropping to \(self.ladder.tier.rawValue, privacy: .public) for this session"
+            nudge()
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): dropping to \(self.ladder.tier.rawValue, privacy: .public) for \(Int(self.ladder.retryBackoffSeconds), privacy: .public) s (\(reason, privacy: .public))"
             )
         }
+    }
+
+    /// Section 6.4's permanent list, applied to whatever the deployment or the stream
+    /// threw. Everything that is not on it - and every transport error, which is an outage
+    /// by definition - is transient and is retried on the ladder's bounded backoff.
+    static func permanence(of error: Error) -> ChangeDetectionLadder.Permanence {
+        if error is SFTPError { return .transient }
+        if let failure = error as? HelperDeployer.Failure {
+            return failure.isPermanent ? .permanent : .transient
+        }
+        return .permanent
     }
 
     /// `sshdrive set <name> helper off`, and `sshdrive remove`: stop the stream and take
@@ -578,11 +710,24 @@ actor ChangeDetector {
         }
         if let note = ladder.note { out["note"] = note }
         if let note = helperNote, ladder.note == nil { out["note"] = note }
+        // Section 6.4's climb-back, so `status` says a downgrade is temporary and when it
+        // ends rather than reading as a verdict (2026-09-08).
+        if let expires = ladder.transientHoldExpiresAt {
+            let remaining = max(0, (expires - Date().timeIntervalSince1970).rounded(.up))
+            out["retryingHigherTierInSeconds"] = remaining
+            // The note the failure wrote counted down from the moment it happened; what a
+            // reader wants is the countdown from now.
+            if let note = ladder.note, let cut = note.range(of: "; retrying in") {
+                out["note"] = String(note[..<cut.lowerBound]) + "; retrying in \(Int(remaining)) s"
+            }
+        }
         if clockSkewSeconds != 0 { out["clockSkewSeconds"] = clockSkewSeconds }
         if !ladder.downgrades.isEmpty {
             out["downgrades"] = ladder.downgrades.map {
-                ["from": $0.from.rawValue, "to": $0.to.rawValue, "reason": $0.reason, "at": $0.at]
-                    as [String: Any]
+                [
+                    "from": $0.from.rawValue, "to": $0.to.rawValue, "reason": $0.reason,
+                    "at": $0.at, "permanence": $0.permanence.rawValue,
+                ] as [String: Any]
             }
         }
         if !lastOutcome.isEmpty { out["lastCycle"] = lastOutcome }
