@@ -102,10 +102,23 @@ public struct RemoteScript: Sendable, Equatable {
     /// probe still records the answer for `status`.
     ///
     /// The kill is a TERM to our own process group, with TERM ignored first so the
-    /// wrapper survives to send the KILL. sshd gives the session its own process group, so
-    /// this reaches the child and everything it started - a `( sleep 300 & )` included -
-    /// and nothing outside the session. Signalling only `$!` would leave the child's own
-    /// background children alive, which is the case this wrapper exists for.
+    /// wrapper survives to send the KILL. OpenSSH's sshd puts the session in a session
+    /// and process group of its own, so this reaches the child and everything it started
+    /// - a `( sleep 300 & )` included - and nothing outside the session. Signalling only
+    /// `$!` would leave the child's own background children alive, which is the case this
+    /// wrapper exists for.
+    ///
+    /// **The group is named `-$$`, never `0`.** `kill … 0` means "whatever process group
+    /// I happen to be in", and not every SSH server gives a session one of its own:
+    /// Tailscale SSH runs every session in `tailscaled`'s process group, shared with
+    /// every other session of every other client. There `kill -TERM 0` killed the
+    /// account's other sessions and the connection carrying them, which is what the
+    /// helper's exec channel exiting 255 fifteen seconds after `ready` actually was
+    /// (2026-09-08). `-$$` names *the group this shell leads*: identical to `0` where
+    /// sshd gave us one, and `ESRCH` where it did not, because a process group's id is
+    /// the pid of its leader and our own pid leads no group then. The child and its
+    /// direct children are signalled by pid either way, so the tier 2 guarantee - the
+    /// helper never outlives the connection - holds on both kinds of server.
     private func wrapper(_ settings: HeartbeatSettings) -> [String] {
         let ticks = max(1, settings.timeoutSeconds / max(1, settings.intervalSeconds))
         // Deliberately unquoted: `${TMPDIR:-/tmp}` and `$$` are meant to expand, and the
@@ -177,10 +190,18 @@ public struct RemoteScript: Sendable, Equatable {
             "trap '' TERM",
             stdinRelay == nil ? "" : "exec 8>&- 2>/dev/null",
             "kill -TERM \"$__sd_child\" 2>/dev/null",
-            "kill -TERM 0 2>/dev/null",
+            // The child's own children, for the server that did not give this session a
+            // process group of its own and where the group kill below is therefore an
+            // `ESRCH`. Best effort by design: `pkill` is absent on some servers, and the
+            // one child that must never be left behind - the helper - is `exec`ed, so it
+            // *is* `$__sd_child`.
+            "pkill -TERM -P \"$__sd_child\" 2>/dev/null || true",
+            "kill -TERM -$$ 2>/dev/null",
             "sleep 2",
             "rm -f \"$__sd_stamp\" \"$__sd_mark\" \"$__sd_relay\" 2>/dev/null",
-            "kill -KILL 0 2>/dev/null",
+            "kill -KILL \"$__sd_child\" 2>/dev/null",
+            "pkill -KILL -P \"$__sd_child\" 2>/dev/null || true",
+            "kill -KILL -$$ 2>/dev/null",
             "exit 0",
         ]
         return lines.filter { !$0.isEmpty }

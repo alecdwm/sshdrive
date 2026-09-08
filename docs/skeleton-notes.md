@@ -210,7 +210,9 @@ signed build.
 
 Test count by milestone: 33 (skeleton) -> 214 (2) -> 295 (3) -> 355 (4) -> 381 (5) ->
 503 (6) -> 548 (7/8) -> 592 (9) -> **606 (10)**, 40 of them skipped without the spike
-testbed.
+testbed. The milestone 10 addenda took it to 627, and 2026-09-08's Tailscale SSH work -
+the heartbeat wrapper's process-group kill, and section 8.1 naming the server software -
+to **635**.
 
 ## `sshdrive debug` hooks, exact syntax
 

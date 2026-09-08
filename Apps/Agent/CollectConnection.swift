@@ -103,7 +103,11 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             askpass: broker,
             hostKeyChecking: attempt.hostKeyChecking,
             isCollectConnection: true,
-            maskedAccounts: attempt.maskedAccounts)
+            maskedAccounts: attempt.maskedAccounts,
+            // Section 8.1 wants `status` to name the server software, and this one
+            // connection is the only `ssh` the agent runs that ever sees the server's
+            // identification string (section 6.1; 2026-09-08).
+            capturesRemoteVersion: true)
         configuration.identityAgentSocket = nil
 
         let master = SSHMaster(configuration: configuration)
@@ -129,6 +133,9 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             stderr = error.localizedDescription
         }
 
+        if let version = await master.remoteSoftwareVersion, !version.isEmpty {
+            remoteSoftwareVersion = version
+        }
         let token = await master.askpassToken
         let info = token.flatMap { broker.info(token: $0) }
         // The master goes either way: if it authenticated, the location's own master is
@@ -178,6 +185,11 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
     /// Keychain accounts the successful attempt wrote. `add` records them on the location,
     /// which is what `remove` counts references against (section 8).
     private(set) var committedKeys: [String] = []
+
+    /// "remote software version <x>" as this connection's `ssh` reported it, e.g.
+    /// `OpenSSH_9.2p1 Debian-2+deb12u10` or `Tailscale`. `add` stores it in
+    /// `capabilities.json` and section 8.1's report names it (2026-09-08).
+    private(set) var remoteSoftwareVersion: String?
 
     // MARK: the relayed prompt
 

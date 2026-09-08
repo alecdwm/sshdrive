@@ -49,6 +49,18 @@ public actor SSHMaster {
         /// rather than being answered from the keychain and refused by the server
         /// (section 4.2).
         public var maskedAccounts: Set<String>
+        /// Raise this one connection to `LogLevel=DEBUG1` and keep the server's
+        /// identification string out of it.
+        ///
+        /// Section 8.1 wants `status` to name the server software, and section 6.1 says
+        /// why nothing else can: the runtime masters run at `LogLevel=ERROR`, which prints
+        /// no remote version, and a mux client never talks to the server at all. The
+        /// collect connection of section 4.2 is a real, fresh `ssh` the agent makes once
+        /// per `add`, so it is the one place the line is free. Everything that looks at
+        /// this connection's stderr afterwards - the exit classifier and the sentence
+        /// `add` prints - sees the debug lines stripped again, so raising the level
+        /// changes no decision (2026-09-08).
+        public var capturesRemoteVersion: Bool
 
         public init(
             locationID: String,
@@ -63,7 +75,8 @@ public actor SSHMaster {
             askpass: (any AskpassTokenProviding)? = nil,
             hostKeyChecking: String = "yes",
             isCollectConnection: Bool = false,
-            maskedAccounts: Set<String> = []
+            maskedAccounts: Set<String> = [],
+            capturesRemoteVersion: Bool = false
         ) {
             self.locationID = locationID
             self.target = target
@@ -78,6 +91,7 @@ public actor SSHMaster {
             self.hostKeyChecking = hostKeyChecking
             self.isCollectConnection = isCollectConnection
             self.maskedAccounts = maskedAccounts
+            self.capturesRemoteVersion = capturesRemoteVersion
         }
     }
 
@@ -86,6 +100,8 @@ public actor SSHMaster {
     private var stderrCollector: StderrCollector?
     public private(set) var lastClassification: SSHExitClassification?
     public private(set) var lastStderr: String = ""
+    /// `ssh`'s "remote software version <x>", when this master was asked for it.
+    public private(set) var remoteSoftwareVersion: String?
     /// The token minted for the running master, retired when it goes. A `ProxyJump` hop
     /// inherits it through the environment and is told apart by its own argv (section 4.2).
     public private(set) var askpassToken: String?
@@ -102,7 +118,8 @@ public actor SSHMaster {
             target: configuration.target,
             controlPath: configuration.controlPath,
             proxyCommand: configuration.proxyCommand,
-            hostKeyChecking: configuration.hostKeyChecking
+            hostKeyChecking: configuration.hostKeyChecking,
+            logLevel: configuration.capturesRemoteVersion ? "DEBUG1" : "ERROR"
         )
     }
 
@@ -146,11 +163,14 @@ public actor SSHMaster {
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: configuration.controlPath) {
                 lastClassification = nil
+                // The identification string is exchanged before authentication, so it is
+                // already in the buffer by the time the socket appears.
+                _ = absorb(collector.text)
                 Log.ssh.info("master up for \(self.configuration.locationID, privacy: .public)")
                 return
             }
             if let exit = Spawn.poll(pid: spawned.pid) {
-                let stderr = collector.text
+                let stderr = absorb(collector.text)
                 lastStderr = stderr
                 let classification = SSHExitClassifier.classify(
                     role: .master, exitStatus: exit.status, terminationSignal: exit.signal,
@@ -166,7 +186,7 @@ public actor SSHMaster {
         // The deadline. For an agentDependent location this stops reconnection and is
         // re-armed once; for a first-pass location, which no key agent can be holding up,
         // it is a transient failure retried through the breaker (section 6.1).
-        let stderr = collector.text
+        let stderr = absorb(collector.text)
         lastStderr = stderr
         Spawn.terminate(spawned, grace: 1)
         process = nil
@@ -212,11 +232,73 @@ public actor SSHMaster {
         ControlSocket.unlink(configuration.controlPath)
     }
 
+    /// Takes the server's identification string out of a raw stderr buffer and hands
+    /// back the buffer as every other reader expects to see it.
+    ///
+    /// Only the collect connection ever runs at `DEBUG1`; for every other master this is
+    /// the identity function. For that one it is what keeps raising the level free: the
+    /// exit classifier and the sentence `add` prints both see exactly the ERROR-level
+    /// text they saw before, because `debug1:`/`debug2:`/`debug3:` lines are dropped
+    /// (2026-09-08, section 8.1).
+    @discardableResult
+    private func absorb(_ raw: String) -> String {
+        guard configuration.capturesRemoteVersion else { return raw }
+        if let found = SSHMaster.remoteSoftwareVersion(inDebugOutput: raw) {
+            remoteSoftwareVersion = found
+        }
+        return SSHMaster.withoutDebugLines(raw)
+    }
+
+    /// `debug1: Remote protocol version 2.0, remote software version OpenSSH_9.2p1 …`
+    public static func remoteSoftwareVersion(inDebugOutput raw: String) -> String? {
+        let marker = "remote software version "
+        for line in lines(of: raw) {
+            guard let range = line.range(of: marker) else { continue }
+            let value = line[range.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    public static func withoutDebugLines(_ raw: String) -> String {
+        lines(of: raw)
+            .filter { line in
+                !(line.hasPrefix("debug1: ") || line.hasPrefix("debug2: ")
+                    || line.hasPrefix("debug3: "))
+            }
+            .joined(separator: "\n")
+    }
+
+    /// **`ssh` ends every stderr log line with `\r\n`, and in Swift `"\r\n"` is one
+    /// `Character`.** So `split(separator: "\n")` finds no separator at all in `ssh -v`
+    /// output, the whole transcript is one "line", and the first thing that reads a value
+    /// off it takes the rest of the file with it: the captured server version became
+    /// `Tailscale` followed by a hundred `debug1:` lines, which `status` then printed
+    /// (measured 2026-09-08). Normalise the line endings first, on scalars.
+    static func lines(of raw: String) -> [Substring] {
+        var normalised = ""
+        normalised.reserveCapacity(raw.unicodeScalars.count)
+        var previousWasCR = false
+        for scalar in raw.unicodeScalars {
+            switch scalar {
+            case "\r":
+                normalised.unicodeScalars.append("\n")
+            case "\n":
+                if !previousWasCR { normalised.unicodeScalars.append("\n") }
+            default:
+                normalised.unicodeScalars.append(scalar)
+            }
+            previousWasCR = scalar == "\r"
+        }
+        return normalised.split(separator: "\n", omittingEmptySubsequences: false)
+    }
+
     /// Reads the master's exit once it has one, and classifies it. The exit of the `-N`
     /// master is the disconnect signal for the location.
     public func classifyExitIfEnded() -> SSHExitClassification? {
         guard let process, let exit = Spawn.poll(pid: process.pid) else { return nil }
-        let stderr = stderrCollector?.text ?? ""
+        let stderr = absorb(stderrCollector?.text ?? "")
         lastStderr = stderr
         let classification = SSHExitClassifier.classify(
             role: .master, exitStatus: exit.status, terminationSignal: exit.signal,

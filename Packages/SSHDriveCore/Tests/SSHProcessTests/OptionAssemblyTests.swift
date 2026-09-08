@@ -235,4 +235,49 @@ final class OptionAssemblyTests: XCTestCase {
         // And this process is certainly alive and certainly not named ssh.
         XCTAssertFalse(ControlSocket.isLiveSSH(getpid()))
     }
+
+    // MARK: The one connection that reads the server's identification string
+
+    /// Section 8.1 wants `status` to name the server software; section 6.1 says the
+    /// runtime masters run at `LogLevel=ERROR` and never see a banner. The collect
+    /// connection asks for `DEBUG1`, and only it (2026-09-08).
+    func testOnlyTheCapturingMasterRaisesTheLogLevel() {
+        let target = SSHTarget(host: "nas")
+        let quiet = SSHCommandBuilder.master(target: target, controlPath: "/tmp/s")
+        XCTAssertTrue(quiet.argv.contains("LogLevel=ERROR"))
+        XCTAssertFalse(quiet.argv.contains("LogLevel=DEBUG1"))
+        let loud = SSHCommandBuilder.master(
+            target: target, controlPath: "/tmp/s", hostKeyChecking: "ask", logLevel: "DEBUG1")
+        XCTAssertTrue(loud.argv.contains("LogLevel=DEBUG1"))
+        XCTAssertFalse(loud.argv.contains("LogLevel=ERROR"))
+    }
+
+    func testTheRemoteSoftwareVersionIsReadAndTheDebugLinesGoAgain() {
+        let raw = """
+            debug1: Reading configuration data /etc/ssh/ssh_config
+            debug1: Connecting to nas port 22.
+            debug1: Remote protocol version 2.0, remote software version Tailscale
+            debug1: compat_banner: no match: Tailscale
+            Permission denied (publickey).
+            """
+        XCTAssertEqual(SSHMaster.remoteSoftwareVersion(inDebugOutput: raw), "Tailscale")
+        // Whatever the classifier and `add` see must be exactly the ERROR-level text.
+        XCTAssertEqual(SSHMaster.withoutDebugLines(raw), "Permission denied (publickey).")
+        XCTAssertNil(SSHMaster.remoteSoftwareVersion(inDebugOutput: "Permission denied."))
+    }
+
+    /// `ssh` ends every stderr log line with CRLF, and Swift counts `"\r\n"` as **one**
+    /// `Character`, so `split(separator: "\n")` finds nothing to split. Without
+    /// normalising first, the captured version was `Tailscale` plus the hundred `debug1:`
+    /// lines after it, and `sshdrive status` printed the lot (measured 2026-09-08).
+    func testCRLFLogLinesAreSplitRatherThanSwallowedWhole() {
+        let raw = "debug1: Remote protocol version 2.0, remote software version Tailscale\r\n"
+            + "debug1: compat_banner: no match: Tailscale\r\n"
+            + "debug1: Authenticating to nas:22 as 'alec'\r\n"
+            + "Permission denied (publickey).\r\n"
+        XCTAssertEqual(SSHMaster.remoteSoftwareVersion(inDebugOutput: raw), "Tailscale")
+        XCTAssertEqual(
+            SSHMaster.withoutDebugLines(raw).trimmingCharacters(in: .whitespacesAndNewlines),
+            "Permission denied (publickey).")
+    }
 }

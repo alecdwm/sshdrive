@@ -291,6 +291,26 @@ enum CapabilityCache {
         return (result, extensions, at)
     }
 
+    /// The server's identification string, captured once by the collect connection of
+    /// section 4.2 (`add`, `passwd`, `set host|user|port|identity`), which is the only
+    /// `ssh` the agent runs that ever sees one (section 6.1, section 8.1; 2026-09-08).
+    static func storeServerVersion(_ version: String?, locationID: String) {
+        guard let version, !version.isEmpty else { return }
+        merge(locationID: locationID, ["serverVersion": version])
+    }
+
+    static func serverVersion(locationID: String) -> String? {
+        read(locationID: locationID)["serverVersion"] as? String
+    }
+
+    /// Section 8.1's "name the server software": the captured banner plus the SFTP
+    /// extension fingerprint, which every connection has for free.
+    static func software(locationID: String) -> ServerSoftware {
+        ServerSoftware(
+            banner: serverVersion(locationID: locationID),
+            advertisedExtensions: advertisedExtensions(locationID: locationID))
+    }
+
     /// Every extension name the last connection's SSH_FXP_VERSION carried.
     static func advertisedExtensions(locationID: String) -> [String] {
         guard let stored = read(locationID: locationID)["probe"] as? [String: Any] else {

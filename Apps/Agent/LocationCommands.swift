@@ -159,6 +159,11 @@ enum LocationCommands {
             file.locations.removeAll { $0.id == created.id }
             file.locations.append(created)
         }
+        // The one `ssh` that ever sees the server's identification string has just run
+        // (section 8.1; 2026-09-08). It is written after the location exists so an `add`
+        // that failed leaves no domain directory behind.
+        CapabilityCache.storeServerVersion(
+            collector.remoteSoftwareVersion, locationID: created.id)
 
         do {
             relay?.note("Connecting for real, from the stored answers.")
@@ -651,6 +656,8 @@ enum LocationCommands {
             broker: AgentSecrets.broker, relay: relay)
         let outcome = await AddFlow.run(
             note: { [weak relay] in relay?.note($0) }, runner: collector)
+        CapabilityCache.storeServerVersion(
+            collector.remoteSoftwareVersion, locationID: location.id)
         return (
             outcome.authenticated, outcome.agentDependent, outcome.failure,
             collector.committedKeys
@@ -751,7 +758,10 @@ enum LocationCommands {
                     probe: cached.probe, extensions: cached.extensions, location: location,
                     allowsExecChannel: budget.allowsExecChannel, probedAt: cached.probedAt,
                     cached: true,
-                    helper: helperState(location: location, cached: cached.probe)).asJSON
+                    advertisedExtensions: CapabilityCache.advertisedExtensions(
+                        locationID: location.id),
+                    helper: helperState(location: location, cached: cached.probe),
+                    software: CapabilityCache.software(locationID: location.id)).asJSON
                 row["channels"] = budget.asJSON
             }
             // Section 6.4: the tier in use, the cadence, the last sweep and where the
@@ -829,7 +839,10 @@ enum LocationCommands {
                 probe: cached.probe, extensions: cached.extensions, location: location,
                 allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,
                 probedAt: cached.probedAt, cached: true,
-                helper: helperState(location: location, cached: cached.probe))
+                advertisedExtensions: CapabilityCache.advertisedExtensions(
+                    locationID: location.id),
+                helper: helperState(location: location, cached: cached.probe),
+                software: CapabilityCache.software(locationID: location.id))
         }
         let freeSpace = await runtime.freeSpaceDescription()
         // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
@@ -842,7 +855,8 @@ enum LocationCommands {
             cached: false, freeSpace: freeSpace,
             advertisedExtensions: CapabilityCache.advertisedExtensions(locationID: location.id),
             activeTier: status?["tier"] as? String,
-            helper: await liveHelperState(location: location, runtime: runtime, status: status))
+            helper: await liveHelperState(location: location, runtime: runtime, status: status),
+            software: CapabilityCache.software(locationID: location.id))
     }
 
     /// Where tier 2 has got to, for a location that is up.

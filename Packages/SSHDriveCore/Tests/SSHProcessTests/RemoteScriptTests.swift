@@ -76,8 +76,20 @@ final class RemoteScriptTests: XCTestCase {
         // which makes the watchdog kill a healthy child seconds after it started.
         XCTAssertEqual(text.components(separatedBy: "trap - EXIT").count - 1, 3,
                        "the child, the read -t probe and the reader all clear the EXIT trap")
-        XCTAssertTrue(text.contains("kill -TERM 0"))
-        XCTAssertTrue(text.contains("kill -KILL 0"))
+        // The group is named `-$$`, never `0`. `0` is "whatever group I am in", and a
+        // Tailscale SSH server puts every session in `tailscaled`'s group, so `kill 0`
+        // there killed the account's other sessions and the connection under them
+        // (2026-09-08). `-$$` is the same group wherever sshd gave us one and an ESRCH
+        // where it did not.
+        XCTAssertFalse(text.contains("kill -TERM 0"), "never the ambient process group")
+        XCTAssertFalse(text.contains("kill -KILL 0"), "never the ambient process group")
+        XCTAssertTrue(text.contains("kill -TERM -$$"))
+        XCTAssertTrue(text.contains("kill -KILL -$$"))
+        // The child by pid on both passes, so the helper dies on a server whose session
+        // leads no group of its own and where the group kill is a no-op.
+        XCTAssertTrue(text.contains("kill -TERM \"$__sd_child\""))
+        XCTAssertTrue(text.contains("kill -KILL \"$__sd_child\""))
+        XCTAssertTrue(text.contains("pkill -TERM -P \"$__sd_child\""))
     }
 
     func testHeartbeatSettingsChangeTheTickCount() {

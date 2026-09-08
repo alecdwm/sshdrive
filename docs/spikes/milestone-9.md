@@ -68,6 +68,7 @@ ditto "$HOME/sshdrive/build/Build/Products/Debug/SSH Drive.app" "/Applications/S
 | `alp` | 2206 | Alpine, **musl**, busybox: the same static aarch64 binary has to run here too |
 | `deb-maxsess` | 2205 | `MaxSessions 2`: the helper must be refused a channel |
 | `deb-shells` | 2202 | the `forcesftp` account: `ForceCommand internal-sftp`, no shell at all |
+| `ts-ssh` | none (tailnet `sshdrive-testbed`) | **Tailscale SSH**: `tailscaled` serves SSH itself, `none` auth, Go `pkg/sftp`. Added 2026-09-07; section 13 below is the tier 2 run against it |
 
 Every change to a served tree below is made by a **separate** `ssh`, never by the agent.
 `~/bin/timeout` (the perl `alarm`/`exec` from `milestone-5.md` 0.2) wraps every `ssh` and
@@ -309,6 +310,40 @@ unusable", which is the distinction section 9.2 spends a paragraph on.
 | s7-6 (helper half) | Does the helper die when the client is killed abruptly? | **Yes, within 10 s**, by its own stdin-EOF rule; the wrapper's 60 s is the backstop |
 | **FreeBSD kqueue on a 100,000-file tree** | | **Not testable here.** The testbed is Linux containers and the build VM cannot host a BSD. The kqueue build compiles for `freebsd/x86_64` and `darwin/arm64` and is exercised by nothing. **Open.** |
 | armv7 | Does the Synology/QNAP target work? | **Links only.** No armv7 hardware here. **Open.** |
+
+---
+
+## 13. Tailscale SSH (`ts-ssh`, added 2026-09-08)
+
+Tier 2 against a server that is not an sshd. Steps 3 and 4 again, on
+`alec@sshdrive-testbed`, plus the one thing this server does differently: a forced full
+sweep on the same connection while the helper stream is up, which is what used to kill it.
+
+```sh
+sshdrive add ts alec@sshdrive-testbed --remote-path /home/alec   # `none` auth needs no flag
+sshdrive status ts                                               # helper running?
+# five to seven rounds of create / modify / rename / chmod / delete from a separate ssh,
+# `sshdrive debug watch ts --full` in the middle, spanning more than ten minutes
+```
+
+**Result (2026-09-08): it reproduced first, then passed.**
+
+Before the fix, `add` printed `note: the helper exited (the channel exited 255)` 24 ms
+after `helper 0.1.0 running … (inotify), 1 root(s)`, the master went with it, and a master
+died once a cycle after that. The cause is not the helper's shape at all: **Tailscale SSH
+runs every session in `tailscaled`'s process group**, so the heartbeat wrapper's
+`kill -TERM 0` - which every sweep and every helper channel ends with - reached the
+account's other sessions and the connection under them. `/proc/$$/stat` on the node gives
+pgid `2260` for every session, and `2260` is `tailscaled`. The wrapper now names `-$$`,
+the group it leads, which is the same group under sshd and an `ESRCH` here.
+
+Latency, and the tier-1 numbers this server would otherwise be stuck with, are in
+`results.md` under "2026-09-08". The capability report names the server
+(`server software  Tailscale   SFTP: Go pkg/sftp`) and states the two missing OpenSSH
+extensions as facts about it rather than as upgrades.
+
+**Teardown for this one** is the same `sshdrive remove ts`, plus a check that
+`~/.cache/sshdrive` is gone from the node and no `sshdrive-helper` is left running.
 
 ---
 

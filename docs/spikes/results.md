@@ -9,6 +9,253 @@ this file records only what happened.
 
 ---
 
+## 2026-09-08 - the helper channel on Tailscale SSH: `kill 0` is not "our" process group
+
+The owner's Tailscale SSH server (x86_64 Debian) killed the tier 2 stream about fifteen
+seconds after `helper 0.1.0 running … (inotify), 1 root(s)`, with `the helper exited (the
+channel exited 255)`, and the ladder dropped the location to sweep for the session. Plain
+long exec sessions survived there, streamed stdin arrived, and `sh -s` sweep scripts
+worked, so the brief's hypothesis was that something in the helper channel's *shape* -
+the heartbeat wrapper, the relay FIFO, the background reader, the long NDJSON stream over
+a mux client - was what the server would not carry.
+
+**It is none of those. It is one line in the wrapper's teardown, and it is a bug on our
+side that only a server of this kind exposes.**
+
+### It reproduced on the first try
+
+`sshdrive add ts alec@sshdrive-testbed --remote-path /home/alec` against the testbed's
+`ts-ssh` node, with the shipped 2026-09-05 build:
+
+```
+  ◐ change detection     sweep (find -cmin over the root set)
+        note: the helper exited (the channel exited 255)
+```
+
+and, in the log, the death **24 ms** after the handshake rather than fifteen seconds -
+the same failure at a different speed:
+
+```
+11:04:11.395 …: helper 0.1.0 running at /home/alec/.cache/sshdrive/… (inotify), 1 root(s)
+11:04:11.419 …: the helper stream died: the helper exited (the channel exited 255)
+11:04:11.428 …: dropping the master - the connection was lost
+11:04:11.428 …: dropping to sweep for this session
+```
+
+The line after the death is the one that gives it away: **the master went too**. And once
+the location settled at tier 1, a master died once every sixty seconds - exactly the sweep
+cadence - each time taking every channel with it.
+
+### The cause: Tailscale SSH gives a session no process group of its own
+
+§6.4's wrapper ends every remote command by signalling `kill -TERM 0` and then
+`kill -KILL 0`, which is "my whole process group". That is deliberate: it catches anything
+the child started and left behind, and OpenSSH's sshd puts each session in a session and
+process group of its own, so the blast radius is exactly our own session.
+
+`tailscaled` serves SSH itself and does no such thing. On the node:
+
+```
+$ ssh alec@sshdrive-testbed 'ps -o pid,ppid,pgid,sid,comm; cat /proc/self/stat'
+PID   PPID  PGID  SID   COMMAND
+    1     0     1    1  containerboot
+ 2260     1  2260    1  tailscaled
+ 4221  2260  2260    1  tailscaled          <- the per-session child
+ 4228  4221  2260    1  bash
+…
+4240 (cat) R 4239 2260 1                    <- pid 4240, pgrp 2260, session 1
+```
+
+Every session of every client sits in `tailscaled`'s process group, `2260`. So
+`kill -TERM 0` from any one of them signals **all of them**. Measured directly, with three
+concurrent sessions and no SSH Drive anywhere:
+
+```
+A-ready                       (ssh … 'echo A-ready; exec sleep 45')
+C-ready                       (a second one, three seconds later)
+--- B: kill -TERM 0 in its own session ---
+B exit=255 after 0s
+A exit=255 after 6s
+C exit=255 after 3s
+```
+
+Two bystander sessions and the connections under them, killed by one line in a third.
+`tailscaled` itself is root and survives; everything of the account's does not.
+
+That is the whole mechanism, and it explains every observation:
+
+- **The helper channel dies "for no reason".** It is killed by whatever *other*
+  wrapper-run command finishes next. On the testbed that is the first change-detection
+  cycle's sweep, which runs while the tier is `helper` and no stream exists yet: 24 ms.
+  On the owner's server, whose tree is a real one, the reconnect's full sweep takes about
+  fifteen seconds - which is the fifteen seconds in the report, and why it looked like a
+  heartbeat interval.
+- **`the channel exited 255` is the remote command being killed by a signal,** not the mux
+  client's own error: `ssh` returns 255 with nothing on stderr when the session ends that
+  way. So the answer to "the mux client's error or the wrapper's exit code" is neither -
+  it is the wrapper's *death*.
+- **The master dies with it,** because the group contains `tailscaled`'s per-session child
+  that is serving the connection.
+- **Tier 1 is broken on this server too,** not just tier 2: every sweep cycle ends with the
+  same two lines and drops the connection. Milestone 6's sweep proofs were all on OpenSSH.
+- **The "random" instability** seen while measuring - a lone `exec sleep 15` exiting 255
+  after two seconds, then three clean runs, then another - was our own agent's sweeps
+  firing on their sixty-second cadence in the background. With the location removed, six
+  of six runs were clean.
+
+### The fix: name the group, do not ask for the ambient one
+
+`RemoteScript`'s teardown now reads
+
+```sh
+kill -TERM "$__sd_child" 2>/dev/null
+pkill -TERM -P "$__sd_child" 2>/dev/null || true
+kill -TERM -$$ 2>/dev/null
+sleep 2
+…
+kill -KILL "$__sd_child" 2>/dev/null
+pkill -KILL -P "$__sd_child" 2>/dev/null || true
+kill -KILL -$$ 2>/dev/null
+```
+
+`-$$` is **the process group this shell leads**. A process group's id is the pid of its
+leader, so where sshd gave us a session of our own, `-$$` and `0` are the same group and
+nothing about OpenSSH changes; where it did not, our own pid leads no group and the kill
+is a harmless `ESRCH`. The child is signalled by pid on both passes, and its direct
+children with `pkill -P` where there is one, so the guarantee that matters - the helper
+never outlives the connection - holds on both kinds of server without depending on the
+group at all. (The helper is `exec`ed by the wrapper's child, so it *is* `$__sd_child`.)
+
+Checked by hand before the build, with a `sleep 600` grandchild under the real wrapper
+shape and a bystander session alongside:
+
+| | wrapper exit | `sleep 600` left behind | bystander |
+|---|---|---|---|
+| `ts-ssh` (Tailscale SSH) | 0 after 3 s | 0 | **survived** |
+| `deb` (OpenSSH 9.2) | 255 after 17 s (its own group kill, as before) | 0 | **survived** |
+
+### Eleven minutes at tier 2 on Tailscale SSH
+
+`sshdrive add ts alec@sshdrive-testbed --remote-path /home/alec` on the fixed build, then
+seven rounds of create / modify / rename / chmod / delete made from a **separate** `ssh`,
+95 s apart, with `sshdrive debug watch ts --full` forced on the same connection in the
+middle. The mount is polled every 100 ms with a 30 s ceiling.
+
+| Step | median of 7 | range | tier 1 on this server |
+|---|---|---|---|
+| create -> visible | **145 ms** | 135-258 | one poll interval |
+| modify -> new content | **405 ms** | 317-931 | one poll interval |
+| rename -> new name visible | **134 ms** | 124-142 | one poll interval |
+| rename -> old name gone | **14 ms** | 10-16 | one poll interval |
+| chmod -> mode changes | **153 ms** | 20-156 | one poll interval |
+| delete -> gone | **17 ms** | 16-20 | one poll interval |
+
+**42 of 42 events observed, none over a second**, and at the end:
+
+```
+       watch helper   every 60s (active)   12 cycle(s)   1 root(s)
+       Capabilities  6/8 optimal   probed 11m ago
+         server software  Tailscale   SFTP: Go pkg/sftp
+       ● change detection     helper 0.1.0 at /home/alec/.cache/sshdrive (push, ~1s)
+       ● rename detection     helper move events
+```
+
+`t=675 s` from the handshake, `helper running`, 35 protocol events, twelve cycles, no
+downgrade recorded - and the forced full sweep at `t=193 s`, which is the exact thing that
+used to kill the stream 24 ms after `ready`, left the tier at `helper` and the connection
+up. Before the fix the same `add` never got past the first cycle.
+
+### The capability report now names the server
+
+The same location's report had two lines that were not true of this server:
+`upgrade: fsync@openssh.com (OpenSSH >= 6.3)` and `upgrade: limits@openssh.com (OpenSSH >=
+8.5)`. Both are OpenSSH's own extensions; no version of Go's `pkg/sftp` advertises either,
+so those lines asked the user to replace their SSH server. §8.1 now identifies the software
+from two independent pieces of evidence:
+
+- **The identification string.** `remote software version <x>` is printed at `DEBUG1` and
+  above, and §6.1 is the reason nothing had it: masters run at `LogLevel=ERROR` and a mux
+  client speaks to the master's socket rather than to the server. The **collect
+  connection** of §4.2 is neither - it is a real, fresh `ssh` the agent makes once per
+  `add` - so it alone runs at `DEBUG1`, the version is taken out of its stderr into
+  `capabilities.json`, and the `debug1:` lines are stripped again before the exit
+  classifier or `add`'s own message sees any of it.
+- **The SFTP extension fingerprint,** free on every connection: exactly
+  `hardlink@openssh.com`, `posix-rename@openssh.com` and `statvfs@openssh.com` and nothing
+  else is Go `pkg/sftp`; anything carrying `fsync`/`lsetstat`/`limits`/`expand-path` is
+  OpenSSH's own `sftp-server`.
+
+"Not OpenSSH" and "not identified" are kept apart, because only the first is a reason to
+change the wording: an unidentified server may well be an old OpenSSH, and there the
+`upgrade:` line stays. The report reads:
+
+```
+  Capabilities  6/8 optimal   probed 0s ago
+    server software  Tailscale   SFTP: Go pkg/sftp
+  ● change detection     helper 0.1.0 at /home/alec/.cache/sshdrive (push, ~1s)
+  ● rename detection     helper move events
+  ◐ durable writes       none; uploads are complete when the server acknowledges the write
+        note: fsync@openssh.com is an OpenSSH extension and Tailscale does not implement it
+  ◐ transfer sizing      conservative 32 KB requests
+        note: limits@openssh.com is an OpenSSH extension and Tailscale does not implement it
+```
+
+### One assumption that failed, in the new code
+
+**`ssh` ends every stderr log line with CRLF, and in Swift `"\r\n"` is one `Character`.**
+So `raw.split(separator: "\n")` finds no separator at all in `ssh -v` output: the whole
+transcript is a single "line", the version parser took everything after
+`remote software version ` to the end of the buffer, and the captured banner became
+`Tailscale` followed by a hundred `debug1:` lines - which `sshdrive status` then printed
+into the middle of its own report, splitting a `note:` in half where the unbuffered CLI
+stdout interleaved. The line splitter normalises `\r\n` and `\r` on **unicode scalars**
+before splitting, and a unit test feeds it CRLF input.
+
+### The OpenSSH re-check
+
+Milestone 9's proofs again on `deb` (2201, OpenSSH_9.2p1 Debian-2+deb12u10, glibc, GNU
+`find`) and `alp` (2206, OpenSSH_9.7, musl, busybox), on the fixed build:
+
+| Step | `m9` on `deb` | `m9a` on `alp` |
+|---|---|---|
+| create -> visible | 131 ms | 137 ms |
+| modify -> new content | 793 ms | 830 ms |
+| rename -> new name visible | 147 ms | 147 ms |
+| rename -> old name gone | 14 ms | 14 ms |
+| chmod -> mode changes | 140 ms | 148 ms |
+| delete -> gone | 15 ms | 154 ms |
+
+Both report **8/8 optimal**, both now name the server
+(`OpenSSH_9.2p1 Debian-2+deb12u10   SFTP: OpenSSH sftp-server` and `OpenSSH_9.7   SFTP:
+OpenSSH sftp-server`), and both keep `fsync@openssh.com` and `limits@openssh.com` at `●` -
+the reworded lines are unreachable on a server that has them. A forced full sweep on the
+same connection left the stream running on both. `kill -9` of the master and every mux
+client left **zero** helpers on `deb` twelve seconds later, exactly as in milestone 9.
+
+### What is not claimed
+
+The **owner's** server is not this server: the reproduction here is a Tailscale SSH node of
+the same kind (`tailscaled`'s own SSH server, `none` auth, Go `pkg/sftp`) on Alpine/aarch64
+rather than Debian/x86_64, and the fifteen seconds there against twenty-four milliseconds
+here is the length of that server's own sweep, which is a guess consistent with the
+evidence rather than a measurement. What *is* measured is the mechanism: a session on
+Tailscale SSH is in `tailscaled`'s process group, `kill … 0` from one session kills the
+others and their connections, and the wrapper no longer does it.
+
+The testbed node also collects a **zombie per killed session** (`containerboot` is PID 1
+and does not reap), which is cosmetic and pre-existing; it is visible as bracketed entries
+in `ps` after any run that used the old wrapper.
+
+### State the VM and the servers were left in
+
+No locations, no File Provider domains, no `~/Library/CloudStorage` entries, no `ssh`
+masters and no control sockets; `~/.cache/sshdrive` gone from `deb`, `alp` and the
+Tailscale node, no `sshdrive-helper` running anywhere and no FIFOs or scratch files left
+behind. The signed Debug build is installed at `/Applications/SSH Drive.app` and the agent
+is running.
+
+---
+
 ## 2026-09-05 (milestone 10) - ship: Developer ID, notarization, the DMG, the cask, `logs`, and S9
 
 **2026-09-05 addendum, the first real install: Homebrew's quarantine attribute stops the

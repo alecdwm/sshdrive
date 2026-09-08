@@ -105,7 +105,16 @@ public enum SSHCommandBuilder {
     /// which runs `ssh`'s default `ask` (or `accept-new` under `--trust-first`) so the
     /// fingerprint question can be relayed to the terminal and written to the user's own
     /// `known_hosts` exactly as it would have been from a tty (section 4.3).
-    static func commonOptions(hostKeyChecking: String = "yes") -> [(String, String)] {
+    ///
+    /// `logLevel` is `ERROR` everywhere except the collect connection of section 4.2,
+    /// which raises it to `DEBUG1` for that one connection so `ssh` prints the server's
+    /// identification string - "remote software version …" - which is the only place the
+    /// agent can ever read it: a mux client speaks to the master's socket rather than to
+    /// the server (section 6.1, section 8.1; 2026-09-08). The debug lines are stripped
+    /// again before anything looks at that connection's stderr.
+    static func commonOptions(
+        hostKeyChecking: String = "yes", logLevel: String = "ERROR"
+    ) -> [(String, String)] {
         [
             ("StrictHostKeyChecking", hostKeyChecking),
             ("UpdateHostKeys", "no"),
@@ -113,7 +122,7 @@ public enum SSHCommandBuilder {
             ("ServerAliveInterval", "15"),
             ("ServerAliveCountMax", "2"),
             ("NumberOfPasswordPrompts", "1"),
-            ("LogLevel", "ERROR"),
+            ("LogLevel", logLevel),
             ("RemoteCommand", "none"),
             ("RequestTTY", "no"),
             ("StdinNull", "no"),
@@ -140,7 +149,8 @@ public enum SSHCommandBuilder {
         target: SSHTarget,
         controlPath: String,
         proxyCommand: String? = nil,
-        hostKeyChecking: String = "yes"
+        hostKeyChecking: String = "yes",
+        logLevel: String = "ERROR"
     ) -> SSHInvocation {
         var arguments = ["-N"]
         arguments += flatten([
@@ -148,7 +158,8 @@ public enum SSHCommandBuilder {
             ("ControlPath", controlPath),
             ("ControlPersist", "no"),
         ])
-        arguments += flatten(commonOptions(hostKeyChecking: hostKeyChecking))
+        arguments += flatten(
+            commonOptions(hostKeyChecking: hostKeyChecking, logLevel: logLevel))
         if target.identityAgentNone {
             arguments += ["-o", "IdentityAgent=none"]
         }

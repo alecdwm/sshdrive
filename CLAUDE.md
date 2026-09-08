@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4319 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4391 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -155,33 +155,33 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 1381-1417 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
 | 1418-1555 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
 | 1556-1557 | §6 The background agent | (heading) |
-| 1558-1935 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
-| 1936-2024 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
-| 2025-2091 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2092-2152 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
-| 2153-2158 | Tier 0: SFTP poll | `readdir` every root |
-| 2159-2232 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2233-2282 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), and that `ClientAliveInterval` does not help |
-| 2283-2405 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
-| 2406-2459 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2460-2518 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2519-2526 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2527-2630 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2631-2719 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2720-2824 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2825-2864 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2865-3029 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 3030-3180 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
-| 3181-3318 | §8.1 Capability report | the probe, the feature/level catalogue, `status` output format, the helper's `note:` list |
-| 3319-3362 | §9 Security | the security properties in one list |
-| 3363-3427 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3428-3521 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
-| 3522-3656 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3657-3762 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
-| 3763-3779 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3780-3829 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3830-4286 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4287-4319 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 1558-1941 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
+| 1942-2030 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
+| 2031-2097 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
+| 2098-2158 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
+| 2159-2164 | Tier 0: SFTP poll | `readdir` every root |
+| 2165-2238 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
+| 2239-2307 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), that `ClientAliveInterval` does not help, and why the kill names `-$$` and never `0` |
+| 2308-2430 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
+| 2431-2484 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2485-2543 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2544-2551 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2552-2655 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2656-2744 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2745-2849 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2850-2889 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2890-3054 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 3055-3205 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
+| 3206-3381 | §8.1 Capability report | the probe, how the server software is identified, the feature/level catalogue, `status` output format, the helper's `note:` list |
+| 3382-3425 | §9 Security | the security properties in one list |
+| 3426-3490 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3491-3584 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
+| 3585-3719 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3720-3825 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
+| 3826-3842 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3843-3892 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3893-4358 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4359-4391 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
 
 ## Milestones (§12)
 
@@ -362,7 +362,17 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
       **S7's helper half is answered.** See `docs/spikes/milestone-9.md` and
       `docs/spikes/results.md` (2026-09-05, "milestone 9"). Not answered and not
       claimable from here: **FreeBSD kqueue** (no BSD in the testbed) and **armv7**
-      (links only, no hardware).*
+      (links only, no hardware).
+      **2026-09-08: tier 2 works on Tailscale SSH too.** The exec channel dying
+      `255` there was the heartbeat wrapper's `kill -TERM 0`, and `tailscaled`
+      puts every session in *its own* process group, so that killed the account's
+      other sessions and the connection under them - tier 1 as well as tier 2. The
+      wrapper names `-$$` now (gotcha 100). Proved over eleven minutes on the
+      testbed's `ts-ssh` node: 42 of 42 events, create 145 ms / modify 405 ms /
+      rename 134 ms / delete 17 ms / chmod 153 ms median, a forced full sweep
+      mid-run leaving the stream up, and `deb` and `alp` re-checked at 8/8. The
+      capability report also names the server software now (gotcha 101).
+      **635 package tests.** See `docs/spikes/results.md` (2026-09-08).*
 - [x] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
       *Done 2026-09-05, and **notarization is done**: `scripts/release.sh` builds Release,
       signs with the Developer ID identity and the hardened runtime, embeds the helper,
@@ -545,6 +555,12 @@ S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
 98. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
 
 99. **LaunchServices registers no plugin of a quarantined bundle nobody has launched.** Homebrew leaves `com.apple.quarantine` on the installed app, `open -g` is not an assessed launch, and the appex then does not exist: `pluginkit -m` prints nothing, `doctor` fails "extension registered" and "file provider domains" ("The application cannot be used right now"), and `fileproviderd` logs `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014`. The agent is unaffected - launchd starts it directly - so the install looks finished. `pluginkit -a` registers it and the next launch wipes that again; `xattr -dr com.apple.quarantine` then `open -g` is durable. The cask's postflight now runs `spctl --assess` and then the strip before its unregister and open, and `doctor` has a `quarantine` check ahead of "extension registered" (2026-09-05, first real cask install on macOS 26.6.2; a fresh-user quarantined install on the 26.4.1 VM had passed, and which half of that difference matters is not claimed, §10).
+
+100. **A `kill … 0` in a remote script is only safe where sshd gave the session its own process group.** Tailscale SSH runs every session in `tailscaled`'s process group, shared with every other session of every client, so the heartbeat wrapper's `kill -TERM 0` killed the account's other sessions **and the connection under them**: the helper's exec channel exited 255 and the tier-1 sweep dropped the master once a cycle. The wrapper names `-$$` instead - the group *this shell leads*, which is the same group where sshd gave us one and a harmless `ESRCH` where it did not - and signals the child by pid on both passes so the helper still cannot outlive the connection. Read the pgid with `/proc/$$/stat` if you ever need to see it; on that node it is `tailscaled`'s pid (2026-09-08, §6.4, §13).
+
+101. **The one `ssh` that can read the server's identification string is the collect connection.** Masters run at `LogLevel=ERROR` and mux clients never speak to the server, so `add`'s verification connection runs at `DEBUG1`, `remote software version …` is taken out of its stderr into `capabilities.json`, and the `debug1:` lines are stripped before the exit classifier or `add`'s message sees them. Beside it the SFTP extension fingerprint is free on every connection: exactly `hardlink`, `posix-rename` and `statvfs` is Go `pkg/sftp`; anything with `fsync`/`lsetstat`/`limits` is OpenSSH's own `sftp-server`. `status` names the server, and "not OpenSSH" and "not identified" stay different answers (2026-09-08, §8.1, §6.1).
+
+102. **`ssh` ends every stderr log line with CRLF, and in Swift `"\r\n"` is one `Character`,** so `split(separator: "\n")` finds no separator in `ssh -v` output at all: the whole transcript is one "line" and the first value read off it takes the rest of the file with it. The captured server version became `Tailscale` followed by a hundred `debug1:` lines, and `sshdrive status` printed the lot into the middle of its own report. Normalise line endings on **unicode scalars** before splitting (2026-09-08, §8.1).
 
 ## Glossary
 

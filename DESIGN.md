@@ -1689,7 +1689,13 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   never sees one. Its `ssh` runs at `LogLevel=ERROR`, which prints no
   remote version, and a mux client speaks to the master's socket rather
   than to the server, so the cache is keyed by the location and an
-  explicit re-probe is its only invalidation (2026-09-04). A cached
+  explicit re-probe is its only invalidation (2026-09-04). The one `ssh`
+  the agent runs that *is* neither a master nor a mux client - the collect
+  connection of §4.2 - raises `LogLevel` to `DEBUG1` for that connection
+  alone and reads the identification string once, which is where §8.1's
+  "server software" line comes from; its debug lines are stripped before
+  the exit classifier below or `add`'s own message sees them, so nothing
+  else changes (2026-09-08). A cached
   budget that no longer holds is noticed anyway, because opening the bulk
   channel is what the cached answer is used for. At 2 the bulk
   SFTP channel is dropped, transfers share the metadata channel under the
@@ -2279,6 +2285,25 @@ helper, so nothing we start on a server outlives our connection by more
 than a minute. The helper also stops on its own when its pings stop
 (below), so for it the wrapper is a second line of defence rather than
 the only one.
+
+**What the wrapper kills is `-$$`, never `0`.** When the wrapper gives
+up it signals the child by pid, its direct children with `pkill -P`
+where there is one, and then the process group *it leads*, spelled
+`-$$`. It is the group that catches anything the child started and left
+behind - a `( sleep 300 & )` - and the reason it is named rather than
+asked for as `0` is that `kill … 0` means "whatever group I happen to be
+in", which is not ours everywhere. OpenSSH's sshd gives each session its
+own session and process group; **Tailscale SSH does not** - `tailscaled`
+serves SSH itself and every session it runs, for every client, sits in
+`tailscaled`'s process group. There `kill -TERM 0` reached the account's
+other sessions and the connection carrying them, so the wrapper the
+helper runs under killed the helper's own channel, and the tier-1 sweep
+killed the connection once a cycle. `-$$` is exactly the same group
+wherever sshd gave us one, because a process group's id is the pid of
+its leader; where it did not, our pid leads no group and the kill is a
+harmless `ESRCH`. The child is signalled by pid on both passes so that
+what must not survive - the helper - does not, on either kind of server
+(2026-09-08; §13).
 
 #### Tier 2: remote helper (default where supported)
 
@@ -3194,6 +3219,35 @@ it (§5.7), the `find` flavour and whether
 it takes `-cmin`, the presence of `sha256sum`/`shasum`, and a writable,
 executable cache directory.
 
+**Which server this is.** Several lines below are claims about the
+server rather than about us, and two of them were being printed as
+though every server were an OpenSSH that had not been upgraded yet. So
+the report names the software when it can, from two pieces of evidence
+that are available at different times:
+
+- **The identification string.** `ssh` prints `remote software version
+  <x>` at `DEBUG1` and above. The runtime masters run at `LogLevel=ERROR`
+  and a mux client never speaks to the server at all (§6.1), so the one
+  connection that can read it is the **collect connection** of §4.2 - a
+  real, fresh `ssh` the agent makes once per `add`, `passwd` or
+  `set host|user|port|identity`. That connection alone runs at `DEBUG1`,
+  the version is taken out of its stderr, and the `debug1:`/`debug2:`/
+  `debug3:` lines are stripped again before the exit classifier (§6.1) or
+  `add`'s own message sees any of it, so raising the level changes no
+  decision. The string is kept in `capabilities.json` beside the probe.
+- **The SFTP extension fingerprint,** which every connection has for
+  free. OpenSSH's `sftp-server` advertises a long list including
+  `fsync@openssh.com` and `lsetstat@openssh.com`; Go's `pkg/sftp`
+  advertises exactly `hardlink@openssh.com`, `posix-rename@openssh.com`
+  and `statvfs@openssh.com` and nothing else, which is what a Tailscale
+  SSH node answers.
+
+`status` prints what the two together can say - `Tailscale   SFTP: Go
+pkg/sftp` - and nothing at all when they can say nothing, rather than a
+line reading "unknown". "Not OpenSSH" and "not identified" are different
+answers and are kept apart: only the first changes any wording, because
+an unidentified server may well be an old OpenSSH (2026-09-08).
+
 The catalogue of server-dependent features:
 
 | Feature | Levels (best first) | What unlocks the next level |
@@ -3311,6 +3365,15 @@ Rules that keep the format stable across permutations:
   saying the server did not advertise `fsync@openssh.com` is a claim about the
   server, and this is what makes it checkable from the user's own machine
   rather than believed (2026-09-05).
+- **`fsync@openssh.com` and `limits@openssh.com` are stated as server
+  facts, not upgrades, on a server known not to be OpenSSH.** They are
+  OpenSSH's own extensions: no version of Go's `pkg/sftp` advertises
+  either, so `upgrade: fsync@openssh.com (OpenSSH >= 6.3)` asked that
+  user to replace their SSH server. Where the software is identified and
+  is not OpenSSH the line keeps its `◐` and its level and carries
+  `note: fsync@openssh.com is an OpenSSH extension and <server> does not
+  implement it`, with no `upgrade:` line. Where the software is unknown
+  nothing changes (2026-09-08).
 - When offline, the cached probe is shown with "(cached; offline)" and no
   guesses are made about what changed.
 
@@ -4281,6 +4344,15 @@ there, so that this list cannot drift from the body.
 - **A polling cycle may take a third of its interval,** and the schedule backs
   off to three times the last cycle's duration when it takes more, capped at the
   insurance interval and reported in `status` (2026-09-05, §6.4).
+- **The heartbeat wrapper kills the process group it leads, `-$$`, never the
+  ambient `0`:** Tailscale SSH runs every session in `tailscaled`'s process
+  group, where `kill -TERM 0` killed the account's other sessions and the
+  connection under them (2026-09-08, §6.4).
+- **`status` names the server software** from the identification string the
+  collect connection captures at `DEBUG1` plus the SFTP extension fingerprint,
+  and states missing `fsync@openssh.com`/`limits@openssh.com` as facts about a
+  server known not to be OpenSSH rather than as upgrades (2026-09-08, §8.1,
+  §6.1).
 
 ---
 

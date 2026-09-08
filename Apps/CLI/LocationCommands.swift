@@ -525,6 +525,16 @@ enum CapabilityRendering {
         let probedAt = report["probedAt"] as? Double ?? 0
         Swift.print("\(indent)Capabilities  \(optimal)/\(total) optimal"
             + "   probed \(age(probedAt))\(cached ? " (cached)" : "")")
+        // Section 8.1: name the server software when it is known. Nothing is printed
+        // when it is not, rather than a line that says "unknown" (2026-09-08).
+        if let software = report["software"] as? [String: Any] {
+            var parts: [String] = []
+            if let banner = software["banner"] as? String, !banner.isEmpty { parts.append(banner) }
+            if let sftp = software["sftp"] as? String { parts.append("SFTP: \(sftp)") }
+            if !parts.isEmpty {
+                Swift.print("\(indent)  server software  \(parts.joined(separator: "   "))")
+            }
+        }
         for feature in report["features"] as? [[String: Any]] ?? [] {
             let name = (feature["feature"] as? String ?? "")
             let padded = name.padding(toLength: max(20, name.count), withPad: " ", startingAt: 0)

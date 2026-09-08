@@ -278,6 +278,17 @@ service exists: there the tier-2 helper's exec channel **exits 255 about 15 s
 after it prints `ready`**, while the tier-1 sweep and a plain long exec session
 with streamed stdin both survive.
 
+**It reproduced here on 2026-09-08 and the cause is ours.** `tailscaled` runs
+every session in **its own process group** - `cat /proc/$$/stat` on this node
+gives pgid `2260`, which is `tailscaled` - so the heartbeat wrapper's
+`kill -TERM 0`, which every sweep and every helper channel ends with, killed the
+account's other sessions and the connection under them. The wrapper now names
+`-$$`, the group it leads, which is the same group under sshd and an `ESRCH`
+here. Details in `docs/spikes/results.md` (2026-09-08). One side effect of the
+old behaviour survives in this container: `containerboot` is PID 1 and does not
+reap, so every session killed that way left a zombie, which `ps` shows as a
+bracketed name. They are inert; `docker compose restart ts-ssh` clears them.
+
 It is reached **over the tailnet, not over `192.168.64.1`**. There is no
 published port and in userspace mode there cannot be one; the build VM
 (`100.114.204.5`) is on the same tailnet and that is the whole route.
@@ -354,8 +365,9 @@ sftp -v alec@sshdrive-testbed </dev/null 2>&1 | grep -i 'server supports extensi
 #   hardlink@openssh.com, posix-rename@openssh.com, statvfs@openssh.com - and
 #   nothing else, which is how a real Tailscale SSH node answers too
 
-# the shape that dies on the owner's Tailscale SSH server: a long exec channel that says `ready` and
-# then only reads.  Time it; ~15 s and exit 255 is the reproduction.
+# a long exec channel that says `ready` and then only reads.  This one always survived,
+# on the owner's server too: the death needed a *second* wrapper-run command to end
+# beside it and call `kill -TERM 0` (2026-09-08).  Time it anyway; it is the control.
 start=$(date +%s); ssh alec@sshdrive-testbed 'echo ready; exec sleep 600' </dev/null; \
   echo "exit=$? after $(( $(date +%s) - start ))s"
 ```

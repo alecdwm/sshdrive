@@ -170,4 +170,73 @@ final class CapabilityReportTests: XCTestCase {
         XCTAssertEqual(change.note, "the account has no shell access")
         XCTAssertEqual(feature(report, "permissions").upgrade, "shell access")
     }
+
+    // MARK: The server flavour (section 8.1, 2026-09-08)
+
+    /// The fingerprint of the owner's Tailscale SSH server, and of the testbed's
+    /// `ts-ssh` node: Go's `pkg/sftp` advertises exactly these three.
+    private let goSFTP = [
+        "hardlink@openssh.com", "posix-rename@openssh.com", "statvfs@openssh.com",
+    ]
+
+    func testTheExtensionFingerprintIdentifiesGoSFTP() {
+        let software = ServerSoftware(banner: nil, advertisedExtensions: goSFTP)
+        XCTAssertEqual(software.sftpImplementation, "Go pkg/sftp")
+        XCTAssertEqual(software.isOpenSSH, false)
+        XCTAssertTrue(software.isKnownNotOpenSSH)
+    }
+
+    func testTheBannerNamesTheServer() {
+        let tailscale = ServerSoftware(banner: "Tailscale", advertisedExtensions: goSFTP)
+        XCTAssertEqual(tailscale.flavour, .tailscale)
+        XCTAssertEqual(tailscale.summary, "Tailscale   SFTP: Go pkg/sftp")
+        let openSSH = ServerSoftware(
+            banner: "OpenSSH_9.2p1 Debian-2+deb12u10",
+            advertisedExtensions: ["fsync@openssh.com", "limits@openssh.com"])
+        XCTAssertEqual(openSSH.flavour, .openSSH)
+        XCTAssertEqual(openSSH.isOpenSSH, true)
+        XCTAssertEqual(openSSH.sftpImplementation, "OpenSSH sftp-server")
+    }
+
+    /// Nothing captured and nothing conclusive in the fingerprint is "we do not know",
+    /// which must stay a third answer: an unidentified server may be an old OpenSSH.
+    func testAnUnidentifiedServerIsNotClaimedToBeAnything() {
+        let software = ServerSoftware(
+            banner: nil, advertisedExtensions: ["posix-rename@openssh.com"])
+        XCTAssertNil(software.isOpenSSH)
+        XCTAssertFalse(software.isKnownNotOpenSSH)
+        XCTAssertFalse(software.isKnown)
+    }
+
+    /// The wording fix: on a server that is not OpenSSH, `fsync` and `limits` are facts
+    /// about the server, not upgrades the user can go and get.
+    func testFsyncAndLimitsAreServerFactsOnANonOpenSSHServer() {
+        let report = CapabilityReport.make(
+            probe: debianProbe(), extensions: SFTPExtensionNames.parse(goSFTP),
+            location: location(), allowsExecChannel: true, probedAt: Date(), cached: false,
+            advertisedExtensions: goSFTP, activeTier: "helper",
+            helper: .running(version: "0.1.0", directory: "/d", mechanism: "inotify"),
+            software: ServerSoftware(banner: "Tailscale", advertisedExtensions: goSFTP))
+        for name in ["durable writes", "transfer sizing"] {
+            XCTAssertNil(feature(report, name).upgrade, name)
+            XCTAssertEqual(feature(report, name).glyph, "◐", name)
+            XCTAssertTrue(
+                feature(report, name).note?.contains("Tailscale does not implement it") == true,
+                "\(name): \(feature(report, name).note ?? "nil")")
+        }
+        XCTAssertEqual(report.asJSON["software"] as? [String: Any] != nil, true)
+    }
+
+    /// And the same two lines keep section 8.1's original wording where the server was
+    /// never identified, because there the upgrade really may exist.
+    func testAnUnidentifiedServerKeepsTheUpgradeWording() {
+        let report = CapabilityReport.make(
+            probe: debianProbe(), extensions: SFTPExtensionNames.parse(["statvfs@openssh.com"]),
+            location: location(), allowsExecChannel: true, probedAt: Date(), cached: false,
+            advertisedExtensions: ["statvfs@openssh.com"], activeTier: "sweep",
+            helper: .unavailable("nope"))
+        XCTAssertEqual(
+            feature(report, "durable writes").upgrade, "fsync@openssh.com (OpenSSH >= 6.3)")
+        XCTAssertNil(feature(report, "durable writes").note)
+    }
 }

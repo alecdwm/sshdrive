@@ -76,6 +76,9 @@ public struct CapabilityReport {
     /// connect. Shown by `--json` so an "it did not advertise it" line can be checked
     /// against the server rather than believed (2026-09-05).
     public var advertisedExtensions: [String] = []
+    /// Which SSH server this is, as far as the evidence goes (section 8.1). `status`
+    /// prints it and two of the lines below are worded from it.
+    public var software: ServerSoftware = .unknown
 
     public var optimalCount: Int { features.filter { $0.glyph == "●" }.count }
 
@@ -89,6 +92,7 @@ public struct CapabilityReport {
         ]
         if let serverFreeSpace { out["serverFreeSpace"] = serverFreeSpace }
         if !advertisedExtensions.isEmpty { out["sftpExtensions"] = advertisedExtensions }
+        if software.isKnown { out["software"] = software.asJSON }
         return out
     }
 
@@ -123,7 +127,8 @@ public struct CapabilityReport {
         freeSpace: String? = nil,
         advertisedExtensions: [String] = [],
         activeTier: String? = nil,
-        helper: HelperState = .unavailable("the server cannot run the remote helper")
+        helper: HelperState = .unavailable("the server cannot run the remote helper"),
+        software: ServerSoftware = .unknown
     ) -> CapabilityReport {
         let shell = probe.hasShellAccess && allowsExecChannel
         var features: [Feature] = []
@@ -174,22 +179,25 @@ public struct CapabilityReport {
                 : "posix-rename@openssh.com (OpenSSH >= 4.9) - server did not advertise it"))
 
         // 6. Durable writes: fsync@openssh.com · none.
-        let fsync = extensions.contains(.fsync)
-        features.append(Feature(
-            name: "durable writes",
-            level: fsync ? "fsync@openssh.com" : "none; uploads are complete when the server acknowledges the write",
-            best: "fsync@openssh.com",
-            glyph: fsync ? "●" : "◐",
-            upgrade: fsync ? nil : "fsync@openssh.com (OpenSSH >= 6.3)"))
-
         // 7. Transfer sizing: limits@openssh.com · conservative 32 KB requests.
-        let limits = extensions.contains(.limits)
-        features.append(Feature(
-            name: "transfer sizing",
-            level: limits ? "limits@openssh.com" : "conservative 32 KB requests",
-            best: "limits@openssh.com",
-            glyph: limits ? "●" : "◐",
-            upgrade: limits ? nil : "limits@openssh.com (OpenSSH >= 8.5)"))
+        //
+        // Both are OpenSSH's own extensions, so on a server that is *not* OpenSSH the
+        // `upgrade:` line was a lie: there is no version of Go's `pkg/sftp` that
+        // advertises `fsync@openssh.com`, and telling that user to want OpenSSH >= 6.3
+        // asks them to replace their SSH server. Where the software is known and is not
+        // OpenSSH the line becomes a `note:` stating the fact, and the `upgrade:` line
+        // goes (2026-09-08). Where it is *unknown* nothing changes: an unidentified
+        // server may well be an old OpenSSH.
+        features.append(extensionFeature(
+            name: "durable writes", present: extensions.contains(.fsync),
+            level: "fsync@openssh.com",
+            fallback: "none; uploads are complete when the server acknowledges the write",
+            upgrade: "fsync@openssh.com (OpenSSH >= 6.3)", software: software))
+
+        features.append(extensionFeature(
+            name: "transfer sizing", present: extensions.contains(.limits),
+            level: "limits@openssh.com", fallback: "conservative 32 KB requests",
+            upgrade: "limits@openssh.com (OpenSSH >= 8.5)", software: software))
 
         // 8. Collision-safe create: server-enforced · lstat preflight.
         // "a server whose plain `rename` refuses to overwrite, as OpenSSH does". A server
@@ -210,7 +218,25 @@ public struct CapabilityReport {
 
         return CapabilityReport(
             features: features, probedAt: probedAt, cached: cached, serverFreeSpace: freeSpace,
-            advertisedExtensions: advertisedExtensions)
+            advertisedExtensions: advertisedExtensions, software: software)
+    }
+
+    /// One of the two lines whose only route to its best level is an OpenSSH extension.
+    private static func extensionFeature(
+        name: String, present: Bool, level: String, fallback: String, upgrade: String,
+        software: ServerSoftware
+    ) -> Feature {
+        if present {
+            return Feature(name: name, level: level, best: level, glyph: "●")
+        }
+        guard software.isKnownNotOpenSSH else {
+            return Feature(
+                name: name, level: fallback, best: level, glyph: "◐", upgrade: upgrade)
+        }
+        let who = software.name.isEmpty ? "this server" : software.name
+        return Feature(
+            name: name, level: fallback, best: level, glyph: "◐", upgrade: nil,
+            note: "\(level) is an OpenSSH extension and \(who) does not implement it")
     }
 
     private static func changeDetection(
