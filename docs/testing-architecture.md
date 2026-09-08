@@ -85,8 +85,12 @@ above is closed and `swift build` and `swift test` run to completion on this box
 holds no decision; everything it used to decide is `ProviderCore`, and `SystemModel`'s
 fileproviderd drives it on Linux. **697 tests here**, 41 skipped, and **706 on the Mac**
 (the nine extra are the macOS-only mirrored-constant assertions), with all four Xcode
-targets still building and signing. `Apps/Agent` is what is left outside the package, and
-that is step 8.
+targets still building and signing.
+
+**2026-09-08, later still: step 8 is done.** `Apps/Agent` went from 13,300 lines to
+**ten adapter files, 2,009 lines**, none of which contains a branch worth testing;
+everything it decided is `AgentRuntime`, behind the fourteen protocols of section 2.3.
+Nothing under `Apps/` needs Darwin for a reason other than Apple's own types any more.
 
 ## 2. (a) The seams
 
@@ -179,6 +183,19 @@ Stays in `Apps/Agent` as an adapter: `main.swift`, `ListenerDelegate.swift`,
 `SpikeHooks.swift`, `TransportDebug.swift`, plus new one-file adapters for the login item, the
 keychain and launchd.
 
+**As built**, `Apps/Agent` is ten files and 2,009 lines: `main.swift` (the three roles and
+nothing else), `ListenerDelegate.swift`, `AgentService.swift`, `AskpassService.swift`,
+`CLIRelay.swift`, `ExtensionPeers.swift`, `PeerExecutable.swift`, `AgentLifecycle.swift`
+(the two dispatch sources; what they decide is `AgentRuntime.AgentLifecycle`),
+`FileProviderReplica.swift` (`ReplicaControlling` over `NSFileProviderManager`, merging what
+`ReplicaAccess`, `ReplicaEnumerators` and `SpikeHooks` were) and `SystemSeams.swift` (IOKit
+power, `NWPathMonitor`, `CGEventSource` presence, the two distributed notifications,
+`SMAppService`, `launchctl print`, the bundle, the keychain diagnostics and the endpoint).
+`HandleSink` and `TransportDebug` moved into the package after all - both are pure
+Foundation, and `HandleSink` is called from `LocationRuntime`. `SSHBackedTransport` moved
+too, with `SSHTransportLauncher` beside it: everything under it was already platform-free in
+`SSHProcess`, and what stands in for a server on Linux is the *binary*, not this code.
+
 Protocols, named:
 
 | Protocol | Apple implementation (stays in `Apps/`) | Linux implementation |
@@ -200,6 +217,34 @@ Protocols, named:
 
 Every one of these is small — most are three to six methods — because the decisions they used
 to carry have moved above them.
+
+**As built (2026-09-08), with four differences from the table above and three additions.**
+
+- The presence seam is **`PresenceReporting`**, not `PresenceReading`: `AgentCore` already
+  owns a *value* called `PresenceReading` - section 4.2's two readings - and a protocol of
+  the same name in a module that imports it is ambiguous at every use.
+- The clock is **`AgentClock`**, not `Clock`, which is a standard-library protocol. It
+  answers `now()` (wall clock, what the schedules are in), `uptime()` (monotonic, what the
+  breaker's backoff is in) and `sleep(seconds:)`, so a scenario drives both together.
+- `ProcessAncestryReading` needed nothing: `Secrets.ProcessAncestry` was already a protocol
+  with a `/proc` implementation off Darwin (step 1.2), and `SecretsStoring` is the
+  `Secrets.SecretsStore` that step made platform-free.
+- `AgentEndpoint.terminate(status:)` does **not** return `Never`: `P4` asserts that SIGTERM
+  exits *0*, and no assertion can be made about a process that is gone. The real one calls
+  `exit`; the harness records the status.
+- **`IndexReaderPeering`** is a fifteenth, split out of `ExtensionPeers`, which section 2.3
+  listed on both sides of the line: the `NSXPCConnection` table stays in `Apps/Agent`, and
+  the "ask every reader to close before the sidecars are truncated" contract of section 5.3
+  is the protocol.
+- **`TerminalRelaying`** (the CLI as the collect connection sees it: one note, one prompt)
+  and **`KeychainDiagnosing`** (`doctor`'s reachability line and S1(d2)'s round trip, which
+  answer `OSStatus` detail no other seam has) are the other two.
+
+The seams are one value, `AgentEnvironment`, and `DomainManager` is constructed with it
+rather than reading singletons. That is what lets a scenario run two agents in one process.
+`DomainManager.shared` still exists for the XPC command layer, which is reached from an
+object made per connection and has nothing else to hold; a scenario binds its own through
+`AgentCommandContext`, a task local, for the duration of one call.
 
 ## 3. (b) `SystemModel`: a simulated fileproviderd, Finder and launchd
 
@@ -400,7 +445,15 @@ process, plus the parts that are honest to run for real on Linux.
 
 ### 4.1 `ServerProfile`
 
-One value describes a server, and the testbed's twelve services are twelve constants:
+One value describes a server, and the testbed's twelve services are twelve constants.
+
+**As built (2026-09-08, §8 step 6)** the sketch below is right in shape and differs in
+three names: `FindFlavour` is `ServerFindFlavour` (so a test may import `AgentCore` and
+`ServerModel` together without qualifying either), `clockOffset` is a `TimeInterval`, and
+every constant carries a `quirks: [ServerQuirkID]` list naming the rows it is a carrier of.
+The account variants of one service - `deb/pw`, `deb/keypass`, `deb-shells/bashbg`,
+`deb-shells/forcesftp`, `deb-extsftp/extquiet` - are constants of their own, and so are the
+owner's `ownerDebian` and `ownerTailscale`.
 
 ```swift
 public struct ServerProfile {
@@ -597,6 +650,7 @@ and the shipping `ProviderCore`.
 | F7 | The reconnect re-opens the helper stream | Tier 2 running, the master `kill -9`ed | The reconnect | The stream is re-opened by the reconnect path itself, in `ReconnectSequence` order — after `applyConnection`, before the signals — and **not** at the next poll cycle; a location that is idle (10 min cadence) is back at tier 2 in seconds | SV |
 | F8 | An outage is not a tier verdict | Tier 2 running; the connection stalls until the helper's 60 s heartbeat lapses and the stream dies with the master still nominally up | The stall, then the link back | The downgrade is transient: held for 2 s, doubling to 60 s, cleared outright the moment a connection comes up. It never becomes the session-long downgrade §6.4 reserves for no shell, no exec channel, an unsupported arch, `noexec` and a hash mismatch after a redeploy | SV |
 | F9 | Repeated down/up cycles converge | Four outages in a row with 30 s of link between them | Each recovery | Every round ends at tier 2 within one cycle of the link being stable; the breaker's own backoff stays capped at 60 s and the ladder's at 60 s; neither compounds across rounds | SV |
+| F10 | The authentication deadline re-arms once per trigger | A location stopped by section 4.2's 60 s deadline | A request with nobody there, a second inside the minute, then one with the user present, then the screen unlock | The absent reading refuses and the second request does not even read the presence test (once a minute); the present-user request re-arms exactly one attempt; the unlock is the other trigger and needs no presence test; each fires once per stop, and a fresh stop arms both again | S |
 
 ### Suite G — eviction and pinning
 
@@ -614,6 +668,12 @@ and the shipping `ProviderCore`.
 
 ### Suite H — change detection
 
+**H1, H2, H3 and H6 implemented 2026-09-08** in `Tests/ServerModelTests/SweepScenarios.swift`,
+against a real shell and a real `find`. The busybox flavour is a generated `find` shim that
+behaves the way BusyBox 1.36.1 was measured to, because this box has GNU findutils and no
+busybox; the *shell* rows that need the busybox binary skip by name. H4, H5, H7-H10 wait for
+`AgentRuntime` (step 8).
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | H1 | busybox `find --version` exits 0 | `.alpine` | The flavour probe | It reads the `busybox` banner and the `-cmin` answer, never the exit status; the server is not called GNU | V |
@@ -628,6 +688,12 @@ and the shipping `ProviderCore`.
 | H10 | A cycle that eats its interval | A 56.8 s cycle against a 60 s interval | The next schedule | The interval becomes three times the last cycle, capped at the insurance interval, and `status` says so; a tier-2 cycle that went nowhere paces nothing | U |
 
 ### Suite J — remote execution and the helper
+
+**J1-J8 and J12 implemented 2026-09-08** in `Tests/ServerModelTests/ShellScenarios.swift`,
+`HeartbeatScenarios.swift` and `SFTPWireScenarios.swift`. J1 is three tests, one of them the
+bite-proof: the wrapper as it stood before 2026-09-08, naming `0`, is run for real against a
+real shared process group and a real bystander session, and the bystander dies. J9-J11 and
+J13 wait for the helper binary (step 9); J11's stale-FIFO half is already covered on the wire.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -646,6 +712,11 @@ and the shipping `ProviderCore`.
 | J13 | The exec channel dies 255 with no stderr | A remote command killed by a signal | Read the exit | Classified as the wrapper's death, not as the mux client's error | V |
 
 ### Suite K — transport and `ssh`
+
+**K1, K2, K7, K9-K14 implemented 2026-09-08** in
+`Tests/ServerModelTests/TransportScenarios.swift`, against the `FakeSSH` stub that `SSHMaster`
+spawns exactly as it spawns `/usr/bin/ssh`. K1 and K2 each run the failing order as well as
+the shipping one. K3-K6 and K8 are pure-unit or `AgentRuntime` rows and are not claimed.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -666,6 +737,10 @@ and the shipping `ProviderCore`.
 
 ### Suite L — paths, names and attributes
 
+**L1 implemented 2026-09-08** in `Tests/ServerModelTests/SFTPWireScenarios.swift`: the wire
+server really does follow the swapped symlink into `/etc`, and the `lstat` that must come
+first is what catches it. The rest of the suite is `AgentRuntime`'s or pure unit.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | L1 | `opendir` follows a symlink | A directory swapped for a link to `/etc` | List it | The listing re-`lstat`s its own directory first, refuses to descend, rewrites the row, deletes every row beneath and answers `.noSuchItem`; **zero** rows under the swapped path | V |
@@ -679,6 +754,9 @@ and the shipping `ProviderCore`.
 
 ### Suite M — symlinks
 
+**M2 implemented 2026-09-08** (`SFTPWireScenarios`), together with `SQ-029`'s reversed
+`SSH2_FXP_SYMLINK` argument order, which no test above the wire can see.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | M1 | The lexical containment check | Links to `note.txt`, `/home/alec/m4/Other`, `/etc/passwd`, under both root spellings | List | Relative in-root shown, absolute in-root rewritten relative, escaping omitted with a reason, and the check holds under the canonical and the user-typed root | U |
@@ -686,6 +764,9 @@ and the shipping `ProviderCore`.
 | M3 | A refused `ln -s` is a sync error | An escaping target created in the mount | `createItem` | The create succeeds locally, the refusal comes back as the item's `uploadingError`, and the sentence reaches the user only through `status` | S |
 
 ### Suite N — the capability report and probes
+
+**N2, N3 and N4 implemented 2026-09-08** (`SFTPWireScenarios`, `TransportScenarios`,
+`ShellScenarios`). N1 is a pure-unit row and belongs beside `CapabilityReport`.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -711,8 +792,10 @@ Linux and names the VM runbook step that measures the fact behind it (§7).
 | P8 | A nickname renames in place | 4 materialized items, 1 pending upload | `set nickname` | The mount directory is renamed, the materialized set and the pending upload are unchanged, nothing is re-fetched, and the pending write still flushes | S |
 | P9 | `add` waits for the first deployment | A location whose helper is being deployed | `add` | The upload sentence is printed first, then the report after a bounded wait; `status` ten seconds later agrees with it | S |
 
-**Counts:** A 9, B 3, C 6, D 9, E 6, F 6, G 9, H 10, J 13, K 12, L 8, M 3, N 4, P 9 = **107
-scenarios**, of which 5 are `VM`-anchored and the other 102 run on Linux with nothing attached.
+**Counts:** A 9, B 3, C 6, D 9, E 6, F 10, G 9, H 10, J 13, K 14, L 8, M 3, N 4, P 9 =
+**113 scenarios**, of which 5 are `VM`-anchored and the other 108 run on Linux with nothing
+attached. (F7-F9 and K13-K14 were added by the 2026-09-08 working-set and helper-survival
+fixes; F10 by step 8, which is where section 4.2's re-arm first became drivable off a Mac.)
 
 ## 6. (e) Seeding: how a VM measurement becomes a quirk
 
@@ -994,23 +1077,168 @@ table. Scenarios **B1-B3, C1-C6, D1, D3, D9, L3-L6, M3**.
 identifier literal, the trash identifier) still equals Apple's. One assert each; it is the only
 thing that can drift silently.
 
+  Two thirds of it exist already and want folding together, not rewriting:
+  `ProviderCoreTests/MirroredProviderConstantsTests` (step 1.3) and
+  `AgentRuntimeTests/MirroredAgentConstantsTests` (step 8: `SF_DATALESS`, the three eviction
+  codes and the two Cocoa ones, `supportsSyncingTrash`'s default, the testing-mode bits and
+  the `SMAppService.Status` cases). What step 4 adds is the single macOS-only *target* and
+  the CI line that runs it.
+
 **Step 5 — `ReplicaControlling` and the replica model.** `ReplicaAccess`,
 `ReplicaEnumerators` and `DomainManager`'s File Provider calls behind the protocol;
 `SystemModel.FileProviderD` grows the materialized and pending sets, the eviction rules and the
 signals. Scenarios **F1-F6, G1-G9, P5, P6, P8**.
 
-**Step 6 — `ServerModel` v0: shells and exec channels.** `ServerProfile`, `FakeExecChannel`
-over real `dash`/`bash`/`busybox ash`, the rc-noise and sentinel shapes, the heartbeat wrapper,
-`MaxSessions`, session process-group policy. Scenarios **J1-J8, J12, J13, N3, N4**.
+  **Half of this arrived with step 8 (2026-09-08):** the protocol exists, every one of those
+  calls is behind it, and `AgentRuntimeTestSupport.FakeReplica` answers them well enough for
+  **F6, G1, G4, G5, P8** and the F7-F10 group. What is still owed is the *model* rather than
+  the fake: `SystemModel.FileProviderD` growing the materialized and pending sets and the
+  eviction rules, so that **F1-F5, G2, G3, G6-G9, P5, P6** assert against measured
+  fileproviderd behaviour instead of a scripted answer.
 
-**Step 7 — `ServerModel`: the SFTP wire and the fake `ssh`.** `FakeSFTPServer` over the same
-`ByteStream`; the `FakeSSH` stub binary behind `TransportLauncher`. Scenarios **K1-K12, L1, L2,
-L7, L8, M1, M2, D7, N1, N2**.
+**Step 6 — [x] Done 2026-09-08. `ServerModel` v0: shells and exec channels.**
+`Sources/ServerModel` is a package library target (`Logging`, `SFTP`, `SSHProcess`,
+`XPCProtocols`) holding four things:
 
-**Step 8 — `AgentRuntime`.** Move `LocationRuntime` and its two extensions, `ChangeDetector`,
-`CacheEvictor`, `IndexReconcile`, `ChannelBudget`, `ReconnectingTransport`,
-`SSHBackedTransport`, `CollectConnection`, the `DomainRegistry` half of `DomainManager` and the
-command handlers. Scenarios **D2, D4-D6, D8, E1-E6, H1-H10**.
+  - **`ServerProfile`** and `ServerQuirks`. Nineteen constants: the testbed's twelve
+    services (`deb`, `deb-shells`, `deb-extsftp`, `deb-kbdint`, `deb-maxsess`, `alp`,
+    `alp-ext`, `alp-nocmin`, `bastion-a`, `bastion-b`, `inner`, `ts-ssh`), the account
+    variants that differ (`deb/pw`, `deb/keypass`, `bashbg`, `forcesftp`, `extquiet`), the
+    **owner's own two servers** (`ownerDebian`, OpenSSH 9.2p1 Debian-2+deb12u10; and
+    `ownerTailscale`, the Tailscale SSH node), an `openSSH9_6` shape, and the two the
+    testbed cannot provide - `freeBSD` and `synologyDSM`. `SFTPExtensionSets` carries the
+    three measured lists (`SQ-024`, `SQ-025`, `SQ-026`), and 9.2's and 9.6's are asserted
+    to be *identical*, so only the identification string can tell them apart (`SQ-036`).
+    `OpenSSHPrompts` carries the captured OpenSSH 10.2 prompt strings with their trailing
+    spaces (`SQ-060`). `ServerQuirks.implemented` names every row keyed on, and
+    `ServerProfileScenarios` asserts each one exists in `docs/quirks/servers.md` - the
+    first of `scripts/check-quirks.sh`'s assertions, run from the suite until the script
+    itself exists.
+  - **`FakeSSHD` / `FakeExecChannel`**: an exec channel whose remote end is a **real**
+    shell on the box. bash and zsh get their real rc mechanism (`BASH_ENV`, `ZDOTDIR`'s
+    `.zshenv`), which is what `SQ-015` is actually about; dash and busybox ash, which read
+    no rc for a script on stdin, get the same bytes ahead of the script. `bashbg`'s
+    background child really holds stdout (`SQ-016`), a `ForceCommand` account answers with
+    the plain sentence or SFTP framing (`SQ-013`), `MaxSessions` is counted across open
+    channels (`SQ-021`), and the process-group policy is **real**: `.ownProcessGroup`
+    spawns each session as its own group leader, `.sharedWith("tailscaled")` starts a
+    long-lived leader and spawns every session into *its* group, so `kill -TERM 0` run by a
+    real shell really does or does not reach a real bystander (`SQ-010`, `SQ-012`). A
+    busybox profile gets a generated `find` shim that behaves the way BusyBox 1.36.1 was
+    measured to - `-cmin`/`-printf` rejected rc 1, `--version` printing an error and
+    exiting **0** (`SQ-001`-`SQ-003`).
+  - **Scenarios**: `ShellScenarios` (J4, J5 ×2, J6, J7, N4), `HeartbeatScenarios`
+    (J1 ×3 including the bite-proof, J2/J3), `SweepScenarios` (H1, H2, H3, H6).
+  - **What skips, by name, on this box**: `busybox`, `fish` and `tcsh` are not installed,
+    so the busybox-ash, fish and tcsh rc-noise rows print a named skip rather than a pass.
+    The busybox **`find`** rows are not skipped - the flavour is modelled by the shim and
+    the shell that runs the script is a real dash.
+  - **And one that skips on macOS**: `J1`'s bite-proof needs a `kill -TERM 0` to reach a
+    sibling in a shared process group. On Linux it does, and the pre-2026-09-08 wrapper
+    kills the bystander exactly as `SQ-010` measured. On macOS 26.4 the sessions really are
+    put in one foreign process group - the model asserts that before it starts - and the
+    group signal reaches nothing but the sender's own child, so the row skips there with
+    that sentence rather than passing for the wrong reason. This is a fact about the
+    *harness* on Darwin, not about a server; the Linux job is the gate (§9), and the
+    shipping wrapper's row - the child dies, the sibling lives - runs on both.
+
+**Step 7 — [x] Done 2026-09-08. `ServerModel`: the SFTP wire and the fake `ssh`.**
+
+  - **`FakeSFTPServer`** is a real SFTP v3 **wire** server over a `ByteStream`, with a
+    codec of its own rather than a reuse of `SFTP`'s: a server that shares the client's
+    encoder can only ever agree with it. `SFTPClient` and `RealSFTPTransport` run against
+    it unmodified. The rules it applies are `SQ-024`-`SQ-034`: the profile's extension list
+    in order and an unadvertised extension refused, `limits@openssh.com`'s measured values,
+    status *classes* with no errno so `ENOSPC`/`EEXIST`/`ENOTEMPTY`/`EXDEV` are all a bare
+    `FAILURE` with the literal message "Failure", the reversed `SSH2_FXP_SYMLINK` argument
+    order, an `opendir` that **follows a symlink**, a `readdir` that carries attributes but
+    no link target, `ETXTBSY` over a running executable, `mkdir` filtered by the umask,
+    `posix-rename` versus a plain `rename` that does or does not overwrite, and case
+    folding. `SFTP.FakeTransport` stays the fast in-memory double above the protocol, and
+    `Tests/SFTPTests`' `InMemorySFTPServer` stays as the codec's own unit double; this is
+    what the profile-driven transport scenarios use.
+  - **`FakeSSH`** is a generated POSIX `sh` stub installed into `SSHProcess.sshBinaryPath`,
+    not a built product: it is spawned by absolute path exactly as `/usr/bin/ssh` is, needs
+    no build step and no product to locate, and lets each scenario script its own stderr
+    and exit shape. It reproduces readconf's **first-setting-wins** rule (`SQ-038`), one
+    round of percent expansion before `/bin/sh -c` (`SQ-039`), CRLF stderr (`SQ-035`), the
+    identification string only at `DEBUG1` (`SQ-036`), the askpass prompts with the
+    host-key question's missing hint (`SQ-047`, `SQ-060`, `SQ-062`), `-O check`/`-O exit`
+    and a real AF_UNIX control socket where `python3` can bind one, the mux client's two
+    stderr shapes for a refusal and for a dead master (`SQ-021`, `SQ-079`), sessions counted
+    by process **state** rather than by pid so a zombie does not hold one open (`SQ-075`),
+    `ControlPersist` forking away (`SQ-041`) and exit 255 with nothing on stderr for a
+    signal-killed remote command (`SQ-011`).
+  - **Scenarios**: `SFTPWireScenarios` (K12 ×2, N2 ×2, L1, M2, D7, J8, J11, and the
+    `SQ-027`/`SQ-028`/`SQ-029` wire rules), `TransportScenarios` (K1, K2 ×2, K7 ×2, K9,
+    K10, K11, K13/K14, N3/J12).
+  - **Deferred, and not claimed**: K3-K6, K8, L2, L7, L8, M1, N1, J9, J10, J13, H4, H5,
+    H7-H10. K5, K8, L2, M1, N1, H8 and H10 are pure-unit rows that belong beside their
+    types; the rest need `AgentRuntime` (step 8) or the helper binary (step 9).
+
+  **Counts.** **745 tests on this box** (was 700), 41 skipped, and **754 on the Mac** (was
+  709), 42 skipped - the 45 new ones are `Tests/ServerModelTests`, and the Mac's extra skip
+  is `J1`'s bite-proof, for the reason above. Nothing else moved on either platform.
+
+  **Two test seams were added, both behaviour-preserving.** `SSHProcess.sshBinaryPath` is
+  a settable `var` over `defaultSSHBinaryPath` (also readable from `SSHDRIVE_SSH_BINARY`,
+  which is how a `ProxyCommand` hop the stub spawns finds the stub again); and
+  `Spawn.run` gained `joinProcessGroup: pid_t?`, which is what lets a session be put into
+  an *existing* group so `SQ-010` can be run rather than asserted. Nothing in the product
+  passes either.
+
+**Step 8 — `AgentRuntime`. [x] Done 2026-09-08.** Everything `Apps/Agent` decided is in the
+package: `LocationRuntime` and its two extensions, `DomainManager`, `ChangeDetector`,
+`CacheEvictor`, `IndexReconcile`, `ReconnectingTransport` with its `ConnectionGate`,
+`SSHBackedTransport` with the new `SSHTransportLauncher`, `ChannelBudget`/`ChannelProbe`/
+`CapabilityCache`, `HelperDeployer`, `HelperStream`, `HelperCleanup`, `CollectConnection`,
+`LocationCommands`, `ControlCommands`, `TransportDebug`, `ConfigAccess`, `Deadline`,
+`CallJournal`, `HandleSink`, `AgentSecrets` and `AgentSecretsDebug`, plus three types that
+were a decision inline in an adapter: `AgentLifecycle` (the handover and unregister rules
+without the dispatch sources), `PresenceOverride` (section 4.2's spike override, parsed) and
+`ForcedNotReady`. `Apps/Agent` is **ten files and 2,009 lines**, down from 13,300, and none
+of them holds a branch worth testing. Beside it `AgentRuntimeTestSupport`: `FakeReplica`
+(recording every domain, signal, enumerator and eviction call, and scriptable for a refusal,
+a missing manager or a 4099 that lands anyway), `FakeLoginItem`/`FakeLaunchd` (`MQ-062` and
+`MQ-063` as state machines), `ScriptedPower`/`ScriptedNetwork`/`ScriptedPresence`/
+`ScriptedScreenLock`, `ScriptedPeers`, `RecordingReaderPeers`, `FakeBundle`,
+`RecordingEndpoint`, `FakeTransportLauncher` with `FakeLiveConnection` (over the existing
+`SFTP.FakeTransport`, or over `ServerModel`'s channels through its `transportFactory` hook),
+`VirtualAgentClock` and `AgentHarness`, which is one agent with a group container of its own.
+
+  Scenarios, in `Tests/AgentRuntimeTests` (**16 tests**, all Linux, all in one `.serialized`
+  tree because `GroupContainer`'s locator is process-wide): **F6** (sleep drops every master
+  and no reconnect is scheduled; wake brings them back), **F7** (the reconnect runs
+  `ReconnectSequence` in order and the flush cue precedes the working set), **F8** (a
+  transient tier-2 failure is held for 2 s, not for the session, and climbs back on the next
+  cycle), **F9** (four outages, and the hold after each reconnect is the 2 s one, never a
+  compounded one), **F10** (section 4.2's two re-arm triggers and the once-a-minute presence
+  rule), **D5** (30 held in bulk plus the directory held as an ancestor of a pending edit, a
+  held fetch answering `.cannotSynchronize`, and `accept-deletions` scoped and whole),
+  **G1** (280 s under a 60 s TTL evicted, with the atime read *before* the eviction and
+  deciding nothing), **G4** (a pin inherited by every descendant with one marker, and the
+  eviction refused with a sentence), **G5** (an explicit exclusion beating the pin above it),
+  **K13**/**K14**'s cache half (the verdict on `ssh`'s own wording, and an abrupt loss
+  making the cached budget suspect while leaving the values in the file for an offline
+  `status`; step 7's `TransportScenarios` covers the same two against a real refused
+  channel), **P1** (`register()` alone does not repair a
+  replaced bundle; the handover waits for a whole one), **P2** (the unregister role polls
+  launchd, not `SMAppService`, and gives up at 30 s) and **P8** (a nickname renames the
+  domain in place, with the materialized set and the pending upload untouched).
+
+  Still owed to this step and not claimed: **D2, D4, D6, D8** and **E1-E6** (the write and
+  index halves, which want `SystemModel`'s replica), and **H1-H10** (the sweep, which wants
+  `ServerModel`'s exec channel). Both are other agents' steps 5-7, and nothing in this one
+  blocks them: `FakeLiveConnection` takes any `SFTPTransport`, and `FakeTransportLauncher`
+  takes a factory.
+
+  Beside them `Tests/AgentRuntimeTests/MirroredAgentConstantsTests.swift`, the macOS-only
+  guard on everything the agent's adapters mirror, in the shape step 1.3 gave the
+  extension's: `SF_DATALESS`; the three eviction codes S4 measured **including the two that
+  are never seen**, because "we never see it" is the finding (`MQ-017`-`MQ-019`); the two
+  Cocoa codes the reports carry (`MQ-019`, `MQ-052`); that `supportsSyncingTrash` still
+  defaults to YES, which is why the adapter clears it (`MQ-008`); the two testing-mode bits;
+  and the four `SMAppService.Status` cases behind `doctor`'s login-item line.
 
 **Step 9 — the helper.** The Rust binary already builds and tests on this box; run it against
 `FakeExecChannel` for real. Scenarios **J9-J11**, and the Tailscale process-group model.
@@ -1053,7 +1281,8 @@ Only compiling and signing. After the migration the four shells contain adapters
 and nothing else, so a macOS job that builds them is a compile check on the Apple type-mapping —
 which is exactly the risk that remains once the logic has moved. `xcodegen generate` then
 `xcodebuild -configuration Debug` and `-configuration Release` for `SSH Drive`, `sshdrive`,
-`sshdrive-askpass` and `SSHDriveFileProvider`, plus `swift test --filter AppleConstantsTests`.
+`sshdrive-askpass` and `SSHDriveFileProvider`, plus `swift test --filter AppleConstantsTests`
+(today: `--filter Mirrored`, which catches both mirrored-constant suites).
 
 ### CI
 

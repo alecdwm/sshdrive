@@ -74,7 +74,7 @@ targets:
             subpath: Contents/Library/LaunchAgents
     dependencies:
       - package: SSHDriveCore
-        products: [AgentCore, Config, Secrets, SFTP, SSHProcess, Index, ProviderCore, XPCProtocols, XPCInterfaces, Logging]
+        products: [AgentRuntime, AgentCore, Config, Secrets, SFTP, SSHProcess, Index, ProviderCore, XPCProtocols, XPCInterfaces, Logging]
       - target: SSHDriveFileProvider
         embed: true
         codeSign: true

@@ -41,15 +41,31 @@ Processes and modules (§3):
   sockets; reads `index.sqlite` read-only for `item(for:)` and the working set only. Since
   2026-09-08 it is **five adapter files and no decision**: everything it decides is
   `ProviderCore` in the package, and `Apps/FileProvider` only translates to and from Apple's
-  types.
+  types. **The agent went the same way later the same day**: `Apps/Agent` is ten adapter
+  files and 2,009 lines, down from 13,300, and everything it decided is `AgentRuntime`.
 - **CLI** (`Contents/MacOS/sshdrive`): pure XPC client; even `add` and `passwd` connect from the agent.
 - **askpass** (`Contents/MacOS/sshdrive-askpass`): pure XPC client, holds nothing, relays `ssh` prompts.
 - **helper**: static Rust binary shipped in `Contents/Resources/helper/`, uploaded to the server (§6.4 tier 2).
 - `Packages/SSHDriveCore` modules: `Config`, `Secrets`, `SFTP`, `SSHProcess`, `Index`, `XPCProtocols`,
   `XPCInterfaces` (macOS-only: the `@objc` NSXPC half), `AgentCore`, `ProviderCore` (everything
   the extension decides, behind platform-free protocols and mirrors of Apple's identifiers,
-  capabilities, flags, fields and error codes), `SystemModel` (the simulated fileproviderd,
-  quirk-driven, with a virtual clock), `Logging`.
+  capabilities, flags, fields and error codes), **`AgentRuntime`** (everything the *agent*
+  decides - `LocationRuntime` and its extensions, `DomainManager`, `ChangeDetector`,
+  `CacheEvictor`, `IndexReconcile`, `ReconnectingTransport`/`ConnectionGate`,
+  `SSHBackedTransport`, the channel budget and its cache, the helper's deployment and
+  stream, the collect connection and the CLI command handlers - behind `ReplicaControlling`,
+  `LoginItemControlling`, `LaunchdControlling`, `PowerObserving`, `NetworkPathObserving`,
+  `PresenceReporting`, `ScreenLockObserving`, `PeerIdentifying`, `IndexReaderPeering`,
+  `BundleInspecting`, `KeychainDiagnosing`, `TransportLauncher`, `TerminalRelaying`,
+  `AgentEndpoint` and `AgentClock`, all carried in one `AgentEnvironment`),
+  **`AgentRuntimeTestSupport`** (an in-memory implementation of every one of those, plus
+  `AgentHarness` and a driven clock), `SystemModel` (the simulated fileproviderd,
+  quirk-driven, with a virtual clock), **`ServerModel`** (the simulated server: a
+  `ServerProfile` per testbed service and per real server of the owner's, `FakeSFTPServer`
+  speaking SFTP v3 on the wire over a `ByteStream`, `FakeExecChannel` running a **real**
+  local shell under the profile's rc noise and process-group policy, and `FakeSSH`, the
+  stub that stands in for `/usr/bin/ssh`; every rule keyed on a row of
+  `docs/quirks/servers.md` - added 2026-09-08), `Logging`.
 
 ## Repo layout (intended)
 
@@ -90,8 +106,19 @@ wipes it.
   macOS-only assertions of every mirrored constant and error code against Apple's, which is the
   only thing that can drift silently, and which caught five wrong error codes the first time it
   ran. **Nothing under `Apps/FileProvider` may contain a branch worth testing**; a new rule
-  there belongs in `ProviderCore` with a scenario. `Apps/Agent` is still outside the package and
-  still needs the Mac; moving its decisions in is step 8. Every Darwin path is byte-for-byte what it was: when you add a `#if`, put the
+  there belongs in `ProviderCore` with a scenario. **Step 8 followed on the same day:
+  `AgentRuntime` and `AgentRuntimeTestSupport`.** `Apps/Agent` is ten adapter files and
+  2,009 lines, down from 13,300; `LocationRuntime` and its extensions, `DomainManager`,
+  `ChangeDetector`, `CacheEvictor`, `IndexReconcile`, `ReconnectingTransport` and its gate,
+  `SSHBackedTransport`, the channel budget and its cache, the helper's deployment and
+  stream, the collect connection and both command handlers are in the package behind the
+  fifteen protocols of `docs/testing-architecture.md` §2.3, all of them carried in one
+  `AgentEnvironment` that `DomainManager` is constructed with. **The same rule applies to
+  `Apps/Agent` as to `Apps/FileProvider`: no branch worth testing may live there**, and a
+  new one belongs in `AgentRuntime` with a scenario. Sixteen agent-side scenarios run here
+  (F6-F10, D5, G1, G4, G5, K13, K14, P1, P2, P8); what they still cannot reach is the write
+  and index half (D2, D4, D6, D8, E1-E6), which wants `SystemModel`'s replica, and the sweep
+  (H1-H10), which wants `ServerModel`'s exec channel. Every Darwin path is byte-for-byte what it was: when you add a `#if`, put the
   existing code in the Darwin branch untouched, and never `sed` a rename across the file that
   defines it. `cargo test` for `helper/` has always worked here.
   **App bundles still need the Mac VM** over ssh:

@@ -1,3 +1,4 @@
+import AgentRuntime
 import Foundation
 import XPCInterfaces
 import XPCProtocols
@@ -11,6 +12,13 @@ import Logging
 /// audit token against the requirement, which no pid-based check can do safely. Every
 /// process of the user can look the service up; only ours get past the delegate.
 final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
+    private let manager: DomainManager
+    private let environment: AgentEnvironment
+
+    init(manager: DomainManager, environment: AgentEnvironment) {
+        self.manager = manager
+        self.environment = environment
+    }
 
     func listener(
         _ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection
@@ -30,24 +38,26 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         // sshdrive-askpass gets the one-method askpass interface and nothing else: the
         // path that hands out secrets must not also be able to remove a location
         // (DESIGN.md sections 4.2, 5.2).
-        if AskpassService.register(peer: connection) { return true }
+        if AskpassService.register(peer: connection, environment: environment) {
+            return true
+        }
 
         connection.exportedInterface = SSHDriveXPCInterface.agent
-        connection.exportedObject = AgentService(connection: connection)
+        connection.exportedObject = AgentService(connection: connection, manager: manager)
         // Both remaining peers export a callback object of their own, and which one they
         // export follows from which of our executables they are - the same rule that gives
         // askpass its one-method interface (section 5.2). The extension takes progress and
         // reopen callbacks; the CLI takes the collect connection's relayed prompts
         // (section 4.2), which is the only thing the agent ever asks a terminal.
         connection.remoteObjectInterface =
-            PeerExecutable.isCLI(pid: connection.processIdentifier)
+            environment.peers.isCLI(pid: connection.processIdentifier)
             ? SSHDriveXPCInterface.cli
             : SSHDriveXPCInterface.fileProviderExtension
 
         // Section 5.3's restore has to reach every live reader, not only the one that
         // happens to be making the current call, so an extension peer goes in the table
         // the moment it is accepted.
-        let isExtension = !PeerExecutable.isCLI(pid: connection.processIdentifier)
+        let isExtension = !environment.peers.isCLI(pid: connection.processIdentifier)
         if isExtension { ExtensionPeers.shared.add(connection) }
 
         connection.invalidationHandler = { [weak connection] in

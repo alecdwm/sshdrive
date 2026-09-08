@@ -1,7 +1,9 @@
-import Foundation
-import FileProvider
-import Index
 import AgentCore
+import AgentRuntime
+import FileProvider
+import Foundation
+import Index
+import ProviderCore
 import SFTP
 import XPCInterfaces
 import XPCProtocols
@@ -12,9 +14,11 @@ import Logging
 /// protocol of DESIGN.md section 5.3) without a lookup.
 final class AgentService: NSObject, SSHDriveAgentProtocol {
     private weak var connection: NSXPCConnection?
+    private let manager: DomainManager
 
-    init(connection: NSXPCConnection) {
+    init(connection: NSXPCConnection, manager: DomainManager) {
         self.connection = connection
+        self.manager = manager
     }
 
     /// The extension's side of this connection, for callbacks.
@@ -30,30 +34,8 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply(sshDriveXPCInterfaceVersion)
     }
 
-    /// Spike hook: while this is in the future the agent answers `indexReady` no, so the
-    /// extension's readiness race can be reproduced on purpose rather than waited for.
-    /// Set by `sshdrive debug reader <name> --not-ready <seconds>`; process-lifetime only.
-    static let forcedNotReadyUntil = ForcedNotReady()
-
-    final class ForcedNotReady: @unchecked Sendable {
-        private let lock = NSLock()
-        private var until: [String: Date] = [:]
-
-        func set(domainIdentifier: String, seconds: TimeInterval) {
-            lock.lock()
-            until[domainIdentifier] = Date().addingTimeInterval(seconds)
-            lock.unlock()
-        }
-
-        func isActive(_ domainIdentifier: String) -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            guard let deadline = until[domainIdentifier] else { return false }
-            return deadline > Date()
-        }
-    }
-
     func indexReady(domainIdentifier: String, reply: @escaping (Bool) -> Void) {
-        if AgentService.forcedNotReadyUntil.isActive(domainIdentifier) {
+        if ForcedNotReady.shared.isActive(domainIdentifier) {
             Log.agent.notice(
                 "\(domainIdentifier, privacy: .public): indexReady -> no (forced by a debug hook)")
             reply(false)
@@ -66,10 +48,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "indexReady", subject: "")
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 _ = try await runtime.currentSequence()
                 call.finish("ready")
                 Log.agent.notice(
@@ -101,10 +83,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "enumerateItems", subject: containerIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 // Section 5.2: paged for directories with tens of thousands of entries.
                 // A page token is an offset into a listing the agent already holds, so a
                 // second page never re-lists the directory.
@@ -134,10 +116,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "enumerateChanges", subject: containerIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let result = try await runtime.enumerateChanges(container: containerIdentifier)
                 let sequence = try await runtime.currentSequence()
                 call.finish("\(result.items.count) changed, \(result.deleted.count) deleted")
@@ -164,11 +146,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     ) {
         Task {
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "enumerateWorkingSetChanges",
                 subject: anchor)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let result: (items: [SSHDriveItemSnapshot], deleted: [String], newAnchor: Int64, hasMore: Bool)
                 do {
                     result = try await runtime.workingSetChanges(since: Int64(anchor) ?? 0)
@@ -207,7 +189,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     func currentAnchor(domainIdentifier: String, reply: @escaping (String?, Error?) -> Void) {
         Task {
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 reply(String(try await runtime.currentSequence()), nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))
@@ -226,10 +208,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "item", subject: itemIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.snapshot(identifier: itemIdentifier)
                 call.finish("ok")
                 reply(snapshot, nil)
@@ -255,11 +237,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "fetchContents", subject: itemIdentifier,
                 isSystemRequest: isSystemRequest)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchContents(
                     identifier: itemIdentifier, into: destination, transferID: transferID,
                     kind: AgentService.transferClass(
@@ -308,10 +290,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "fetchPartialContents", subject: itemIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.fetchPartialContents(
                     identifier: itemIdentifier, offset: offset, length: length,
                     into: destination, transferID: transferID,
@@ -339,10 +321,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "createItem", subject: filename)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let snapshot = try await runtime.createItem(
                     parentIdentifier: parentIdentifier,
                     filename: filename,
@@ -379,13 +361,13 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "modifyItem", subject: itemIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 let result = try await runtime.modifyItem(
                     identifier: itemIdentifier,
-                    changedFields: NSFileProviderItemFields(rawValue: UInt(changedFields)),
+                    changedFields: ProviderItemFields(rawValue: UInt(changedFields)),
                     baseVersion: baseVersion,
                     newParentIdentifier: newParentIdentifier,
                     newFilename: newFilename,
@@ -408,9 +390,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     // The conflict copy is a new sibling with an anchor of its own; the
                     // signal is what makes the system read that anchor, so Finder shows
                     // the copy at once rather than at the next enumeration (section 5.5).
-                    await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
-                    await SpikeHooks.evictAfterConflict(
-                        locationID: domainIdentifier, identifier: itemIdentifier)
+                    await manager.signalWorkingSet(locationID: domainIdentifier)
+                    await manager.environment.replica.evictAfterConflict(
+                        locationID: domainIdentifier, identifier: itemIdentifier,
+                        sleeper: manager.environment.clock)
                 }
             } catch {
                 call.finish(error: error)
@@ -430,10 +413,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "deleteItem", subject: itemIdentifier)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 try await runtime.deleteItem(identifier: itemIdentifier, recursive: recursive)
                 call.finish("deleted")
                 reply(nil)
@@ -450,7 +433,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // so the cancel goes to every started runtime; each scheduler ignores an id it
             // does not hold. Only runtimes that are already up are asked, so a cancel
             // never connects a location (section 5.2).
-            for runtime in await DomainManager.shared.startedRuntimes() {
+            for runtime in await manager.startedRuntimes() {
                 await runtime.cancel(transferID: transferID)
             }
         }
@@ -464,7 +447,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         // materializedItemsDidChange". Milestone 8's pin safety net (section 7.2) hangs
         // off the same signal.
         Log.agent.debug("materializedItemsDidChange for \(domainIdentifier, privacy: .public)")
-        Task { await DomainManager.shared.materializedItemsChanged(locationID: domainIdentifier) }
+        Task { await manager.materializedItemsChanged(locationID: domainIdentifier) }
     }
 
     func workingSetAnchorExpired(domainIdentifier: String, freshAnchor: String) {
@@ -475,24 +458,24 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // spike S5's journal: arrival, outcome and the gap since the previous call
             // of the same kind, which is what every "how long does the system wait"
             // question in the S5 row is asking for.
-            let call = DomainManager.shared.noteFileProviderRequest(
+            let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "workingSetAnchorExpired", subject: freshAnchor)
             do {
-                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
                 // Section 5.3: "the agent treats handing out a fresh working-set anchor
                 // exactly as it treats a reconnect: it runs one full sweep of the root set
                 // at once, and every difference from the index becomes an anchor after the
                 // fresh one". The detector's next cycle is that sweep; the catch-up walk
                 // below is the immediate half, so a fresh anchor is never left waiting for
                 // the cadence.
-                await DomainManager.shared.requestFullSweep(
+                await manager.requestFullSweep(
                     locationID: domainIdentifier, reason: "working-set anchor expired")
                 let changes = try await runtime.runCatchUpSweep()
                 call.finish("\(changes) change(s)")
                 Log.agent.notice(
                     "catch-up sweep after an anchor expiry found \(changes, privacy: .public) change(s)")
                 if changes > 0 {
-                    await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
+                    await manager.signalWorkingSet(locationID: domainIdentifier)
                 }
             } catch {
                 call.finish(error: error)
@@ -526,12 +509,12 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                 "Unknown action \(actionIdentifier)."))
             return
         }
-        DomainManager.shared.noteFileProviderRequest(
+        manager.noteFileProviderRequest(
             domainIdentifier: domainIdentifier, method: "performAction",
             subject: actionIdentifier)
         Task {
             do {
-                let runtime = try await DomainManager.shared.runtime(
+                let runtime = try await manager.runtime(
                     domainIdentifier: domainIdentifier)
                 var changed = false
                 var lookUp: [String] = []
@@ -545,12 +528,12 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     }
                 }
                 if changed {
-                    await DomainManager.shared.signalWorkingSet(locationID: domainIdentifier)
+                    await manager.signalWorkingSet(locationID: domainIdentifier)
                     // The rows always exist here - Finder is acting on items it is showing -
                     // but the eager download still needs the replica lookup of section 7.1
                     // step 1 for a subtree the system has not enumerated below the pin.
                     for identifier in lookUp {
-                        await ReplicaAccess.lookUpInReplica(
+                        await manager.environment.replica.lookUpInReplica(
                             locationID: domainIdentifier, identifier: identifier)
                     }
                 }
@@ -569,11 +552,14 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         // The terminal, captured while the method is still on the connection: `add` and
         // `passwd` relay the collect connection's prompts back along it (section 4.2).
         let relay = CLIRelay(connection: connection)
+        let manager = self.manager
         Task {
             do {
                 reply(
-                    try await ControlCommands.run(
-                        command: command, arguments: arguments, relay: relay),
+                    try await AgentCommandContext.with(manager) {
+                        try await ControlCommands.run(
+                            command: command, arguments: arguments, relay: relay)
+                    },
                     nil)
             } catch {
                 reply(nil, sshDriveXPCError(error))

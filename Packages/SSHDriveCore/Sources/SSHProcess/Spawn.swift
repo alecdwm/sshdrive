@@ -35,7 +35,8 @@ public enum Spawn {
         wantsStdout: Bool = false,
         wantsStderr: Bool = false,
         stdinFromDevNull: Bool = false,
-        newProcessGroup: Bool = false
+        newProcessGroup: Bool = false,
+        joinProcessGroup: pid_t? = nil
     ) throws -> SpawnedProcess {
         var inPipe: [Int32] = [-1, -1]
         var outPipe: [Int32] = [-1, -1]
@@ -89,7 +90,15 @@ public enum Spawn {
         #endif
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        if newProcessGroup {
+        // `joinProcessGroup` is the one test seam here: `ServerModel.FakeExecChannel`
+        // puts every session of a `.sharedWith("tailscaled")` profile into one existing
+        // group, which is the whole of `SQ-010` and the only way `kill -TERM -$$` versus
+        // `kill -TERM 0` can be told apart by running them for real. Nothing in the
+        // product passes it; `newProcessGroup` behaves exactly as before.
+        if let joinProcessGroup {
+            posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
+            posix_spawnattr_setpgroup(&attributes, joinProcessGroup)
+        } else if newProcessGroup {
             posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
             posix_spawnattr_setpgroup(&attributes, 0)
         }

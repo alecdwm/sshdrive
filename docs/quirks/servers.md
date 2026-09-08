@@ -8,6 +8,25 @@ each was measured against.
 `ServerModel.ServerProfile` is built from these rows: a profile is a set of values for them, and
 the testbed's twelve services are twelve profiles.
 
+**Implemented on Linux, 2026-09-08** (`docs/testing-architecture.md` §8 steps 6 and 7).
+`Sources/ServerModel` keys a rule on each of the ids below, and `Tests/ServerModelTests`
+defends it with no Mac, no VM, no network and no testbed:
+`ServerProfileScenarios` (the profile table, the three extension sets, the prompt strings,
+and the assertion that every id the model keys on is a row of *this file*),
+`SFTPWireScenarios` (**L1**, **M2**, **D7**, **J8**, **J11**, **K12**, **N2** and the
+`SQ-027`/`SQ-028`/`SQ-029` wire rules, over a real SFTP v3 wire server),
+`ShellScenarios` (**J4**, **J5**, **J6**, **J7**, **N4**, against real shells),
+`HeartbeatScenarios` (**J1** - including the bite-proof that the pre-2026-09-08 wrapper
+really does kill a sibling session - **J2**, **J3**),
+`SweepScenarios` (**H1**, **H2**, **H3**, **H6**),
+`TransportScenarios` (**K1**, **K2**, **K7**, **K9**, **K10**, **K11**, **K13**, **K14**,
+**N3**, **J12**, against a stub `ssh` that `SSHMaster` spawns exactly as it spawns the real
+one). A scenario needing a shell this box lacks - `busybox`, `fish`, `tcsh` - skips with a
+named reason rather than pretending, and **J1's bite-proof skips on macOS**: the sessions
+are put in one shared process group there too, but a `kill -TERM 0` reaches nothing but the
+sender's own child, so the row says so instead of passing for the wrong reason. Linux is
+the gate.
+
 ## `find` and the sweep
 
 | id | statement | measured on | source | scenarios |
@@ -33,7 +52,7 @@ the testbed's twelve services are twelve profiles.
 | SQ-077 | **The helper's stream does not survive its connection, and it is the connection that usually kills it.** A master `kill -9`ed, an agent restart, a wake, a network path change and a 90-second stall all end the exec channel; the helper on the server then exits on its own 60 s heartbeat timeout. Nothing about any of that is a statement about whether the server can run a helper. | `deb` (2026-09-08) | results 2026-09-08 (addendum, the helper stream); §6.4; §13 2026-09-08 | F7, F8, F9 |
 | SQ-078 | **A stall of more than 60 s kills the helper even though nothing is broken.** With the master and its mux clients `SIGSTOP`ped for 90 s and then continued, the helper had already exited (missed pings) and the exec channel came back exit 255 — with the master still alive, so the agent saw a stream that died on a *live* connection. | `deb` (2026-09-08) | results 2026-09-08 (addendum, scenario c) | F8 |
 | SQ-079 | **A channel open that fails because the master died is not distinguishable from a refused session by anything but the master.** `ssh` prints `mux_client_request_session: session request failed` only for a real refusal, but a dead master produces `Control socket connect: No such file or directory`, `mux_client_hello_exchange: … Broken pipe` or nothing at all — and every one of those was read as "the server allows one channel at a time". Whether the `-N` master is still running is the test. | `deb` (2026-09-08) | results 2026-09-08 (addendum, scenario d); §6.1; §13 2026-09-08 | K13, K14 |
-| SQ-032 | Writing over a **running** executable fails `ETXTBSY` / `Text file busy`, which is why an upload must go to a temp name and rename. | `deb` (2026-09-05) | results 2026-09-05 (M9) "A corrupted binary"; §6.4; gotcha 89 | J10 |
+| SQ-032 | Writing over a **running** executable fails `ETXTBSY` / `Text file busy`, which is why an upload must go to a temp name and rename. | `deb` (2026-09-05) | results 2026-09-05 (M9) "A corrupted binary"; §6.4; gotcha 89 | **J8**, J10 |
 | SQ-033 | `mkdir`'s attributes go through the **server's umask**, so a mode of 0700 that was asked for can land as 0755; the mode must be asserted with a `setstat` afterwards. | `deb` (2026-09-05) | results 2026-09-05 (M10) addendum item 3; §6.4; §13 2026-09-05 | J8 |
 
 ## Shells and remote scripts
@@ -57,9 +76,9 @@ the testbed's twelve services are twelve profiles.
 | SQ-024 | **Go `pkg/sftp` advertises exactly `hardlink@openssh.com`, `posix-rename@openssh.com` and `statvfs@openssh.com`** and nothing else; that fingerprint identifies it. No version advertises `fsync@openssh.com` or `limits@openssh.com`, so an `upgrade:` line naming either asks the user to replace their SSH server for nothing. | `ts-ssh` (2026-09-08) | results 2026-09-08 "The capability report now names the server"; §8.1; §13 2026-09-08; gotcha 101 | K12, N2 |
 | SQ-025 | OpenSSH's own `sftp-server` advertises `posix-rename`, `statvfs`, `fstatvfs`, `hardlink`, `fsync`, `lsetstat`, `limits`, `expand-path`, `copy-data`, `home-directory`, `users-groups-by-id` — anything carrying `fsync`/`lsetstat`/`limits`/`expand-path` is OpenSSH. | `deb` OpenSSH 9.2p1 (2026-09-05) | results 2026-09-05 (M10) addendum; §8.1 | K12, N2 |
 | SQ-026 | Alpine's `internal-sftp` offers the **same** OpenSSH extensions as the external `sftp-server` (`posix-rename`, `fsync`, `lsetstat`, `limits`), so nothing in the write protocol degrades there. | `alp` (2026-09-04) | results 2026-09-04 (M4) "busybox and internal-sftp" | N2 |
-| SQ-027 | **`limits@openssh.com` sizes the request, not the window.** It says nothing about how many requests may be outstanding; the pipeline depth of sixteen is the client's own. Measured: `maxPacketLength 262144`, `maxReadLength/maxWriteLength 261120`, `maxOpenHandles 20475`. | `deb` (2026-09-04) | results 2026-09-04 (S2) throughput; §6.2; §13 2026-09-04; gotcha 38 | — (wire model) |
+| SQ-027 | **`limits@openssh.com` sizes the request, not the window.** It says nothing about how many requests may be outstanding; the pipeline depth of sixteen is the client's own. Measured: `maxPacketLength 262144`, `maxReadLength/maxWriteLength 261120`, `maxOpenHandles 20475`. | `deb` (2026-09-04) | results 2026-09-04 (S2) throughput; §6.2; §13 2026-09-04; gotcha 38 | N2 |
 | SQ-028 | **SFTP v3 carries nine status codes and no errno**: `ENOSPC`, `EEXIST`, `ENOTEMPTY` and `EXDEV` all arrive as a bare `FAILURE`, so a second question (`lstat`, `statvfs`, `readdir`) is the only way to tell them apart. | (protocol + measurement) | §6.2; §13; gotcha 24 | D3, L7 |
-| SQ-029 | OpenSSH's `SSH2_FXP_SYMLINK` takes its two paths in the **opposite order from the draft**. | (protocol) | §6.2; gotcha 24 | M1 |
+| SQ-029 | OpenSSH's `SSH2_FXP_SYMLINK` takes its two paths in the **opposite order from the draft**. | (protocol) | §6.2; gotcha 24 | M1, **L1** |
 | SQ-030 | **SFTP `opendir` follows a symlink.** A directory swapped on the server for a link to `/etc` is read straight through, and eighty names outside the account's tree land in the index. Every listing must re-`lstat` its own directory before `readdir`. | `deb` (2026-09-04, S3 deferred containment) | results 2026-09-04 (M3 part 1) "S3's deferred containment test"; §9.1; §13 2026-09-04; gotcha 41 | **L1** |
 | SQ-031 | **SFTP v3's `readdir` carries attributes but no link target,** so every symlink a listing reports costs a `readlink` before its row can be built. | `deb` (2026-09-04) | results 2026-09-04 (M4) S8; §5.7, §6.2; §13 2026-09-04; gotcha 54 | M2 |
 | SQ-034 | A server's plain `rename` may refuse an existing name or may overwrite it; busybox + `internal-sftp` reports `renameRefusesAnExistingName: true` and needs no preflight, and the probe is what decides. | `alp` (2026-09-04) | results 2026-09-04 (M4) "busybox and internal-sftp"; §5.5 | D7 |
@@ -119,5 +138,5 @@ the testbed's twelve services are twelve profiles.
 | SQ-072 | Containers see connections coming from the docker bridge gateway, never from the VM, so sshd logs and `Match Address` cannot tell clients apart. | testbed (2026-09-04) | `testbed/README.md` | — (harness) |
 | SQ-073 | **zsh does not word-split an unquoted parameter,** so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails; a zsh harness must spell `${=K}`. A latency run then "passes" the steps that check for absence. | (2026-09-05) | results/CLAUDE.md gotcha 98 | — (harness) |
 | SQ-074 | `$TMPDIR` is shared and `sshdrive-*` there is **not** necessarily ours: the package's own test databases are `sshdrive-nested-<uuid>.sqlite` with `-wal`/`-shm` sidecars, and a name-only orphan sweep reported six "orphaned sockets" on a clean install and would have deleted them. Each candidate must be `lstat`ed for `S_IFSOCK`. | (2026-09-04) | results 2026-09-04 (M6) "Three smaller things"; §6.1; §13 2026-09-04; gotcha 79 | K5 |
-| SQ-075 | `pgrep` counts **zombies**: an `ssh` mux client killed with `-9` stays in `pgrep -f` output as `Z` until the agent reaps it, so "did I kill the master?" is unanswerable from `pgrep` alone; `ps -o stat` is the one to read. | (2026-09-04) | results 2026-09-04 (M4) "Three smaller things"; gotcha 56 | K6 |
+| SQ-075 | `pgrep` counts **zombies**: an `ssh` mux client killed with `-9` stays in `pgrep -f` output as `Z` until the agent reaps it, so "did I kill the master?" is unanswerable from `pgrep` alone; `ps -o stat` is the one to read. | (2026-09-04) | results 2026-09-04 (M4) "Three smaller things"; gotcha 56 | K6, **N3** (the session budget counts by state, not by pid) |
 | SQ-076 | macOS has neither `timeout` nor `gtimeout`, and **zsh has a `log` builtin** that shadows `/usr/bin/log`, so every command that touches the mount wants a wrapper and `log` must be spelled absolutely. | (2026-09-04) | results 2026-09-04 S1(e); §8; gotcha 96 | — (harness) |

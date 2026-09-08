@@ -1,3 +1,4 @@
+import AgentRuntime
 import Foundation
 import XPCInterfaces
 import XPCProtocols
@@ -16,7 +17,7 @@ import Logging
 /// Weak references and no ownership: the listener registers a connection when it accepts
 /// it and drops it in the invalidation handler, and a connection that dies in between is
 /// simply gone from the table.
-final class ExtensionPeers: @unchecked Sendable {
+final class ExtensionPeers: IndexReaderPeering, @unchecked Sendable {
     static let shared = ExtensionPeers()
 
     private let lock = NSLock()
@@ -34,7 +35,7 @@ final class ExtensionPeers: @unchecked Sendable {
         lock.unlock()
     }
 
-    var count: Int {
+    var peerCount: Int {
         lock.lock(); defer { lock.unlock() }
         return connections.count
     }
@@ -49,7 +50,9 @@ final class ExtensionPeers: @unchecked Sendable {
     /// An extension that is not running cannot be waiting on anything, so a peer that does
     /// not answer inside the deadline is not a reason to abandon the restore - the agent
     /// goes ahead. What it must never do is truncate *before* asking (section 5.3).
-    func closeReaders(timeout: TimeInterval = 20) async {
+    func closeReaders() async { await closeReaders(timeout: 20) }
+
+    func closeReaders(timeout: TimeInterval) async {
         let peers = live
         guard !peers.isEmpty else { return }
         Log.agent.notice(

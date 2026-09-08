@@ -1,3 +1,4 @@
+import AgentRuntime
 import Foundation
 import XPCInterfaces
 import XPCProtocols
@@ -15,7 +16,7 @@ import Logging
 ///
 /// A relay only exists while a CLI command of the user's own making is in flight. Nothing
 /// the extension or a timer does can reach a terminal.
-final class CLIRelay: @unchecked Sendable {
+final class CLIRelay: TerminalRelaying, @unchecked Sendable {
 
     /// Long enough for a person to read a fingerprint off the screen and type a password,
     /// and shorter than the collect token's own 300 s.

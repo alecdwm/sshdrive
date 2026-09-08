@@ -18,7 +18,10 @@ let package = Package(
         .library(name: "SSHProcess", targets: ["SSHProcess"]),
         .library(name: "AgentCore", targets: ["AgentCore"]),
         .library(name: "ProviderCore", targets: ["ProviderCore"]),
+        .library(name: "AgentRuntime", targets: ["AgentRuntime"]),
+        .library(name: "AgentRuntimeTestSupport", targets: ["AgentRuntimeTestSupport"]),
         .library(name: "SystemModel", targets: ["SystemModel"]),
+        .library(name: "ServerModel", targets: ["ServerModel"]),
     ],
     targets: [
         // os.Logger subsystems, shared by all processes.
@@ -81,21 +84,60 @@ let package = Package(
         // error codes. Apps/FileProvider is the adapter above it and holds no decision.
         .target(name: "ProviderCore", dependencies: ["Logging", "Config", "Index", "XPCProtocols"]),
 
+        // Everything Apps/Agent decides (docs/testing-architecture.md section 2.3):
+        // LocationRuntime and its extensions, the domain registry, change detection,
+        // eviction, the reconnecting transport and its gate, the helper's deployment and
+        // stream, the channel budget, the collect connection and the command handlers -
+        // behind ReplicaControlling, SecretsStore, LoginItemControlling,
+        // LaunchdControlling, PowerObserving, NetworkPathObserving, PresenceReporting,
+        // ScreenLockObserving, PeerIdentifying, IndexReaderPeering, BundleInspecting,
+        // TransportLauncher, TerminalRelaying, AgentEndpoint and AgentClock. Apps/Agent is
+        // the adapter above it and holds no decision.
+        .target(
+            name: "AgentRuntime",
+            dependencies: [
+                "Logging", "Config", "Index", "AgentCore", "ProviderCore", "SFTP", "Secrets",
+                "SSHProcess", "XPCProtocols",
+            ]),
+
+        // In-memory implementations of every AgentRuntime seam, so the agent's logic can
+        // be driven on Linux with no Mac, no network and no keychain.
+        .target(
+            name: "AgentRuntimeTestSupport",
+            dependencies: [
+                "AgentRuntime", "AgentCore", "Config", "Index", "Logging", "ProviderCore",
+                "SFTP", "SSHProcess", "Secrets", "XPCProtocols",
+            ]),
+
         // The simulated macOS: a fileproviderd that drives ProviderCore the way the real
         // one drives the extension, with the measured quirks of docs/quirks/macos.md as a
         // per-version table and a virtual clock (docs/testing-architecture.md section 3).
         .target(name: "SystemModel", dependencies: ["Logging", "Config", "Index", "ProviderCore", "XPCProtocols"]),
 
+        // The simulated server: ServerProfile values for the testbed's twelve services and
+        // for the owner's own two servers, a wire-level SFTP v3 server over ByteStream, an
+        // exec channel whose remote end is a real local shell, and a stub standing in for
+        // /usr/bin/ssh - every rule keyed on a row of docs/quirks/servers.md
+        // (docs/testing-architecture.md section 4).
+        .target(name: "ServerModel", dependencies: ["Logging", "SFTP", "SSHProcess", "XPCProtocols"]),
+
         .testTarget(name: "LoggingTests", dependencies: ["Logging"]),
         .testTarget(name: "ProviderCoreTests", dependencies: ["ProviderCore", "Config", "Index", "XPCProtocols"]),
         .testTarget(name: "SystemModelTests", dependencies: ["SystemModel", "ProviderCore", "Config", "Index", "Logging", "XPCProtocols"]),
         .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
+        .testTarget(
+            name: "AgentRuntimeTests",
+            dependencies: [
+                "AgentRuntime", "AgentRuntimeTestSupport", "AgentCore", "Config", "Index",
+                "Logging", "ProviderCore", "SFTP", "SSHProcess", "Secrets", "XPCProtocols",
+            ]),
         .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
         .testTarget(name: "ConfigTests", dependencies: ["Config"]),
         .testTarget(name: "IndexTests", dependencies: ["Index", "Config", "XPCProtocols"]),
         .testTarget(name: "SecretsTests", dependencies: ["Secrets", "XPCProtocols"]),
         .testTarget(name: "SSHProcessTests", dependencies: ["SSHProcess", "AgentCore", "SFTP", "Config", "XPCProtocols"]),
+        .testTarget(name: "ServerModelTests", dependencies: ["ServerModel", "AgentCore", "SFTP", "SSHProcess", "Secrets", "Config", "XPCProtocols"]),
 
     ]
 )
