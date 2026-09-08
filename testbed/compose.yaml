@@ -45,6 +45,14 @@
 # their packages on first start; treat a compromised one as a machine sitting
 # on the Mac's LAN, not as a foothold on the Mac.
 #
+# --- the one service that is not on 192.168.64.1 -----------------------------
+#
+# `ts-ssh` (service 12) is a Tailscale SSH node: no published port, reachable
+# over the tailnet only, and it needs an auth key.  Copy .env.example to .env
+# and put a key in it BEFORE running any compose command here - TS_AUTHKEY uses
+# the `${VAR:?}` required form, so without it every command fails, not just
+# that service.  README.md, "Tailscale SSH", has the ACL rule it also needs.
+#
 # See README.md for the account table, the ~/.ssh/config stanzas and the
 # smoke tests.
 name: sshdrive-testbed
@@ -292,6 +300,67 @@ services:
       SEED_TREE_FILES: "10"
       SEED_MANY: "0"
 
+  # -- 12. Tailscale SSH.  Not an sshd at all: tailscaled serves SSH itself, so
+  #        the remote software version is "Tailscale", userauth succeeds with
+  #        the `none` method, and the SFTP subsystem is Go pkg/sftp (which
+  #        advertises hardlink@, posix-rename@ and statvfs@ and nothing else).
+  #        That is exactly the shape of the owner's Tailscale SSH server, and
+  #        this is where its exec-channel behaviour (the tier-2 helper channel
+  #        exiting 255 about 15 s after `ready`, while the sweep and a plain
+  #        long exec with streamed stdin survive) gets reproduced.
+  #
+  #        Reached over the TAILNET, not over 192.168.64.1: no published port,
+  #        none is possible in userspace mode.  The build VM (100.114.204.5) is
+  #        on the same tailnet.  Access is decided entirely by the tailnet ACL
+  #        (README, "Tailscale SSH"); the container's only job is to own a Unix
+  #        user `alec` for the session to land in.
+  #
+  #        TS_AUTHKEY is required, and the `:?` form means EVERY compose
+  #        command fails without it - copy .env.example to .env first.
+  ts-ssh:
+    image: tailscale/tailscale:v1.86.2
+    container_name: sshdrive-ts-ssh
+    hostname: ts-ssh          # the container's name; the tailnet name is --hostname below
+    restart: unless-stopped
+    # Overrides the image's ENTRYPOINT ["/usr/local/bin/containerboot"]: seed
+    # the account and the data tree, then exec containerboot as PID 1.
+    entrypoint: ["/bin/sh", "/ts-entrypoint.sh"]
+    networks: [edge]
+    volumes:
+      - ./entrypoint.sh:/entrypoint.sh:ro
+      - ./ts-entrypoint.sh:/ts-entrypoint.sh:ro
+      - ts-state:/var/lib/tailscale     # node identity: survives restarts, dies with `down -v`
+      - home-ts:/home
+    environment:
+      # --- tailscaled (read by containerboot) ---
+      TS_AUTHKEY: '${TS_AUTHKEY:?set TS_AUTHKEY in testbed/.env - see .env.example and the README}'
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "true"              # no /dev/net/tun, no NET_ADMIN; Tailscale SSH works in userspace
+      TS_ACCEPT_DNS: "false"            # do not rewrite the container's resolv.conf
+      # A tagged auth key applies its tag by itself, so TS_TAGS is empty by
+      # default; set TS_TAGS=--advertise-tags=tag:testbed in .env to be explicit.
+      TS_EXTRA_ARGS: "--ssh --hostname=sshdrive-testbed ${TS_TAGS:-}"
+      # --- entrypoint.sh (NO_SSHD=1 is set by ts-entrypoint.sh) ---
+      SVC: ts-ssh
+      # bash + GNU coreutils/findutils so the sweep sees `find -cmin -printf`
+      # and a bash login shell, as on a Debian-like server.  The base is still
+      # Alpine/musl and /bin/sh is still busybox ash (README).
+      PKGS: bash zsh coreutils findutils
+      # Unused by Tailscale SSH (no authorized_keys, no PAM, no shadow check);
+      # it is set only so the account is not locked and `su - alec` works.
+      PASSWORD: spike-password
+      USERS: |
+        alec:1000:bash:pass:data
+      SEED_TREE_DIRS: "100"
+      SEED_TREE_FILES: "20"
+      SEED_MANY: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status --peers=false >/dev/null 2>&1 && test -f /home/alec/.testbed-seeded"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 180s
+
 networks:
   edge:
   backnet:
@@ -300,3 +369,5 @@ volumes:
   hostkeys:
   home-deb:
   home-alp:
+  home-ts:
+  ts-state:

@@ -82,13 +82,17 @@ wipes it.
 
 ## The spike testbed (`testbed/`)
 
-Eleven real SSH servers for the milestone 2 (S2), milestone 6 (S7 tiers 0-1) and milestone 9
+Twelve real SSH servers for the milestone 2 (S2), milestone 6 (S7 tiers 0-1) and milestone 9
 (S7 tier 2) work: Debian and Alpine
 targets, every login-shell shape, an external `sftp-server`, keyboard-interactive, `MaxSessions 2`,
-a busybox `find` without `-cmin`, and a two-hop `ProxyJump` chain. `docker compose up -d` in
+a busybox `find` without `-cmin`, a two-hop `ProxyJump` chain, and **a real Tailscale SSH node**
+(`ts-ssh`: `tailscaled` serves SSH itself, so `none` auth and a Go `pkg/sftp` subsystem - the shape
+of the owner's Tailscale SSH server). `docker compose up -d` in
 `testbed/`, **on the Mac that hosts the build VM** (OrbStack), never on this Linux box. The account
 table, the `~/.ssh/config` stanzas and the per-service smoke tests are in `testbed/README.md`; read
-that before using it.
+that before using it. **`testbed/.env` must exist first** (`cp .env.example .env`, then a Tailscale
+auth key): `TS_AUTHKEY` uses compose's `${VAR:?}` required form, so without it every `docker
+compose` command in that directory fails, not just `ts-ssh`.
 
 | Reaching it from the VM | |
 |---|---|
@@ -97,6 +101,7 @@ that before using it.
 | Keys | `~/.ssh/sshdrive-spike` on the VM, and `~/.ssh/sshdrive-spike-enc` (passphrase `spike-passphrase`) |
 | Passwords | `spike-password`, plus `spike-password-a` / `spike-password-b` for the two bastions |
 | Behind the chain | `bastion-b` and `inner` have no published port and are reachable only through `hop@192.168.64.1:2210` |
+| `ts-ssh` | the exception: no port at all. It is on the **tailnet** as `sshdrive-testbed` (`alec@`, no key, no password - the tailnet ACL is the auth), which the VM reaches directly |
 
 Verified from the VM on 2026-09-04, and the traps that pass found (details in `testbed/README.md`):
 

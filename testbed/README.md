@@ -8,10 +8,17 @@ what [Reachability](#reachability) below is about.
 
 ```sh
 cd testbed
+cp .env.example .env       # and put a Tailscale auth key in it: see below
 docker compose up -d
 docker compose ps          # wait for healthy
 docker compose logs -f deb # sshd runs in the foreground with -D -e
 ```
+
+**The `.env` step is not optional.** The twelfth service, `ts-ssh`, is a
+Tailscale SSH node and its `TS_AUTHKEY` is declared with compose's required form
+`${TS_AUTHKEY:?…}`, so with no key in `testbed/.env` *every* compose command in
+this directory fails, not just that one service. See
+[Tailscale SSH](#tailscale-ssh-ts-ssh).
 
 Nothing is built. Every service runs `entrypoint.sh` over a stock `debian:12-slim`
 or `alpine:3.20` image and installs its packages on first start, so the first
@@ -24,7 +31,9 @@ afterwards, so `known_hosts` on the VM stays stable across `up`/`down`/`restart`
 VM's `known_hosts` entries for `[<ip>]:22xx` must be removed.
 
 Files: `compose.yaml`, `entrypoint.sh` (shared by every service, driven entirely
-by environment variables), this README. Nothing else.
+by environment variables), `ts-entrypoint.sh` (the `ts-ssh` wrapper: seed, then
+hand over to the Tailscale image's own `containerboot`), `.env.example`, this
+README. Nothing else.
 
 ## Reachability
 
@@ -155,6 +164,7 @@ export SSH_ASKPASS=/tmp/spike-askpass.sh SSH_ASKPASS_REQUIRE=force
 | 2210 | `bastion-a` | debian:12-slim | bash | hop 1, password auth, the only door onto `backnet` |
 | — | `bastion-b` | debian:12-slim | bash | hop 2, password auth, no published port |
 | — | `inner` | debian:12-slim | bash | destination behind both hops, no published port |
+| — | `ts-ssh` | tailscale/tailscale | bash / GNU (`-cmin`, `-printf`) | **Tailscale SSH**, not sshd: `none` auth, Go `pkg/sftp` subsystem. No port at all - reached over the tailnet as `sshdrive-testbed`. Needs `TS_AUTHKEY` and an ACL rule ([below](#tailscale-ssh-ts-ssh)) |
 
 `bastion-b` and `inner` sit on the `backnet` network with no port mapping, so the
 VM can reach them **only** through `bastion-a`. Inside the compose network every
@@ -205,6 +215,7 @@ auth genuinely cannot succeed for them.
 | `bastion-a` | `hop` | password | `spike-password-a` | bash | hop 1 of the ProxyJump chain |
 | `bastion-b` | `hop` | password | `spike-password-b` | bash | hop 2 — a **different** password, so per-host keychain keying (`password:<user>@<hostname>:<port>`) is visibly doing its job |
 | `inner` | `alec` | key or password | `spike-password` | bash | the destination; small `data/` tree for an end-to-end sweep over the chain |
+| `ts-ssh` | `alec` | **none** (tailnet ACL) | — | bash | Tailscale SSH: no `authorized_keys`, no PAM, no password check. The ACL decides admission and this account only has to *exist*. Its password is set (`spike-password`) so the account is not locked and `su - alec` works from a root shell; nothing on the wire ever uses it |
 
 ## The data tree
 
@@ -254,6 +265,164 @@ docker compose restart alp alp-nocmin
 
 `alp-ext` seeds nothing, so it needs no re-seed. The Debian targets were always seeded by
 perl and are unaffected.
+
+## Tailscale SSH (`ts-ssh`)
+
+The twelfth service is not an sshd at all. `tailscaled` serves SSH itself, so a
+client sees `remote software version Tailscale`, authenticates with the **`none`**
+method, and gets an SFTP subsystem written in Go with `pkg/sftp` - which
+advertises `hardlink@openssh.com`, `posix-rename@openssh.com` and
+`statvfs@openssh.com` and nothing else. That is the exact shape of the owner's
+Tailscale SSH server, and reproducing one thing it does is why this
+service exists: there the tier-2 helper's exec channel **exits 255 about 15 s
+after it prints `ready`**, while the tier-1 sweep and a plain long exec session
+with streamed stdin both survive.
+
+It is reached **over the tailnet, not over `192.168.64.1`**. There is no
+published port and in userspace mode there cannot be one; the build VM
+(`100.114.204.5`) is on the same tailnet and that is the whole route.
+
+### What the owner must do, in order
+
+**1. Tailnet policy file** (Admin console -> Access controls). Two additions -
+`tag:testbed` needs an owner before any key may apply it, and Tailscale SSH is
+decided *here and nowhere else*:
+
+```jsonc
+	// A tag needs an owner before an auth key can apply it.
+	"tagOwners": {
+		"tag:testbed": ["autogroup:admin"],
+	},
+
+	// Tailscale SSH admission.  There is no authorized_keys, no password and no
+	// sshd_config on the node; this rule is the entire auth decision.
+	"ssh": [
+		{
+			"action": "accept",
+			"src":    ["autogroup:member"],
+			"dst":    ["tag:testbed"],
+			"users":  ["alec", "root"],
+		},
+	],
+```
+
+`"action": "accept"` and not `"check"`: `check` demands a browser re-auth every
+12 h, which a headless VM cannot do. The ordinary `acls` section must also allow
+your devices to reach `tag:testbed` on TCP 22 - the default allow-all rule does.
+
+**2. Auth key** (Admin console -> Settings -> Keys -> Generate auth key):
+**reusable**, **pre-approved** (only matters if device approval is on),
+tagged **`tag:testbed`**, ephemeral optional (an ephemeral node removes itself
+from the console shortly after the container stops). A tagged key **applies the
+tag by itself**, which is why `TS_EXTRA_ARGS` carries no `--advertise-tags` by
+default; set `TS_TAGS=--advertise-tags=tag:testbed` in `.env` to be explicit
+about it. Keys expire after 90 days at most; a rotated key goes in `.env` and
+`docker compose up -d ts-ssh` picks it up.
+
+**3. `testbed/.env`** - `cp .env.example .env`, paste the key into `TS_AUTHKEY`.
+The file is gitignored; `.env.example` is not.
+
+**4. Bring it up**, on the Mac as usual:
+
+```sh
+docker compose up -d ts-ssh
+docker compose logs -f ts-ssh   # containerboot + tailscaled: a bad key or a
+                                # refused tag says so here, in words
+```
+
+**5. Find the node**, once it is up:
+
+```sh
+docker compose exec ts-ssh tailscale ip -4     # 100.x.y.z
+docker compose exec ts-ssh tailscale status    # state, and who it can see
+```
+
+or just use the MagicDNS name **`sshdrive-testbed`** from anything on the
+tailnet, the VM included.
+
+**6. Smoke test from the VM.** The point of the first one is the two debug
+lines; there is no key and no password anywhere in it:
+
+```sh
+ssh -v alec@sshdrive-testbed true 2>&1 | grep -E 'remote software version|Authenticated to'
+#   debug1: Remote protocol version 2.0, remote software version Tailscale
+#   debug1: Authenticated to sshdrive-testbed ([100.x.y.z]:22) using "none".
+
+ssh alec@sshdrive-testbed 'id; uname -sm; find data/tree -maxdepth 1 -cmin -60 -printf "%p\0" | tr "\0" "\n" | wc -l'
+echo "ls data" | sftp -b - alec@sshdrive-testbed
+sftp -v alec@sshdrive-testbed </dev/null 2>&1 | grep -i 'server supports extension'
+#   hardlink@openssh.com, posix-rename@openssh.com, statvfs@openssh.com - and
+#   nothing else, which is how a real Tailscale SSH node answers too
+
+# the shape that dies on the owner's Tailscale SSH server: a long exec channel that says `ready` and
+# then only reads.  Time it; ~15 s and exit 255 is the reproduction.
+start=$(date +%s); ssh alec@sshdrive-testbed 'echo ready; exec sleep 600' </dev/null; \
+  echo "exit=$? after $(( $(date +%s) - start ))s"
+```
+
+**7. Tear down.** `docker compose exec ts-ssh tailscale logout` **before**
+`docker compose down`, or delete the machine in the admin console afterwards -
+see trap 3.
+
+### What is inside the container
+
+The image is `tailscale/tailscale:v1.86.2` (Alpine-based; its own entrypoint is
+`/usr/local/bin/containerboot`, which reads the `TS_*` environment, starts
+`tailscaled` and runs `tailscale up`). `ts-entrypoint.sh` replaces that
+entrypoint, runs the shared `entrypoint.sh` in a new **`NO_SSHD=1`** mode -
+packages, accounts, rc files, data tree; no openssh packages, no host keys, no
+`sshd_config`, no `sshd` - and then **execs `containerboot`**, so containerboot
+is still PID 1 and still gets the signals. To bump the pin, look at
+`docker run --rm --entrypoint tailscale tailscale/tailscale:stable version`.
+
+`PKGS: bash zsh coreutils findutils` buys the two things the sweep and §6.1 care
+about: **GNU `find`** (so `-cmin` and `-printf` work, as on `deb` and on the owner's
+Tailscale SSH server) and a **bash** login shell for `alec`, plus GNU `stat`/`date`/`ls`.
+**What stays busybox:** `/bin/sh` (ash - and so `sh -s` scripts run under ash),
+`awk`, `sed`, `grep`, `tar`, `ps`, `wget`, `adduser`. And the base is
+Alpine/musl, not Debian: no PAM, no `sudo`, no systemd, and **no perl**, so the
+data tree comes from `entrypoint.sh`'s shell fallback exactly as `alp`'s does.
+It is a Debian-*shaped* userland for the sweep, not a Debian. (That seeding
+step assumes the image stays Alpine-based, because it installs with `apk`. If a
+future tag stops being one, the container fails on the first start and says so
+in `docker compose logs ts-ssh`.)
+
+`~alec/data/` gets the `alp`-sized tree: `tree/d0000…d0099/f000…f019.bin`
+(2,000 files), the ten `weird/` names, no `many/`. It lives in the `home-ts`
+volume and is seeded once, like every other service's.
+
+### Five Tailscale-specific things that will waste an hour
+
+1. **`TS_AUTHKEY` is required for the whole file, not just this service.**
+   `${TS_AUTHKEY:?…}` is evaluated for every `docker compose` invocation in this
+   directory, so with no `.env` even `docker compose logs deb` fails. That is
+   deliberate - a silently keyless `up` would leave a dead service behind - but
+   it is the first thing that will bite a fresh checkout.
+2. **Userspace mode has no inbound ports except Tailscale SSH.** `TS_USERSPACE=true`
+   means no `/dev/net/tun`, no `NET_ADMIN`, and nothing in the container can be
+   reached from the tailnet except the SSH server `tailscaled` runs itself. There
+   is nothing to publish and no `ports:` entry to add; the other eleven services
+   are untouched by this and are still on `192.168.64.1`.
+3. **The node is a machine in the admin console and outlives the container.**
+   `docker compose down` leaves it listed (offline); `down -v` also destroys the
+   `ts-state` volume, so the identity can never be reclaimed and the entry has to
+   be deleted by hand. Log out first - `docker compose exec ts-ssh tailscale
+   logout` - or use an ephemeral auth key, which cleans up by itself.
+4. **A fresh state volume is a new machine.** Recreate the container with
+   `ts-state` gone and the tailnet gets a *second* node: MagicDNS names it
+   `sshdrive-testbed-1` while the dead one keeps `sshdrive-testbed`, and the SSH
+   host key is new, so the VM's `known_hosts` needs
+   `ssh-keygen -R sshdrive-testbed`. Keep the volume and none of that happens.
+5. **The ACL and the local user are two separate halves.** `users: ["alec","root"]`
+   only says which names are *permitted*; Tailscale SSH creates nobody, and a
+   name with no `getpwnam` entry fails after authentication has already
+   succeeded. `alec` exists because `ts-entrypoint.sh` seeds it. The other half
+   of the same trap is `src`: **a tagged node is not `autogroup:member`**, so if
+   the build VM is itself tagged, `src` must name its tag instead.
+
+One more that is not a trap but is worth knowing: `TS_ACCEPT_DNS=false` only
+stops the *container* from taking tailnet DNS. MagicDNS still resolves
+`sshdrive-testbed` on the VM.
 
 ## `~/.ssh/config` for the Mac VM
 
@@ -349,6 +518,15 @@ Host spike-deb-spacekey
     IdentityFile "~/.ssh/spike key's copy"
     IdentitiesOnly yes
 
+# --- Tailscale SSH -----------------------------------------------------------
+# Over the tailnet, not 192.168.64.1: no port, no key, no password.  The tailnet
+# ACL is the whole auth decision and ssh(1) gets in with the `none` method.  Use
+# the 100.x.y.z address from `tailscale ip -4` if MagicDNS is off.
+Host spike-ts
+    HostName sshdrive-testbed
+    User alec
+    PubkeyAuthentication no
+
 # Defaults for every alias above.  ssh takes the FIRST value it obtains for a
 # keyword, so this catch-all block must come LAST or it would override the
 # per-host User lines above it.
@@ -434,6 +612,11 @@ ssh -p 2210 hop@$IP 'echo hop1-ok'
 echo "ls" | sftp -P 2210 hop@$IP
 ssh -J hop@$IP:2210,hop@bastion-b $K alec@inner 'echo inner-ok; ls data'
 echo "ls data" | sftp -b - -J hop@$IP:2210,hop@bastion-b $K alec@inner
+
+# 12. ts-ssh - over the tailnet, no key and no password; see "Tailscale SSH"
+ssh -v alec@sshdrive-testbed true 2>&1 | grep -E 'remote software version|Authenticated to'
+ssh alec@sshdrive-testbed 'uname -sm; find data/tree -maxdepth 1 -cmin -60 -printf "%p\0" | tr "\0" "\n" | wc -l'
+echo "ls data" | sftp -b - alec@sshdrive-testbed
 ```
 
 Handy while iterating: `docker compose logs -f <service>` shows `sshd -e` at
@@ -458,9 +641,14 @@ and data.
 - **A server whose clock is five minutes behind.** Containers share the host's
   clock and Docker has no time namespace, so the server-clock sweep window must
   be tested by shifting the **Mac VM's** clock instead (or the compose host's).
-- **Tailscale SSH `none` auth.** `deb`'s `nopw` account makes sshd's `none`
-  userauth method succeed, which is the same wire outcome, but it is not
-  Tailscale's implementation, and there is no Tailscale in the compose network.
+- ~~**Tailscale SSH `none` auth.**~~ Provided since 2026-09-07 by the `ts-ssh`
+  service - a real `tailscale/tailscale` node with `--ssh`, so a real
+  `tailscaled` SSH server, a real `none` userauth and a real Go `pkg/sftp`
+  subsystem. `deb`'s `nopw` account (sshd's own `none` method) stays as the
+  OpenSSH-side control case. What is still *not* covered: the owner's actual
+  server - its kernel, its filesystem and whatever local policy shortens an
+  exec channel there - so a behaviour that reproduces on `ts-ssh` is evidence
+  about Tailscale SSH, and one that does not is not evidence about that server.
 - **Anything Mac-side**, which is most of S2: 1Password/Secretive/`ssh-agent`
   key agents, `IdentityAgent`, FIDO/`sk` keys and user-presence prompts, Apple's
   `UseKeychain`, the login-shell `env -0` snapshot under fish/tcsh, the 60 s

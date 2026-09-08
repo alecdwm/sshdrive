@@ -28,3 +28,6 @@ Resources/helper/
 
 # The Homebrew tap is its own repository (alecdwm/homebrew-tap), checked out here for convenience.
 packaging/homebrew-tap/
+
+# The testbed Tailscale auth key lives here (testbed/.env.example is the template).
+testbed/.env

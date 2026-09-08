@@ -19,6 +19,11 @@
 #   SFTP_SUBSYSTEM    internal-sftp (default) or a path to an external sftp-server
 #   FIND_SHIM         1 = replace find with a shim that rejects -cmin/-printf
 #   SEED_TREE_DIRS SEED_TREE_FILES SEED_MANY SEED_BYTES BIG_FILE
+#   NO_SSHD           1 = accounts, rc files and data tree only.  No package
+#                     install beyond PKGS, no host keys, no sshd_config, no
+#                     sshd: the caller runs its own server and execs it itself.
+#                     ts-entrypoint.sh (service ts-ssh) is the one user - there
+#                     Tailscale SSH is served by tailscaled, not by OpenSSH.
 set -eu
 
 SVC="${SVC:-unnamed}"
@@ -31,29 +36,46 @@ log() { printf '[testbed:%s] %s\n' "$SVC" "$*" >&2; }
 is_alpine() { [ -f /etc/alpine-release ]; }
 
 # --------------------------------------------------------------- packages ---
-if [ ! -x /usr/sbin/sshd ]; then
-	log "installing packages (first start only) ..."
-	if is_alpine; then
-		apk add --no-cache openssh-server openssh-keygen openssh-sftp-server ${PKGS:-} >/dev/null
-	else
-		export DEBIAN_FRONTEND=noninteractive
-		apt-get update -qq >/dev/null
-		apt-get install -y -qq --no-install-recommends openssh-server ${PKGS:-} >/dev/null
+if [ "${NO_SSHD:-0}" = "1" ]; then
+	# No sshd wanted, so no openssh packages and no host keys either.  PKGS is
+	# still installed once, tracked by a stamp because there is no sshd binary
+	# to use as the "already done" marker.
+	if [ -n "${PKGS:-}" ] && [ ! -f /.testbed-pkgs ]; then
+		log "installing packages (first start only): ${PKGS}"
+		if is_alpine; then
+			apk add --no-cache ${PKGS} >/dev/null
+		else
+			export DEBIAN_FRONTEND=noninteractive
+			apt-get update -qq >/dev/null
+			apt-get install -y -qq --no-install-recommends ${PKGS} >/dev/null
+		fi
+		: >/.testbed-pkgs
 	fi
-fi
-mkdir -p /run/sshd /etc/ssh
+else
+	if [ ! -x /usr/sbin/sshd ]; then
+		log "installing packages (first start only) ..."
+		if is_alpine; then
+			apk add --no-cache openssh-server openssh-keygen openssh-sftp-server ${PKGS:-} >/dev/null
+		else
+			export DEBIAN_FRONTEND=noninteractive
+			apt-get update -qq >/dev/null
+			apt-get install -y -qq --no-install-recommends openssh-server ${PKGS:-} >/dev/null
+		fi
+	fi
+	mkdir -p /run/sshd /etc/ssh
 
-# -------------------------------------------------- host keys (persisted) ---
-mkdir -p "$HK"
-for t in ed25519 rsa; do
-	if [ ! -f "$HK/ssh_host_${t}_key" ]; then
-		log "generating $t host key in the hostkeys volume"
-		ssh-keygen -q -t "$t" -N '' -C "sshdrive-testbed-$SVC" -f "$HK/ssh_host_${t}_key"
-	fi
-done
-chmod 700 "$HK"
-chmod 600 "$HK"/ssh_host_*_key
-chmod 644 "$HK"/ssh_host_*_key.pub
+	# ------------------------------------------ host keys (persisted) ---
+	mkdir -p "$HK"
+	for t in ed25519 rsa; do
+		if [ ! -f "$HK/ssh_host_${t}_key" ]; then
+			log "generating $t host key in the hostkeys volume"
+			ssh-keygen -q -t "$t" -N '' -C "sshdrive-testbed-$SVC" -f "$HK/ssh_host_${t}_key"
+		fi
+	done
+	chmod 700 "$HK"
+	chmod 600 "$HK"/ssh_host_*_key
+	chmod 644 "$HK"/ssh_host_*_key.pub
+fi
 
 # ------------------------------------------------------------- find shim ----
 # Emulates a busybox older than 1.34 (as shipped by some Synology DSM builds):
@@ -276,6 +298,11 @@ printf '%s\n' "${USERS:-}" | while IFS=: read -r name uid shell auth flags; do
 	case "$name" in "" | \#*) continue ;; esac
 	add_user "$name" "$uid" "$shell" "$auth" "${flags:--}"
 done
+
+if [ "${NO_SSHD:-0}" = "1" ]; then
+	log "NO_SSHD=1: accounts, rc files and data tree done; no sshd here"
+	exit 0
+fi
 
 # ------------------------------------------------------------ sshd_config ---
 # sshd takes the FIRST value for each keyword, so SSHD_EXTRA goes above the
