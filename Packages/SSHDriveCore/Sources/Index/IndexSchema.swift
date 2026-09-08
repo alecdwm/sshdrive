@@ -227,3 +227,71 @@ public enum IndexError: Error, Equatable {
     /// The reader is closed for the truncate window of a restore (section 5.3).
     case closed
 }
+
+/// The working-set change stream, read identically by the extension's read-only reader
+/// and by the agent's writer (DESIGN.md sections 5.2, 5.3).
+///
+/// It lives here, taking a connection rather than sitting on either class, because the
+/// extension now has two ways to answer the working set - its own reader, and the agent
+/// over XPC when the reader is not usable - and two copies of "what is a change since
+/// this anchor" would drift. One query, one expiry rule, two callers.
+public enum IndexChangeStream {
+    public struct Page: Equatable, Sendable {
+        public var entries: [IndexAnchorEntry]
+        public var newAnchor: Int64
+        public var hasMore: Bool
+
+        public init(entries: [IndexAnchorEntry], newAnchor: Int64, hasMore: Bool) {
+            self.entries = entries
+            self.newAnchor = newAnchor
+            self.hasMore = hasMore
+        }
+    }
+
+    public static func newestSequence(_ connection: SQLiteConnection) throws -> Int64 {
+        let statement = try connection.prepare("SELECT COALESCE(MAX(seq), 0) FROM anchors")
+        defer { statement.reset() }
+        guard try statement.step() else { return 0 }
+        return statement.int(0)
+    }
+
+    public static func oldestSequence(_ connection: SQLiteConnection) throws -> Int64 {
+        let statement = try connection.prepare("SELECT COALESCE(MIN(seq), 0) FROM anchors")
+        defer { statement.reset() }
+        guard try statement.step() else { return 0 }
+        return statement.int(0)
+    }
+
+    /// Throws `.syncAnchorExpired` when the anchor is older than the oldest row still
+    /// held; the caller hands out a fresh anchor and tells the agent, whose response is
+    /// one full sweep of the root set (section 5.3).
+    public static func changes(_ connection: SQLiteConnection, since anchor: Int64, limit: Int)
+        throws -> Page
+    {
+        let oldest = try oldestSequence(connection)
+        let newest = try newestSequence(connection)
+        if anchor < oldest - 1 && oldest > 0 {
+            throw IndexError.syncAnchorExpired
+        }
+        let statement = try connection.prepare(
+            "SELECT seq, changed_identifier, change_kind FROM anchors "
+                + "WHERE seq > ?1 ORDER BY seq LIMIT ?2")
+        statement.bind(1, anchor)
+        statement.bind(2, Int64(limit + 1))
+        defer { statement.reset() }
+        var entries: [IndexAnchorEntry] = []
+        while try statement.step() {
+            let kind = IndexAnchorEntry.Kind(rawValue: statement.string(2) ?? "modified") ?? .modified
+            entries.append(
+                IndexAnchorEntry(
+                    sequence: statement.int(0),
+                    identifier: statement.string(1) ?? "",
+                    kind: kind))
+        }
+        let hasMore = entries.count > limit
+        if hasMore { entries.removeLast(entries.count - limit) }
+        return Page(
+            entries: entries, newAnchor: entries.last?.sequence ?? max(anchor, newest),
+            hasMore: hasMore)
+    }
+}

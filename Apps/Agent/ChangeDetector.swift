@@ -400,7 +400,24 @@ actor ChangeDetector {
             // cycle to notice is exactly the window the sweep exists to close.
             requestFullSweep(reason: "the helper reported an overflow")
         }
+        // At the default level, so `log show` still has it hours later. A mount that
+        // takes no server-side change is diagnosed by two facts - did the events arrive,
+        // and did applying them change anything - and neither used to be recorded at all
+        // (2026-09-08).
+        let kinds = Dictionary(grouping: events, by: { $0.kind.rawValue })
+            .map { "\($0.key)=\($0.value.count)" }
+            .sorted()
+            .joined(separator: " ")
+        // The 15-second heartbeat is the one kind that carries nothing. Logging it at the
+        // default level would put four lines a minute per location into everyone's log
+        // for ever, and drown the lines that matter.
+        let worthLogging = events.contains { $0.kind != .heartbeat }
         let application = await runtime.applyHelperEvents(events)
+        if worthLogging {
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): applied \(events.count, privacy: .public) helper event(s) [\(kinds, privacy: .public)] -> \(application.changed, privacy: .public) changed, \(application.deleted, privacy: .public) deleted, \(application.held, privacy: .public) held, \(application.listedDirectories, privacy: .public) listed"
+            )
+        }
         guard !application.isEmpty else { return }
         await DomainManager.shared.signalWorkingSet(locationID: locationID)
         var outcome: [String: Any] = [

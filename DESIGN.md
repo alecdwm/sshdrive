@@ -922,17 +922,35 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   the sweep below is the agent's response. `enumerateItems` on the working set returns no
   items and the current sequence number as the anchor: the working set
   is only ever a change stream, never a listing. When the reader is not
-  usable - the `indexReady` call has not come back, or the schema is
-  newer than the extension understands - the working-set
-  `enumerateChanges` answers **`.serverUnreachable`**, never an empty
-  change set at the anchor the system already holds. That is not a
-  nicety: the system launches a fresh extension instance for every
-  working-set signal (S5), so the first `enumerateChanges` on a
-  signalled instance races the readiness call, and "no changes" tells
-  the system it is up to date. The change is then dropped until
-  something else signals, which for a deletion leaves a file that is
-  gone from both the server and the index sitting in Finder
-  indefinitely - measured on a real mount, 2026-09-04. A container enumerator
+  usable - the `indexReady` call has not come back, the agent answered
+  no, the schema is newer than the extension understands, or the file
+  could not be opened - the working-set `enumerateChanges` **asks the
+  agent for the same change stream over XPC**
+  (`enumerateWorkingSetChanges`), which the agent answers from the
+  writer's connection with the same query the reader runs
+  (`IndexChangeStream`), so the two cannot drift. What it must never
+  answer is an empty change set at the anchor the system already holds:
+  the system launches a fresh extension instance for every working-set
+  signal (S5), so the first `enumerateChanges` on a signalled instance
+  races the readiness call, and "no changes" tells the system it is up
+  to date. The change is then dropped until something else signals,
+  which for a deletion leaves a file that is gone from both the server
+  and the index sitting in Finder indefinitely - measured on a real
+  mount, 2026-09-04. **`.serverUnreachable` is reserved for an agent
+  that genuinely cannot be reached**, which is the one case where there
+  is nothing to say. It used to be the answer for every unusable
+  reader, and that is what broke: fileproviderd throttles a change
+  enumeration that keeps failing, on a doubling schedule with no
+  ceiling, and a real domain reached 27 consecutive failures and a
+  47-minute retry interval, after which nothing the agent found on the
+  server reached Finder at all while listings, `item(for:)` and uploads
+  all kept working (2026-09-08). For the same reason the extension calls
+  `signalErrorResolved(.serverUnreachable)` on its own domain the first
+  time a change enumeration succeeds after one has failed: a signalled
+  enumerator is re-scheduled, not un-throttled, and only that call
+  clears the backoff. The agent makes the same call once per mounted
+  location at start, which is the only way to clear a backoff a
+  previous version left behind. A container enumerator
   hands out the same sequence number and its `enumerateChanges` never
   expires it: a folder refresh is a fresh listing diffed against the
   index (§5.1), whatever anchor the system holds. That makes expiry
@@ -974,16 +992,34 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   instance that the system launches between the close and the truncate
   is covered by one rule at reader open: before an instance opens the
   index for the first time it asks the agent whether the index is
-  ready, one XPC call per instance launch rather than per item, and an
-  agent mid-restore answers no, so the instance serves
-  `.serverUnreachable` and opens nothing until the reopen callback
-  arrives. An agent that cannot be reached at all leaves the instance
-  free to open the reader, since a missing agent is the case the direct
-  reader exists for. The reader's side of this is one rule: any SQLite
-  error, a corrupt page, a not-a-database header during the truncate
-  window, a missing table, is answered as `.serverUnreachable`, never as
-  `.noSuchItem`, so a rebuild in progress can never look like a
-  deletion. Replacing the file at the path was rejected twice
+  ready, and an agent mid-restore answers no, so the instance opens
+  nothing and every read goes to the agent instead until the answer
+  changes. **"Not ready" is a window, not a verdict.** The answer used
+  to be taken once per instance launch and held for that instance's
+  whole life, and since the agent answers no for any location whose
+  runtime is not up yet - a domain restart, an upgrade handover - a few
+  seconds of it left an instance that could never read the index and,
+  before the XPC fallback of §5.3 existed, could never answer the
+  working set either (2026-09-08). So every read that meets a non-ready
+  answer asks again, no more often than a couple of seconds, and the
+  rule is a value with tests of its own (`IndexReaderReadiness`). The
+  one permanent answer is a schema newer than the extension
+  understands, because waiting does not make an unknown schema
+  readable; a reader shut for a truncate is lifted by the reopen
+  callback and by nothing else. An agent that cannot be reached at all
+  leaves the instance free to open the reader, since a missing agent is
+  the case the direct reader exists for. The reader's side of this is
+  one rule: any SQLite error, a corrupt page, a not-a-database header
+  during the truncate window, a missing table, drops the reader and
+  sends that call to the agent, and is never answered `.noSuchItem`, so
+  a rebuild in progress can never look like a deletion. The extension
+  writes what it last knew about its own reader - state, the
+  `meta.generation` it last saw, the last error, and when - into
+  `domains/<id>/reader-state.json`, which is the one file it writes in
+  the container besides the `-shm` its read-only connection needs, and
+  which `sshdrive doctor` reports: the extension is sandboxed, short
+  lived and usually not running when the question is asked, so the last
+  thing it said is the only evidence there is. Replacing the file at the path was rejected twice
   over: the `-wal` and `-shm` sidecars belong to the old inode and a
   stale WAL would be replayed into the new file on first open, and the
   extension's reader (§5.2), which holds the database open across calls,
@@ -4254,7 +4290,29 @@ there, so that this list cannot drift from the body.
 - **The working-set enumerator answers `.serverUnreachable` while its reader
   is not ready, never an empty change set:** the system launches a fresh
   instance for every signal, so "no changes" at the anchor it already holds
-  drops the change silently (2026-09-04, §5.3, §5.2).
+  drops the change silently (2026-09-04, §5.3, §5.2). **Superseded
+  2026-09-08:** an unusable reader now asks the agent for the same change
+  stream over XPC; the empty change set is still forbidden, but
+  `.serverUnreachable` is reserved for an agent that cannot be reached.
+- **fileproviderd throttles a working-set change enumeration that keeps
+  failing, without a ceiling, and only `signalErrorResolved` clears it:** 27
+  consecutive `.serverUnreachable` answers on a real domain produced a
+  47-minute retry interval and a mount that took no server-side change at all
+  while every other path worked, so the working set has an XPC fallback and
+  both the extension and the agent clear the backoff explicitly
+  (2026-09-08, §5.3, §5.6).
+- **`indexReady`'s "no" is a window, not a verdict:** the agent answers it for
+  any location whose runtime is not up yet, so an extension instance that took
+  the answer once and held it was permanently unable to read the index; every
+  read that meets a non-ready answer now re-asks (2026-09-08, §5.2).
+- **The extension writes one file into the group container,**
+  `domains/<id>/reader-state.json`, because a sandboxed, short-lived process
+  that is not running when the question is asked can leave no other evidence;
+  `doctor` reports it (2026-09-08, §5.2).
+- **Applying helper events and signalling an enumerator are logged at the
+  default level:** a mount that takes no change is diagnosed by whether the
+  events arrived, whether applying them changed anything, and whether the
+  signal went out, and none of those was recorded (2026-09-08, §6.4, §5.3).
 - **A bare background process on the server survives an abrupt client kill
   whatever `ClientAliveInterval` is set to,** so the heartbeat wrapper is
   the only thing that ever kills what we started, not a workaround for a
@@ -4353,6 +4411,14 @@ there, so that this list cannot drift from the body.
   and states missing `fsync@openssh.com`/`limits@openssh.com` as facts about a
   server known not to be OpenSSH rather than as upgrades (2026-09-08, §8.1,
   §6.1).
+- **Tests encode measured behaviour and run on Linux; the VM only seeds them.**
+  Every decision moves out of `Apps/` into the package behind named protocols,
+  a `SystemModel` (fileproviderd + Finder + launchd) and a `ServerModel`
+  (sshd, SFTP, shells, `find`) replay what `docs/spikes/results.md` measured,
+  and one numbered scenario stands for each past failure - starting with the
+  0.1.2 working-set throttle that agent-run VM proofs did not catch. A future
+  macOS release is a new column in `docs/quirks/`, not a new test
+  (2026-09-08, §15).
 
 ---
 
@@ -4389,3 +4455,49 @@ Not planned for v1, recorded so the design leaves room for them:
   server, and cannot report renames; adding a helper target for the
   platform in question is usually cheaper.
 - **Submitting the cask to homebrew-cask** so the tap is unnecessary.
+
+---
+
+## 15. Testing
+
+The whole design is `docs/testing-architecture.md`; this section is the pointer and the
+principle, which is the owner's, verbatim (2026-09-08):
+
+> "I would like as much of the testing as possible to be done in a way that encodes mocks
+> measured/known macOS behaviour and then exercises the codebase against all known issues
+> identified in the past. If future macOS releases cause breakage, we can then add their
+> behaviour into the encoded mocks and thereby unit test across all supported macOS versions
+> (and each one's quirks) without needing to spin up VMs and such. The tests should be able to
+> run 100% isolated on a Linux box. We should only use the VM to seed the macOS mocks into the
+> tests."
+
+What follows from it:
+
+- **No decision lives under `Apps/`.** The four Apple targets are adapters over named
+  protocols - `ReplicaControlling`, `SecretsStoring`, `LoginItemControlling`,
+  `LaunchdControlling`, `PowerObserving`, `NetworkPathObserving`, `PresenceReading`,
+  `ScreenLockObserving`, `PeerIdentifying`, `ProcessAncestryReading`, `BundleInspecting`,
+  `TransportLauncher`, `AgentEndpoint`, and on the extension side `ProviderFailure`,
+  `EnumerationObserving`, `ChangeObserving`, `AgentChannel`, `ReaderStoring`. The logic sits
+  in two new package modules, `ProviderCore` and `AgentRuntime`, beside the existing ones.
+- **`SystemModel`** is a simulated fileproviderd, Finder and launchd that drives the extension
+  and the agent through those protocols and behaves as macOS was *measured* to behave, with a
+  per-version quirk table deciding every difference. **`ServerModel`** does the same for remote
+  servers - OpenSSH against Go `pkg/sftp`, GNU against busybox `find`, every login-shell shape,
+  `MaxSessions`, `ForceCommand`, and Tailscale SSH's shared process group - with an in-process
+  fake transport and a fake exec channel that speak the same `ByteStream` a real mux client
+  does, so the wire client, `RemoteScript` and the heartbeat wrapper run unmodified.
+- **Every past failure is a numbered scenario.** 107 of them, in `Tests/ScenarioTests/`,
+  each naming its setup, its action and its assertion, and each parameterised over the macOS
+  versions in the matrix.
+- **The catalog is `docs/quirks/`** - `macos.md` (75 entries) and `servers.md` (71) - one entry
+  per measured behaviour with its id, its statement, the versions it was measured on, the
+  `docs/spikes/results.md` entry that measured it and the scenarios that defend it.
+  `results.md` remains the source of truth; the catalog is an index into it.
+- **The VM measures; it never proves.** A VM session is finished when it has produced a
+  `results.md` entry, a quirk row, a model rule and a green `swift test` on Linux - not before.
+  What genuinely cannot be modelled (Finder's drawing, Gatekeeper and AMFI, LaunchServices,
+  TCC, real timing, real key agents, servers we do not own) is listed honestly in
+  `docs/testing-architecture.md` §7 and stays a VM runbook item.
+- **CI** is a Linux job that runs the whole suite across every supported macOS version, and a
+  macOS job that only builds the `Apps/` shells and checks the mirrored Apple constants.

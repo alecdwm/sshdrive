@@ -1384,6 +1384,36 @@ actor LocationRuntime {
 
     func currentSequence() throws -> Int64 { try index.currentSequence() }
 
+    /// Section 5.3's working-set change stream, answered from the agent's own connection.
+    ///
+    /// This is the extension's fallback when its read-only reader cannot answer
+    /// (section 5.2), and it runs the same `IndexChangeStream` query the reader does, so
+    /// the two can never disagree about what changed since an anchor. A reconcile refuses
+    /// it, exactly as it refuses every other enumeration.
+    func workingSetChanges(since anchor: Int64, limit: Int = 500) throws
+        -> (items: [SSHDriveItemSnapshot], deleted: [String], newAnchor: Int64, hasMore: Bool)
+    {
+        try refuseWhileReconciling()
+        let page = try index.changes(since: anchor, limit: limit)
+        var items: [SSHDriveItemSnapshot] = []
+        var deleted: [String] = []
+        for entry in page.entries {
+            switch entry.kind {
+            case .deleted:
+                deleted.append(entry.identifier)
+            case .modified:
+                // An anchor whose identifier no longer has a row is reported as a
+                // deletion: only a deletion removes a row (section 5.3).
+                if let row = try index.item(identifier: entry.identifier) {
+                    items.append(row.snapshot)
+                } else {
+                    deleted.append(entry.identifier)
+                }
+            }
+        }
+        return (items, deleted, page.newAnchor, page.hasMore)
+    }
+
     /// Section 5.3's reconcile against the system's replica, run after the domain exists
     /// so `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can answer. It
     /// clears `meta.reconciling`, which is what lifts the extension's stall.

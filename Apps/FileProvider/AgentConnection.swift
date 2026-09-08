@@ -115,6 +115,9 @@ final class AgentConnection: NSObject {
     /// retries rather than showing an error.
     static func fileProviderError(from error: Error) -> Error {
         let nsError = error as NSError
+        // An error the agent raised in the system's own domain - `.syncAnchorExpired` off
+        // the working-set fallback - is already the answer and must survive the trip.
+        if nsError.domain == NSFileProviderErrorDomain { return nsError }
         guard let agentError = nsError.sshDriveAgentError else {
             return NSFileProviderError(.serverUnreachable)
         }

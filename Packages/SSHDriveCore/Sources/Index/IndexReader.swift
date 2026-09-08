@@ -56,6 +56,12 @@ public final class IndexReader {
         return statement.string(0).flatMap(Int64.init)
     }
 
+    /// `meta.generation`, the wholesale-replacement counter, for the extension's state
+    /// file (section 5.2).
+    public func generation() throws -> Int64 {
+        try metaInt(IndexSchema.MetaKey.generation) ?? 0
+    }
+
     public func metaString(_ key: String) throws -> String? {
         let statement = try database().prepare("SELECT value FROM meta WHERE key = ?1")
         statement.bind(1, key)
@@ -129,43 +135,18 @@ public final class IndexReader {
         return statement.int(0)
     }
 
-    private func oldestSequence() throws -> Int64 {
-        let statement = try database().prepare("SELECT COALESCE(MIN(seq), 0) FROM anchors")
-        defer { statement.reset() }
-        guard try statement.step() else { return 0 }
-        return statement.int(0)
-    }
-
     /// The working-set change stream. Throws `.syncAnchorExpired` when the anchor is
     /// older than the oldest row we still hold; the caller then hands out a fresh anchor
     /// and tells the agent, whose response is one full sweep of the root set (section 5.3).
+    ///
+    /// The query itself is `IndexChangeStream`, shared with the writer, so the extension's
+    /// direct read and the agent's XPC fallback answer the same question (section 5.2).
     public func changes(since anchor: Int64, limit: Int = 500) throws
         -> (entries: [IndexAnchorEntry], newAnchor: Int64, hasMore: Bool)
     {
         try checkMeta()
-        let oldest = try oldestSequence()
-        let newest = try currentSequence()
-        if anchor < oldest - 1 && oldest > 0 {
-            throw IndexError.syncAnchorExpired
-        }
-        let statement = try database().prepare(
-            "SELECT seq, changed_identifier, change_kind FROM anchors "
-                + "WHERE seq > ?1 ORDER BY seq LIMIT ?2")
-        statement.bind(1, anchor)
-        statement.bind(2, Int64(limit + 1))
-        defer { statement.reset() }
-        var entries: [IndexAnchorEntry] = []
-        while try statement.step() {
-            let kind = IndexAnchorEntry.Kind(rawValue: statement.string(2) ?? "modified") ?? .modified
-            entries.append(
-                IndexAnchorEntry(
-                    sequence: statement.int(0),
-                    identifier: statement.string(1) ?? "",
-                    kind: kind))
-        }
-        let hasMore = entries.count > limit
-        if hasMore { entries.removeLast(entries.count - limit) }
-        return (entries, entries.last?.sequence ?? max(anchor, newest), hasMore)
+        let page = try IndexChangeStream.changes(try database(), since: anchor, limit: limit)
+        return (page.entries, page.newAnchor, page.hasMore)
     }
 
     /// Closes the reader for the truncate window of a restore (section 5.3). The reader

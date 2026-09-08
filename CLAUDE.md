@@ -4,7 +4,7 @@ A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4391 lines) - this file is the map to it, not a replacement.
+`DESIGN.md` (4503 lines) - this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -63,7 +63,12 @@ wipes it.
 
 ## Working rules
 
-- **This Linux box has no Swift toolchain.** Builds run on a headless Mac VM over ssh:
+- **This Linux box has Swift 6.3.3** (`. ~/.local/share/swiftly/env.sh`, installed 2026-09-08).
+  `swift build` and `swift test` in `Packages/SSHDriveCore` are the ordinary loop; note that the
+  package does **not** compile on Linux yet - it stops at `Sources/Logging/Log.swift`'s
+  `import os`, and every module depends on `Logging`, so the port is step 1 of
+  `docs/testing-architecture.md` §8. `cargo test` for `helper/` has always worked here.
+  **App bundles still need the Mac VM** over ssh:
   `scripts/mac-build.sh` syncs the tree to `alec@100.114.204.5:~/sshdrive`, runs xcodegen, `swift test`
   and an ad-hoc signed `xcodebuild` (`app` or `test` argument to run one half). The VM has Xcode 26.4
   on macOS 26.4, no GUI, no signing identities, no passwordless sudo. Finder-dependent spike questions
@@ -77,6 +82,15 @@ wipes it.
   was a deliberate decision; then add a dated entry to **§13 Decisions** (`- **<thing>** … (§N)`, with
   the date) and fix the body section it points at. §13 entries are pointers only; the reasoning must
   live in the named section and nowhere else.
+- **Tests run on Linux against the models; the VM only seeds quirks.** A behaviour of macOS or
+  of a server is measured on the VM, written into `docs/spikes/results.md` (still the source of
+  truth), catalogued as an entry in `docs/quirks/macos.md` or `docs/quirks/servers.md`, taught to
+  `SystemModel`/`ServerModel` as a rule keyed on that entry's id, and defended by a numbered
+  scenario in `Tests/ScenarioTests/`. A new macOS release is a **new column in the quirk table,
+  not a new test**. Nothing is "proved on the VM" any more: a VM session is finished when the
+  Linux suite is green. What cannot be modelled at all (Finder's drawing, Gatekeeper/AMFI,
+  LaunchServices, TCC, real timing, real key agents, servers we do not own) is listed in
+  `docs/testing-architecture.md` §7 and stays a runbook item. Design: `DESIGN.md` §15.
 - **Do not run mutating git commands** (commit, push, checkout, branch, merge, rebase, reset, add, …)
   unless explicitly asked. Read-only git is fine.
 
@@ -149,39 +163,40 @@ Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
 | 630-631 | §5 The File Provider extension | (heading) |
 | 632-668 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
 | 669-782 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
-| 783-1060 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors and why the working set never reports an empty change set, no tombstones (and the local-only exception), backup + restore-into-live + reconcile-against-replica and when the walk runs |
-| 1061-1231 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
-| 1232-1380 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
-| 1381-1417 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
-| 1418-1555 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
-| 1556-1557 | §6 The background agent | (heading) |
-| 1558-1941 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
-| 1942-2030 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
-| 2031-2097 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2098-2158 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
-| 2159-2164 | Tier 0: SFTP poll | `readdir` every root |
-| 2165-2238 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2239-2307 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), that `ClientAliveInterval` does not help, and why the kill names `-$$` and never `0` |
-| 2308-2430 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
-| 2431-2484 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2485-2543 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2544-2551 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2552-2655 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2656-2744 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2745-2849 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 2850-2889 | §7.1.2 Pinning the root | why the root is not a special case |
-| 2890-3054 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 3055-3205 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
-| 3206-3381 | §8.1 Capability report | the probe, how the server software is identified, the feature/level catalogue, `status` output format, the helper's `note:` list |
-| 3382-3425 | §9 Security | the security properties in one list |
-| 3426-3490 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3491-3584 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
-| 3585-3719 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3720-3825 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
-| 3826-3842 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 3843-3892 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 3893-4358 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4359-4391 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 783-1096 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors and why the working set never reports an empty change set, no tombstones (and the local-only exception), backup + restore-into-live + reconcile-against-replica and when the walk runs |
+| 1097-1267 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
+| 1268-1416 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
+| 1417-1453 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
+| 1454-1591 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
+| 1592-1593 | §6 The background agent | (heading) |
+| 1594-1977 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
+| 1978-2066 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
+| 2067-2133 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
+| 2134-2194 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
+| 2195-2200 | Tier 0: SFTP poll | `readdir` every root |
+| 2201-2274 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
+| 2275-2343 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), that `ClientAliveInterval` does not help, and why the kill names `-$$` and never `0` |
+| 2344-2466 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
+| 2467-2520 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
+| 2521-2579 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
+| 2580-2587 | §6.6 Eviction and pin maintenance | where the timers live |
+| 2588-2691 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
+| 2692-2780 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
+| 2781-2885 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
+| 2886-2925 | §7.1.2 Pinning the root | why the root is not a special case |
+| 2926-3090 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
+| 3091-3241 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
+| 3242-3417 | §8.1 Capability report | the probe, how the server software is identified, the feature/level catalogue, `status` output format, the helper's `note:` list |
+| 3418-3461 | §9 Security | the security properties in one list |
+| 3462-3526 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
+| 3527-3620 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
+| 3621-3755 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
+| 3756-3861 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
+| 3862-3878 | §11 Spikes | S1-S10, each with its question and why it matters |
+| 3879-3928 | §12 Milestones | the ten milestones and which spikes fold into each |
+| 3929-4424 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
+| 4425-4460 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
+| 4461-4503 | §15 Testing | the principle in the owner's words, the seam list, `SystemModel`/`ServerModel`, and the pointer to `docs/testing-architecture.md` |
 
 ## Milestones (§12)
 

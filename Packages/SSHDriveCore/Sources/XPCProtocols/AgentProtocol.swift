@@ -2,7 +2,7 @@ import Foundation
 
 /// Version of the XPC interface. A mismatched agent and extension (mid upgrade) is
 /// reported as `.serverUnreachable` until the agent restarts (DESIGN.md section 5.2).
-public let sshDriveXPCInterfaceVersion = 3
+public let sshDriveXPCInterfaceVersion = 4
 
 /// The agent's interface, exported to the extension, the CLI and askpass alike. One
 /// interface rather than three keeps the peer check in one place; what a peer may
@@ -46,6 +46,29 @@ public let sshDriveXPCInterfaceVersion = 3
         anchor: String,
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     )
+
+    /// The fallback path for the **working set**: used whenever the extension's own
+    /// reader is not usable - the `indexReady` round trip has not come back, the agent
+    /// answered no, the schema is newer than this build understands, or the reader could
+    /// not be opened at all (section 5.2).
+    ///
+    /// Before this existed the working-set enumerator answered `.serverUnreachable` in
+    /// every one of those cases. It is the honest answer only when the agent really is
+    /// out of reach: fileproviderd throttles a change enumeration that keeps failing, and
+    /// a run of them takes the domain's event stream out to tens of minutes, after which
+    /// nothing the agent finds on the server reaches Finder at all (2026-09-08).
+    @objc(enumerateWorkingSetChangesInDomain:anchor:reply:)
+    func enumerateWorkingSetChanges(
+        domainIdentifier: String,
+        anchor: String,
+        reply: @escaping (SSHDriveItemPage?, Error?) -> Void
+    )
+
+    /// The newest sync anchor, for the enumerator's `currentSyncAnchor` when the reader
+    /// cannot answer. Handing the system a 0 there is not free: 0 is an expired anchor as
+    /// soon as the oldest surviving row is past it.
+    @objc(currentAnchorInDomain:reply:)
+    func currentAnchor(domainIdentifier: String, reply: @escaping (String?, Error?) -> Void)
 
     /// The fallback path for `item(for:)`: used when the extension has no reader, or
     /// found a schema version newer than it understands (section 5.2).

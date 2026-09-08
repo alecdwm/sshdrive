@@ -33,22 +33,60 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         callbacks.onReaderClose = { [weak self] in self?.readerStore.close() }
         callbacks.onReaderReopen = { [weak self] in self?.readerStore.reopen() }
 
-        // One XPC call per instance launch: is the index ready to be read (section 5.3)?
-        // An agent that cannot be reached at all leaves the instance free to open the
-        // reader, since a missing agent is the case the direct reader exists for.
-        if let proxy = agentProxy({ [weak self] _ in self?.readerStore.markReady(true) }) {
-            proxy.indexReady(domainIdentifier: domainIdentifier) { [weak self] ready in
+        // How the store asks the agent whether the index is ready to be read
+        // (section 5.3). It is asked once at launch and again by any read that finds the
+        // answer was no, rate limited: a `false` covers a window - a domain restart, an
+        // agent mid-restore - and an instance that could never ask again would answer the
+        // working set nothing for the rest of its life (2026-09-08).
+        //
+        // A `nil` answer means the agent could not be reached at all, which leaves the
+        // instance free to open the reader, since a missing agent is the case the direct
+        // reader exists for.
+        readerStore.askAgent = { [weak self] done in
+            guard let self else { return done(nil) }
+            guard let proxy = self.agentProxy({ _ in done(nil) }) else { return done(nil) }
+            proxy.indexReady(domainIdentifier: self.domainIdentifier) { [weak self] ready in
                 // A reply of any kind is proof the agent is there, so lift a disconnect a
                 // previous instance may have left on the domain (section 5.2).
                 self?.connection.noteAgentReachable()
-                self?.readerStore.markReady(ready)
+                done(ready)
             }
-        } else {
-            readerStore.markReady(true)
         }
+        readerStore.askAgent?({ [weak self] ready in self?.readerStore.markReady(ready) })
 
         Log.extensionLog.notice(
             "extension instance for \(self.displayName, privacy: .public) started")
+    }
+
+    // MARK: The working set's error state
+
+    private let workingSetLock = NSLock()
+    private var workingSetFailing = false
+
+    /// A working-set change enumeration answered normally. If the last one did not,
+    /// fileproviderd is holding this domain's event stream on a throttle that only
+    /// `signalErrorResolved` clears - a signalled enumerator is re-scheduled, not
+    /// un-throttled - so one call goes out here, once per recovery (2026-09-08).
+    func noteWorkingSetSucceeded() {
+        workingSetLock.lock()
+        let recovering = workingSetFailing
+        workingSetFailing = false
+        workingSetLock.unlock()
+        guard recovering, let manager else { return }
+        Log.extensionLog.notice(
+            "workingSet recovered; clearing the domain's serverUnreachable throttle")
+        manager.signalErrorResolved(NSFileProviderError(.serverUnreachable)) { error in
+            if let error {
+                Log.extensionLog.error(
+                    "signalErrorResolved failed: \(error, privacy: .public)")
+            }
+        }
+    }
+
+    func noteWorkingSetFailed() {
+        workingSetLock.lock()
+        workingSetFailing = true
+        workingSetLock.unlock()
     }
 
     func invalidate() {
@@ -65,8 +103,23 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
-    func currentSequence() -> Int64 {
-        readerStore.currentSequence() ?? 0
+    /// The newest sync anchor: the reader when it can answer, the agent when it cannot.
+    ///
+    /// The old version was `readerStore.currentSequence() ?? 0`, and the `0` is a trap -
+    /// it is an expired anchor as soon as the oldest surviving row is past it, so a
+    /// readiness race turned into an expiry and a full sweep.
+    func currentAnchor(_ completion: @escaping (String) -> Void) {
+        if let sequence = readerStore.currentSequence() {
+            completion(String(sequence))
+            return
+        }
+        guard let proxy = agentProxy({ _ in completion("0") }) else {
+            completion("0")
+            return
+        }
+        proxy.currentAnchor(domainIdentifier: domainIdentifier) { anchor, _ in
+            completion(anchor ?? "0")
+        }
     }
 
     /// The extension tells the agent it has answered `.syncAnchorExpired` and handed out

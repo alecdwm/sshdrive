@@ -14,7 +14,7 @@ struct Debug: ParsableCommand {
             Fake.self, Tree.self, Mutate.self, Anchor.self, Sweep.self, Policy.self,
             IndexCommand.self, Keychain.self, Secrets.self, Signal.self,
             DebugEvict.self, DebugTTL.self, Materialized.self, Stat.self, Xattr.self, Fault.self, Transfers.self,
-            Stabilize.self, Testing.self, Transport.self,
+            Stabilize.self, Reader.self, Testing.self, Transport.self,
             Breaker.self, Power.self, Presence.self, Rearm.self, Calls.self, Row.self,
             Watch.self, Roots.self, Held.self, Reconcile.self, DomainGroup.self,
         ])
@@ -615,6 +615,29 @@ struct Transfers: ParsableCommand {
         if reset { arguments["reset"] = "true" }
         AgentClient.prettyPrint(
             try AgentClient.send(command: "debug.transfers", arguments: arguments))
+    }
+}
+
+/// The extension's read-only index reader, seen from the CLI: what it last wrote into the
+/// group container, and a switch that makes the agent answer `indexReady` no for a while.
+///
+/// The switch is what reproduces 2026-09-08's stall: an extension instance told "not
+/// ready" used to hold that answer for its whole life and answer the working set
+/// `.serverUnreachable` for ever, which fileproviderd throttles into a mount that takes no
+/// server-side change at all.
+struct Reader: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "The extension's index reader: its last reported state, and a not-ready switch.")
+
+    @Argument var name: String
+
+    @Option(help: "Answer indexReady no for this many seconds, then behave normally.")
+    var notReady: Double?
+
+    func run() throws {
+        var arguments = ["name": name]
+        if let notReady { arguments["notReady"] = String(notReady) }
+        AgentClient.prettyPrint(try AgentClient.send(command: "debug.reader", arguments: arguments))
     }
 }
 

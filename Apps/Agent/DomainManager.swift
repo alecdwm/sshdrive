@@ -74,6 +74,14 @@ actor DomainManager {
                 do {
                     let started = try await runtime(for: location)
                     try await addDomain(for: location)
+                    // A domain whose working set answered `.serverUnreachable` often
+                    // enough is left throttled by fileproviderd, and a signalled
+                    // enumerator is re-scheduled rather than un-throttled: only
+                    // `signalErrorResolved` clears it. The agent starting is the one
+                    // moment it can be cleared for a domain whose extension has not been
+                    // able to run a successful enumeration to clear it itself
+                    // (2026-09-08, section 5.6).
+                    await signalErrorResolved(locationID: location.id)
                     // Section 5.3's replica walk needs the domain to exist before
                     // `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can
                     // answer, so it runs here rather than inside `start()`. It clears
@@ -594,6 +602,12 @@ actor DomainManager {
             try await Deadline.run("signalling an enumerator") {
                 try await manager.signalEnumerator(for: container)
             }
+            // At the default level, and not `debug`: this is the last thing the agent
+            // does with a change it found, and when nothing reaches Finder the question
+            // is always whether the signal went out at all (2026-09-08).
+            Log.agent.notice(
+                "\(locationID, privacy: .public): signalled \(container.rawValue, privacy: .public)"
+            )
         } catch {
             Log.agent.error("signalEnumerator failed: \(error, privacy: .public)")
         }

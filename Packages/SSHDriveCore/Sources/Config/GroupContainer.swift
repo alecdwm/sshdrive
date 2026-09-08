@@ -72,6 +72,13 @@ public enum GroupContainer {
         try domainURL(locationID: locationID).appendingPathComponent("pins.json")
     }
 
+    /// What the File Provider extension last knew about its own read-only index reader
+    /// (section 5.2). The one file the extension writes here, and the only evidence
+    /// `sshdrive doctor` has about a process it cannot ask.
+    public static func readerStateURL(locationID: String) throws -> URL {
+        try domainURL(locationID: locationID).appendingPathComponent("reader-state.json")
+    }
+
     public static func capabilitiesURL(locationID: String) throws -> URL {
         try domainURL(locationID: locationID).appendingPathComponent("capabilities.json")
     }

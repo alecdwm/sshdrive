@@ -383,6 +383,15 @@ public final class IndexWriter {
         return statement.int(0)
     }
 
+    /// The same working-set change stream the extension's reader serves, answered from
+    /// the writer's connection. This is the XPC fallback of section 5.2: an extension
+    /// whose own reader is not usable asks the agent rather than answering
+    /// `.serverUnreachable`, and both sides run `IndexChangeStream` so they cannot drift.
+    public func changes(since anchor: Int64, limit: Int = 500) throws -> IndexChangeStream.Page {
+        if isReconciling { throw IndexError.reconciling }
+        return try IndexChangeStream.changes(connection, since: anchor, limit: limit)
+    }
+
     public func currentSequence() throws -> Int64 {
         let statement = try connection.prepare("SELECT COALESCE(MAX(seq), 0) FROM anchors")
         defer { statement.reset() }

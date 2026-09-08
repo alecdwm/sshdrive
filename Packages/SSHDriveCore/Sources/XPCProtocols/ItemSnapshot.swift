@@ -213,17 +213,22 @@ public final class SSHDriveItemPage: NSObject, NSSecureCoding {
     /// The sync anchor to hand the system after this page, when the enumeration is a
     /// change stream. Empty otherwise.
     public let anchor: String
+    /// True when the change stream has more entries past this page's anchor, which is
+    /// `moreComing:` on `finishEnumeratingChanges`.
+    public let moreComing: Bool
 
     public init(
         items: [SSHDriveItemSnapshot],
         deletedIdentifiers: [String] = [],
         nextPageToken: String? = nil,
-        anchor: String = ""
+        anchor: String = "",
+        moreComing: Bool = false
     ) {
         self.items = items
         self.deletedIdentifiers = deletedIdentifiers
         self.nextPageToken = nextPageToken
         self.anchor = anchor
+        self.moreComing = moreComing
     }
 
     public func encode(with coder: NSCoder) {
@@ -231,6 +236,7 @@ public final class SSHDriveItemPage: NSObject, NSSecureCoding {
         coder.encode(deletedIdentifiers as NSArray, forKey: "deleted")
         coder.encode(nextPageToken as NSString?, forKey: "next")
         coder.encode(anchor as NSString, forKey: "anchor")
+        coder.encode(moreComing, forKey: "more")
     }
 
     public init?(coder: NSCoder) {
@@ -241,5 +247,6 @@ public final class SSHDriveItemPage: NSObject, NSSecureCoding {
             (coder.decodeObject(of: stringClasses, forKey: "deleted") as? [String]) ?? []
         self.nextPageToken = coder.decodeObject(of: NSString.self, forKey: "next") as String?
         self.anchor = (coder.decodeObject(of: NSString.self, forKey: "anchor") as String?) ?? ""
+        self.moreComing = coder.decodeBool(forKey: "more")
     }
 }

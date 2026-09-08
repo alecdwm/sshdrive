@@ -9,6 +9,237 @@ this file records only what happened.
 
 ---
 
+## 2026-09-08 (addendum) - nothing from the server reaches Finder: the working set had one answer for a reader it could not use
+
+A field report from a real install: files created on the server appear in the agent's index
+(`sshdrive debug index dump --table items` lists them) and never in
+`~/Library/CloudStorage/SSHDrive-<name>` or Finder, for over ten minutes. Files created on
+the Mac upload fine and are visible. `sshdrive debug signal <name>` changes nothing, and a
+live `sshdrive logs --follow --debug` during that signal shows no extension line at all.
+Everything else about the location works: listings, opening files, uploads, `status`.
+
+`fileproviderctl dump <domain>` on that Mac named the mechanism:
+
+```
+i:.root fetch-event-stream: 🛑 last:'-18min9s' next:'28min45s' count:27
+  error:'NSError: FP -1004 "Your device couldn't connect to the server..."
+  UserInfo={NSFileProviderErrorDomainDisconnectionStateKey=4}' domain:serverUnreachable
+<FP1 ⏳ fetch-event-stream(.root) why: sched:utility ⧗throttling>
+throttling: next expiration in 28min45s
+error generation: 14
+```
+
+while the container enumerator for the same domain showed `errors: 0` and a valid anchor.
+So the working-set change enumeration had answered `.serverUnreachable` twenty-seven times
+in a row and **fileproviderd had backed the domain's event stream off to a 47-minute
+retry**. The working set is the only route a server-side change has (§6.5: a folder is
+enumerated once, ever), so the mount was silent while every other path worked.
+
+### The cause: `.serverUnreachable` was the answer for *any* reader that was not usable
+
+Two lines of the extension, together:
+
+- `IndexReaderStore.markReady(_:)` was called once, from the extension instance's `init`,
+  on the reply to one `indexReady` round trip, and there was no other caller anywhere.
+  The agent answers `indexReady` **no** for any location whose runtime is not up yet -
+  a domain restart, an upgrade handover, an index mid-restore - so a `false` that described
+  a two-second window was held for the whole life of that extension instance.
+- `WorkingSetEnumerator.enumerateChanges` had exactly one answer for a reader that was not
+  usable: `observer.finishEnumeratingWithError(NSFileProviderError(.serverUnreachable))`,
+  with no fallback and, notably, **no log line of any kind** - which is why the owner's
+  `logs --follow` showed nothing during a signal.
+
+The 2026-09-04 rule those two came from is still right as far as it goes: the working set
+must never report an empty change set at the anchor the system already holds, because that
+tells the system it is up to date and the change is dropped. What was missing is that
+`.serverUnreachable` is not free. S5 measured the system's `.serverUnreachable` backoff for
+a queued write - roughly a doubling, 5.5 s to 331 s, with no ceiling in sight - and the
+same shape applies to a change enumeration. A handful of failed enumerations is a stall
+measured in tens of minutes.
+
+The dump also carried an item in the same block whose name fileproviderd had elided to
+`l{4}h.throttle` - a symlink in the location root - which raised the question of whether a
+symlink row could be what the change page choked on. It is not, and it cannot be: a symlink
+is a row like any other on this path, the page is built from `anchors` and `items` alone,
+and a row the extension could not turn into an item would be a crash or a `.noSuchItem`,
+not a `.serverUnreachable` on the event stream. The reproduction below was run against a
+root holding exactly that shape - relative symlinks inside a `node_modules/.bin`, one to a
+sibling directory, one pointing outside the root - and the stall reproduced and the fix
+held with them present.
+
+The field report also mentioned a file created on the server after the last reconnect that
+is missing from the index itself. That is a second, separate question about tier 2's event
+delivery on that machine; nothing here reproduces it, and the logging added below is what
+will show it next time.
+
+### It reproduced on the VM, with the same dump
+
+`sshdrive add proj spike-deb --path /home/alec/proj` against `deb`, the location root a
+subdirectory of the home holding a twelve-package `node_modules` tree, a `.bin` directory
+of relative symlinks, a symlink to a sibling directory and one pointing outside the root;
+the mount opened in Finder with `osascript`; tier 2 (helper 0.1.0, inotify) active.
+
+Healthy, on the shipped code, a file created / appended to / removed on the server by a
+separate `ssh`:
+
+```
+create                 0.29 s
+modify                 0.29 s
+delete                 0.01 s
+```
+
+Then the same thing with one difference - the extension instance that serves the working
+set was launched while the agent answered `indexReady` no. The hook for that is new:
+`sshdrive debug reader <name> --not-ready <seconds>`, which makes the agent answer no for a
+window and then behave normally; the appex is killed first so the instance that asks is a
+fresh one.
+
+```
+--- forcing indexReady no for 90s, then signalling ---
+NEVER APPEARED in 216 s
+```
+
+The agent had it the whole time - one `items` row and one anchor for the file - and the
+mount never showed it, two and a half minutes after the 90-second window had closed. The
+system's own view was the field report's, one generation for one failure:
+
+```
++ error generation: 7
++ throttling: next expiration in 1min34s
+  i:.root fetch-event-stream: 🛑 last:'-1min13s' next:'1min34s' count:7
+    error:'NSError: FP -1004 ...' domain:serverUnreachable category:<nil> prio:utility
+  <FP1 ⏳ fetch-event-stream(.root) why: sched:utility ⧗throttling>
+```
+
+### The fix
+
+1. **The working set falls back to the agent.** A new XPC call,
+   `enumerateWorkingSetChanges(domainIdentifier:anchor:)`, answers the same change stream
+   from the writer's connection. Both sides run one new type, `IndexChangeStream`, so the
+   reader's answer and the agent's cannot drift - same query, same expiry rule, same
+   paging. `.serverUnreachable` from the working set now means only that the agent could
+   not be reached, which is the one case where there is nothing to say. The empty change
+   set is still forbidden.
+2. **"Not ready" is a window, not a verdict.** The rule moved into
+   `IndexReaderReadiness`, a clock-injected value in the `Index` module with tests of its
+   own: every read that meets a non-ready answer re-asks the agent, at most once every two
+   seconds. `schemaTooNew` stays permanent, because waiting does not make an unknown schema
+   readable, and a reader shut for a restore's truncate window is still lifted only by the
+   reopen callback. A reader read that fails no longer throws `.serverUnreachable` either;
+   it drops the reader and sends that one call to the agent.
+3. **The throttle is cleared explicitly.** The extension calls
+   `signalErrorResolved(.serverUnreachable)` on its own domain the first time a change
+   enumeration succeeds after one has failed - a signalled enumerator is re-scheduled, not
+   un-throttled, and only that call clears the backoff (S5 measured the same thing for
+   queued writes). The agent makes the call once per mounted location at start, which is
+   the only way to clear a backoff a previous version left behind.
+4. **`currentSyncAnchor` no longer answers 0** when the reader cannot answer; it asks the
+   agent. A 0 is an expired anchor as soon as the oldest surviving row is past it.
+5. **Everything is logged at the default level**, so `log show` still has it hours later:
+   every working-set enumeration (anchor in, reader state, counts out, new anchor,
+   `moreComing`, and whether the reader or the agent answered), every readiness answer,
+   every container enumeration outcome, every batch of helper events applied with its kinds
+   and its counts, and every `signalEnumerator`. The 15-second helper heartbeat is the one
+   thing excluded, because four lines a minute per location for ever would drown the rest.
+6. **`sshdrive doctor` reports the reader.** The extension writes
+   `domains/<id>/reader-state.json` - state, the `meta.generation` it last saw, the last
+   error, when, and its pid - which is the one file it writes in the container besides the
+   `-shm` its read-only connection needs. It is a file and not an XPC push because the
+   question is asked when the extension is usually not running. `sshdrive debug reader
+   <name>` prints it raw.
+
+### The same experiments, fixed
+
+The reproduction, unchanged, with the reader deliberately held not-ready for 90 s:
+
+```
+--- forcing indexReady no for 90s, then signalling ---
+APPEARED after 0.42 s
+{ "state" : { "state" : "not-ready", "useReader" : true, ... } }
+```
+
+and a full cycle in the same window, every one of them served by the agent
+(`source=agent` in the log):
+
+```
+create                 0.29 s
+modify                 0.28 s
+delete                 0.01 s
+[ warn ] index reader (proj)   not-ready, generation -1, reported 2 s ago; …/index.sqlite
+```
+
+The instance recovered on its own once the window closed - no restart, no signal from
+anyone - and went back to answering from its own reader:
+
+```
+14:18:49.769 extension  workingSet enumerateChanges anchor=34 reader=not-ready
+14:18:49.789 extension  index reader … is ready (indexReady answered yes)
+[  ok  ] index reader (proj)   ready, generation 0, reported 3 s ago; …/index.sqlite
+```
+
+Healthy again, tier 2, reader ready, `source=reader`:
+
+```
+create                 0.29 s
+modify                 0.29 s
+delete                 0.01 s
+```
+
+And after the upgrade restart - `SSHDRIVE_AGENT_ROLE=unregister` then `open -g -a`, which
+is what the cask's postflight does, with the appex killed as well:
+
+```
+tier 2 streaming again 2.9 s after the handover
+watch helper   every 60s (active)   1 cycle(s)   1 root(s)
+create                 0.27 s
+modify                 0.29 s
+delete                 0.30 s
+[  ok  ] index reader (proj)   ready, generation 0, reported 3 s ago; …/index.sqlite
+```
+
+A trace of one such cycle, all of it at the default level:
+
+```
+agent      applied 1 helper event(s) [create=1] -> 1 changed, 0 deleted, 0 held, 1 listed
+agent      signalled NSFileProviderWorkingSetContainerItemIdentifier
+extension  workingSet enumerateChanges anchor=34 reader=ready
+extension  workingSet enumerateChanges anchor=34 -> 1 changed, 0 deleted, newAnchor=35,
+           moreComing=false, source=reader
+```
+
+### Two things worth knowing that came out of the runs
+
+- **The helper stream does not survive the agent, and coming back takes a moment.** The
+  stream is per connection, so an upgrade handover drops it and the next detector cycle
+  starts a new one: measured at 2.9 s here, but a change made in that gap waits for the
+  cycle, which is up to 60 s. That is §6.4 working as written, not a regression, but it is
+  what a "why did that take a minute?" straight after an upgrade will be.
+- **Killing `ssh` out from under the agent poisons the `MaxSessions` probe.** After several
+  rounds of `pkill -x ssh` plus restarts, the location came up reporting "the server allows
+  one channel at a time (MaxSessions 1): … SFTP-only", with tier 0 and no helper, against a
+  `deb` whose sshd was healthy and printing `0 of 10-100 startups`. `remove` and `add`
+  restored 8/8 optimal. The probe result is cached with the capability report, so a
+  measurement taken in a broken moment outlives the moment.
+
+### Not answered here
+
+- The field report's missing `test1.txt` - a file created on the server after the last
+  reconnect that never reached the index at all. Tier 2 on the VM delivered every event in
+  every run. The helper-event logging above is what will tell the difference next time
+  between "no event arrived" and "the event arrived and changed nothing".
+- Whether the reader on that particular Mac is `ready` at all. It may be, and the stall
+  above needs only a moment of `not-ready` to start; `doctor` and
+  `sshdrive debug reader <name>` now answer it directly.
+
+### State the VM was left in
+
+One location, `proj` -> `alec@spike-deb:2201`, root `/home/alec/proj` (the `node_modules`
+tree and its symlinks), mounted, tier 2, `doctor` green including the new index-reader
+check. `~/wsprobe.sh`, `~/stallprobe.sh`, `~/upgrade3.sh` and `~/showlog.sh` are the
+harnesses these numbers came from.
+
+---
+
 ## 2026-09-08 - the helper channel on Tailscale SSH: `kill 0` is not "our" process group
 
 The owner's Tailscale SSH server (x86_64 Debian) killed the tier 2 stream about fifteen

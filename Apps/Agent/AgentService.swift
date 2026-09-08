@@ -29,7 +29,35 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply(sshDriveXPCInterfaceVersion)
     }
 
+    /// Spike hook: while this is in the future the agent answers `indexReady` no, so the
+    /// extension's readiness race can be reproduced on purpose rather than waited for.
+    /// Set by `sshdrive debug reader <name> --not-ready <seconds>`; process-lifetime only.
+    static let forcedNotReadyUntil = ForcedNotReady()
+
+    final class ForcedNotReady: @unchecked Sendable {
+        private let lock = NSLock()
+        private var until: [String: Date] = [:]
+
+        func set(domainIdentifier: String, seconds: TimeInterval) {
+            lock.lock()
+            until[domainIdentifier] = Date().addingTimeInterval(seconds)
+            lock.unlock()
+        }
+
+        func isActive(_ domainIdentifier: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard let deadline = until[domainIdentifier] else { return false }
+            return deadline > Date()
+        }
+    }
+
     func indexReady(domainIdentifier: String, reply: @escaping (Bool) -> Void) {
+        if AgentService.forcedNotReadyUntil.isActive(domainIdentifier) {
+            Log.agent.notice(
+                "\(domainIdentifier, privacy: .public): indexReady -> no (forced by a debug hook)")
+            reply(false)
+            return
+        }
         Task {
             // Section 4.2's second re-arm trigger: a File Provider request for this
             // domain. Behind the presence test and its once-a-minute rule, so it is
@@ -43,11 +71,17 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                 let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
                 _ = try await runtime.currentSequence()
                 call.finish("ready")
+                Log.agent.notice(
+                    "\(domainIdentifier, privacy: .public): indexReady -> yes")
                 reply(true)
             } catch {
                 // An agent mid-restore, or one that cannot open the index at all, answers
-                // no and the instance opens nothing (section 5.3).
+                // no and the instance falls back to asking us for everything. It asks
+                // again, so this is a window and not a verdict (section 5.2).
                 call.finish(error: error)
+                Log.agent.notice(
+                    "\(domainIdentifier, privacy: .public): indexReady -> no: \(String(describing: error), privacy: .public)"
+                )
                 reply(false)
             }
         }
@@ -112,6 +146,69 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                         anchor: String(sequence)), nil)
             } catch {
                 call.finish(error: error)
+                reply(nil, sshDriveXPCError(error))
+            }
+        }
+    }
+
+    /// The working-set change stream, answered from the agent's own connection when the
+    /// extension's reader cannot answer it (section 5.2).
+    ///
+    /// The extension used to have no fallback here at all: any reader that was not usable
+    /// meant `.serverUnreachable`, and fileproviderd throttles a change enumeration that
+    /// keeps failing until the domain takes no server-side change at all (2026-09-08).
+    /// Both sides run `IndexChangeStream` so the two answers cannot drift.
+    func enumerateWorkingSetChanges(
+        domainIdentifier: String, anchor: String,
+        reply: @escaping (SSHDriveItemPage?, Error?) -> Void
+    ) {
+        Task {
+            let call = DomainManager.shared.noteFileProviderRequest(
+                domainIdentifier: domainIdentifier, method: "enumerateWorkingSetChanges",
+                subject: anchor)
+            do {
+                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                let result: (items: [SSHDriveItemSnapshot], deleted: [String], newAnchor: Int64, hasMore: Bool)
+                do {
+                    result = try await runtime.workingSetChanges(since: Int64(anchor) ?? 0)
+                } catch IndexError.syncAnchorExpired {
+                    // The one index error the system understands for itself. It has to
+                    // cross as an NSFileProviderError, not as one of ours, or the
+                    // extension would map it to serverUnreachable and the fresh anchor
+                    // would never be handed out (section 5.3).
+                    call.finish("syncAnchorExpired")
+                    Log.agent.notice(
+                        "\(domainIdentifier, privacy: .public): the working set from \(anchor, privacy: .public) is expired"
+                    )
+                    reply(nil, NSFileProviderError(.syncAnchorExpired) as NSError)
+                    return
+                }
+                call.finish(
+                    "\(result.items.count) changed, \(result.deleted.count) deleted, anchor \(result.newAnchor)"
+                )
+                Log.agent.notice(
+                    "\(domainIdentifier, privacy: .public): the extension asked for the working set from \(anchor, privacy: .public); \(result.items.count, privacy: .public) changed, \(result.deleted.count, privacy: .public) deleted, newAnchor \(result.newAnchor, privacy: .public)"
+                )
+                reply(
+                    SSHDriveItemPage(
+                        items: result.items, deletedIdentifiers: result.deleted,
+                        anchor: String(result.newAnchor), moreComing: result.hasMore), nil)
+            } catch {
+                call.finish(error: error)
+                Log.agent.notice(
+                    "\(domainIdentifier, privacy: .public): the working set from \(anchor, privacy: .public) could not be answered: \(String(describing: error), privacy: .public)"
+                )
+                reply(nil, sshDriveXPCError(error))
+            }
+        }
+    }
+
+    func currentAnchor(domainIdentifier: String, reply: @escaping (String?, Error?) -> Void) {
+        Task {
+            do {
+                let runtime = try await DomainManager.shared.runtime(domainIdentifier: domainIdentifier)
+                reply(String(try await runtime.currentSequence()), nil)
+            } catch {
                 reply(nil, sshDriveXPCError(error))
             }
         }

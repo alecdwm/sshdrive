@@ -514,6 +514,27 @@ enum ControlCommands {
             let runtime = try await resolveRuntime(arguments)
             return try json(await runtime.transferStats(reset: arguments["reset"] == "true"))
 
+        case "debug.reader":
+            // The extension's read-only reader, from the outside: what it last told us in
+            // its state file, and a switch that makes the agent answer `indexReady` no for
+            // a while so the readiness race of section 5.2 can be reproduced on purpose.
+            let location = try await resolveLocation(arguments)
+            if let seconds = arguments["notReady"].flatMap(Double.init) {
+                AgentService.forcedNotReadyUntil.set(
+                    domainIdentifier: location.id, seconds: seconds)
+                await DomainManager.shared.signalWorkingSet(locationID: location.id)
+            }
+            var readerReport: [String: Any] = ["location": location.displayName]
+            if let url = try? GroupContainer.readerStateURL(locationID: location.id),
+                let data = try? Data(contentsOf: url),
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            {
+                readerReport["state"] = object
+            } else {
+                readerReport["state"] = "the extension has not reported its reader"
+            }
+            return try json(readerReport)
+
         case "debug.stabilize":
             let location = try await resolveLocation(arguments)
             return try json(try await SpikeHooks.stabilize(locationID: location.id))
@@ -686,6 +707,17 @@ enum ControlCommands {
                     + "does not survive the next launch. See the \"quarantine\" check above."
                 : nil)
 
+        // What the extension's own read-only index reader last said about itself
+        // (section 5.2). The extension is sandboxed, short-lived and not running most of
+        // the time, so it writes its state into the group container and this is where it
+        // is read back. A reader that is not `ready` is not on its own a fault - every
+        // read falls back to the agent - but it is the difference between a mount that is
+        // slow and a mount that is silent, and it was invisible before 2026-09-08.
+        for line in await readerStates() {
+            check(
+                "index reader (\(line.name))", line.ok, line.detail, remedy: line.remedy)
+        }
+
         // The ssh binary, always /usr/bin/ssh by absolute path (section 6.1).
         let sshVersion = SSHProcess.sshVersion()
         check("ssh", sshVersion != nil, sshVersion ?? "cannot run \(SSHProcess.sshBinaryPath)")
@@ -793,6 +825,53 @@ enum ControlCommands {
     }
 
     /// The control sockets of locations that are actually up, so the orphan count in
+    /// One line per location, from the `reader-state.json` the File Provider extension
+    /// writes into the group container (section 5.2).
+    private struct ReaderStateLine {
+        var name: String
+        var ok: Bool?
+        var detail: String
+        var remedy: String?
+    }
+
+    private static func readerStates() async -> [ReaderStateLine] {
+        guard let file = try? await ConfigAccess().load() else { return [] }
+        var lines: [ReaderStateLine] = []
+        for location in file.locations where location.mounted {
+            guard let url = try? GroupContainer.readerStateURL(locationID: location.id) else {
+                continue
+            }
+            guard let data = try? Data(contentsOf: url),
+                let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else {
+                lines.append(
+                    ReaderStateLine(
+                        name: location.displayName, ok: nil,
+                        detail: "the extension has never reported its reader",
+                        remedy: "Open the location in Finder once. If this stays empty the "
+                            + "extension is not running; see the \"extension registered\" check."))
+                continue
+            }
+            let state = (object["state"] as? String) ?? "unknown"
+            let at = (object["at"] as? Double).map { Date(timeIntervalSince1970: $0) }
+            let age = at.map { "\(Int(Date().timeIntervalSince($0))) s ago" } ?? "at an unknown time"
+            let generation = (object["generation"] as? Int64) ?? -1
+            let lastError = (object["lastError"] as? String) ?? ""
+            var detail = "\(state), generation \(generation), reported \(age)"
+            if !lastError.isEmpty { detail += "; last error: \(lastError)" }
+            if let path = object["path"] as? String, !path.isEmpty { detail += "; \(path)" }
+            let ok: Bool? = state == "ready" ? true : nil
+            lines.append(
+                ReaderStateLine(
+                    name: location.displayName, ok: ok, detail: detail,
+                    remedy: ok == true
+                        ? nil
+                        : "Every read falls back to the agent over XPC, so the location still "
+                            + "works; a reader that stays unready is slower and worth reporting."))
+        }
+        return lines
+    }
+
     /// `doctor` does not accuse a healthy mount.
     private static func liveLocationSockets() async -> Set<String> {
         guard let file = try? await DomainManager.shared.configuration() else { return [] }
