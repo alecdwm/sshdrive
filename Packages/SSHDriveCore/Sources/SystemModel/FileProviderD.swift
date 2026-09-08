@@ -23,6 +23,20 @@ public enum ModelCall: Equatable, Sendable {
     /// A working-set signal that never reached the extension because the domain's
     /// fetch-event stream was throttled (`MQ-005`). This is the shipped symptom.
     case signalDroppedByThrottle
+    /// One offer of a queued write, on the fresh instance `MQ-003` gives it.
+    case createItem(filename: String, attempt: Int)
+    case modifyItem(identifier: String, changedFields: UInt, attempt: Int)
+    case deleteItem(identifier: String)
+    /// One `fetchContents`. `MQ-036`: a failed one is never re-issued, so the count of
+    /// these per identifier is an assertion in itself.
+    case fetchContents(identifier: String, foreground: Bool)
+    case evictItem(identifier: String)
+    /// The trash node the system made for itself, and each time it asked us about it
+    /// (`MQ-075`, `MQ-009`, `MQ-010`).
+    case trashNodeCreated
+    case trashRemovedFromMount
+    /// `add(domain)` with an identifier the system already holds (`MQ-051`).
+    case domainRenamedInPlace(from: String, to: String)
 }
 
 /// The simulated fileproviderd (`docs/testing-architecture.md` section 3).
@@ -35,12 +49,41 @@ public enum ModelCall: Equatable, Sendable {
 public final class FileProviderD {
     public let clock: VirtualClock
     public let quirks: QuirkTable
+    public let version: MacOSVersion
     public private(set) var domains: [String: ModelDomain] = [:]
+    /// launchd, the login item and LaunchServices, which is where `MQ-061`, `MQ-062` and
+    /// `MQ-063` live. It is on fileproviderd because the appex it can or cannot find is
+    /// what decides whether a domain comes up at all.
+    public let launchd: Launchd
 
     public init(macOS version: MacOSVersion = .v26_4, clock: VirtualClock = VirtualClock()) {
         self.clock = clock
+        self.version = version
         self.quirks = QuirkTable(for: version)
+        self.launchd = Launchd(clock: clock, quirks: self.quirks)
     }
+
+    /// What `add(domain)` can answer with. `MQ-052`'s 4099 is the case where the call
+    /// reports a failure the domain list contradicts.
+    public struct DomainError: Error, Equatable {
+        public let domain: String
+        public let code: Int
+        public let message: String
+        /// True when the domain is there despite the error, which is what makes re-reading
+        /// the domain list before believing it the only safe response.
+        public let landedAnyway: Bool
+
+        public init(domain: String, code: Int, message: String, landedAnyway: Bool) {
+            self.domain = domain
+            self.code = code
+            self.message = message
+            self.landedAnyway = landedAnyway
+        }
+    }
+
+    /// Staged by a scenario: the next `addDomain` reports this even though it worked
+    /// (`MQ-052`).
+    public var nextAddReportsError: DomainError?
 
     /// `add(domain)`. The system creates the domain, launches a provider instance and asks
     /// the working-set enumerator for the anchor it should start from.
@@ -50,16 +93,48 @@ public final class FileProviderD {
     /// `MQ-010`). Those are suite B, at step 3 of the migration.
     @discardableResult
     public func addDomain(
-        identifier: String, displayName: String,
+        identifier: String, displayName: String, supportsSyncingTrash: Bool? = nil,
         makeProvider: @escaping (ModelDomain) -> ProviderService
-    ) -> ModelDomain {
+    ) throws -> ModelDomain {
+        // `MQ-061`: with no plugin registered the appex does not exist as far as
+        // fileproviderd is concerned, and the domain is refused before anything of ours
+        // is asked anything.
+        guard launchd.providerPluginIsRegistered else {
+            throw DomainError(
+                domain: "NSFileProviderErrorDomain", code: -2001,
+                message: "The File Provider extension could not be found (underlying FP -2014).",
+                landedAnyway: false)
+        }
+        // `MQ-051`: the same identifier with a new display name renames the domain in
+        // place. Nothing about the replica moves - not the materialized set, not the
+        // pending writes, not one byte on disk.
+        if let existing = domains[identifier] {
+            if existing.displayName != displayName {
+                existing.rename(to: displayName)
+            }
+            if let staged = nextAddReportsError {
+                nextAddReportsError = nil
+                throw staged
+            }
+            return existing
+        }
         let domain = ModelDomain(
             identifier: identifier, displayName: displayName, clock: clock, quirks: quirks,
+            supportsSyncingTrash: supportsSyncingTrash
+                ?? quirks.bool(.supportsSyncingTrashDefaultsYes),
             makeProvider: makeProvider)
         domains[identifier] = domain
         domain.start()
+        if let staged = nextAddReportsError {
+            nextAddReportsError = nil
+            throw staged
+        }
         return domain
     }
+
+    /// Re-reading the domain list, which is the only way to tell a 4099 that landed from
+    /// one that did not (`MQ-052`).
+    public func domainList() -> [String] { domains.keys.sorted() }
 
     public func domain(_ identifier: String) -> ModelDomain {
         guard let domain = domains[identifier] else {
@@ -74,16 +149,64 @@ public final class FileProviderD {
 /// One domain: its replica, its provider instances, its anchors and its throttle.
 public final class ModelDomain: ProviderDomainSignalling {
     public let identifier: String
-    public let displayName: String
+    /// `MQ-050`: the bare nickname. The mount directory and the sidebar label are derived
+    /// from it and nowhere else, which is why a nickname that repeats the app name
+    /// stutters. `MQ-051` moves it in place.
+    public private(set) var displayName: String
     public let replica = Replica()
-    private let clock: VirtualClock
-    private let quirks: QuirkTable
+    let clock: VirtualClock
+    let quirks: QuirkTable
     private let makeProvider: (ModelDomain) -> ProviderService
+
+    /// What the domain was added with. `MQ-008`: it defaults to YES, and `B2` is the
+    /// finding that setting it to NO changes nothing the model can see - the trash node
+    /// is created and asked about either way.
+    public let supportsSyncingTrash: Bool
+
+    /// Finder, the user. Section 3.1's second part of the model.
+    public private(set) lazy var finder = Finder(domain: self)
+
+    // MARK: The write queue (`MQ-035`, `MQ-014`, `MQ-003`)
+
+    public internal(set) var queued: [PendingWrite] = []
+    var nextWriteSequence = 0
+    var nextLocalIdentifier = 0
+    /// Every offer of every write, in order, for a scenario to read the schedule off.
+    public internal(set) var writeOffers: [WriteOffer] = []
+
+    // MARK: Downloads (`MQ-031`, `MQ-032`, `MQ-036`)
+
+    public internal(set) var fetchesInFlight = 0
+    public var peakFetchesInFlight = 0
+    /// Every batch boundary the eager pass produced, so `G8` can assert "strict batches of
+    /// six, never seven".
+    public internal(set) var fetchBatchSizes: [Int] = []
+    public internal(set) var fetchesIssued: [ProviderItemIdentifier] = []
+    public internal(set) var fetchFailures: [ProviderItemIdentifier] = []
+    var eagerQueue: [ProviderItemIdentifier] = []
+    var eagerBatchOutstanding = 0
+
+    // MARK: Eviction (`MQ-017`-`MQ-021`, `MQ-033`, `MQ-034`)
+
+    /// The identifiers whose `modifyItem` reply the system is still finishing, which is
+    /// what refuses the eviction issued straight after one (`MQ-017`).
+    var settlingAfterModify: Set<ProviderItemIdentifier> = []
+    /// When the last pin was removed, for the 5-10 s window in which the system has not
+    /// re-read the rows whose policy changed (`MQ-034`).
+    public internal(set) var lastUnpinAt: Double?
+    public internal(set) var evictionAttempts: [(identifier: ProviderItemIdentifier, outcome: EvictionOutcome)] = []
+
+    // MARK: The trash (`MQ-075`, `MQ-009`, `MQ-010`)
+
+    public internal(set) var trash = TrashNode()
+    /// Answers the trash question with this instead of asking the provider. A model seam
+    /// for `B1`'s bite-proof and nothing else.
+    public var trashAnswerOverride: ProviderFailure?
 
     /// The live extension instance, or nil between a teardown and the next call.
     public private(set) var provider: ProviderService?
     public private(set) var instancesLaunched = 0
-    public private(set) var calls: [ModelCall] = []
+    public internal(set) var calls: [ModelCall] = []
 
     /// Sync anchors, one per enumerator: `workingSet`, and one per container the system
     /// has an enumerator for. They are the system's, not ours, and the system never
@@ -91,7 +214,7 @@ public final class ModelDomain: ProviderDomainSignalling {
     public private(set) var anchors: [String: ProviderSyncAnchor] = [:]
 
     /// `MQ-001`: a folder is enumerated once, ever. This is the set that makes it so.
-    public private(set) var enumeratedContainers: Set<ProviderItemIdentifier> = []
+    public internal(set) var enumeratedContainers: Set<ProviderItemIdentifier> = []
 
     public private(set) var throttle: ErrorThrottle
     private var throttledUntil: Double?
@@ -115,12 +238,14 @@ public final class ModelDomain: ProviderDomainSignalling {
 
     init(
         identifier: String, displayName: String, clock: VirtualClock, quirks: QuirkTable,
+        supportsSyncingTrash: Bool = true,
         makeProvider: @escaping (ModelDomain) -> ProviderService
     ) {
         self.identifier = identifier
         self.displayName = displayName
         self.clock = clock
         self.quirks = quirks
+        self.supportsSyncingTrash = supportsSyncingTrash
         self.makeProvider = makeProvider
         self.throttle = ErrorThrottle(
             threshold: quirks.int(.changeEnumerationThrottleThreshold),
@@ -157,12 +282,27 @@ public final class ModelDomain: ProviderDomainSignalling {
         calls.append(.instanceInvalidated)
     }
 
-    private func liveProvider() -> ProviderService {
+    func liveProvider() -> ProviderService {
         if let provider { return provider }
         return launchInstance()
     }
 
     // MARK: Start
+
+    /// `MQ-051`: a rename in place. The mount directory moves and nothing else does.
+    func rename(to newName: String) {
+        calls.append(.domainRenamedInPlace(from: displayName, to: newName))
+        displayName = newName
+    }
+
+    /// Where the domain is mounted, derived from the display name and nothing else
+    /// (`MQ-050`).
+    public var mountDirectoryName: String {
+        "SSHDrive-" + displayName.replacingOccurrences(of: " ", with: "")
+    }
+
+    /// What the Finder sidebar reads (`MQ-050`).
+    public var sidebarLabel: String { "SSH Drive - " + displayName }
 
     func start() {
         let service = launchInstance()
@@ -174,6 +314,10 @@ public final class ModelDomain: ProviderDomainSignalling {
             self?.anchors[Self.workingSetEnumeratorKey] = anchor ?? ProviderSyncAnchor("0")
         }
         clock.drain()
+        // `MQ-075`: the system makes the trash node itself at `add(domain)` time and then
+        // asks the extension for its children - whatever `supportsSyncingTrash` said
+        // (`MQ-008`, and `B2` is that the flag alone changes nothing).
+        createTrashNodeAndAsk()
     }
 
     private func workingSetEnumerator(of service: ProviderService) -> ProviderEnumerating {
@@ -315,7 +459,7 @@ public final class ModelDomain: ProviderDomainSignalling {
         let observer = ModelChangeObserver(
             onUpdate: { [weak self] items in
                 carried += items.count
-                items.forEach { self?.replica.ingest($0) }
+                items.forEach { self?.ingestFromWorkingSet($0) }
             },
             onDelete: { [weak self] ids in
                 carried += ids.count
@@ -363,6 +507,36 @@ public final class ModelDomain: ProviderDomainSignalling {
         enumerator.enumerateChanges(for: observer, from: held)
         clock.drain()
     }
+
+    /// What the working set may put in the replica.
+    ///
+    /// `MQ-029`: **ancestors reported through the working set are not ingested.** Neither
+    /// the signal nor a `signalEnumerator` on each new ancestor's container starts
+    /// anything; a lookup of the path in the replica is what does. The model expresses
+    /// that as: the change stream updates what the replica holds and adds items to
+    /// containers it holds, but it never brings a **new container** into being - a
+    /// directory enters the replica through an `enumerateItems` of its parent or through
+    /// `getUserVisibleURL` plus an `lstat`, and by no other route.
+    ///
+    /// confidence: `MQ-029` measured the *outcome* three times (nothing downloads, and
+    /// the path lookup is what starts it); that the new-directory case is the dividing
+    /// line is the model's reading of it, not a separate measurement.
+    func ingestFromWorkingSet(_ view: ItemView) {
+        let existing = replica.item(view.identifier)
+        if existing == nil, view.contentTypeHint == .folder, view.identifier != .rootContainer {
+            replicaDroppedContainers += 1
+            return
+        }
+        // `MQ-034`: a policy that stopped being eager is not re-read at once, and an
+        // eviction inside the settle window fails naming no reason. The clock on that
+        // window starts when the change arrives.
+        if let existing, existing.kept, !view.kept { lastUnpinAt = clock.now() }
+        replica.ingest(view)
+    }
+
+    /// How many new containers the working set was told about and did not create
+    /// (`MQ-029`).
+    public internal(set) var replicaDroppedContainers = 0
 
     /// A container's `enumerateChanges`. `MQ-001` says the system does not ask for one, so
     /// nothing but a scenario about that fact calls this.
@@ -424,6 +598,9 @@ public final class ModelDomain: ProviderDomainSignalling {
         guard failure == .serverUnreachable else { return }
         throttle.clear()
         throttledUntil = nil
+        // `MQ-037`: and this is also the only thing that flushes a queued write. The
+        // `modifyItem` arrived 20 ms after it; a `signalEnumerator` did nothing in 60 s.
+        flushQueuedWritesAfterErrorResolved()
     }
 
     public func disconnect(reason: String) {

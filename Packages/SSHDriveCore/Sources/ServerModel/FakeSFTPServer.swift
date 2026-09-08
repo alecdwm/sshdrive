@@ -126,6 +126,30 @@ public final class FakeSFTPServer: @unchecked Sendable {
         }
     }
 
+    /// A **directory** whose own name need not be valid UTF-8, and the names it holds.
+    ///
+    /// `SQ-055`: this is the shape tier 1 cannot reach at all - `set --` is a String
+    /// pipeline, so such a root has no spelling that survives the trip to `find` - and
+    /// tier 0's `readdir` must, in the same cycle. Nothing else in the model can build
+    /// one, because `absolute(_:)` starts from a `String`.
+    public func putRawDirectory(
+        _ name: Data, in directory: String = "", containing children: [String] = [],
+        mode: UInt32 = 0o755
+    ) {
+        lock.withLock {
+            var path = absolute(directory)
+            path.append(0x2F)
+            path.append(name)
+            nodes[path] = Node(type: .directory, mode: mode)
+            for child in children {
+                var childPath = path
+                childPath.append(0x2F)
+                childPath.append(Data(child.utf8))
+                nodes[childPath] = Node(type: .file, contents: Data())
+            }
+        }
+    }
+
     /// A FIFO or socket, which the enumerator drops: they get no row (section 5.4).
     public func putSpecial(_ path: String, type: SFTPNodeType) {
         lock.withLock { nodes[absolute(path)] = Node(type: type) }
@@ -174,6 +198,14 @@ public final class FakeSFTPServer: @unchecked Sendable {
     // MARK: - Serving
 
     /// Answers one framed packet, returning the bytes to send back.
+    ///
+    /// One `FakeSFTPServer` serves as many `FakeSFTPStream`s as a scenario makes - two
+    /// locations on one host are two clients (`Q2`), and the metadata and bulk channels
+    /// are two more - so this is reached on whichever thread each client's `write` was
+    /// called from. The state those calls share is behind the lock `handle` takes, and it
+    /// is taken **there** rather than here: the `.initialize` branch below reads only the
+    /// immutable profile, and wrapping this method as well would take a non-recursive
+    /// `NSLock` twice on one thread and wedge the channel.
     func answer(_ packet: SFTPWire.Packet) -> Data {
         guard let type = packet.packetType else { return Data() }
         if type == .initialize {
@@ -376,8 +408,16 @@ public final class FakeSFTPServer: @unchecked Sendable {
                 guard nodes[parent(resolved)]?.type == .directory else {
                     throw SFTPWire.Status.noSuchFile
                 }
+                // `SQ-033`: a **create**'s attributes go through the server's umask too,
+                // exactly as `mkdir`'s do, which is why section 5.5's upload sets the mode
+                // back with a `setstat` after the rename rather than trusting the `open`.
+                // Confidence: the umask itself is measured (`deb`, 2026-09-05, on `mkdir`);
+                // that `open(O_CREAT)` takes the same filter is POSIX and is what DESIGN.md
+                // section 5.5 already assumes ("the server's umask still applies"), not a
+                // separate measurement.
                 nodes[resolved] = Node(
-                    type: .file, mode: (attributes.permissions ?? 0o644) & 0o7777)
+                    type: .file,
+                    mode: ((attributes.permissions ?? 0o644) & ~profile.umask) & 0o7777)
             } else if flags & SFTPWire.OpenFlags.exclusive != 0,
                       flags & SFTPWire.OpenFlags.create != 0 {
                 // EEXIST, which is also a bare FAILURE (`SQ-028`).
@@ -419,10 +459,23 @@ public final class FakeSFTPServer: @unchecked Sendable {
             }
             let page = pages.removeFirst()
             directoryPages[handle] = pages
+            // The count is what is **written**, not the size of the page.
+            //
+            // The pages are cut at `opendir`, and a name can go between then and the
+            // `readdir` that reports it - our own stale-temp sweep removes
+            // `.sshdrive-upload-*` while a listing of the same directory is in flight,
+            // which is exactly how this was found. Skipping the entry while still
+            // announcing the page's size produced a `SSH_FXP_NAME` whose header promised
+            // more entries than its body held; the client read past the end of the packet
+            // into the next one, and the channel died `badMessage` a millisecond after it
+            // came up. A real server cannot emit that packet, and neither may this one.
+            let entries = page.compactMap { path -> (Data, Node)? in
+                guard let node = nodes[path] else { return nil }
+                return (path, node)
+            }
             var writer = SFTPWire.Writer(.name, requestID: id)
-            writer.writeUInt32(UInt32(page.count))
-            for path in page {
-                guard let node = nodes[path] else { continue }
+            writer.writeUInt32(UInt32(entries.count))
+            for (path, node) in entries {
                 writer.writeString(lastComponent(path))
                 let kind: String
                 switch node.type {
@@ -626,7 +679,17 @@ public final class FakeSFTPStream: ByteStream, @unchecked Sendable {
     private let server: FakeSFTPServer
     private let lock = NSLock()
     private var outbound = Data()
-    private var waiter: CheckedContinuation<Data, Error>?
+    /// The parked reader, the size **it asked for**, and a ticket.
+    ///
+    /// Both of the extra fields are bugs this stream had. `ByteStream.read(upTo:)` is a
+    /// ceiling, and handing a reader more bytes than it asked for overran `SFTPClient`'s
+    /// buffer and surfaced as `SFTP reply could not be parsed; the channel is dead` -
+    /// a dead connection where nothing was wrong with either end. And a read that is
+    /// satisfied by data leaves its deadline timer armed, so the *next* read could be
+    /// failed `readTimedOut` by the previous read's timer; the ticket is what makes a
+    /// timer only ever able to time out its own read.
+    private var waiter: (continuation: CheckedContinuation<Data, Error>, limit: Int, ticket: Int)?
+    private var nextTicket = 0
     private var scratch: [UInt8] = []
     private var closed = false
     /// Set to drop the connection mid-flight, which is what a dying master looks like to
@@ -642,7 +705,7 @@ public final class FakeSFTPStream: ByteStream, @unchecked Sendable {
         let pending = waiter
         waiter = nil
         lock.unlock()
-        pending?.resume(returning: Data())
+        pending?.continuation.resume(returning: Data())
     }
 
     public func read(upTo count: Int, deadline: Date) async throws -> Data {
@@ -661,19 +724,26 @@ public final class FakeSFTPStream: ByteStream, @unchecked Sendable {
                 continuation.resume(returning: Data())
                 return
             }
-            waiter = continuation
+            nextTicket += 1
+            let ticket = nextTicket
+            waiter = (continuation, count, ticket)
             lock.unlock()
             // Every read takes a deadline, without exception (`ByteStream`): a server
-            // that never answers must time the caller out, not hang it.
+            // that never answers must time the caller out, not hang it. The ticket is
+            // what keeps this timer to its own read: a read satisfied by data leaves its
+            // timer armed, and without the check it would fail whichever read happened to
+            // be parked when it fired.
             let delay = deadline.timeIntervalSinceNow
             guard delay < 86_400 else { return }
             DispatchQueue.global().asyncAfter(deadline: .now() + max(0, delay)) { [weak self] in
                 guard let self else { return }
                 self.lock.lock()
-                guard let pending = self.waiter else { self.lock.unlock(); return }
+                guard let pending = self.waiter, pending.ticket == ticket else {
+                    self.lock.unlock(); return
+                }
                 self.waiter = nil
                 self.lock.unlock()
-                pending.resume(throwing: ByteStreamError.readTimedOut)
+                pending.continuation.resume(throwing: ByteStreamError.readTimedOut)
             }
         }
     }
@@ -700,15 +770,18 @@ public final class FakeSFTPStream: ByteStream, @unchecked Sendable {
         }
     }
 
-    /// Queues the replies, and hands back the parked reader with everything owed to it.
+    /// Queues the replies and hands the parked reader **at most what it asked for**,
+    /// leaving the rest for its next read. A `ByteStream` read is `upTo:`, and a real
+    /// pipe never returns more than the buffer handed to it.
     private func enqueue(_ replies: Data) -> (CheckedContinuation<Data, Error>, Data)? {
         lock.withLock {
             outbound.append(replies)
             guard let pending = waiter else { return nil }
             waiter = nil
-            let handoff = outbound
-            outbound = Data()
-            return (pending, handoff)
+            let take = min(outbound.count, pending.limit)
+            let handoff = Data(outbound.prefix(take))
+            outbound.removeFirst(take)
+            return (pending.continuation, handoff)
         }
     }
 

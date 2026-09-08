@@ -152,6 +152,41 @@ public enum ScriptShell: String, Sendable, Equatable, CaseIterable {
 
     public var isAvailable: Bool { executablePath != nil }
 
+    /// Whether this box's **system** rc file for the shell rewrites `PATH` after the
+    /// account's own has set it, which makes an account's `PATH` unisolatable.
+    ///
+    /// `SQ-083`: macOS ships `/etc/zprofile` calling `/usr/libexec/path_helper`, and zsh
+    /// reads `$ZDOTDIR/.zshenv` **first** and the system's `/etc/zprofile` after it, so a
+    /// login shell's `PATH` is the system's list with the account's appended - which is not
+    /// what the account exported, and no `ZDOTDIR` can prevent it. (bash is unaffected:
+    /// `/etc/profile` runs path_helper *before* `.bash_profile`, so the account still wins.)
+    /// Detected rather than branched on the platform: a Linux box that grew the same file
+    /// would have the same problem, and a macOS that dropped `path_helper` would not.
+    public var systemRCRewritesPATH: Bool {
+        guard self == .zsh else { return false }
+        guard FileManager.default.isExecutableFile(atPath: "/usr/libexec/path_helper") else {
+            return false
+        }
+        // Every system-wide file zsh reads after `$ZDOTDIR/.zshenv` for the `-ilc` shell
+        // `LoginShellSnapshotReader` runs: the login one and the interactive one.
+        for rc in ["/etc/zshenv", "/etc/zprofile", "/etc/zshrc",
+                   "/etc/zsh/zshenv", "/etc/zsh/zprofile", "/etc/zsh/zshrc"] {
+            guard let text = try? String(contentsOfFile: rc, encoding: .utf8) else { continue }
+            if text.contains("path_helper") { return true }
+        }
+        return false
+    }
+
+    /// The sentence the row above skips with.
+    public var systemRCSkipReason: String {
+        "SQ-083: a system-wide zsh rc file on this box runs /usr/libexec/path_helper, which "
+            + "rewrites PATH from /etc/paths - and zsh reads $ZDOTDIR/.zshenv before the "
+            + "system's /etc/zprofile, so the account's PATH is overwritten by the system's "
+            + "however the account is generated. The zsh row keeps its full SQ-015 coverage on "
+            + "a box without path_helper; it is skipped here, not faked, and the bash and dash "
+            + "rows still run on both."
+    }
+
     /// The sentence a skipped scenario prints. Naming the shell and the package is the
     /// difference between a skip a reader can act on and one they cannot.
     public var skipReason: String {

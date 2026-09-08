@@ -481,10 +481,29 @@ public final class FakeSSHD: @unchecked Sendable {
     /// `--version` printing an error and exiting **0** (`SQ-002`), which is the trap a
     /// probe keyed on the exit status falls into. A GNU profile gets no shim at all and
     /// runs the real `find`.
+    ///
+    /// The same directory carries the profile's **clock** where `clockOffset` is not zero
+    /// (`SQ-054`). Docker has no time namespace, so no container can be made to disagree
+    /// with our clock and no testbed service ever will; a shimmed `date` is the only way a
+    /// skewed server can be run at all, and `H4` is the only coverage that case will ever
+    /// get. A profile at offset zero gets no `date` shim and runs the real one.
     func shimmedPATH(_ base: String) throws -> String {
-        guard profile.findFlavour != .gnu else { return base }
+        // Only a **busybox** profile is shimmed. A `.gnu` or `.bsd` profile runs this box's
+        // own `find`, which is the whole point of running the sweep against a real one - and
+        // shimming either of them would answer `find: unrecognized: -cmin` for a flavour that
+        // takes it. Where the box's `find` is not the flavour the profile claims, the
+        // scenario skips by name (`HostTools.flavourTakingCmin`, `SQ-081`); it never
+        // runs against a shim pretending to be findutils.
+        let needsFindShim: Bool
+        switch profile.findFlavour {
+        case .busybox, .busyboxNoCmin: needsFindShim = true
+        case .gnu, .bsd: needsFindShim = false
+        }
+        guard needsFindShim || profile.clockOffset != 0 else { return base }
         let bin = directory.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        if profile.clockOffset != 0 { try writeClockShim(into: bin) }
+        guard needsFindShim else { return "\(bin.path):\(base)" }
         let script = """
             #!/bin/sh
             # BusyBox 1.36.1's `find`, as measured on `alp` (SQ-001, SQ-002, SQ-003).
@@ -498,7 +517,7 @@ public final class FakeSSHD: @unchecked Sendable {
                   echo "find: unrecognized: --version" >&2; exit 0 ;;
               esac
             done
-            exec /usr/bin/find "$@"
+            exec \(Self.realFindPath) "$@"
             """
         let path = bin.appendingPathComponent("find")
         try script.write(to: path, atomically: true, encoding: .utf8)
@@ -514,6 +533,45 @@ public final class FakeSSHD: @unchecked Sendable {
                 [.posixPermissions: 0o755], ofItemAtPath: bbPath.path)
         }
         return "\(bin.path):\(base)"
+    }
+
+    /// The box's own `find`, which every shim ends up delegating to. Spelled absolutely
+    /// because the shim puts itself first on the `PATH` and would otherwise recurse.
+    static let realFindPath: String = ["/usr/bin/find", "/bin/find"].first {
+        FileManager.default.isExecutableFile(atPath: $0)
+    } ?? "/usr/bin/find"
+
+    /// The profile's own clock, as a `date` on the session's `PATH` (`SQ-054`).
+    ///
+    /// Only `date +%s` is shifted, because that is the only spelling anything of ours ever
+    /// runs: the sweep script prints `"$(date +%s)"` before its first `find` (section 6.4)
+    /// and the helper deployment asks for the same thing. Every other invocation falls
+    /// through to the real `date` rather than being answered with an invention.
+    ///
+    /// The offset is applied to the *reading*, not to the box: nothing here touches this
+    /// machine's clock, so a skewed profile and an unskewed one can run side by side in
+    /// one test, which is exactly what `H4` needs to show that the absolute values do not
+    /// enter the window at all.
+    private func writeClockShim(into bin: URL) throws {
+        let real = ["/bin/date", "/usr/bin/date"].first {
+            FileManager.default.isExecutableFile(atPath: $0)
+        } ?? "/bin/date"
+        let offset = Int(profile.clockOffset.rounded())
+        let script = """
+            #!/bin/sh
+            # SQ-054: this server's clock is \(offset) s from ours. A container could never
+            # be made to say this - Docker has no time namespace - so the model is the
+            # only place a skewed server exists.
+            for __a in "$@"; do
+              case "$__a" in
+                +%s) echo $(( $(\(real) +%s) + (\(offset)) )); exit 0 ;;
+              esac
+            done
+            exec \(real) "$@"
+            """
+        let path = bin.appendingPathComponent("date")
+        try script.write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
     }
 
     /// What the account's rc file does, as shell text.
@@ -562,5 +620,147 @@ public struct ForceCommandRefusal: Error {
         parser.append(bytes)
         parser.finish()
         return parser.looksLikeForceCommandRefusal
+    }
+}
+
+/// The account as the **login-shell snapshot** meets it (DESIGN.md section 6.1).
+///
+/// A generated `HOME` whose rc files print the profile's noise and export a `PATH` and an
+/// `SSH_AUTH_SOCK`, so `LoginShellSnapshotReader` can be run against a real shell shape.
+public struct LoginShellAccount: Sendable {
+    public let shell: LoginShell
+    /// The shell `LoginShellSnapshotReader.take(shell:)` is pointed at - what `getpwuid`
+    /// would have answered for this account.
+    public let shellPath: String
+    public let home: String
+    /// The rc file the noise and the two variables were written into, named so a failure
+    /// says which mechanism did not fire.
+    public let rcFile: String
+    /// `HOME`, and `ZDOTDIR` where the shell needs one. Handed to `take` as its base
+    /// environment, so nothing of this box's own shell leaks into the answer.
+    public let environment: [String: String]
+    public let expectedPATH: String
+    public let expectedAuthSock: String?
+    /// The bytes the rc file prints before anything of ours (`SQ-015`).
+    public let noise: String
+    /// `SQ-016`: the rc file leaves a background child holding stdout, so EOF never
+    /// arrives and only the closing sentinel can end the read.
+    public let holdsStdoutOpen: Bool
+}
+
+extension FakeSSHD {
+
+    /// Builds the account's login-shell shape: an rc file that prints the profile's noise
+    /// and exports a `PATH` and an `SSH_AUTH_SOCK` (DESIGN.md section 6.1, `SQ-015`).
+    ///
+    /// A **different mechanism** from the exec channel's above, deliberately. An exec
+    /// channel runs `sh -s` non-interactively, where bash reads `BASH_ENV`; the snapshot
+    /// runs `<shell> -ilc`, an *interactive login* shell, where bash reads
+    /// `.bash_profile`, zsh reads `.zshenv` under `ZDOTDIR` and dash reads `.profile` -
+    /// and `BASH_ENV` is not consulted at all. The bytes are the same and they arrive in
+    /// the same place, in front of the sentinel, which is the whole of `SQ-015`.
+    ///
+    /// Nothing is faked if the mechanism does not fire: the same rc file exports the
+    /// `PATH` the caller then asserts on, so a shell that never read it fails the scenario
+    /// rather than passing it with an empty channel.
+    ///
+    /// `fish` and `tcsh` throw `ServerModelUnavailable`: their rc syntax is not this
+    /// POSIX body, and neither shell is on this box, so those rows skip **by name**.
+    public func loginShellAccount(
+        path: String = "/opt/rc/bin:/usr/bin:/bin",
+        sshAuthSock: String? = "/tmp/sshdrive-rc-agent.sock"
+    ) throws -> LoginShellAccount {
+        if let reason = FakeSSHD.unavailabilityReason(for: profile) {
+            throw ServerModelUnavailable(reason: reason)
+        }
+        let shell = profile.loginShell
+        let executable: ScriptShell
+        switch shell {
+        case .bashQuiet, .bashNoisy, .bashBackgroundHolder: executable = .bash
+        case .zsh: executable = .zsh
+        case .busyboxAsh: executable = .busyboxAsh
+        case .dash, .none: executable = .dash
+        case .fish, .tcsh:
+            throw ServerModelUnavailable(
+                reason: FakeSSHD.unavailabilityReason(for: profile)
+                    ?? "\(shell.rawValue) is not installed on this box; the row is skipped, not faked")
+        }
+        guard let shellPath = executable.executablePath else {
+            throw ServerModelUnavailable(reason: executable.skipReason)
+        }
+
+        let home = directory.appendingPathComponent("login-home-\(shell.rawValue)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+
+        var body = ""
+        if !shell.rcNoise.isEmpty {
+            body += "printf '%s' \(loginQuoted(shell.rcNoise))\n"
+        }
+        if shell.holdsStdoutOpen {
+            // `SQ-016`: the background child inherits the shell's stdout - the pipe the
+            // reader is on - so EOF never arrives however long it waits.
+            body += "( sleep 120 & )\n"
+        }
+        body += "PATH=\(loginQuoted(path)); export PATH\n"
+        if let sshAuthSock {
+            body += "SSH_AUTH_SOCK=\(loginQuoted(sshAuthSock)); export SSH_AUTH_SOCK\n"
+        } else {
+            body += "unset SSH_AUTH_SOCK\n"
+        }
+
+        var environment: [String: String] = [
+            "HOME": home.path,
+            "PATH": "/usr/bin:/bin",
+        ]
+        let rcName: String
+        switch shell {
+        case .bashQuiet, .bashNoisy, .bashBackgroundHolder:
+            // An interactive login bash reads `.bash_profile` and not `.bashrc`; the
+            // testbed's accounts keep the noise in `.bashrc` and source it from there,
+            // which is the ordinary Debian shape and the one `SQ-015` names.
+            rcName = ".bashrc"
+            try body.write(to: home.appendingPathComponent(".bashrc"),
+                           atomically: true, encoding: .utf8)
+            try ". \"$HOME/.bashrc\"\n".write(
+                to: home.appendingPathComponent(".bash_profile"),
+                atomically: true, encoding: .utf8)
+        case .zsh:
+            // `.zshenv` is read for *every* zsh invocation, which is why a zsh account's
+            // noise reaches even a non-interactive channel (`SQ-015`).
+            rcName = ".zshenv"
+            environment["ZDOTDIR"] = home.path
+            try body.write(to: home.appendingPathComponent(".zshenv"),
+                           atomically: true, encoding: .utf8)
+        case .dash, .none, .busyboxAsh:
+            rcName = ".profile"
+            try body.write(to: home.appendingPathComponent(".profile"),
+                           atomically: true, encoding: .utf8)
+        case .fish, .tcsh:
+            throw ServerModelUnavailable(reason: "unreachable: handled above")
+        }
+
+        return LoginShellAccount(
+            shell: shell, shellPath: shellPath, home: home.path,
+            rcFile: home.appendingPathComponent(rcName).path,
+            environment: environment, expectedPATH: path, expectedAuthSock: sshAuthSock,
+            noise: shell.rcNoise, holdsStdoutOpen: shell.holdsStdoutOpen)
+    }
+
+    /// A real directory with nothing in it, for a script that has to run with **no tools
+    /// on its `PATH`** (`SQ-067`).
+    ///
+    /// A server may have neither `sha256sum` nor `shasum`, which is why the helper's
+    /// verification falls back to the remote file's size plus running the binary with
+    /// `--version` (section 6.4 tier 2). The model cannot uninstall coreutils, so it takes
+    /// the tools off `PATH` instead and the shell really does find none - *inferred*
+    /// staging of a **measured** row (2026-09-05), and the only kind this box can offer.
+    public func emptyToolDirectory() throws -> String {
+        let empty = directory.appendingPathComponent("no-tools")
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        return empty.path
+    }
+
+    private func loginQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

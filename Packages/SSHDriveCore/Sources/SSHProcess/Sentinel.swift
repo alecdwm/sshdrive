@@ -52,11 +52,28 @@ public struct SentinelParser: Sendable {
     private var closed = false
     private var prefixBytes: [UInt8] = []
     private var payloadBytes: [UInt8] = []
+    /// The login-shell snapshot's command opens with a `printf '\000'` of its own before
+    /// the sentinel (section 6.1); an exec channel's script does not.
+    private let expectsALeadingNUL: Bool
+    private var settledAnyPrefixBytes = false
 
-    public init(sentinel: Sentinel, prefixLimit: Int = 4096) {
+    /// - Parameter expectsALeadingNUL: true for the login-shell snapshot, whose command is
+    ///   `NUL sentinel NUL … sentinel NUL` (section 6.1). That first NUL is **ours**, not
+    ///   the account's, and it is normally still next to the marker when the marker is
+    ///   found, where it is stripped below. A read that ends exactly on the sentinel's
+    ///   last hex digit settles it into the prefix instead, and `sshdrive doctor` then
+    ///   tells the user their login shell printed one byte - naming an rc file that
+    ///   printed nothing at all. Found by `J14`, 2026-09-08.
+    ///
+    ///   It is a flag rather than a rule for every parser because a NUL really can be the
+    ///   first byte of an exec channel's answer: a `ForceCommand internal-sftp` account
+    ///   replies with an `SSH_FXP_VERSION` packet, whose first byte is `0`, and
+    ///   `looksLikeSFTPVersion` reads exactly those bytes (`SQ-013`).
+    public init(sentinel: Sentinel, prefixLimit: Int = 4096, expectsALeadingNUL: Bool = false) {
         self.sentinel = sentinel
         self.prefixLimit = prefixLimit
         self.marker = sentinel.marker
+        self.expectsALeadingNUL = expectsALeadingNUL
     }
 
     /// True once the opening sentinel has been seen; everything in `payload` is the
@@ -125,6 +142,13 @@ public struct SentinelParser: Sendable {
     }
 
     private mutating func addPrefix(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        var bytes = bytes
+        if expectsALeadingNUL, !settledAnyPrefixBytes, bytes.first == 0 {
+            // Ours: the snapshot's opening `printf '\000'`. See the initializer.
+            bytes.removeFirst()
+        }
+        settledAnyPrefixBytes = true
         guard prefixBytes.count < prefixLimit, !bytes.isEmpty else { return }
         prefixBytes.append(contentsOf: bytes.prefix(prefixLimit - prefixBytes.count))
     }

@@ -15,6 +15,10 @@ import SSHProcess
 /// fetch. This actor holds the schedule and the tier, calls into the runtime for the parts
 /// that touch the index, and holds nothing while it waits.
 public actor ChangeDetector {
+    /// How often `settleHelper` looks again while `add` is waiting. On the injected
+    /// clock, so the wait is bounded in model time and costs a scenario nothing (`P9`).
+    public static let settlePollSeconds: Double = 0.1
+
     public let locationID: String
     private let runtime: LocationRuntime
     private let environment: AgentEnvironment
@@ -262,7 +266,12 @@ public actor ChangeDetector {
             full = true
             reason = "30-minute insurance sweep"
         }
-        let started = Date()
+        // The cycle's own stopwatch. `environment.clock` rather than `Date()` because a
+        // cycle's duration is what paces the next interval (section 6.4), and a scenario
+        // that asserts the pacing has to be able to make a cycle take 56.8 s without
+        // taking 56.8 s (`H10`). `SystemAgentClock.now()` *is* `Date().timeIntervalSince1970`,
+        // so nothing about a shipping agent changes.
+        let started = environment.clock.now()
 
         // Section 6.4's guard needs the pending set, and section 6.5's root set needs the
         // materialized one. Both are the system's answers, taken before anything is listed.
@@ -361,7 +370,7 @@ public actor ChangeDetector {
             "tier": tierUsed.rawValue,
             "full": full,
             "reason": reason,
-            "seconds": Date().timeIntervalSince(started),
+            "seconds": environment.clock.now() - started,
             "changed": application.changed,
             "deleted": application.deleted,
             "held": application.held,
@@ -373,8 +382,8 @@ public actor ChangeDetector {
         lastOutcome = outcome
         // Only a cycle that actually went to the server paces the schedule; a tier-2 cycle
         // that did nothing but refresh the root set is not evidence of a slow server.
-        if !handledByHelper || full {
-            lastCycleSeconds = Date().timeIntervalSince(started)
+        if PollSchedule.paces(handledByHelper: handledByHelper, ranFullSweep: full) {
+            lastCycleSeconds = environment.clock.now() - started
         }
         await runtime.recordWatchCycle(outcome)
         return application
@@ -477,22 +486,28 @@ public actor ChangeDetector {
     /// choosing tier 2 and the binary arriving. Bounded by `HelperSettle`: a server that
     /// never answers costs `add` a few seconds, and the report then says `deploying`
     /// rather than blaming the server (2026-09-05).
+    ///
+    /// The elapsed time and the poll interval are both the injected clock's (`P9`), so
+    /// the bound is a value a scenario can drive rather than six real seconds in a test
+    /// suite: `SQ-077` says the deployment and its stream end with the connection, which
+    /// is precisely the case where nothing settles and this has to give up.
     @discardableResult
     public func settleHelper(timeout: TimeInterval = HelperSettle.addSeconds) async -> Bool {
-        let started = Date()
+        let clock = environment.clock
+        let started = clock.now()
         while true {
             var running = false
             if let helper { running = await helper.state == .running }
             let step = HelperSettle.step(
                 tierIsHelper: ladder.tier == .helper, streamRunning: running,
-                refusal: helperNote, elapsed: Date().timeIntervalSince(started),
+                refusal: helperNote, elapsed: clock.now() - started,
                 timeout: timeout)
             switch step {
             case .done: return running
             case .giveUp: return false
             case .wait:
                 if !helperStarting { await ensureHelper() }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                await clock.sleep(seconds: ChangeDetector.settlePollSeconds)
             }
         }
     }
@@ -645,21 +660,25 @@ public actor ChangeDetector {
         // a String pipeline end to end (section 9.2). It is listed at tier 0 in the same
         // cycle instead, so it is watched rather than dropped; nothing about the sweep is
         // weakened for the rest of the tree (2026-09-04, section 13).
-        let shallow = split.shallow.compactMap(LocationRuntime.utf8Root)
-        let recursive = split.recursive.compactMap(LocationRuntime.utf8Root)
-        let awkward = (split.shallow + split.recursive).filter { LocationRuntime.utf8Root($0) == nil }
+        // `SweepPlan.partitionRoots` is the rule itself (`SQ-055`, `SQ-007`), so the sweep
+        // scenarios and the agent make the same split of the same roots.
+        let partition = SweepPlan.partitionRoots(
+            shallow: split.shallow, recursive: split.recursive)
+        let shallow = partition.shallow
+        let recursive = partition.recursive
+        let awkward = partition.tierZero
 
         // The window is elapsed time on **our** clock applied to the **server's** stamp,
         // never the Mac's wall clock measured against a server timestamp: the second form
         // folds the whole clock difference into the window, and a server a few minutes
-        // behind would then be swept with a window of nothing (section 6.4).
+        // behind would then be swept with a window of nothing (section 6.4). The
+        // arithmetic is `SweepWindow.forCycle`'s, where `H4` exercises it.
         let stored = await runtime.sweepServerTime()
-        let takenAt = await runtime.sweepServerTimeTakenAt() ?? Date().timeIntervalSince1970
-        let elapsed = max(0, Date().timeIntervalSince1970 - takenAt)
-        let serverNow = (stored ?? 0) + Int64(elapsed.rounded(.up))
-        let window = SweepWindow.compute(
-            lastAppliedServerTime: stored.map { $0 + clockSkewSeconds },
-            serverNow: serverNow, full: full)
+        let takenAt = await runtime.sweepServerTimeTakenAt()
+        let window = SweepWindow.forCycle(
+            lastAppliedServerTime: stored, takenAt: takenAt,
+            now: Date().timeIntervalSince1970,
+            clockSkewSeconds: clockSkewSeconds, full: full)
 
         let flavour: FindFlavour
         switch probe?.findFlavour {
@@ -699,20 +718,23 @@ public actor ChangeDetector {
 
     // MARK: Status (section 8.1)
 
-    public func status() async -> [String: Any] {
+    /// `now` is a parameter so a scenario can ask what the schedule says at a moment of
+    /// its choosing - eleven minutes after the last touch, say - rather than living
+    /// through it (`H9`, `H10`). Every caller in the agent takes the default.
+    public func status(now: Double = Date().timeIntervalSince1970) async -> [String: Any] {
         var out: [String: Any] = [
             "tier": ladder.tier.rawValue,
             "watchMode": watchMode.rawValue,
             "cycles": cycles,
             "intervalSeconds": PollSchedule.interval(
-                lastTouch: lastTouch, now: Date().timeIntervalSince1970,
+                lastTouch: lastTouch, now: now,
                 lastCycleSeconds: lastCycleSeconds),
-            "active": PollSchedule.isActive(lastTouch: lastTouch, now: Date().timeIntervalSince1970),
+            "active": PollSchedule.isActive(lastTouch: lastTouch, now: now),
             "sweepUsesMmin": ladder.sweepUsesMmin,
             "paused": paused,
         ]
         if let backoff = PollSchedule.backoffNote(
-            lastTouch: lastTouch, now: Date().timeIntervalSince1970,
+            lastTouch: lastTouch, now: now,
             lastCycleSeconds: lastCycleSeconds)
         {
             out["intervalNote"] = backoff
@@ -722,7 +744,7 @@ public actor ChangeDetector {
         // Section 6.4's climb-back, so `status` says a downgrade is temporary and when it
         // ends rather than reading as a verdict (2026-09-08).
         if let expires = ladder.transientHoldExpiresAt {
-            let remaining = max(0, (expires - Date().timeIntervalSince1970).rounded(.up))
+            let remaining = max(0, (expires - now).rounded(.up))
             out["retryingHigherTierInSeconds"] = remaining
             // The note the failure wrote counted down from the moment it happened; what a
             // reader wants is the countdown from now.

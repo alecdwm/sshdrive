@@ -30,6 +30,9 @@ public enum QuirkValue: Equatable, Sendable {
     case int(Int)
     case duration(Double)
     case text(String)
+    /// A measured *schedule* - the retry intervals of `MQ-014` and `MQ-035`, which were
+    /// recorded one interval at a time and are the only shape of value that is a list.
+    case durations([Double])
 }
 
 /// One measurement of one quirk: which versions it covers, what was seen, and where the
@@ -107,17 +110,37 @@ public struct QuirkTable {
         return value
     }
 
+    public func text(_ id: QuirkID) -> String {
+        guard case .text(let value) = value(id) else { fatalError("quirk \(id) is not text") }
+        return value
+    }
+
+    public func durations(_ id: QuirkID) -> [Double] {
+        guard case .durations(let value) = value(id) else {
+            fatalError("quirk \(id) is not a schedule")
+        }
+        return value
+    }
+
     public var ids: [QuirkID] { quirks.keys.sorted { $0.rawValue < $1.rawValue } }
+
+    /// The statement the catalogue carries, for a failure message that names the rule
+    /// rather than the number.
+    public func statement(_ id: QuirkID) -> String { quirks[id]?.statement ?? "" }
 }
 
 extension QuirkTable {
     /// Both columns, for the rows nothing has been measured to differ on.
-    private static let bothVersions: [MacOSVersion] = [.v26_4, .v26_6]
+    static let bothVersions: [MacOSVersion] = [.v26_4, .v26_6]
 
-    /// The rows step 1.3 needs: enumeration, the working set, anchors and the throttle.
-    /// Statements are abbreviations of `docs/quirks/macos.md`, which is the catalogue;
+    /// The whole catalogue, in the order `docs/quirks/macos.md` lists its sections.
+    /// Statements are abbreviations of that file, which is the catalogue;
     /// `results.md` is the source of truth behind both.
-    public static let macOSCatalogue: [Quirk] = [
+    public static let macOSCatalogue: [Quirk] =
+        enumerationQuirks + writeQuirks + evictionQuirks + attributeQuirks + lifecycleQuirks
+
+    /// The rows step 1.3 needed: enumeration, the working set, anchors and the throttle.
+    static let enumerationQuirks: [Quirk] = [
         Quirk(
             id: .enumerateOnceEver,
             statement:

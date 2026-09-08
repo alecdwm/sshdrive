@@ -40,6 +40,7 @@ public final class AgentHarness: @unchecked Sendable {
     public init(
         clock: VirtualAgentClock = VirtualAgentClock(),
         launchdProbesBeforeGone: Int = 0,
+        secrets: AgentSecrets? = nil,
         configure: (inout AgentEnvironment) -> Void = { _ in }
     ) throws {
         container = FileManager.default.temporaryDirectory
@@ -80,7 +81,11 @@ public final class AgentHarness: @unchecked Sendable {
             clock: clock)
         configure(&environment)
         self.environment = environment
-        self.manager = DomainManager(environment: environment)
+        // Section 4.2's askpass broker and keychain. The default one is built from the
+        // environment's own store with no askpass program and no `ssh` to resolve with,
+        // which is right for every scenario that never spawns one; a scenario that drives
+        // `add` end to end hands in its own (see `AddFlowScenarios`).
+        self.manager = DomainManager(environment: environment, secrets: secrets)
     }
 
     /// Deliberately **not** `GroupContainer.resetLocator()`.
@@ -144,6 +149,19 @@ public final class AgentHarness: @unchecked Sendable {
     ) async throws -> [String: Any] {
         let data = try await AgentCommandContext.with(manager) {
             try await ControlCommands.run(command: command, arguments: arguments)
+        }
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    /// The same call with a terminal attached: `add` and a re-keying `set` are the two
+    /// commands that relay a prompt to the CLI (section 4.2), and `TerminalRelaying` is
+    /// the seam they reach it through.
+    public func control(
+        _ command: String, _ arguments: [String: String], relay: any TerminalRelaying
+    ) async throws -> [String: Any] {
+        let data = try await AgentCommandContext.with(manager) {
+            try await ControlCommands.run(
+                command: command, arguments: arguments, relay: relay)
         }
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }

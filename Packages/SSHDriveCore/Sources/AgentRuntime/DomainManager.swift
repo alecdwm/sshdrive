@@ -376,7 +376,15 @@ public actor DomainManager {
     ///
     /// Runs the locations concurrently, and each `-O exit` is bounded by `Spawn`'s own
     /// timeout, so a server that has stopped answering cannot hold the exit open.
-    public func shutdownAll() async {
+    ///
+    /// - Returns: what it took down, so `P4` can assert from the agent's side that the
+    ///   shutdown reached **every** location and then ran the argv sweep - `SQ-043`'s
+    ///   second master, the one with no socket at all, is invisible to anything else, and
+    ///   `SQ-044`'s master whose socket was already unlinked cannot be reached by
+    ///   `-O exit`. Counting is all a caller may do with it: the kill itself is
+    ///   `ControlSocket`'s, and `K5`/`K6` are where it is defended.
+    @discardableResult
+    public func shutdownAll() async -> ShutdownSummary {
         let detectors = Array(self.detectors.values)
         let evictors = Array(self.evictors.values)
         let gates = Array(self.gates.values)
@@ -404,6 +412,23 @@ public actor DomainManager {
         }
         Log.agent.notice(
             "shut down \(runtimes.count, privacy: .public) location(s) before exiting")
+        return ShutdownSummary(
+            locations: runtimes.count, gates: gates.count, detectors: detectors.count,
+            evictors: evictors.count, straySweepRan: true, strayMastersKilled: strays.count)
+    }
+
+    /// What one shutdown took down (`P4`).
+    public struct ShutdownSummary: Sendable, Equatable {
+        public var locations: Int
+        public var gates: Int
+        public var detectors: Int
+        public var evictors: Int
+        /// Whether the argv sweep of section 6.1 ran at all. It is unconditional and runs
+        /// **after** every transport is down, which is the only place it is safe: a
+        /// master this agent still means to use looks exactly like a stray one
+        /// (`SQ-043`).
+        public var straySweepRan: Bool
+        public var strayMastersKilled: Int
     }
 
     // MARK: Section 6.1's sleep and wake, section 6.3's path gate, section 4.2's re-arm

@@ -25,6 +25,10 @@ final class ScenarioHarness {
     /// the shipping one - which is how `A2` proves it bites.
     var workingSetEnumeratorOverride: ((ProviderService) -> ProviderEnumerating)?
 
+    /// Set before `addDomain()` to answer the trash question the way version 0.1.0 did,
+    /// which is how `B1` proves the `.Trash` hang bites.
+    var trashAnswerOverride: ProviderFailure?
+
     init(macOS version: MacOSVersion = .v26_4, displayName: String = "nas") throws {
         self.locationID = UUID().uuidString
         self.displayName = displayName
@@ -47,16 +51,27 @@ final class ScenarioHarness {
 
     /// `add(domain)`: the system creates the domain, launches an instance and asks the
     /// working-set enumerator where to start.
+    ///
+    /// The bundle is installed and launched first, because `MQ-061` makes the plugin
+    /// registration the precondition for a domain existing at all.
     @discardableResult
-    func addDomain() -> ModelDomain {
+    func addDomain(nickname: String? = nil, supportsSyncingTrash: Bool? = nil) throws -> ModelDomain {
+        // A scenario that stages its own install - `P3`'s quarantined bundle - keeps it.
+        if system.launchd.bundleGeneration == 0 {
+            system.launchd.installBundle(quarantined: false)
+            system.launchd.launchApp()
+        }
         let locationID = self.locationID
-        let displayName = self.displayName
+        let displayName = nickname ?? self.displayName
         let clock = self.clock
         let agent = self.agent
         let override = self.workingSetEnumeratorOverride
-        let domain = system.addDomain(identifier: locationID, displayName: displayName) {
-            modelDomain in
+        let domain = try system.addDomain(
+            identifier: locationID, displayName: displayName,
+            supportsSyncingTrash: supportsSyncingTrash
+        ) { [trashAnswerOverride] modelDomain in
             modelDomain.workingSetEnumeratorOverride = override
+            modelDomain.trashAnswerOverride = trashAnswerOverride
             let reader = IndexReaderStore(
                 locationID: locationID, rootDisplayName: displayName, clock: clock)
             return ProviderService(
@@ -65,6 +80,45 @@ final class ScenarioHarness {
         }
         self.domain = domain
         return domain
+    }
+
+    /// Finder, the user.
+    var finder: Finder { domain.finder }
+
+    /// A directory appearing on the server and reaching the index.
+    @discardableResult
+    func serverCreatesDirectory(_ name: String, identifier: String? = nil, parent: String? = nil)
+        throws -> String
+    {
+        let id = identifier ?? "id-\(name)"
+        try agent.indexRow(
+            identifier: id, name: name, parent: parent ?? IndexWriter.rootIdentifier,
+            isDirectory: true)
+        return id
+    }
+
+    /// A file appearing on the server inside a directory the index already knows.
+    @discardableResult
+    func serverCreates(_ name: String, in parent: String, identifier: String? = nil) throws -> String {
+        let id = identifier ?? "id-\(parent)-\(name)"
+        try agent.indexRow(identifier: id, name: name, parent: parent)
+        return id
+    }
+
+    /// The row for the location root, which the index carries permanently and which the
+    /// working set delivers like any other (`MQ-030`'s pin on `/` needs it).
+    func touchRootRow() throws {
+        _ = try writer.appendAnchor(identifier: IndexWriter.rootIdentifier, kind: .modified)
+    }
+
+    func id(_ raw: String) -> ProviderItemIdentifier { ProviderItemIdentifier(raw) }
+
+    /// A row that has stopped carrying the user's tags - section 5.4 as it was written
+    /// before S4 corrected it. `L4`'s bite-proof needs an item that returns no `tagData`.
+    func forgetStoredTags(of identifier: String) throws {
+        guard var row = try writer.item(identifier: identifier) else { return }
+        row.xattrs = nil
+        try writer.upsert(row)
     }
 
     // MARK: The server, as far as suite A cares

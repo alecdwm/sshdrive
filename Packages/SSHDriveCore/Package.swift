@@ -112,7 +112,7 @@ let package = Package(
         // The simulated macOS: a fileproviderd that drives ProviderCore the way the real
         // one drives the extension, with the measured quirks of docs/quirks/macos.md as a
         // per-version table and a virtual clock (docs/testing-architecture.md section 3).
-        .target(name: "SystemModel", dependencies: ["Logging", "Config", "Index", "ProviderCore", "XPCProtocols"]),
+        .target(name: "SystemModel", dependencies: ["Logging", "AgentCore", "Config", "Index", "ProviderCore", "SFTP", "XPCProtocols"]),
 
         // The simulated server: ServerProfile values for the testbed's twelve services and
         // for the owner's own two servers, a wire-level SFTP v3 server over ByteStream, an
@@ -123,13 +123,19 @@ let package = Package(
 
         .testTarget(name: "LoggingTests", dependencies: ["Logging"]),
         .testTarget(name: "ProviderCoreTests", dependencies: ["ProviderCore", "Config", "Index", "XPCProtocols"]),
-        .testTarget(name: "SystemModelTests", dependencies: ["SystemModel", "ProviderCore", "Config", "Index", "Logging", "XPCProtocols"]),
+        .testTarget(name: "SystemModelTests", dependencies: ["SystemModel", "AgentCore", "ProviderCore", "Config", "Index", "Logging", "XPCProtocols"]),
         .testTarget(name: "AgentCoreTests", dependencies: ["AgentCore", "Config", "Index", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
         .testTarget(
             name: "AgentRuntimeTests",
             dependencies: [
                 "AgentRuntime", "AgentRuntimeTestSupport", "AgentCore", "Config", "Index",
                 "Logging", "ProviderCore", "SFTP", "SSHProcess", "Secrets", "XPCProtocols",
+                // For the `ServerProfile` values: `N5` reports what a Tailscale SSH
+                // node and an OpenSSH `sftp-server` advertise, and those two extension
+                // sets are `SQ-024`/`SQ-025` as `ServerModel` already holds them. And for
+                // `FakeSFTPServer` itself, which `D10` and `D11` put a real
+                // `RealSFTPTransport` on, through `FakeTransportLauncher.transportFactory`.
+                "ServerModel",
             ]),
         .testTarget(name: "SFTPTests", dependencies: ["SFTP", "SSHProcess"]),
         .testTarget(name: "XPCProtocolsTests", dependencies: ["XPCProtocols", "Config"]),
@@ -137,7 +143,10 @@ let package = Package(
         .testTarget(name: "IndexTests", dependencies: ["Index", "Config", "XPCProtocols"]),
         .testTarget(name: "SecretsTests", dependencies: ["Secrets", "XPCProtocols"]),
         .testTarget(name: "SSHProcessTests", dependencies: ["SSHProcess", "AgentCore", "SFTP", "Config", "XPCProtocols"]),
-        .testTarget(name: "ServerModelTests", dependencies: ["ServerModel", "AgentCore", "SFTP", "SSHProcess", "Secrets", "Config", "XPCProtocols"]),
+        // `ProviderCore` is for `L8` only: the two bitmasks `ItemDerivation` puts on a row
+        // are `ProviderCapabilities` and `ProviderFileSystemFlags`, and the scenario reads
+        // them by name rather than by raw value.
+        .testTarget(name: "ServerModelTests", dependencies: ["ServerModel", "AgentCore", "ProviderCore", "SFTP", "SSHProcess", "Secrets", "Config", "XPCProtocols"]),
 
     ]
 )

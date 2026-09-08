@@ -21,6 +21,39 @@ public enum AgentLifecycle {
     /// masters down, status 0.
     public static let shutdownGraceSeconds: Double = 20
 
+    /// The status the agent exits with when it is asked to go away: **0**, always.
+    ///
+    /// Section 10: the plist sets `KeepAlive` with `SuccessfulExit` false, so any other
+    /// status - including death by an undefaulted SIGTERM - is read as a crash and
+    /// launchd restarts at once, from whatever bundle sits at the path in that moment,
+    /// which mid-upgrade is the old one about to be deleted (`MQ-062` is what that leaves
+    /// behind).
+    public static let exitStatus: Int32 = 0
+
+    /// The one shutdown: every master down, then exit 0.
+    ///
+    /// `sshdrive agent stop`, the cask's TERM and the upgrade handover are three ways of
+    /// asking the same question and must not be three answers. Exiting without the
+    /// shutdown leaves an `ssh -N` per location holding a connection to a server, with a
+    /// control socket the next start unlinks out from under it (section 8, section 6.1;
+    /// docs/spikes/results.md 2026-09-05) - and the master a restarted location holds
+    /// without a socket at all (`SQ-043`) is then reachable by nothing, since `-O exit`
+    /// needs the socket (`SQ-044`).
+    ///
+    /// Confidence: the ordering and the status are ours and are measured by `P4`. That
+    /// launchd restarts on a non-zero exit is documented `KeepAlive`/`SuccessfulExit`
+    /// behaviour, and the bundle-replacement half of what that costs is `MQ-062`,
+    /// measured on the VM.
+    @discardableResult
+    public static func shutdownAndExit(
+        reason: String, manager: DomainManager, environment: AgentEnvironment
+    ) async -> DomainManager.ShutdownSummary {
+        Log.agent.notice("\(reason, privacy: .public): shutting down and exiting 0")
+        let summary = await manager.shutdownAll()
+        environment.endpoint.terminate(status: exitStatus)
+        return summary
+    }
+
     /// One second apart, for five minutes. A replacement that never appears - somebody
     /// deleting the app and stopping there - leaves the agent running on the old inode,
     /// which is the right answer: there is nothing to hand over to.

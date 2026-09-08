@@ -172,6 +172,19 @@ public enum LocationCommands {
             // section 4.2's promise that "a location that passes `add` works from the
             // agent" has been demonstrated rather than asserted.
             let runtime = try await AgentCommandContext.manager.runtime(for: created)
+            // `LocationRuntime.start()` deliberately swallows a failed `applyConnection`,
+            // because section 5.6 wants a location whose server is down to mount anyway.
+            // `add` is the one moment where that is wrong: the user is at the terminal,
+            // nothing is mounted yet, and a location added against a root the server does
+            // not have would come back `.serverUnreachable` for ever. Re-running it here
+            // is what puts the `NO_SUCH_FILE` of a mistyped `--remote-path` back in front
+            // of the catch below, which is the only thing that can name the path.
+            //
+            // Confidence: inferred, not measured. Milestone 5 made `start()` non-fatal and
+            // nothing noticed that it had taken this failure away from `add`; before this
+            // line, `add --remote-path /srv/typo` answered "No row for
+            // NSFileProviderRootContainerItemIdentifier." (Q7, 2026-09-08).
+            try await runtime.applyConnection()
             let root = try await runtime.rootDescription()
             let items = try await runtime.enumerateItems(
                 container: IndexWriter.rootIdentifier, pageToken: nil)
@@ -191,27 +204,12 @@ public enum LocationCommands {
                 "resolution": display.lines.map(\.text),
                 "jumpChain": display.jumpChain.map(\.host),
             ]
-            // Section 6.4: `add` "states this plainly in its output, after the probe has
-            // chosen the directory so the message names the real one". It is said before
-            // the upload happens, and before the report that describes its result.
-            if let sentence = await helperNotice(runtime: runtime, location: created) {
-                report["helperNotice"] = sentence
-                relay?.note(sentence)
-            }
-            // The helper is deployed by the first change-detection cycle, which starts
-            // with the location. `add` prints one capability report and the user reads it
-            // as the truth about this server, so it waits - bounded - for that first
-            // attempt to settle. Without this the report described a sweep and blamed the
-            // server for it, ten seconds before `status` said `helper 0.1.0` (2026-09-05,
-            // sections 8.1 and 6.4).
-            if let detector = await AgentCommandContext.manager.detector(locationID: created.id) {
-                await detector.settleHelper()
-            }
-            if let capability = try? await capabilityReport(
-                location: created, runtime: runtime, forceProbe: false)
-            {
-                report["capabilities"] = capability.asJSON
-            }
+            let first = await firstDeploymentReport(
+                location: created, runtime: runtime,
+                detector: await AgentCommandContext.manager.detector(locationID: created.id),
+                relay: relay)
+            if let sentence = first.helperNotice { report["helperNotice"] = sentence }
+            if let capability = first.capabilities { report["capabilities"] = capability }
             return try ControlCommands.json(report)
         } catch {
             // "`add` must fail cleanly … without leaving a half-added location."
@@ -385,7 +383,8 @@ public enum LocationCommands {
             report["lastError"] = await runtime.lastErrorText() ?? "none"
             report["channels"] = await runtime.channelReport()
             if let capability = try? await capabilityReport(
-                location: location, runtime: runtime, forceProbe: false)
+                location: location, runtime: runtime, forceProbe: false,
+                detector: await AgentCommandContext.manager.detector(locationID: location.id))
             {
                 report["capabilities"] = capability.asJSON
             }
@@ -748,7 +747,8 @@ public enum LocationCommands {
                 ] as [String: Any]
                 row["lastError"] = await runtime.lastErrorText() ?? "none"
                 if let capability = try? await capabilityReport(
-                    location: location, runtime: runtime, forceProbe: forceProbe)
+                    location: location, runtime: runtime, forceProbe: forceProbe,
+                    detector: await AgentCommandContext.manager.detector(locationID: location.id))
                 {
                     row["capabilities"] = capability.asJSON
                 }
@@ -826,9 +826,52 @@ public enum LocationCommands {
             + "`sshdrive set \(location.displayName) helper off`"
     }
 
+    /// The tail of `add`: the upload sentence, the bounded wait for the first deployment,
+    /// and then the one capability report `add` prints (`P9`, `N1`).
+    ///
+    /// It is one function rather than three statements inside `add` because the **order**
+    /// is the rule and the wait is the bound. Section 6.4's notice is printed first - it
+    /// describes what is about to happen and names the directory the probe chose - and the
+    /// report comes after `settleHelper`, which is bounded by `HelperSettle.addSeconds` so
+    /// a server that never answers costs `add` a few seconds and nothing more. Without the
+    /// wait the report described a sweep and blamed the server for it, ten seconds before
+    /// `sshdrive status` said `helper 0.1.0` (2026-09-05; `SQ-077`).
+    ///
+    /// Confidence: the ordering and the bound are ours and are measured here. That a
+    /// deployment can hang rather than refuse is inferred from `SQ-077` - the stream dies
+    /// with its connection - and is why the wait may not be unbounded.
+    @discardableResult
+    public static func firstDeploymentReport(
+        location: Location, runtime: LocationRuntime, detector: ChangeDetector?,
+        relay: (any TerminalRelaying)?
+    ) async -> (helperNotice: String?, capabilities: [String: Any]?) {
+        // Section 6.4: `add` "states this plainly in its output, after the probe has
+        // chosen the directory so the message names the real one". It is said before the
+        // upload happens, and before the report that describes its result.
+        let notice = await helperNotice(runtime: runtime, location: location)
+        if let notice { relay?.note(notice) }
+        // The helper is deployed by the first change-detection cycle, which starts with
+        // the location. `add` prints one capability report and the user reads it as the
+        // truth about this server, so it waits - bounded - for that first attempt to
+        // settle (2026-09-05, sections 8, 8.1 and 6.4).
+        if let detector { await detector.settleHelper() }
+        // The report itself is not relayed: it goes back in the reply and the CLI renders
+        // it (section 8.1's `--json` is the same data). What the terminal is told here is
+        // only what it could not work out for itself, and it is told before the wait.
+        let capabilities = try? await capabilityReport(
+            location: location, runtime: runtime, forceProbe: false, detector: detector)
+        return (notice, capabilities?.asJSON)
+    }
+
     /// Section 8.1's report for a live location, re-probing when asked.
-    private static func capabilityReport(
-        location: Location, runtime: LocationRuntime, forceProbe: Bool
+    ///
+    /// - Parameter detector: the location's change-detection ladder, which is the
+    ///   authority on the running tier and on where tier 2 has got to. Passed in rather
+    ///   than looked up so `add`'s report and `status`'s report are built by the same
+    ///   code from the same source, and so a scenario can hand it one (`N1`, `P9`).
+    public static func capabilityReport(
+        location: Location, runtime: LocationRuntime, forceProbe: Bool,
+        detector: ChangeDetector?
     ) async throws -> CapabilityReport {
         if forceProbe { await runtime.reprobeServer() }
         guard let live = await runtime.serverProbe() else {
@@ -847,7 +890,7 @@ public enum LocationCommands {
         let freeSpace = await runtime.freeSpaceDescription()
         // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
         // to (section 6.4).
-        let status = await AgentCommandContext.manager.detector(locationID: location.id)?.status()
+        let status = await detector?.status()
         return CapabilityReport.make(
             probe: live.probe, extensions: live.extensions, location: location,
             allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,

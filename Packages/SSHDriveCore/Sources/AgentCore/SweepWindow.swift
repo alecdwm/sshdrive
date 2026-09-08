@@ -55,4 +55,46 @@ public struct SweepWindow: Equatable, Sendable {
         let rounded = Int((elapsed + 59) / 60)
         return SweepWindow(minutes: max(1, rounded + 1))
     }
+
+    /// One cycle's window, as the agent computes it: **elapsed time on our own clock,
+    /// applied to the server's own stamp**.
+    ///
+    /// This is the rule `H4` is about, and it is the whole reason `compute` takes two
+    /// server timestamps rather than one server timestamp and a `Date`. The stored stamp
+    /// is the server's `date +%s` from the last sweep whose results were applied; the only
+    /// thing our clock is used for is *how long ago that was*, which both clocks agree on
+    /// however far apart they are set. `serverNow` is therefore reconstructed as
+    /// `stored + elapsed` rather than read off either clock's absolute value, and
+    ///
+    ///     N = ceil((now - takenAt) / 60) + 1
+    ///
+    /// comes out identical on a server five minutes behind, five minutes ahead, and in
+    /// step with us. Measuring a server timestamp against our own wall clock instead folds
+    /// the entire skew into the window: a server running ahead is swept with a window of
+    /// nothing until the 30-minute insurance pass, and one running behind is swept with a
+    /// window twice as wide as it needs (section 6.4).
+    ///
+    /// `clockSkewSeconds` is `sshdrive debug`'s deliberate offset of the stored stamp and
+    /// is zero everywhere else; it is applied to the stamp, never to the elapsed time.
+    ///
+    /// Confidence: the arithmetic is DESIGN.md section 6.4's, and the ordinary path is
+    /// measured (milestone 6 ran real sweeps against `deb` and `alp`). What has never been
+    /// measured against a real server is the skew itself - Docker has no time namespace
+    /// (`SQ-054`) - so a clock-skewed server is modelled and will only ever be modelled.
+    public static func forCycle(
+        lastAppliedServerTime: Int64?,
+        takenAt: TimeInterval?,
+        now: TimeInterval,
+        clockSkewSeconds: Int64 = 0,
+        full: Bool
+    ) -> SweepWindow {
+        guard let stored = lastAppliedServerTime else { return .unbounded }
+        // Never negative: our own clock stepping backwards between two cycles must not
+        // widen the window into the future, which `compute` would read as a clock that
+        // went backwards on the *server*.
+        let elapsed = max(0, now - (takenAt ?? now))
+        let serverNow = stored + Int64(elapsed.rounded(.up))
+        return compute(
+            lastAppliedServerTime: stored + clockSkewSeconds, serverNow: serverNow, full: full)
+    }
 }

@@ -48,5 +48,15 @@ public final class VirtualClock: ProviderClock {
     /// Runs everything already due without moving the clock.
     public func drain() { advance(0) }
 
+    /// Moves to the next thing that is owed and runs it, whenever that is. It is how the
+    /// model waits for work it scheduled - a held `fetchContents`, a retry - without a
+    /// scenario having to know the interval.
+    @discardableResult
+    public func runNextDue() -> Bool {
+        guard let next = pending.map(\.at).min() else { return false }
+        advance(max(next - seconds, 0))
+        return true
+    }
+
     public var scheduledCount: Int { pending.count }
 }

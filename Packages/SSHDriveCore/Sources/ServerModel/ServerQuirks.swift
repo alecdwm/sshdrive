@@ -42,6 +42,10 @@ public enum ServerQuirks {
     public static let findHasNoPortableDashDash: ServerQuirkID = "SQ-007"
     /// A container cannot have its clock skewed, so `clockOffset` is model-only coverage.
     public static let containersShareTheHostClock: ServerQuirkID = "SQ-054"
+    /// A root whose bytes are not valid UTF-8 cannot travel through `set --` at all, so it
+    /// is left out of the `find` argv and listed at tier 0 in the same cycle.
+    /// `FakeSFTPServer.putRawName` is what lets such a name exist in the model at all.
+    public static let nonUTF8RootCannotReachFind: ServerQuirkID = "SQ-055"
 
     // MARK: process lifetime and teardown
 
@@ -63,6 +67,11 @@ public enum ServerQuirks {
     public static let killedWrapperLeavesItsFIFO: ServerQuirkID = "SQ-069"
     /// A `kill -9` of the client leaves no helper on the server within 10 s.
     public static let helperDiesWithTheRelay: ServerQuirkID = "SQ-070"
+    /// One static binary runs on both glibc and musl and self-reports the same digest.
+    public static let oneStaticBinaryOnGlibcAndMusl: ServerQuirkID = "SQ-066"
+    /// A server may have neither `sha256sum` nor `shasum`, and a hash the build embeds in
+    /// a binary cannot be the hash of that binary: `--version` digests its own executable.
+    public static let versionDigestsItsOwnExecutable: ServerQuirkID = "SQ-067"
 
     // MARK: shells and remote scripts
 
@@ -128,6 +137,11 @@ public enum ServerQuirks {
     public static let secondMasterRunsWithoutASocket: ServerQuirkID = "SQ-043"
     /// An unlinked socket cannot be reached by `-O exit` at all.
     public static let unlinkedSocketNeedsThePID: ServerQuirkID = "SQ-044"
+    /// `$TMPDIR` is shared: a `sshdrive-*` name there is not necessarily ours, so every
+    /// candidate for the orphan sweep is `lstat`ed for `S_IFSOCK`.
+    public static let sweepCandidatesMustBeSockets: ServerQuirkID = "SQ-074"
+    /// `pgrep` counts zombies, so liveness is read from the process **state**.
+    public static let zombiesAreCountedByPgrep: ServerQuirkID = "SQ-075"
     /// The host-key question reaches askpass with `SSH_ASKPASS_PROMPT` unset.
     public static let hostKeyQuestionHasNoHint: ServerQuirkID = "SQ-047"
     /// `Enter passphrase for key '%.100s': ` truncates.
@@ -154,14 +168,35 @@ public enum ServerQuirks {
     /// A server can accept both a key and a password for the same account.
     public static let keyAndPasswordTogether: ServerQuirkID = "SQ-064"
 
+    // MARK: the box the tests run on
+
+    /// APFS refuses a filename whose bytes are not valid UTF-8 (`mkdir` answers `EILSEQ`).
+    public static let apfsRefusesNonUTF8Names: ServerQuirkID = "SQ-080"
+    /// macOS's `/usr/bin/find` is BSD, not GNU findutils: `-cmin` yes, `-printf` no.
+    public static let macOSFindIsBSD: ServerQuirkID = "SQ-081"
+    /// XNU takes `p_comm` from the interpreter binary, and a copy of a system shell is
+    /// killed by a launch constraint, so a script stub can never be named `ssh` there.
+    public static let processNameComesFromTheInterpreter: ServerQuirkID = "SQ-082"
+    /// `/etc/zshenv` runs `path_helper`, which rewrites `PATH` after `$ZDOTDIR/.zshenv`.
+    public static let pathHelperRewritesTheZshPATH: ServerQuirkID = "SQ-083"
+    /// A shell prints a job-status report when a foreground child dies by a signal, and
+    /// dash writes it to the command's redirected stderr rather than to its own.
+    public static let shellsReportASignalledChild: ServerQuirkID = "SQ-084"
+    /// `PATH_MAX` is 1024 on macOS and `sun_path` holds 104 bytes.
+    public static let hostPathLimits: ServerQuirkID = "SQ-085"
+    /// A test child inherits an ignored `SIGINT` on Darwin and an ignored `SIGPIPE`
+    /// everywhere, so neither of the two silent signals can kill a shell from a scenario.
+    public static let inheritedIgnoredSignals: ServerQuirkID = "SQ-086"
+
     /// Every id above, in the order a reader of `docs/quirks/servers.md` meets it.
     public static let implemented: [ServerQuirkID] = [
         noBusyboxCmin, busyboxFindVersionExitsZero, noBusyboxPrintf, busyboxCminFailsTheSweep,
         mminMissesCtimeOnly, findTimeTestCostsAStat, findHasNoPortableDashDash,
-        containersShareTheHostClock,
+        containersShareTheHostClock, nonUTF8RootCannotReachFind,
         backgroundChildSurvivesAKill, clientAliveDoesNotReap, tailscaleSharesTheProcessGroup,
         signalKillIs255WithNoStderr, opensshGivesASessionItsOwnGroup, etxtbsyOverARunningBinary,
         mkdirGoesThroughTheUmask, killedWrapperLeavesItsFIFO, helperDiesWithTheRelay,
+        oneStaticBinaryOnGlibcAndMusl, versionDigestsItsOwnExecutable,
         forceCommandAnswersPlainText, noisyRCBreaksTheExternalSFTPServer,
         rcFilesPrintNonInteractively, backgroundChildHoldsStdout, debianShIsDash,
         dashRejectsDoubleSemicolon, dotIsASpecialBuiltin, printfEatsTheSentinelsFirstBytes,
@@ -173,10 +208,14 @@ public enum ServerQuirks {
         proxyJumpNoneBeforeProxyCommandWins, proxyCommandIsPercentExpanded,
         hopNeedsControlPathNone, controlPersistForksAway,
         muxClientNeedsBatchModeAndAFalseProxy, secondMasterRunsWithoutASocket,
-        unlinkedSocketNeedsThePID, hostKeyQuestionHasNoHint, passphrasePromptTruncates,
+        unlinkedSocketNeedsThePID, sweepCandidatesMustBeSockets, zombiesAreCountedByPgrep,
+        hostKeyQuestionHasNoHint, passphrasePromptTruncates,
         stderrHidesTheKeyAgentState, maxSessionsTwoLeavesOneSpare,
         aChannelIsProvedByItsHandshake, aDeadMasterIsNotARefusal,
         promptStringsAreExact, tailscaleAuthenticatesWithNone, keyboardInteractivePromptShape,
         hopsAreToldApartByArgv, keyAndPasswordTogether,
+        apfsRefusesNonUTF8Names, macOSFindIsBSD, processNameComesFromTheInterpreter,
+        pathHelperRewritesTheZshPATH, shellsReportASignalledChild, hostPathLimits,
+        inheritedIgnoredSignals,
     ]
 }

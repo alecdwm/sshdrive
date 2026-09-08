@@ -24,6 +24,23 @@
             return text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        /// The state letter of `/proc/<pid>/stat`, the third field: `R`, `S`, `D`, `Z`,
+        /// `T`. The name is read out of the parenthesised second field first, because a
+        /// process name may contain spaces and parentheses and only the **last** `)` on
+        /// the line ends it - splitting on whitespace from the left is the classic way to
+        /// read the wrong field here.
+        ///
+        /// `SQ-075`: `pgrep` and `kill(pid, 0)` both count a zombie, so "did I kill the
+        /// master?" is unanswerable without this.
+        static func processState(of pid: pid_t) -> String? {
+            guard let text = try? String(contentsOfFile: "\(root)/\(pid)/stat", encoding: .utf8),
+                let close = text.lastIndex(of: ")")
+            else { return nil }
+            let rest = text[text.index(after: close)...]
+                .split(whereSeparator: { $0 == " " || $0 == "\n" })
+            return rest.first.map(String.init)
+        }
+
         /// The real uid on `/proc/<pid>/status`, compared with ours.
         static func isOwnedByThisUser(_ pid: pid_t) -> Bool {
             guard let text = try? String(contentsOfFile: "\(root)/\(pid)/status", encoding: .utf8)

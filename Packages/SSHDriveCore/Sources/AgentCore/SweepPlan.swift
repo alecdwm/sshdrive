@@ -98,6 +98,61 @@ public struct SweepPlan: Sendable, Equatable {
         return batches
     }
 
+    // MARK: Roots that can travel
+
+    /// How one cycle's roots divide between the two tiers (DESIGN.md section 6.4).
+    ///
+    /// `tierZero` is not a failure list. Those roots are watched at the same cadence by
+    /// tier 0's `readdir` in the **same** cycle; all that is lost is the server-side walk.
+    public struct RootPartition: Equatable, Sendable {
+        /// Shallow roots, spelled `./name`, in the order they were given.
+        public var shallow: [String]
+        /// Recursive (pin) roots, spelled `./name`.
+        public var recursive: [String]
+        /// The roots that cannot reach `find`'s argv at all, as raw server bytes.
+        public var tierZero: [Data]
+
+        public init(shallow: [String], recursive: [String], tierZero: [Data]) {
+            self.shallow = shallow
+            self.recursive = recursive
+            self.tierZero = tierZero
+        }
+    }
+
+    /// One root as `find` must see it, or nil where it cannot travel.
+    ///
+    /// Two rules in one place, because they are one decision about one string:
+    ///
+    /// - **Every root is spelled `./name`** (`SQ-007`). `find` has no portable `--`, so a
+    ///   top-level directory named `-name` would be read as an option and take the whole
+    ///   sweep with it; the `./` is what makes a name a path. The prefix comes back on
+    ///   every hit and is stripped before the path reaches `RelativePath`.
+    /// - **A root whose bytes are not valid UTF-8 cannot travel at all** (`SQ-055`).
+    ///   `set --` is a String pipeline end to end (section 9.2): `RemoteScript` builds one
+    ///   `set --` line out of `[String]`, so such a root has no spelling that survives the
+    ///   trip. It is left out of the argv and listed at tier 0 in the same cycle instead.
+    ///
+    /// The conversion is `String(data:encoding:)` and never `String(decoding:as:)`: the
+    /// second one *succeeds* on invalid bytes by substituting U+FFFD, and a root spelled
+    /// with a replacement character names a directory that exists on no server. `find`
+    /// then reports `No such file or directory` for it, the real directory is never
+    /// walked, and the root is silently unwatched - which is the bug this returns nil for.
+    ///
+    /// The root itself (empty bytes) is `.`, which is where the script already `cd`ed.
+    public static func argvRoot(_ path: Data) -> String? {
+        if path.isEmpty { return "." }
+        guard let text = String(data: path, encoding: .utf8) else { return nil }
+        return "./" + text
+    }
+
+    /// Splits a cycle's roots into the ones `find` can be given and the ones tier 0 takes.
+    public static func partitionRoots(shallow: [Data], recursive: [Data]) -> RootPartition {
+        RootPartition(
+            shallow: shallow.compactMap(argvRoot),
+            recursive: recursive.compactMap(argvRoot),
+            tierZero: (shallow + recursive).filter { argvRoot($0) == nil })
+    }
+
     // MARK: Glob escaping
 
     /// Section 6.4: "`-path` takes a glob, so `*`, `?`, `[` and `\` in an excluded path

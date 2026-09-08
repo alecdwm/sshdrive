@@ -224,6 +224,15 @@ public actor ConnectionGate {
     public private(set) var failFastCalls = 0
     public private(set) var waitedCalls = 0
     public private(set) var reconnects = 0
+    /// The bound the last waiting call was held under (`F5`).
+    ///
+    /// Section 6.3 rule 2: a call that arrives during an attempt waits for **that
+    /// attempt's own remaining deadline** - 60 s measured from the spawn of `ssh`, which
+    /// already contains the 15 s `ConnectTimeout` - and never for a fresh 60 s of its
+    /// own. The difference is invisible from the outside on a connect that succeeds, and
+    /// is the whole of the rule on one that does not, so the number is recorded rather
+    /// than inferred.
+    public private(set) var lastWaitBoundSeconds: Double?
 
     /// `sshdrive debug fault <name> --unreachable on`: every transport call and every
     /// connect attempt fails as if the server had gone, without a container being stopped
@@ -316,6 +325,7 @@ public actor ConnectionGate {
                     continue
                 }
                 waitedCalls += 1
+                lastWaitBoundSeconds = seconds
                 do {
                     // Bounded by what is left of the attempt's own 60 s (section 4.2),
                     // never by a timeout of our own added on top of it.
@@ -663,6 +673,7 @@ public actor ConnectionGate {
             report["reconnects"] = reconnects
             report["failFastCalls"] = failFastCalls
             report["waitedCalls"] = waitedCalls
+            if let lastWaitBoundSeconds { report["lastWaitBoundSeconds"] = lastWaitBoundSeconds }
             report["faultUnreachable"] = faultUnreachable
             report["faultHangMilliseconds"] = faultHangMilliseconds
         }

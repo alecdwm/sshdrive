@@ -60,6 +60,24 @@ public struct PollSchedule: Sendable, Equatable {
         return min(max(base, lastCycleSeconds * cycleShare), maximumInterval)
     }
 
+    /// Whether a finished cycle's own duration is allowed to pace the next interval.
+    ///
+    /// Section 6.4's rule - "a cycle may take at most a third of its own interval" - is
+    /// evidence about how long the *server* takes to answer, so only a cycle that went to
+    /// the server may produce it. At tier 2 an ordinary cycle refreshes the root set,
+    /// pushes it to the helper's stdin and touches nothing on the wire; timing that and
+    /// feeding it back into the schedule would pace a location on the cost of a local
+    /// index read. A tier-2 cycle that *did* run the insurance sweep went to the server
+    /// like any other and counts.
+    ///
+    /// Inferred, not measured: the 56.8 s figure below was measured at tier 1 on a real
+    /// install (2026-09-05), and no measurement of a tier-2 cycle's own duration exists.
+    /// The rule is the design's sentence, kept here so it can be asserted rather than
+    /// read out of a condition in the middle of a cycle (`H10`).
+    public static func paces(handledByHelper: Bool, ranFullSweep: Bool) -> Bool {
+        !handledByHelper || ranFullSweep
+    }
+
     /// The sentence `status` prints when the backoff above is in force, or nil when the
     /// location is on its ordinary cadence.
     public static func backoffNote(

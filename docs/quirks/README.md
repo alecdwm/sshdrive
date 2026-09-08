@@ -60,8 +60,8 @@ agree; it runs in the Linux CI job.
 
 | File | Entries |
 |---|---|
-| `macos.md` | 75 |
-| `servers.md` | 71 |
+| `macos.md` | 80 |
+| `servers.md` | 82 |
 
 Ids are **stable, not sequential**: they are allocated as behaviours are found and are never
 reused, so gaps in the numbering are expected and mean nothing.

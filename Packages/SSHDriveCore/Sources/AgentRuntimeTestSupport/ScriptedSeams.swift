@@ -382,12 +382,70 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
 public final class RecordingEndpoint: AgentEndpoint, @unchecked Sendable {
     private let lock = NSLock()
     private var _statuses: [Int32] = []
+    private var _onTerminate: (@Sendable (Int32) -> Void)?
 
     public init() {}
 
     public var statuses: [Int32] { lock.lock(); defer { lock.unlock() }; return _statuses }
 
+    /// Run at the moment the exit is asked for, before the status is visible.
+    ///
+    /// `P4` uses it to assert the **order**: the masters are already down when the agent
+    /// exits, because an exit that came first would leave every location's `ssh -N`
+    /// behind with a control socket the next start unlinks out from under it.
+    public func onTerminate(_ hook: @escaping @Sendable (Int32) -> Void) {
+        lock.lock(); _onTerminate = hook; lock.unlock()
+    }
+
     public func terminate(status: Int32) {
+        lock.lock()
+        let hook = _onTerminate
+        lock.unlock()
+        hook?(status)
         lock.lock(); _statuses.append(status); lock.unlock()
+    }
+}
+
+// MARK: The terminal
+
+/// The tty `add`, `passwd` and `set` relay their prompts and notes to (section 4.2,
+/// section 8), as a recorder.
+///
+/// `P9` asserts the **order** of what `add` printed: the upload sentence before the
+/// report, because the sentence describes what is about to happen and the report
+/// describes what happened.
+public final class RecordingRelay: TerminalRelaying, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _notes: [String] = []
+    private var _answers: [String]
+    private var _onNote: (@Sendable (String) -> Void)?
+
+    public init(answers: [String] = []) { self._answers = answers }
+
+    public var notes: [String] { lock.lock(); defer { lock.unlock() }; return _notes }
+
+    /// Whether one note came before another, by the first line that contains each.
+    public func noteIndex(containing text: String) -> Int? {
+        notes.firstIndex { $0.contains(text) }
+    }
+
+    /// Run as each note is relayed, so a scenario can read the clock at that moment.
+    /// `P9` is about *when* the upload sentence is said - before the wait, not after it -
+    /// and after the fact everything looks the same.
+    public func onNote(_ hook: @escaping @Sendable (String) -> Void) {
+        lock.lock(); _onNote = hook; lock.unlock()
+    }
+
+    public func note(_ text: String) {
+        lock.lock()
+        _notes.append(text)
+        let hook = _onNote
+        lock.unlock()
+        hook?(text)
+    }
+
+    public func prompt(kind: String, prompt text: String, detail: String, secret: Bool) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return _answers.isEmpty ? nil : _answers.removeFirst()
     }
 }

@@ -1,6 +1,9 @@
+import AgentCore
 import Foundation
 import Index
 import ProviderCore
+import SFTP
+import XPCProtocols
 
 /// The agent, as the extension sees it, over a **real index database**.
 ///
@@ -43,6 +46,9 @@ public final class ModelAgent: AgentChannel {
     /// (section 5.3), and this is the count of them.
     public private(set) var fullSweeps = 0
     public private(set) var anchorExpiryReports: [String] = []
+
+    /// For a scenario that wants to count what happened *after* a point.
+    public func resetCalls() { calls.removeAll() }
 
     public init(writer: IndexWriter, displayName: String, clock: VirtualClock) {
         self.writer = writer
@@ -170,7 +176,14 @@ public final class ModelAgent: AgentChannel {
         completion(.success(view(row)))
     }
 
-    // MARK: Transfers and mutations - not exercised by suite A
+    // MARK: Transfers
+
+    /// Model seconds a `fetchContents` is held open. `G8` sets it to the 5 s each of the
+    /// 38 measured transfers was held for, which is what makes the batching visible.
+    public var fetchDelay: Double = 0
+    /// What a fetch of this identifier answers, if anything but the row.
+    public var fetchFailures: [String: ProviderFailure] = [:]
+    public private(set) var fetchCount: [String: Int] = [:]
 
     public func fetchContents(
         identifier: ProviderItemIdentifier, requestedVersion: String?,
@@ -179,7 +192,18 @@ public final class ModelAgent: AgentChannel {
         _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
     ) {
         calls.append("fetchContents(\(identifier.rawValue))")
-        item(identifier: identifier, completion)
+        fetchCount[identifier.rawValue, default: 0] += 1
+        let answer: () -> Void = { [self] in
+            if let failure = fetchFailures[identifier.rawValue] {
+                return completion(.failure(failure))
+            }
+            item(identifier: identifier, completion)
+        }
+        if fetchDelay > 0 {
+            clock.schedule(after: fetchDelay, answer)
+        } else {
+            answer()
+        }
     }
 
     public func fetchPartialContents(
@@ -191,12 +215,65 @@ public final class ModelAgent: AgentChannel {
         item(identifier: identifier, completion)
     }
 
+    // MARK: Mutations
+
+    /// Scripted answers, for the scenarios that are about *which* answer the agent gives.
+    /// Returning nil takes the default below, which is a real row written to the real
+    /// index.
+    public var onCreate: ((ItemTemplate) -> Result<ItemView, ProviderFailure>?)?
+    public var onModify:
+        ((ProviderItemIdentifier, ProviderItemFields, ItemChanges) -> Result<ItemView, ProviderFailure>?)?
+
+    /// Section 5.7's lexical check, as far as the model needs it: a target that is
+    /// absolute-and-outside or climbs out of the share is refused, and the refusal is a
+    /// `.cannotSynchronize` that reaches the user only as the item's `uploadingError`
+    /// (`MQ-078`).
+    public var remoteRoot = "/home/alec"
+
     public func createItem(
         template: ItemTemplate, contents: FileHandle?, transferID: String,
         _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
     ) {
         calls.append("createItem(\(template.filename))")
-        completion(.failure(.cannotSynchronize))
+        guard isReachable else { return completion(.failure(.serverUnreachable)) }
+        if let scripted = onCreate?(template) { return completion(scripted) }
+        if let target = template.symlinkTarget {
+            // The shipping check, not a paraphrase of it: section 5.7's lexical rule as
+            // `createItem` applies it. An escaping or absolute target never leaves the
+            // Mac, and the refusal is a `.cannotSynchronize` (`MQ-078`).
+            let directory =
+                (try? RelativePath(string: parentPath(of: template.parentIdentifier.rawValue)))
+                ?? .root
+            let roots = SymlinkPolicy.Roots(canonical: remoteRoot)
+            guard (try? SymlinkPolicy.targetForCreate(target, in: directory, roots: roots)) != nil
+            else { return completion(.failure(.cannotSynchronize)) }
+        }
+        do {
+            let parent = template.parentIdentifier.rawValue
+            let siblings = try writer.children(ofParent: parent)
+            if siblings.contains(where: { $0.filename == template.filename }) {
+                return completion(.failure(.filenameCollision))
+            }
+            let identifier = UUID().uuidString
+            let path = try pathBytes(forChild: template.filename, of: parent)
+            var row = IndexItem(
+                identifier: identifier, path: path, parent: parent,
+                type: template.isDirectory ? "directory" : (template.isSymlink ? "symlink" : "file"),
+                size: template.isSymlink ? Int64(template.symlinkTarget?.utf8.count ?? 0) : 12,
+                mtime: Int64(clock.now()),
+                linkTarget: template.symlinkTarget.map { Data($0.utf8) },
+                xattrs: LocalAttributes(
+                    xattrs: template.extendedAttributes ?? [:], tagData: template.tagData
+                ).encoded())
+            row.contentVersion = IndexItem.contentVersion(
+                size: row.size, mtime: row.mtime, generation: 0)
+            RowBuilder.restamp(&row)
+            try writer.upsert(row)
+            _ = try writer.appendAnchor(identifier: identifier, kind: .modified)
+            completion(.success(view(row)))
+        } catch {
+            completion(.failure(.cannotSynchronize))
+        }
     }
 
     public func modifyItem(
@@ -205,8 +282,47 @@ public final class ModelAgent: AgentChannel {
         transferID: String,
         _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
     ) {
-        calls.append("modifyItem(\(identifier.rawValue),0x\(String(changedFields.rawValue, radix: 16)))")
-        item(identifier: identifier, completion)
+        calls.append(
+            "modifyItem(\(identifier.rawValue),0x\(String(changedFields.rawValue, radix: 16)))")
+        guard isReachable else { return completion(.failure(.serverUnreachable)) }
+        if let scripted = onModify?(identifier, changedFields, changes) {
+            return completion(scripted)
+        }
+        do {
+            guard var row = try writer.item(identifier: identifier.rawValue) else {
+                // The row is gone. `MQ-080`: the system re-offers the edit as a create.
+                return completion(.failure(.noSuchItem))
+            }
+            if changedFields.contains(.filename), let name = changes.newFilename {
+                row.path = try pathBytes(forChild: name, of: row.parent ?? IndexWriter.rootIdentifier)
+            }
+            if changedFields.contains(.contents) {
+                row.generation += 1
+                row.mtime = Int64(clock.now())
+                row.contentVersion = IndexItem.contentVersion(
+                    size: row.size, mtime: row.mtime, generation: row.generation)
+            }
+            if changedFields.contains(.fileSystemFlags), let flags = changes.newFileSystemFlags {
+                row.mode = Int64(flags)
+            }
+            // Section 5.4: the tags and the xattrs go into the one local blob, and its
+            // hash is what moves the metadata version - which is the only thing that
+            // moves it for an *agent-side* change (`MQ-079`).
+            if changedFields.contains(.tagData) || changedFields.contains(.extendedAttributes) {
+                var local = LocalAttributes.decode(row.xattrs)
+                if changedFields.contains(.tagData) { local.tagData = changes.newTagData }
+                for (name, value) in changes.newExtendedAttributes ?? [:] {
+                    local.xattrs[name] = value
+                }
+                row.xattrs = local.encoded()
+            }
+            RowBuilder.restamp(&row)
+            try writer.upsert(row)
+            _ = try writer.appendAnchor(identifier: row.identifier, kind: .modified)
+            completion(.success(view(row)))
+        } catch {
+            completion(.failure(.cannotSynchronize))
+        }
     }
 
     public func deleteItem(
@@ -214,11 +330,27 @@ public final class ModelAgent: AgentChannel {
         _ completion: @escaping (ProviderFailure?) -> Void
     ) {
         calls.append("deleteItem(\(identifier.rawValue))")
+        guard isReachable else { return completion(.serverUnreachable) }
+        try? writer.delete(identifier: identifier.rawValue)
         completion(nil)
     }
 
     public func cancelTransfer(transferID: String) {
         calls.append("cancelTransfer")
+    }
+
+    private func parentPath(of parent: String) -> String {
+        guard parent != IndexWriter.rootIdentifier,
+            let row = try? writer.item(identifier: parent)
+        else { return "" }
+        return String(decoding: row.path, as: UTF8.self)
+    }
+
+    private func pathBytes(forChild name: String, of parent: String) throws -> Data {
+        guard parent != IndexWriter.rootIdentifier,
+            let parentRow = try writer.item(identifier: parent), !parentRow.path.isEmpty
+        else { return Data(name.utf8) }
+        return parentRow.path + Data("/".utf8) + Data(name.utf8)
     }
 
     // MARK: Signals
@@ -249,16 +381,22 @@ public final class ModelAgent: AgentChannel {
     @discardableResult
     public func indexRow(
         identifier: String, name: String, parent: String = IndexWriter.rootIdentifier,
-        size: Int64 = 10, mtime: Int64 = 1_700_000_000
+        size: Int64 = 10, mtime: Int64 = 1_700_000_000, isDirectory: Bool = false
     ) throws -> IndexItem {
-        let row = IndexItem(
+        var row = IndexItem(
             identifier: identifier,
-            path: Data(name.utf8),
+            path: try pathBytes(forChild: name, of: parent),
             parent: parent,
-            type: "file",
-            size: size,
+            type: isDirectory ? "directory" : "file",
+            size: isDirectory ? 0 : size,
             mtime: mtime,
             contentVersion: IndexItem.contentVersion(size: size, mtime: mtime, generation: 0))
+        // Section 7.1.1: `kept` is derived from the parent row's effective state, which is
+        // the whole of "descendants the index has never seen need nothing".
+        if let parentRow = try writer.item(identifier: parent), parentRow.kept {
+            row.kept = true
+        }
+        RowBuilder.restamp(&row)
         try writer.upsert(row)
         _ = try writer.appendAnchor(identifier: identifier, kind: .modified)
         return row
@@ -268,4 +406,94 @@ public final class ModelAgent: AgentChannel {
     public func removeIndexRow(identifier: String) throws {
         try writer.delete(identifier: identifier)
     }
+
+    // MARK: Pins, as the agent writes them (section 7.1.1)
+
+    /// `sshdrive pin`: the marker on the row, `kept` on it and on every known descendant,
+    /// a restamped metadata version each, and an anchor each - which is how the change
+    /// reaches the system at all, a folder being enumerated once, ever (`MQ-001`).
+    public func pin(identifier: String) throws {
+        try setPin(identifier: identifier, marker: 1, kept: true)
+    }
+
+    /// `sshdrive unpin` on a path inside a pin: an **exclusion**, which is the explicit
+    /// `.downloadLazily` that beats an eager ancestor (`MQ-027`, section 7.1.1 situation C).
+    public func exclude(identifier: String) throws {
+        try setPin(identifier: identifier, marker: -1, kept: false)
+    }
+
+    /// Removing the pin marker outright (situation B).
+    public func unpin(identifier: String) throws {
+        try setPin(identifier: identifier, marker: 0, kept: false)
+    }
+
+    private func setPin(identifier: String, marker: Int64, kept: Bool) throws {
+        guard var row = try writer.item(identifier: identifier) else { return }
+        row.pinState = marker
+        row.kept = kept
+        RowBuilder.restamp(&row)
+        try writer.upsert(row)
+        _ = try writer.appendAnchor(identifier: identifier, kind: .modified)
+        try rewriteDescendants(of: identifier, kept: kept)
+    }
+
+    private func rewriteDescendants(of identifier: String, kept: Bool) throws {
+        for var child in try writer.children(ofParent: identifier) {
+            // An explicit marker of its own is left alone: invariant 2 clears the
+            // markers *beneath* a change, and an exclusion under a pin is the one thing
+            // that survives the walk in the model's scenarios.
+            if child.pinState == -1 { continue }
+            child.kept = kept
+            RowBuilder.restamp(&child)
+            try writer.upsert(child)
+            _ = try writer.appendAnchor(identifier: child.identifier, kind: .modified)
+            try rewriteDescendants(of: child.identifier, kept: kept)
+        }
+    }
+
+    // MARK: The conflict copy of section 5.5
+
+    /// What the next `modifyItem` does instead of writing: rename the temp file - which
+    /// already holds the local content - to `<name> (conflicted copy from <Mac> <date>)`
+    /// beside it, return the **remote** item as current, and leave the caller to evict and
+    /// signal.
+    ///
+    /// Both of those are the agent's, not the system's, and both are needed: `MQ-013` says
+    /// the returned version is believed and never re-fetched, so without the eviction the
+    /// replica keeps the *local* bytes under the *remote* version for ever; and `MQ-001`
+    /// says the new sibling is in a folder the system will never enumerate again, so
+    /// without the working-set signal Finder never shows it.
+    public func makeConflictCopyOnNextModify(macName: String = "mac", remoteSize: Int64 = 999) {
+        onModify = { [weak self] identifier, _, _ in
+            guard let self else { return nil }
+            self.onModify = nil
+            guard var row = try? self.writer.item(identifier: identifier.rawValue) else {
+                return .failure(.cannotSynchronize)
+            }
+            let name = row.filename as NSString
+            let ext = name.pathExtension
+            let copyName =
+                ext.isEmpty
+                ? "\(row.filename) (conflicted copy from \(macName))"
+                : "\(name.deletingPathExtension) (conflicted copy from \(macName)).\(ext)"
+            self.conflictCopyIdentifier = UUID().uuidString
+            try? self.indexRow(
+                identifier: self.conflictCopyIdentifier!, name: copyName,
+                parent: row.parent ?? IndexWriter.rootIdentifier, size: row.size)
+            // The remote item as current: a bigger file with a version of its own, which
+            // is what the server has and the Mac does not.
+            row.size = remoteSize
+            row.generation += 1
+            row.mtime = Int64(self.clock.now())
+            row.contentVersion = IndexItem.contentVersion(
+                size: row.size, mtime: row.mtime, generation: row.generation)
+            RowBuilder.restamp(&row)
+            try? self.writer.upsert(row)
+            _ = try? self.writer.appendAnchor(identifier: row.identifier, kind: .modified)
+            return .success(self.view(row))
+        }
+    }
+
+    /// The identifier of the copy the last conflict made, so a scenario can look for it.
+    public private(set) var conflictCopyIdentifier: String?
 }

@@ -39,6 +39,24 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     private var _pending: [String: [String]] = [:]
     private var _times: [String: (atime: Double, mtime: Double)] = [:]
     private var _evictionRefusals: [String: [String: Any]] = [:]
+    /// How many more times each staged refusal answers before the item becomes evictable.
+    /// Nil is "for ever", which is what `refuseEviction` used to mean and still does.
+    /// A finite count is `MQ-017`/`MQ-034`'s shape: the system is still finishing a
+    /// modification, or has not yet re-read a row whose policy just changed, and the same
+    /// call a moment later succeeds - which is what the doubling backoff is for.
+    private var _refusalsRemaining: [String: Int] = [:]
+    /// `MQ-060`, scripted the other way round. **Measured** (S4, 2026-09-04, macOS 26.4):
+    /// a launchd agent's `stat` and `open` under its *own* domain's mount draw no TCC
+    /// prompt and no `EPERM`, because the access is evaluated as
+    /// `kTCCServiceFileProviderDomain` with our domain as the indirect object. The rule in
+    /// the model is therefore a **no-op**: nothing is gated, and `false` here is the
+    /// measured world. `true` is the counterfactual - "TCC would deny it" - which no
+    /// scenario may treat as measured behaviour (TCC is VM-only,
+    /// `docs/testing-architecture.md` section 7); it exists so a scenario can pin down
+    /// what our code *does* if that rule ever changes, which is the thing we control.
+    private var _tccDenied = false
+    /// A hook on `pendingIdentifiers`; see `setOnPendingIdentifiers`.
+    private var _onPending: (@Sendable (String) -> Void)?
     private var _evicted: [String] = []
     /// A domain the system has no manager for: every call for it answers "no news"
     /// (section 6.5), which is never "the user evicted everything".
@@ -113,12 +131,41 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     /// Refuse an eviction, field by field, the way the system does. `MQ-018`: the code
     /// says nothing about why, so this takes the whole dictionary.
-    public func refuseEviction(identifier: String, report: [String: Any]) {
-        lock.lock(); _evictionRefusals[identifier] = report; lock.unlock()
+    ///
+    /// `times` is how many calls are refused before the item becomes evictable; nil, the
+    /// default, refuses for ever. A finite count is what the doubling backoff of section
+    /// 5.5 is written against (`MQ-017`, `MQ-034`).
+    public func refuseEviction(identifier: String, report: [String: Any], times: Int? = nil) {
+        lock.lock()
+        _evictionRefusals[identifier] = report
+        if let times { _refusalsRemaining[identifier] = times }
+        lock.unlock()
     }
 
     public func allowEviction(identifier: String) {
-        lock.lock(); _evictionRefusals.removeValue(forKey: identifier); lock.unlock()
+        lock.lock()
+        _evictionRefusals.removeValue(forKey: identifier)
+        _refusalsRemaining.removeValue(forKey: identifier)
+        lock.unlock()
+    }
+
+    /// `MQ-060` the other way round: the counterfactual in which TCC denies the agent its
+    /// own domain's mount, so `getUserVisibleURL` and the `lstat` behind it fail with
+    /// `EPERM`. **Never a measurement** - the measured answer is that the access is
+    /// allowed silently (see `_tccDenied`) - only a way to ask what our code does with a
+    /// denial it has never seen.
+    public func setTCCDenial(_ value: Bool = true) {
+        lock.lock(); _tccDenied = value; lock.unlock()
+    }
+
+    /// `EPERM` as a `stat` under a denied mount would report it.
+    public static func tccDenial(path: String) -> NSError {
+        NSError(
+            domain: NSPOSIXErrorDomain, code: Int(EPERM),
+            userInfo: [
+                NSLocalizedDescriptionKey: "Operation not permitted",
+                NSFilePathErrorKey: path,
+            ])
     }
 
     /// No manager for this domain: it is being added or removed (section 6.5).
@@ -199,16 +246,37 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     }
 
     public func pendingIdentifiers(locationID: String) async -> [String]? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         _calls.append(.pending(locationID: locationID))
-        if _unmanaged.contains(locationID) { return nil }
-        return _pending[locationID] ?? []
+        let hook = _onPending
+        let unmanaged = _unmanaged.contains(locationID)
+        let answer = _pending[locationID] ?? []
+        lock.unlock()
+        // Called with the lock down, so a hook may call back in. This is the first thing
+        // `ChangeDetector.runCycle` asks the replica for after it starts its own
+        // stopwatch, which is where a scenario hangs the clock advance that makes a cycle
+        // *take* time without taking it (`H10`).
+        hook?(locationID)
+        return unmanaged ? nil : answer
+    }
+
+    /// Runs on every `pendingIdentifiers`, before the answer is given. Nil clears it.
+    public func setOnPendingIdentifiers(_ body: (@Sendable (String) -> Void)?) {
+        lock.lock(); _onPending = body; lock.unlock()
     }
 
     public func evict(locationID: String, identifier: String) async -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
         _calls.append(.evict(locationID: locationID, identifier: identifier))
         if let refusal = _evictionRefusals[identifier] {
+            if let remaining = _refusalsRemaining[identifier] {
+                if remaining <= 1 {
+                    _refusalsRemaining.removeValue(forKey: identifier)
+                    _evictionRefusals.removeValue(forKey: identifier)
+                } else {
+                    _refusalsRemaining[identifier] = remaining - 1
+                }
+            }
             var report = refusal
             report["evicted"] = false
             return report
@@ -224,6 +292,13 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         if _unmanaged.contains(locationID) {
             throw SSHDriveFakeReplicaError.noDomain(locationID)
         }
+        // `MQ-060` is a **no-op rule**: the measured world has no gate here at all, so
+        // this returns the URL and the TTL loop's `lstat` behind it just works. The throw
+        // is the scripted counterfactual and nothing else.
+        if _tccDenied {
+            throw FakeReplica.tccDenial(
+                path: url(locationID: locationID, identifier: identifier).path)
+        }
         return url(locationID: locationID, identifier: identifier)
     }
 
@@ -237,11 +312,20 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func replicaTimes(url: URL) -> (atime: Double, mtime: Double)? {
         lock.lock(); defer { lock.unlock() }
+        // The `lstat` of our own mount is ungated (`MQ-060`); under the scripted denial it
+        // is the `EPERM` a `stat` would return, which reaches the caller as "no times".
+        if _tccDenied { return nil }
         return _times[url.path]
     }
 
     public func statReport(url: URL, readFirst: Bool) -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
+        if _tccDenied {
+            return [
+                "path": url.path, "read": readFirst,
+                "error": FakeReplica.tccDenial(path: url.path).localizedDescription,
+            ]
+        }
         guard let times = _times[url.path] else { return ["path": url.path, "read": readFirst] }
         return [
             "path": url.path, "read": readFirst,

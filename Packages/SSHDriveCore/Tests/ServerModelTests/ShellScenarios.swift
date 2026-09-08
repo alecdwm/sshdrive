@@ -220,4 +220,175 @@ final class ShellScenarios: XCTestCase {
             }
         }
     }
+
+    // MARK: - J14: the login-shell env snapshot, per shell
+
+    /// **J14** (`SQ-015`, `SQ-016`, `SQ-017`): the login-shell snapshot of section 6.1
+    /// runs the *account's own* shell - `<shell> -ilc` - and takes exactly two variables
+    /// out of it. Every byte the rc files print arrives **in front of** the opening
+    /// sentinel and must be discarded, in every shell shape the box can run: bash quiet,
+    /// bash noisy, dash (which is Debian's `/bin/sh`, `SQ-017`) and zsh, whose `.zshenv`
+    /// is read for every invocation there is.
+    ///
+    /// This is a different mechanism from `J5`'s and deliberately so: an exec channel is
+    /// non-interactive, where bash reads `BASH_ENV`; a login shell reads `.bash_profile`,
+    /// `.zshenv` or `.profile` and never `BASH_ENV`. The claim `SQ-015` makes is about
+    /// both, so both are run.
+    ///
+    /// A shell this box does not have skips **by name**: `busybox ash`, `fish` and `tcsh`
+    /// are asserted to skip rather than being quietly left out of the loop.
+    func testJ14_theLoginShellSnapshotDiscardsTheRCNoiseAndReturnsTheTwoVariables() async throws {
+        var ran: [String] = []
+        var skipped: [String] = []
+        for shape in [LoginShell.bashQuiet, .bashNoisy, .dash, .zsh, .busyboxAsh, .fish, .tcsh] {
+            let profile = ServerProfile.debianShells.with(loginShell: shape)
+            if let reason = FakeSSHD.unavailabilityReason(for: profile) {
+                skipped.append("\(shape.rawValue): \(reason)")
+                continue
+            }
+            // `SQ-083`: on macOS the zsh row cannot be isolated at all. `/etc/zprofile`
+            // runs `path_helper`, which **rewrites** `PATH` from `/etc/paths` and
+            // `/etc/paths.d`, and zsh reads `$ZDOTDIR/.zshenv` *before* the system's
+            // `/etc/zprofile` - so the account's PATH comes back as the system's list with
+            // the account's appended, and `ZDOTDIR` cannot stop it. (`-f`/`NO_RCS` would
+            // suppress the account's own file along with the system's, which is the
+            // opposite of what this row is about.) bash is unaffected, because
+            // `/etc/profile` runs `path_helper` *before* `.bash_profile`. The claim
+            // `SQ-015` makes about zsh keeps its whole coverage on Linux, where no
+            // `path_helper` runs; bash and dash run on both.
+            if shape == .zsh, ScriptShell.zsh.systemRCRewritesPATH {
+                skipped.append("\(shape.rawValue): \(ScriptShell.zsh.systemRCSkipReason)")
+                continue
+            }
+            let server = try sshd(profile)
+            let account = try server.loginShellAccount(
+                path: "/opt/\(shape.rawValue)/bin:/usr/bin:/bin",
+                sshAuthSock: "/tmp/sshdrive-\(shape.rawValue)-agent.sock")
+
+            let snapshot = await LoginShellSnapshotReader.take(
+                shell: account.shellPath, timeout: 20, baseEnvironment: account.environment)
+
+            XCTAssertTrue(
+                snapshot.succeeded,
+                "\(shape.rawValue): the snapshot failed: \(snapshot.diagnostic ?? "no diagnostic")")
+            XCTAssertEqual(snapshot.path, account.expectedPATH,
+                           "\(shape.rawValue): SQ-015 - the PATH is the rc file's, not launchd's")
+            XCTAssertEqual(snapshot.sshAuthSock, account.expectedAuthSock,
+                           "\(shape.rawValue): SQ-015 - and so is SSH_AUTH_SOCK")
+            XCTAssertFalse(
+                (snapshot.path ?? "").contains("hello from"),
+                "\(shape.rawValue): SQ-015 - not one byte of the noise is in the answer")
+            XCTAssertFalse(account.rcFile.isEmpty)
+
+            if account.noise.isEmpty {
+                XCTAssertNil(
+                    snapshot.diagnostic,
+                    "\(shape.rawValue): a quiet account prints nothing before the sentinel "
+                        + "(a diagnostic here is this box's own /etc rc files talking)")
+            } else {
+                let diagnostic = snapshot.diagnostic ?? ""
+                XCTAssertTrue(
+                    diagnostic.contains("bytes before the sentinel"),
+                    "\(shape.rawValue): SQ-015 - the noise is discarded but still reported, "
+                        + "which is what tells the user which rc file to fix: \(diagnostic)")
+                let reported = diagnostic.split(separator: " ").compactMap { Int($0) }.first ?? 0
+                XCTAssertGreaterThanOrEqual(
+                    reported, account.noise.utf8.count,
+                    "\(shape.rawValue): every byte the rc file wrote is accounted for")
+            }
+            // Only the two variables travel; nothing else of the shell's is taken.
+            let applied = snapshot.applied(to: ["PATH": "/usr/bin:/bin", "HOME": "/var/empty"])
+            XCTAssertEqual(applied["PATH"], account.expectedPATH)
+            XCTAssertEqual(applied["HOME"], "/var/empty", "section 6.1: only the two")
+            ran.append(shape.rawValue)
+        }
+
+        XCTAssertTrue(ran.contains("dash"), "dash is /bin/sh here and must have run")
+        XCTAssertGreaterThanOrEqual(ran.count, 2, "at least dash and one other shell ran: \(ran)")
+        // The shells this box does not have are skipped by name, never faked.
+        for absent in [LoginShell.fish, .tcsh] {
+            let profile = ServerProfile.debianShells.with(loginShell: absent)
+            XCTAssertNotNil(
+                FakeSSHD.unavailabilityReason(for: profile),
+                "\(absent.rawValue) has no POSIX rc body and is not installed: it skips by name")
+        }
+        if !skipped.isEmpty {
+            print("J14 skipped rows (not faked): \(skipped.joined(separator: "; "))")
+        }
+    }
+
+    /// **J14** (`SQ-016`): `deb-shells`' `bashbg` account leaves a background child holding
+    /// stdout, so **EOF never arrives** on the snapshot's pipe. The closing sentinel is
+    /// what ends the read, and every read has a deadline - which is why a complete answer
+    /// comes back in a fraction of the timeout rather than at the end of it.
+    ///
+    /// The bite-proof is the second half: a reader that waits for EOF, run against the
+    /// very same shell and the very same command, is still waiting when its deadline
+    /// fires - **with the whole answer already in its buffer**, which is the answer it
+    /// would have thrown away.
+    func testJ14_theBashbgSnapshotIsEndedByItsSentinelAndAnEOFReaderHangsOnTheSameShell() async throws {
+        let profile = ServerProfile.debianBackgroundHolder
+        if let reason = FakeSSHD.unavailabilityReason(for: profile) {
+            throw XCTSkip("\(profile.name): \(reason)")
+        }
+        let server = try sshd(profile)
+        let account = try server.loginShellAccount(
+            path: "/opt/bashbg/bin:/usr/bin:/bin", sshAuthSock: "/tmp/sshdrive-bashbg.sock")
+        XCTAssertTrue(account.holdsStdoutOpen, "SQ-016: this is the account that holds stdout")
+
+        let timeout: TimeInterval = 20
+        let started = Date()
+        let snapshot = await LoginShellSnapshotReader.take(
+            shell: account.shellPath, timeout: timeout, baseEnvironment: account.environment)
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertTrue(snapshot.succeeded,
+                      "SQ-016: \(snapshot.diagnostic ?? "the snapshot failed with no diagnostic")")
+        XCTAssertEqual(snapshot.path, account.expectedPATH)
+        XCTAssertEqual(snapshot.sshAuthSock, account.expectedAuthSock)
+        XCTAssertLessThan(
+            elapsed, timeout / 2,
+            "SQ-016: the closing sentinel ended the read; taking the whole \(Int(timeout)) s "
+                + "would mean it had waited for an EOF that never comes")
+
+        // The bite-proof: the reader as it would be if EOF were trusted. Same shell, same
+        // argv, same rc file - and it is still waiting when the deadline fires.
+        let sentinel = Sentinel()
+        var environment = account.environment
+        environment["TERM"] = "dumb"
+        let spawned = try Spawn.run(
+            executable: account.shellPath,
+            argv: [account.shellPath, "-ilc",
+                   LoginShellSnapshotReader.snapshotCommand(sentinel: sentinel)],
+            environment: environment,
+            wantsStdout: true, stdinFromDevNull: true, newProcessGroup: true)
+        defer {
+            kill(-spawned.pid, SIGKILL)
+            _ = Spawn.wait(pid: spawned.pid)
+        }
+        let stream = PipeByteStream(readFD: spawned.stdoutFD, writeFD: -1, label: "j14-eof-reader")
+        defer { stream.close() }
+        var parser = SentinelParser(sentinel: sentinel)
+        var collected = Data()
+        let legacyDeadline = Date().addingTimeInterval(4)
+        var sawEOF = false
+        do {
+            while Date() < legacyDeadline {
+                let chunk = try await stream.read(upTo: 64 * 1024, deadline: legacyDeadline)
+                if chunk.isEmpty { sawEOF = true; break }
+                collected.append(chunk)
+                parser.append(chunk)
+            }
+        } catch ByteStreamError.readTimedOut {
+            // What the old reader does with a complete answer: nothing.
+        }
+        XCTAssertFalse(
+            sawEOF,
+            "SQ-016: EOF must never arrive - the rc file's background child holds stdout")
+        XCTAssertTrue(
+            parser.sawClosingSentinel,
+            "SQ-016: and the answer was complete the whole time the EOF reader was waiting")
+        XCTAssertNotNil(parser.environment["PATH"],
+                        "SQ-016: including the PATH an EOF-waiting reader would have thrown away")
+    }
 }

@@ -50,15 +50,24 @@ public enum ControlCommands {
             // runs - the CLI is waiting on it, and `-O exit` against an unreachable server
             // can take seconds per location - so `stopping` means "accepted", as it always
             // did, and the exit still follows.
-            Log.agent.notice("exiting on request from the CLI")
+            //
+            // It is `AgentLifecycle.shutdownAndExit` and not an `exit(0)` of its own: the
+            // cask's TERM takes the same path, and one shutdown with one exit status is
+            // the whole of `P4`. The exit goes through `AgentEndpoint` so a harness can
+            // record the status instead of taking the test process with it.
+            let manager = AgentCommandContext.manager
+            let environment = manager.environment
             Task {
-                await AgentCommandContext.manager.shutdownAll()
-                exit(0)
+                await AgentLifecycle.shutdownAndExit(
+                    reason: "exiting on request from the CLI", manager: manager,
+                    environment: environment)
             }
             // A server that has gone away must not be able to keep the agent alive.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + AgentLifecycle.shutdownGraceSeconds
+            ) {
                 Log.agent.error("shutdown did not finish in 20 s; exiting anyway")
-                exit(0)
+                environment.endpoint.terminate(status: AgentLifecycle.exitStatus)
             }
             return try json(["stopping": true])
 
@@ -737,7 +746,9 @@ public enum ControlCommands {
         // nobody asked for.
         let sockets = ControlSocket.existingSockets()
         let live = await liveLocationSockets()
-        let orphans = sockets.filter { !live.contains($0) }
+        // `ControlSocket.orphanedSockets` rather than a filter written here, so the
+        // answer `doctor` prints is the one `K5` asserts (`SQ-074`).
+        let orphans = ControlSocket.orphanedSockets(among: sockets, inUse: live)
         check(
             "control sockets", orphans.isEmpty,
             sockets.isEmpty

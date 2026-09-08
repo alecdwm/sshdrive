@@ -28,7 +28,7 @@ final class WorkingSetScenarios: XCTestCase {
         // The agent answers no for a location whose runtime is not up yet, which is the
         // window the whole defect lived in.
         harness.agent.indexReadyAnswer = false
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         domain.openFolder()
         XCTAssertEqual(harness.finderListing(), ["gone.txt", "stays.txt"])
 
@@ -54,7 +54,7 @@ final class WorkingSetScenarios: XCTestCase {
     func testA2_TheServerUnreachableStormDoesNotHappen() throws {
         let harness = try ScenarioHarness()
         harness.agent.indexReadyAnswer = false
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         domain.openFolder()
 
         for index in 0..<40 {
@@ -91,7 +91,7 @@ final class WorkingSetScenarios: XCTestCase {
         let harness = try ScenarioHarness()
         harness.workingSetEnumeratorOverride = { LegacyWorkingSetEnumeration(service: $0) }
         harness.agent.indexReadyAnswer = false
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         domain.openFolder()
 
         for index in 0..<40 {
@@ -124,7 +124,7 @@ final class WorkingSetScenarios: XCTestCase {
     /// instance, which is the only life in which the extension can see both.
     func testA2_TheThrottleIsClearedOnTheFirstSuccessAfterAFailure() throws {
         let harness = try ScenarioHarness()
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         try harness.serverCreates("late.txt")
 
         harness.agent.indexReadyAnswer = false
@@ -165,7 +165,7 @@ final class WorkingSetScenarios: XCTestCase {
     /// is delivered from the agent's identical query - both sides run `IndexChangeStream`.
     func testA3_AFreshInstanceWithANotReadyReaderAsksTheAgent() throws {
         let harness = try ScenarioHarness()
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         // The first ask of the instance the signal launches answers no; a later one would
         // answer yes, which is what "a window, not a verdict" means.
         harness.agent.indexReadyAnswerForAsk = { ask in ask == 1 ? true : (ask == 2 ? false : true) }
@@ -190,7 +190,7 @@ final class WorkingSetScenarios: XCTestCase {
         for index in 0..<5 { try harness.serverCreates("f\(index).txt") }
         try harness.writer.pruneAnchors(maximumRows: 2)
         harness.agent.indexReadyAnswer = false
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
 
         let anchor = try XCTUnwrap(domain.askWorkingSetAnchor())
         XCTAssertNotEqual(anchor.rawValue, "0", "a 0 is an expired anchor as soon as rows are past it")
@@ -215,7 +215,7 @@ final class WorkingSetScenarios: XCTestCase {
     /// once, and exactly one full sweep runs (`MQ-006`).
     func testA5_AnchorExpiryReportsOnceAndSweepsOnce() throws {
         let harness = try ScenarioHarness()
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         XCTAssertEqual(domain.heldWorkingSetAnchor?.sequence, 0)
 
         for index in 0..<5 { try harness.serverCreates("f\(index).txt") }
@@ -243,7 +243,7 @@ final class WorkingSetScenarios: XCTestCase {
     func testA6_AFolderIsEnumeratedOnceEver() throws {
         let harness = try ScenarioHarness()
         try harness.serverCreates("a.txt")
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
 
         domain.openFolder()
         domain.openFolder()
@@ -275,7 +275,7 @@ final class WorkingSetScenarios: XCTestCase {
     func testA7_ANewSiblingNeedsAWorkingSetSignal() throws {
         let harness = try ScenarioHarness()
         try harness.serverCreates("report.txt")
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         domain.openFolder()
         XCTAssertEqual(harness.finderListing(), ["report.txt"])
 
@@ -301,7 +301,7 @@ final class WorkingSetScenarios: XCTestCase {
     func testA8_ASixtySecondEnumerateItemsIsNotTakenAway() throws {
         let harness = try ScenarioHarness()
         try harness.serverCreates("slow.txt")
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
         let instancesBefore = domain.instancesLaunched
         harness.agent.enumerateItemsDelay = 60
 
@@ -322,7 +322,7 @@ final class WorkingSetScenarios: XCTestCase {
     func testA9_TheWorkingSetEnumeratesNoItems() throws {
         let harness = try ScenarioHarness()
         for index in 0..<3 { try harness.serverCreates("f\(index).txt") }
-        let domain = harness.addDomain()
+        let domain = try harness.addDomain()
 
         let listing = domain.enumerateWorkingSetItems()
         XCTAssertTrue(listing.items.isEmpty)

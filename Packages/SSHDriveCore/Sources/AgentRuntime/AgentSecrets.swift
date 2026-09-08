@@ -19,9 +19,18 @@ public final class AgentSecrets: Sendable {
     /// The askpass program beside this executable, taken from the running bundle.
     public let askpassPath: String?
 
-    public init(store: any SecretsStore, askpassPath: String?) {
+    public init(
+        store: any SecretsStore, askpassPath: String?,
+        resolver: (any SSHResolving)? = nil
+    ) {
         self.store = store
-        self.broker = AskpassBroker(store: store)
+        // `SSHGResolver` is how the broker learns the destination of the `ssh` that is
+        // asking - the one thing that tells a `ProxyJump` hop from the master whose token
+        // it inherited (section 4.2). It runs `/usr/bin/ssh -G` by default; a harness that
+        // has installed a stand-in `ssh` hands its own in, or the hops would be resolved
+        // by a binary that is not the one connecting.
+        self.broker = resolver.map { AskpassBroker(store: store, resolver: $0) }
+            ?? AskpassBroker(store: store)
         self.askpassPath = askpassPath
     }
 

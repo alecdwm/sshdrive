@@ -105,6 +105,17 @@ public actor SSHMaster {
     /// The token minted for the running master, retired when it goes. A `ProxyJump` hop
     /// inherits it through the environment and is told apart by its own argv (section 4.2).
     public private(set) var askpassToken: String?
+    /// The token the **last** spawn used, which `retireToken()` does not clear.
+    ///
+    /// `askpassToken` is the *live* one and goes as soon as the master dies, which is
+    /// right for everything that might still put a prompt to it. But everything the
+    /// connection recorded - the touch-required keys, the refusal reason, the answers it
+    /// took from the keychain - is read off the broker's session *after* the attempt, and
+    /// a failed attempt is exactly when section 4.2 needs it: a refused PIN is a failure,
+    /// and "add explains which prompt it saw" has to survive it. Retiring the session is
+    /// what stops it answering; forgetting it is what makes it unreadable, and the collect
+    /// connection does that itself when it has finished with it (2026-09-08, Q8).
+    public private(set) var lastAskpassToken: String?
 
     public init(configuration: Configuration) {
         self.configuration = configuration
@@ -324,6 +335,7 @@ public actor SSHMaster {
                 maskedAccounts: configuration.maskedAccounts)
             : askpass.mintToken(locationID: configuration.locationID, argv: argv)
         askpassToken = token
+        lastAskpassToken = token
         return AskpassEnvironment.environment(
             base: configuration.environment, askpassPath: path, token: token)
     }

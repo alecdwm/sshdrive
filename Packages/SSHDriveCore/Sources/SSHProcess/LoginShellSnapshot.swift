@@ -121,7 +121,7 @@ public enum LoginShellSnapshotReader {
         }
 
         let stream = PipeByteStream(readFD: spawned.stdoutFD, writeFD: -1, label: "login-shell")
-        var parser = SentinelParser(sentinel: sentinel)
+        var parser = SentinelParser(sentinel: sentinel, expectsALeadingNUL: true)
         let deadline = Date().addingTimeInterval(timeout)
         do {
             try await stream.drain(deadline: deadline) { chunk in

@@ -438,6 +438,30 @@ Each rule is a `SystemModel` behaviour keyed to a quirk id (the ids are catalogu
   ours near it (`MQ-022`). The model advances atime on the deferred schedule, which is what makes
   `G1` — a file fetched 280 s ago under a 60 s TTL with a 23 s atime — reproducible without a Mac.
 
+**Symlinks and the local blob** (added 2026-09-08, from S8 and S10, which had measurements and
+no catalogue rows)
+
+- The system makes a **real symlink** under CloudStorage for an item served as one, and
+  `readlink` answers the row's target (`MQ-076`); a **dangling** one is indistinguishable from a
+  live one, size and all (`MQ-077`).
+- A create the agent refuses surfaces **only** as the item's `uploadingError` (`MQ-078`): `ln -s`
+  exits 0 and the item stays in the mount, so `sshdrive status` is the one route to the user.
+- A tag change is asked **once even when the reply freezes the metadata version** (`MQ-079`), so
+  the xattr hash is not what ends the exchange; what it is for is an *agent-side* change of the
+  stored blob.
+- A pending edit on an item we report deleted comes back as a **`createItem`** of the same name
+  and then collides for ever (`MQ-080`), which is why §6.4's guard holds pending items.
+
+**Where the model is uncertain, it says so.** Four rules read a measurement that was taken once
+or bracketed rather than measured, and each carries a `confidence:` note in the rule and in the
+catalogue row: the window in which an eviction straight after a `modifyItem` reply is refused
+(`MQ-017`, modelled as exactly the first call); the single deferred atime advance (`MQ-022`,
+one file, one reading); the 5-10 s unpin settle window and the minute the root was still refused
+in (`MQ-034`, `MQ-034.root`, taken at their upper bounds); the length of the window
+`unregister()` leaves open (`MQ-063`, bracketed at five seconds by a command that worked); and
+that the dividing line in `MQ-029` is a **new container** rather than a new item, which is the
+model's reading of an outcome measured three times rather than a measurement of its own.
+
 ## 4. (c) `ServerModel`: the remote half
 
 `ServerModel` is the second package library target: a whole SSH/SFTP server universe in
@@ -523,6 +547,54 @@ the helper's NDJSON reader all run **unmodified**.
   `kill -TERM 0` really does or does not reach a bystander. A scenario that needs a shell the box
   does not have (`fish`, `tcsh`, `zsh`) skips with a named reason rather than pretending.
 
+  **The box is a seam too** (2026-09-08). `ServerModel.HostTools` measures what the machine
+  running the suite can actually do, once per process, and a scenario that meets one of those
+  bounds skips with the sentence it returns - an `XCTSkip` naming the platform fact, never a
+  silent `#if`. Three bounds bite today. The local `find` is probed by **what it accepts**
+  rather than by what it prints (`SQ-081`, the same rule `SQ-002` states for a server), so a
+  sweep row that only needs *a* `-cmin` runs against GNU findutils on Linux and real BSD
+  `find` on a Mac instead of being pinned to a flavour, and only a busybox profile is ever
+  shimmed. The filesystem is asked whether it will hold a name that is not valid UTF-8
+  (`SQ-080`): APFS will not, so `H7`'s real-`find` half is Linux-only while its
+  `partitionRoots` and SFTP-wire halves run everywhere. And `PATH_MAX` and
+  `sockaddr_un.sun_path` are read from the box rather than written out (`SQ-085`) - a harness
+  tree deep enough to outrun a channel's 4 MB buffer is over the Darwin limit at Linux's
+  dimensions, and every `open` then fails silently.
+
+  `FakeSSH` also tells `ControlSocket` what the kernel will *call* a running stub. The stub is
+  a shell script named `ssh`; Linux takes a process's short name from the script, XNU from the
+  interpreter binary, and macOS launch constraints `SIGKILL` a copy of any system shell, so
+  there is no binary named `ssh` to point a shebang at (`SQ-082`).
+  `ControlSocket.masterProcessName` is the seam - the same shape as
+  `SSHProcess.sshBinaryPath` - and `install()` sets it to a **measured** name, read from a
+  probe script that prints before it sleeps, because macOS's `/bin/sh` is a launcher that
+  re-execs `bash` and a name sampled on a timer is `sh` or `bash` depending on how cold the
+  box is. Without it, `K4`'s liveness and both of `K6`'s pid-based routes could not run on the
+  one platform whose branch of `ControlSocket` they are about.
+
+  One artifact the harness suppresses rather than asserts around: a shell prints
+  `Killed`/`Terminated` on its own stderr when a foreground child dies by a signal, and dash
+  writes it to the *command's* redirected stderr rather than its own (`SQ-084`) - while
+  `SQ-011` is the claim that a signal-killed remote command says nothing at all.
+  `FakeSSH.run_session` hands the session its real stderr on fd 4 and points its own at
+  `/dev/null`, which lets `J13` pick its signal for what it proves: `SIGKILL`, since a test
+  child inherits an ignored `SIGINT` on Darwin and an ignored `SIGPIPE` everywhere
+  (`SQ-086`).
+
+  **A scenario that sweeps or kills by prefix takes the directory it acts on.**
+  `ControlSocket.sweepOrphans(in:)`, `liveMasterPIDs(in:)` and `killStrayMasters(in:)` all
+  default to the real `$TMPDIR` - the shipping blast radius `agent stop` needs - and a test
+  passes one of its own, because `swift test` runs the swift-testing suites **concurrently
+  with** XCTest in a single process. `K6` killing by the `ControlPath=$TMPDIR/sshdrive-`
+  needle was reaching suite `Q`'s live masters and failing two or three of its nine, a
+  different two or three every run.
+
+  The same rule holds for anything else a scenario installs process-wide. Suite `Q` is
+  `.serialized` because `SSHProcess.sshBinaryPath` decides which stub *every* `ssh` in the
+  process is, and its bed stops its agent **before** putting that path back: a `DomainManager`
+  handed to a detached `Task` outlived its own bed, went on reconnecting on the breaker's
+  schedule, and dialled the next scenario's stub.
+
   This is the deliberate design choice of the whole document: **the shell scripts are tested
   against real shells, because that is where three of our worst bugs lived** — the `;;` syntax
   error dash rejected, the `{ … }` group the heartbeat reader would otherwise eat, and the
@@ -595,6 +667,10 @@ and the shipping `ProviderCore`.
 
 ### Suite B — trash
 
+**Implemented 2026-09-08** in `Tests/SystemModelTests/TrashAndSymlinkScenarios.swift` (four
+tests: `B1` is two, the second driving the 0.1.0 `.noSuchItem` answer through the same model
+and asserting the mount hangs).
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | B1 | The `.Trash` materialize loop | A fresh domain | The system creates its trash node and asks `enumerator(for: .trashContainer)` | The provider answers `NSFeatureUnsupportedError`, **never** `.noSuchItem`; the model gives up after two attempts and removes `.Trash`; a `stat` of `.Trash` returns | S |
@@ -602,6 +678,11 @@ and the shipping `ProviderCore`.
 | B3 | A `.Trash` create under the root is refused | — | `createItem(filename: ".Trash", parent: .rootContainer)` | Refused feature-unsupported, and nothing is sent to the server | S |
 
 ### Suite C — extension lifecycle and XPC
+
+**C1 and C2 implemented 2026-09-08** in `Tests/SystemModelTests/LifecycleScenarios.swift`
+(three tests; `C1` is two, the second running the 0.1.0 invalidation handler and asserting
+the domain goes permanently disconnected). `C3`-`C5` are pure-unit rows and `C6` wants
+`AgentRuntime`.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -614,6 +695,19 @@ and the shipping `ProviderCore`.
 
 ### Suite D — writes, conflicts, atomicity
 
+**D1, D2, D3, D4, D9 and D12 implemented 2026-09-08** in
+`Tests/SystemModelTests/WriteScenarios.swift`, together with `F1`, `F2` and `F4`, which are
+about the same queue (eleven tests; `D2` and `D3` are two each, one of them `D2`'s
+bite-proof: the single un-retried eviction, which leaves the replica holding the local bytes
+under the remote version for ever). `D5`, `D6`, `D7`, `D10` and `D11` are the agent's and the
+server's rows; `D8` is not claimed.
+
+**D2, D6 and the two new rows implemented 2026-09-08** in
+`Tests/AgentRuntimeTests/WriteScenarios.swift`, beside `G10` (nine tests; `D2` is two - the
+retry itself and the schedule behind it - and `D10` is two, one per rename semantics).
+`D2` has a row on each side: this one is what the **agent** does with the refusal, the
+`SystemModelTests` one is what the system does to the replica if it never retries.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | D1 | A `modifyItem` reply is believed | A materialized file | Reply with a version that is not the one written | No second `modifyItem`, no re-fetch, no conflict flag; the replica records the invented version | S |
@@ -625,6 +719,9 @@ and the shipping `ProviderCore`.
 | D7 | The conflict check reads `generation` | A same-size, same-second remote change | An overwrite | The conflict is detected, because generation came from the row and not from the wire | V |
 | D8 | A pending upload survives a bundle replacement | A held upload; the bundle replaced | The system re-offers to the new instance | The conflict check makes the duplicate safe; a conflict copy, not a loss | S |
 | D9 | An atomic save keeps the identifier | A materialized file | The temp+rename save shape | One `modifyItem` on the original identifier; no `createItem`, no `deleteItem` | S |
+| D10 | The temp+rename upload restores mode and mtime | A create and an overwrite, on the wire | Upload each | `.sshdrive-upload-<mac8>-<uuid>` then the non-overwriting `rename` (create) or `posix-rename` (overwrite), then the `setstat` putting the mode back through the server's umask (`SQ-033`), then the post-upload `lstat`; both rename semantics are met (`SQ-034`). Added 2026-09-08 | SV |
+| D11 | The stale temp sweep takes only our prefix | Our own stale temps, a bystander's similarly shaped names, and one temp whose upload is in flight | A listing | Only ours are swept; the in-flight one is left; a prefix-blind sweep is asserted to take the bystanders. Added 2026-09-08 | SV |
+| D12 | Both `fetchContents` failures are reversible | Two materialized items, one answered `.cannotSynchronize` and one `.noSuchItem` | Read each, then `item(for:)` the second | Neither fetch answer removes anything (`MQ-012`); the same code from `item(for:)` deletes the user's file (`MQ-011`). Added 2026-09-08 | S |
 
 ### Suite E — the index
 
@@ -639,6 +736,12 @@ and the shipping `ProviderCore`.
 
 ### Suite F — offline, the breaker, reconnection
 
+**F5-F11 implemented 2026-09-08** in `Tests/AgentRuntimeTests/ReconnectScenarios.swift`
+(seven tests, all on `VirtualAgentClock`, so the breaker's backoff, the ladder's climb-back
+hold and section 4.2's once-a-minute presence rule run at their real numbers and cost no
+real time). `F1`, `F2` and `F4` are the system's rows and live in
+`Tests/SystemModelTests/WriteScenarios.swift`; `F3` is not claimed.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | F1 | `signalErrorResolved` is the only flush | A queued write, the backoff past five minutes | Reconnect with no signal; then `signalEnumerator`; then `signalErrorResolved` | Nothing, nothing, then the `modifyItem` within 20 ms | S |
@@ -650,9 +753,17 @@ and the shipping `ProviderCore`.
 | F7 | The reconnect re-opens the helper stream | Tier 2 running, the master `kill -9`ed | The reconnect | The stream is re-opened by the reconnect path itself, in `ReconnectSequence` order — after `applyConnection`, before the signals — and **not** at the next poll cycle; a location that is idle (10 min cadence) is back at tier 2 in seconds | SV |
 | F8 | An outage is not a tier verdict | Tier 2 running; the connection stalls until the helper's 60 s heartbeat lapses and the stream dies with the master still nominally up | The stall, then the link back | The downgrade is transient: held for 2 s, doubling to 60 s, cleared outright the moment a connection comes up. It never becomes the session-long downgrade §6.4 reserves for no shell, no exec channel, an unsupported arch, `noexec` and a hash mismatch after a redeploy | SV |
 | F9 | Repeated down/up cycles converge | Four outages in a row with 30 s of link between them | Each recovery | Every round ends at tier 2 within one cycle of the link being stable; the breaker's own backoff stays capped at 60 s and the ladder's at 60 s; neither compounds across rounds | SV |
+| F11 | The path gate fails fast and spawns nothing | `NWPathMonitor` reporting no path | A request, then the path back | The call fails fast rather than waiting out `ConnectTimeout`, **no `ssh` is spawned at all** while the path is down, and the path coming back connects without waiting out the breaker's backoff. Added 2026-09-08 | SV |
 | F10 | The authentication deadline re-arms once per trigger | A location stopped by section 4.2's 60 s deadline | A request with nobody there, a second inside the minute, then one with the user present, then the screen unlock | The absent reading refuses and the second request does not even read the presence test (once a minute); the present-user request re-arms exactly one attempt; the unlock is the other trigger and needs no presence test; each fires once per stop, and a fresh stop arms both again | S |
 
 ### Suite G — eviction and pinning
+
+**G1-G6, G8, G9 and the two new rows implemented 2026-09-08** in
+`Tests/SystemModelTests/EvictionAndPinningScenarios.swift` (twelve tests; `G1` and `G14` are
+two each - `G1`'s bite-proof puts atime back in the `max` and the file survives its TTL for
+ever, and `G14`'s runs both misspellings of the activation-rule binding). `G1`, `G4` and `G5`
+also have an agent-side row in `Tests/AgentRuntimeTests`, asserting what the *agent* decides;
+these assert what the system does to it. `G7` is a pure-unit row.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -665,14 +776,23 @@ and the shipping `ProviderCore`.
 | G7 | A pin change rewrites descendants | A pinned subtree with nested markers | Change the pin | Every explicit state beneath is cleared first (invariant 2), every known descendant row is rewritten with an anchor each, and the smallest marker change is the one made (invariant 3) | U |
 | G8 | Six fetches, and the seventh | A 30-file eager subtree; then eight concurrent opens | Both | Strict batches of six for the subtree; eight simultaneous foreground calls are all admitted and counted, never refused | S |
 | G9 | `evictItem` is recursive | A materialized tree | Evict the root container | Every item goes dataless, directories included | S |
+| G10 | The transfer scheduler | A queue of background transfers, then a foreground one; then a cancel | Both | Four run at once, foreground before background, the window split between them, a cancelled transfer stops and frees its slot, and eight simultaneous opens are all admitted and counted (`MQ-032`) - the six-fetch ceiling bounds an eager subtree (`MQ-031`), never the queue. Added 2026-09-08 | S |
+| G11 | Pins export and import | A marker set with an exclusion nested under a pin | `pins --export`, then `--import` onto a fresh location and onto itself | The round trip preserves the set exactly, the import applies the **smallest** marker change (invariant 3) and clears explicit states beneath (invariant 2), and importing a matching file is idempotent. Added 2026-09-08 | S |
+| G12 | The agent's own `stat` under its mount is not gated | The TTL loop's `lstat` and `getUserVisibleURL` on its own domain | One pass | Allowed with no prompt, no probe, no guard and no fallback (`MQ-060`); a scripted denial degrades to the index's own `last_fetch` rather than branching. TCC itself stays a VM measurement (section 7). Added 2026-09-08 | S |
+| G13 | Finder owns Download Now and Remove Download | One file, dataless then materialized then kept | `contextMenu` | Exactly one of the two, by `isDownloaded` and nothing else (`MQ-053`); `Remove Download` is still offered on a kept item, where the eviction fails. Added 2026-09-08 | S |
+| G14 | Our actions are one of a pair, top level, never on the sidebar | The shipped `Info.plist` declaration, read from the repository | `contextMenu` on an item, on the window background and on the sidebar row | One of the pair each time (`MQ-054`), at the top level, absent from the sidebar row, and absent on an empty selection; either misspelling of `fileproviderItems` drops the entry silently (`MQ-055`). Added 2026-09-08 | S |
 
 ### Suite H — change detection
 
 **H1, H2, H3 and H6 implemented 2026-09-08** in `Tests/ServerModelTests/SweepScenarios.swift`,
 against a real shell and a real `find`. The busybox flavour is a generated `find` shim that
 behaves the way BusyBox 1.36.1 was measured to, because this box has GNU findutils and no
-busybox; the *shell* rows that need the busybox binary skip by name. H4, H5, H7-H10 wait for
-`AgentRuntime` (step 8).
+busybox; the *shell* rows that need the busybox binary skip by name.
+
+**H4, H5 and H7 implemented 2026-09-08** in the same file (seven tests now), and **H8, H9,
+H10 and the new H11** in `Tests/AgentRuntimeTests/DetectionScenarios.swift` (six tests, two
+of them bite-proofs). `H4` is the case a container could never provide: a `date` shim driven
+by `ServerProfile.clockOffset` (`SQ-054`) is the only coverage that row will ever have.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -685,6 +805,7 @@ busybox; the *shell* rows that need the busybox binary skip by name. H4, H5, H7-
 | H7 | A non-UTF-8 root goes to tier 0 | A root named `latin1-caf\xff` | A cycle | It is dropped from the `find` argv and listed at tier 0 in the same cycle | V |
 | H8 | The rotation and the caps | 5,000 `materialized` roots | One tier-0 cycle | 64 materialized roots plus the root; `rotationPeriod == ceil(5000/64)`; `viewed` capped at 256 with LRU eviction; pin roots exempt | U |
 | H9 | A CLI command is a touch | A location watched only from a terminal | `sshdrive status <name>` | The location's `viewed` reason is refreshed and the cadence does not fall to ten minutes | S |
+| H11 | The mass-deletion guard's thresholds | Directories at and either side of every threshold, and a root emptied | One listing diff each | The count, the proportion and the small-directory floor each fire and do not fire at their boundaries; the root has no floor; `held` rows carry `reason` and `checks`; the 5- and 30-minute re-checks run on schedule; `accept-deletions` releases them; a held fetch answers `.cannotSynchronize` (`MQ-011`, `MQ-012`). The pending-item half is `D5`. Added 2026-09-08 | S |
 | H10 | A cycle that eats its interval | A 56.8 s cycle against a 60 s interval | The next schedule | The interval becomes three times the last cycle, capped at the insurance interval, and `status` says so; a tier-2 cycle that went nowhere paces nothing | U |
 
 ### Suite J — remote execution and the helper
@@ -694,6 +815,12 @@ busybox; the *shell* rows that need the busybox binary skip by name. H4, H5, H7-
 bite-proof: the wrapper as it stood before 2026-09-08, naming `0`, is run for real against a
 real shared process group and a real bystander session, and the bystander dies. J9-J11 and
 J13 wait for the helper binary (step 9); J11's stale-FIFO half is already covered on the wire.
+
+**J9, J10 and J13 implemented 2026-09-08** in
+`Tests/ServerModelTests/HelperShellScenarios.swift` (four tests; `J13` is two, the second
+asserting the death is *reported* with its exit status and its stderr rather than swallowed).
+`J9` runs the **real Rust helper** where `helper/target` holds one and skips by name naming
+`scripts/build-helper.sh` where it does not. **The new J14** is in `ShellScenarios.swift`.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -709,6 +836,7 @@ J13 wait for the helper binary (step 9); J11's stale-FIFO half is already covere
 | J10 | Writing over a running helper | A running helper | Re-upload | `ETXTBSY`; the temp-name-and-rename path succeeds | V |
 | J11 | A stale relay FIFO | A wrapper `SIGKILL`ed (its EXIT trap does not run) | The next deployment | `.sshdrive-helper-in-*` is swept with no age rule; `helper off` can remove the directory | V |
 | J12 | Tier 2 needs a held channel | `.debianMaxSessions` | The ladder | The helper is refused with `ChannelBudget.allowsPersistentExecChannel` false and one sentence in `status`; the sweep and probe still work | V |
+| J14 | The login-shell snapshot, per shell | Each `LoginShell` shape the box can run, with its own rc mechanism | Take the snapshot | Every byte of rc noise before the sentinel is discarded (`SQ-015`) and `PATH`/`SSH_AUTH_SOCK` come back; on `bashbg` the background child holds stdout so EOF never arrives (`SQ-016`) - the snapshot is ended by its **closing sentinel**, and an EOF-waiting reader on the same shell is shown still waiting at its deadline. `busybox ash`, `fish` and `tcsh` skip by name. Added 2026-09-08 | V |
 | J13 | The exec channel dies 255 with no stderr | A remote command killed by a signal | Read the exit | Classified as the wrapper's death, not as the mux client's error | V |
 
 ### Suite K — transport and `ssh`
@@ -716,7 +844,12 @@ J13 wait for the helper binary (step 9); J11's stale-FIFO half is already covere
 **K1, K2, K7, K9-K14 implemented 2026-09-08** in
 `Tests/ServerModelTests/TransportScenarios.swift`, against the `FakeSSH` stub that `SSHMaster`
 spawns exactly as it spawns `/usr/bin/ssh`. K1 and K2 each run the failing order as well as
-the shipping one. K3-K6 and K8 are pure-unit or `AgentRuntime` rows and are not claimed.
+the shipping one. **K3, K4, K5 and K6 implemented 2026-09-08** in
+`Tests/ServerModelTests/MasterScenarios.swift` (eight tests, three of them bite-proofs: a mux
+client without the three guards really does open a second unsupervised connection, a
+`ControlPersist` master really does fork away and take the pid, the stderr and the exit
+signal with it, and the pre-2026-09-04 name-only orphan sweep really does delete the
+package's own test databases). K8 is a pure-unit row and is not claimed.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -737,9 +870,14 @@ the shipping one. K3-K6 and K8 are pure-unit or `AgentRuntime` rows and are not 
 
 ### Suite L — paths, names and attributes
 
-**L1 implemented 2026-09-08** in `Tests/ServerModelTests/SFTPWireScenarios.swift`: the wire
+**L3-L6 implemented 2026-09-08** in `Tests/SystemModelTests/AttributeScenarios.swift`,
+beside `E3`, which is about the same blob (seven tests; `L4` is three - the round trip, the
+bite-proof against an item that returns no `tagData`, and `MQ-079`'s frozen metadata
+version). **L1 implemented 2026-09-08** in `Tests/ServerModelTests/SFTPWireScenarios.swift`: the wire
 server really does follow the swapped symlink into `/etc`, and the `lstat` that must come
-first is what catches it. The rest of the suite is `AgentRuntime`'s or pure unit.
+first is what catches it. **L7 and L8 implemented 2026-09-08** in
+`Tests/ServerModelTests/NamesAndAttributesScenarios.swift` (three tests). `L2` is pure unit
+and is not claimed.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -754,19 +892,25 @@ first is what catches it. The rest of the suite is `AgentRuntime`'s or pure unit
 
 ### Suite M — symlinks
 
-**M2 implemented 2026-09-08** (`SFTPWireScenarios`), together with `SQ-029`'s reversed
+**M3 and M4 implemented 2026-09-08** in
+`Tests/SystemModelTests/TrashAndSymlinkScenarios.swift`. **M2 implemented 2026-09-08**
+(`SFTPWireScenarios`), together with `SQ-029`'s reversed
 `SSH2_FXP_SYMLINK` argument order, which no test above the wire can see.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | M1 | The lexical containment check | Links to `note.txt`, `/home/alec/m4/Other`, `/etc/passwd`, under both root spellings | List | Relative in-root shown, absolute in-root rewritten relative, escaping omitted with a reason, and the check holds under the canonical and the user-typed root | U |
 | M2 | A `readlink` per link | A listing with links | Enumerate | One `readlink` per link, because SFTP v3's `readdir` carries no target | V |
-| M3 | A refused `ln -s` is a sync error | An escaping target created in the mount | `createItem` | The create succeeds locally, the refusal comes back as the item's `uploadingError`, and the sentence reaches the user only through `status` | S |
+| M3 | A refused `ln -s` is a sync error | An escaping target created in the mount | `createItem` | The create succeeds locally, the refusal comes back as the item's `uploadingError` (`MQ-078`), and the sentence reaches the user only through `status`; an in-root relative target reaches `createItem` with the target intact | S |
+| M4 | A real link, and a dangling one | A link served for a live target and one for a missing target | List the mount | The system makes a real symlink under CloudStorage and `readlink` returns the row's target (`MQ-076`); the dangling one is indistinguishable - same kind, size = the target string's length, no marker (`MQ-077`). Added 2026-09-08 | S |
 
 ### Suite N — the capability report and probes
 
 **N2, N3 and N4 implemented 2026-09-08** (`SFTPWireScenarios`, `TransportScenarios`,
-`ShellScenarios`). N1 is a pure-unit row and belongs beside `CapabilityReport`.
+`ShellScenarios`). **N1 and the new N5 implemented 2026-09-08** in
+`Tests/AgentRuntimeTests/CapabilityScenarios.swift`, where the report is built by the
+shipping `LocationCommands` and read back out of `sshdrive status`' own JSON. N1's harness
+is therefore SV rather than the U the row was drafted as.
 
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
@@ -774,28 +918,79 @@ first is what catches it. The rest of the suite is `AgentRuntime`'s or pure unit
 | N2 | A cached probe keeps its extensions | A cached probe with no live connection | Build the report | The recorded extension set is used, never an empty default; four lines do not silently degrade | U |
 | N3 | The `MaxSessions` probe | `.debianMaxSessions` | Probe | It asks "may I hold three at once", proves each by completing the SFTP handshake, drops the bulk channel at 2 and keeps the exec channel | V |
 | N4 | A shell-less account | `.debianShells` `forcesftp` | Probe | "no shell access (ForceCommand)", never "shell output unusable", whether the account answers with SFTP framing or with a plain sentence | V |
+| N5 | The report names the server, and `fsync`/`limits` are server facts | `.tailscaleSSH`, then `.debian`/`.ownerDebian`, then a server we could not identify | `status` | Tailscale is named from the collect connection's `DEBUG1` string (`SQ-036`) and the missing `fsync`/`limits` are stated as facts **about that server** with no `upgrade:` line (`SQ-024`); OpenSSH has both (`SQ-025`); an *unidentified* server keeps the upgrade line, because it may well be an old OpenSSH. Added 2026-09-08 | SV |
 
 ### Suite P — packaging and lifecycle
 
 These are the ones whose ground truth is a Mac. Each scenario asserts the **state machine** on
 Linux and names the VM runbook step that measures the fact behind it (§7).
 
+**P1, P2, P3, P5 and P8's system halves implemented 2026-09-08** in
+`Tests/SystemModelTests/LifecycleScenarios.swift`, against `SystemModel.Launchd`. `P1`, `P2`
+and `P8` already had an agent-side row in `Tests/AgentRuntimeTests` asserting what the
+*agent* decides against `FakeLoginItem`/`FakeLaunchd`; these are the other half - what
+launchd, `SMAppService` and LaunchServices do, which is what makes those decisions
+necessary - and both halves are keyed on the same `MQ-061`, `MQ-062` and `MQ-063`. `P3` is
+two tests, because `MQ-061` holds a **different value in each column**: the quarantined
+install was refused on 26.6 and had passed on 26.4, and the model branches on the table
+rather than picking one.
+
+**P4 and P9 implemented 2026-09-08** in `Tests/AgentRuntimeTests/LifecycleScenarios.swift`,
+beside the agent-side halves of `P1`, `P2` and `P8` (six tests). `P4`'s `agent stop` half is
+the agent-side orchestration only - that every master really goes, by all three of section
+6.1's routes, is `K6` against the `FakeSSH` stub.
+
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | P1 | The login item after a replacement | A registered job; the bundle deleted and replaced | `register()` alone, then `unregister()` + launch | `register()` alone does not repair it; only the unregister path does | VM |
 | P2 | `unregister` waits for launchd | A job launchd has not yet dropped | Back-to-back unregister/register | The `unregister` role polls until the service is gone; a `register()` inside the window is asserted to leave a job dying on a 10 s throttle for ever | VM |
 | P3 | A quarantined bundle registers no plugin | Quarantine xattr present | The postflight | `spctl --assess`, then the xattr strip, then unregister and `open -g`; `doctor`'s `quarantine` check is ordered ahead of "extension registered" | VM |
-| P4 | SIGTERM exits 0 | The agent running with masters | `kill -TERM` | The same shutdown as `agent stop` runs, every master goes, and the exit status is 0 so `KeepAlive` does not restart the old bundle | S |
+| P4 | SIGTERM exits 0, and `agent stop` takes every master | The agent running with masters | `kill -TERM` | The same shutdown as `agent stop` runs, every master goes, and the exit status is 0 so `KeepAlive` does not restart the old bundle | S |
 | P5 | `add(domain)` 4099 after landing | A replica that reports 4099 *after* the call succeeded | `add(domain)` | The domain list is re-read before the error is believed, and the discrepancy is logged | S |
 | P6 | Stranded domains are removed | A domain no `config.json` claims, and a missing `config.json` | First start | Both are removed, with their `~/Library/CloudStorage` directories | S |
 | P7 | The profile names the signing certificate | A profile issued for another certificate | `release.sh` | The hashes are compared **before** signing; the mismatch is named, the entitlement dropped loudly, and the build carries on | VM |
 | P8 | A nickname renames in place | 4 materialized items, 1 pending upload | `set nickname` | The mount directory is renamed, the materialized set and the pending upload are unchanged, nothing is re-fetched, and the pending write still flushes | S |
 | P9 | `add` waits for the first deployment | A location whose helper is being deployed | `add` | The upload sentence is printed first, then the report after a bounded wait; `status` ten seconds later agrees with it | S |
 
-**Counts:** A 9, B 3, C 6, D 9, E 6, F 10, G 9, H 10, J 13, K 14, L 8, M 3, N 4, P 9 =
-**113 scenarios**, of which 5 are `VM`-anchored and the other 108 run on Linux with nothing
+### Suite Q — `add`, askpass and the collect connection
+
+**Added and implemented 2026-09-08**, in `Tests/AgentRuntimeTests/AddFlowScenarios.swift`
+(nine tests). The suite the architecture was missing: every earlier row about section 4.2 was
+about one decision in isolation, and the failures this project has actually had at `add` time
+were about the *flow* - a password filed under the alias instead of the resolved host, a hop
+keyed off the prompt text, a half-added location left behind by a refusal.
+
+So each of these drives the shipping `LocationCommands.add` end to end: `ServerModel.FakeSSH`
+installed at `SSHProcess.sshBinaryPath` answers `ssh -G`, raises the real prompt strings and
+binds a real control socket; a real `sshdrive-askpass`-shaped program with a file mailbox in
+place of the XPC connection hands each prompt to the **real** `AskpassBroker`; and the mount
+that follows runs `RealSFTPTransport` over `ServerModel.FakeSFTPServer` on a real SFTP v3
+wire. Nothing between the CLI's arguments and the server is a stub of ours.
+
+| Id | Name | Setup | Action | Assertion | H |
+|---|---|---|---|---|---|
+| Q1 | Key auth prompts for nothing | A server that takes the key | `add` | No askpass invocation at all, no secret stored, the location created and mounted | SV |
+| Q2 | A password is relayed, stored on the **resolved** host, and asked for once | An alias resolving to another hostname, `HostKeyAlias` set | `add`, then a second location on the same host | The prompt is exactly `<user>@<host>'s password: ` (`SQ-060`); the item is keyed `password:<user>@<hostname>:<port>` off `ssh -G` and **not** off the alias or the prompt text; the second location prompts for nothing | SV |
+| Q3 | A `ProxyJump` chain is keyed per hop | One hop, then two, each with a different password | `add` | Each hop gets its own item, from the argv of the asking `ssh` and never from the prompt text (`SQ-063`); the port in the key can only have come from that hop's own `-p` | SV |
+| Q4 | Keyboard-interactive shares the plain password key | `.debianKbdInt` | `add` | The prompt is `(<user>@<host>) Password: ` (`SQ-062`) and the answer is stored under the same `password:` key | SV |
+| Q5 | The host-key question, answered no then yes | A fresh `known_hosts` | `add` twice | It arrives with `SSH_ASKPASS_PROMPT` **unset** and is classified by its text (`SQ-047`); a stored password is never answered to it; the `no` run leaves **no half-added location** - no `config.json` entry, no domain, no domain directory - and the `yes` run succeeds | SV |
+| Q6 | A wrong password stores nothing | A server that refuses it | `add` | The secrets store is empty afterwards and, again, nothing half-added | SV |
+| Q7 | A bad remote path rolls back | Authentication succeeds; the root does not exist | `add` | The failure is `NO_SUCH_FILE` from the wire, the location is removed from `config.json`, the domain removed and its directory deleted, and the message names the path | SV |
+| Q8 | The askpass token lifecycle and prompt classification | Every prompt shape section 4.2 tabulates | `add` | One token per `ssh`, attached to the asking pid, used, committed and then retired so it cannot be replayed; each shape classifies to its own case, the host-key question with no hint included; a PIN or unrecognised prompt is never relayed and refuses the location | SV |
+| Q9 | The two-step collect connection | A server accepting both a key and a password (`SQ-064`) | `add` | The first attempt runs `IdentityAgent=none`, the second consults the key agent, `agentDependent` follows which passed - asserted against the argv `FakeSSH` recorded; and the collect connection is bounded at **300 s** while the master `add` brings up afterwards runs at **60 s** (`K10`'s agent-side half) | SV |
+
+**Counts:** A 9, B 3, C 6, D 12, E 6, F 11, G 14, H 11, J 14, K 14, L 8, M 4, N 5, P 9,
+Q 9 =
+**135 scenarios**, of which 5 are `VM`-anchored and the other 130 run on Linux with nothing
 attached. (F7-F9 and K13-K14 were added by the 2026-09-08 working-set and helper-survival
-fixes; F10 by step 8, which is where section 4.2's re-arm first became drivable off a Mac.)
+fixes; F10 by step 8, which is where section 4.2's re-arm first became drivable off a Mac;
+**D12, G13, G14 and M4 by the same day's `SystemModel` write, eviction, menu and symlink
+work** - `MQ-012`, `MQ-053`, `MQ-054`/`MQ-055` and S8's two symlink answers each had a
+measurement and no scenario; and **D10, D11, F11, G10, G11, G12, H11, J14, N5 and the whole
+of suite Q by the same day's `AgentRuntime`/`ServerModel` pass**, which is where the `add`
+flow, the write protocol on the wire, the transfer scheduler, the pin sidecar, the guard's
+thresholds, the login-shell snapshot and `MQ-060`'s no-op first became assertable off a
+Mac.)
 
 ## 6. (e) Seeding: how a VM measurement becomes a quirk
 
@@ -842,12 +1037,32 @@ drift.
 
 ### 6.3 Checklist for adding a macOS version
 
+*Last walked 2026-09-08, when the write, eviction, pinning, trash, attribute, menu, symlink and
+launchd rules were added to `SystemModel` and `MQ-076`-`MQ-080` were catalogued; and again the
+same day for the agent and server halves - the `add` flow, the write protocol on the wire, the
+transfer scheduler, the pin sidecar, the guard's thresholds, the sweep window, the login-shell
+snapshot, the helper's self-digest and the masters - which added `SQ-055` and turned `MQ-060`
+from a VM-only row into `G12`'s no-op rule.*
+
+- [ ] Walk **every** row of `docs/quirks/servers.md` as well where the VM session touched a
+      server: an `SQ` row is measured against a service, not against an OS version, so a new
+      testbed image is the same kind of work as a new macOS and wants the same walk.
+
 - [ ] Add the version to `MacOSVersion` and to the CI matrix.
 - [ ] Run `docs/spikes/macos-version-sweep.md` on a VM of that version against the testbed.
 - [ ] Write the dated `results.md` entry.
 - [ ] Walk **every** quirk in `docs/quirks/macos.md` and record a value: confirmed, changed, or
       not measured. Not-measured is a legitimate answer and shows as an empty cell.
-- [ ] For each changed value, add a measurement row and let the model branch on it.
+- [ ] For each changed value, add a measurement row and let the model branch on it. A row that
+      differs between two columns is the point of the table, not a problem with it: `MQ-061` is
+      one already — the quarantined install was refused on 26.6 and passed on 26.4 — and `P3`
+      asserts both without deciding which is "right".
+- [ ] Mark any value taken **once**, or bracketed rather than measured, with a `confidence:`
+      note in both the catalogue row and the rule that reads it. Five rules carry one today
+      (`MQ-017`, `MQ-022`, `MQ-029`, `MQ-034`, `MQ-063`).
+- [ ] Check that every new id is in `docs/quirks/macos.md` **and** in the model:
+      `swift test --filter QuirkCatalogueTests` is that guard until `scripts/check-quirks.sh`
+      exists.
 - [ ] `swift test` on Linux, every version in the matrix, green.
 - [ ] Update `README.md`'s supported-versions line and DESIGN.md §2 if the minimum moved.
 
@@ -907,7 +1122,10 @@ against NFD, `XATTR_FLAG_SYNCABLE` at the kernel level, and whatever advances a 
 file's atime minutes after a fetch. The model encodes the *observation*; it does not reproduce
 the mechanism.
 
-**Servers we do not have.** A real BSD `find`; FreeBSD kqueue and the helper's FreeBSD target
+**Servers we do not have.** ~~A real BSD `find`~~ - no longer true as of 2026-09-08: macOS's
+`/usr/bin/find` **is** BSD, and when the suite runs on the build VM `H4` and `H7` exercise the
+`.bsd` flavour against a real one. What is still missing is a BSD *server*: FreeBSD's `sh`,
+FreeBSD kqueue and the helper's FreeBSD target
 (`aarch64-unknown-freebsd` cannot even be `cargo check`ed); a real Synology DSM box, its `sh` and
 its `max_user_watches`; armv7 hardware; and **the owner's own Tailscale server** — a behaviour
 that reproduces on the testbed's `ts-ssh` is evidence about Tailscale SSH, not about that
@@ -1068,9 +1286,27 @@ target depends on `Logging`.
 JSON mirror, the "unmeasured quirk on a supported version fails loudly" rule, and the
 Markdown/JSON consistency test. Parameterise the A suite over the matrix.
 
-**Step 3 — the rest of the extension.** `item(for:)`, `fetchContents`/`fetchPartialContents`,
-`createItem`/`modifyItem`/`deleteItem`, the trash, `performAction`, `decorations`, the error
-table. Scenarios **B1-B3, C1-C6, D1, D3, D9, L3-L6, M3**.
+**Step 3 — [x] Done 2026-09-08. The rest of the extension**, driven by the model rather than
+by a script. `SystemModel` grew the halves it had not had: the **write queue** (`PendingWrite`,
+the `MQ-035` and `MQ-014` schedules, a fresh instance per offer, the pending-items set a
+collision retry stays out of), the **download scheduler** (the six-fetch ceiling of `MQ-031`
+against the all-admitted foreground opens of `MQ-032`, and no retry ever for a failure),
+**eviction** (`MQ-017`-`MQ-021`, `MQ-024`, `MQ-030`, `MQ-033`, `MQ-034`, and the recursion of
+`MQ-020`), the **deferred atime advance** (`MQ-022`), the **trash node** and its two answers
+(`MQ-075`, `MQ-009`, `MQ-010`), the **replica lookup** that `MQ-029` says is the only thing
+that starts an unseen path, `SystemModel.Finder` (the user: open, read, create, duplicate,
+save, rename, `chmod`, tag, `setxattr`, `ln -s`, delete, walk and the contextual menu) and
+`SystemModel.Launchd` (`MQ-061`-`MQ-063`). `ModelAgent` gained a real write path over the real
+index, including section 5.7's own `SymlinkPolicy` check and the conflict copy of section 5.5.
+
+  Scenarios: **B1-B3, C1, C2, D1, D2, D3, D4, D9, D12, F1, F2, F4, G1-G6, G8, G9, G13, G14,
+  H9's system half, L3-L6, M3, M4, E3** and **P1, P2, P3, P5, P8**'s system halves - 48 tests
+  in five files, of which six are bite-proofs against a copy of the old behaviour: the 0.1.2
+  invalidation handler that disconnected the domain (`C1`), the un-retried eviction that leaves
+  local bytes under a remote version (`D2`), atime back in the TTL's `max` (`G1`), the
+  `.noSuchItem` trash answer that hangs the mount (`B1`), an item that returns no `tagData` and
+  loses the user's tags (`L4`), and both misspellings of the activation-rule binding (`G14`).
+  `C3`-`C6`, `D8` and `L7`/`L8` are not claimed.
 
 **Step 4 — `AppleConstantsTests`.** The macOS-only target that asserts every mirrored constant
 (capability bits, `fileSystemFlags`, error codes and domains, `changedFields` masks, the root
@@ -1091,10 +1327,14 @@ signals. Scenarios **F1-F6, G1-G9, P5, P6, P8**.
 
   **Half of this arrived with step 8 (2026-09-08):** the protocol exists, every one of those
   calls is behind it, and `AgentRuntimeTestSupport.FakeReplica` answers them well enough for
-  **F6, G1, G4, G5, P8** and the F7-F10 group. What is still owed is the *model* rather than
-  the fake: `SystemModel.FileProviderD` growing the materialized and pending sets and the
-  eviction rules, so that **F1-F5, G2, G3, G6-G9, P5, P6** assert against measured
-  fileproviderd behaviour instead of a scripted answer.
+  **F6, G1, G4, G5, P8** and the F7-F10 group.
+
+  **The other half arrived with step 3, later the same day.** `SystemModel.FileProviderD` now
+  holds the materialized set, the pending set, the eviction rules, the download scheduler and
+  the deferred atime, so **F1, F2, F4, G1-G6, G8, G9, P5 and P8** assert against measured
+  fileproviderd behaviour rather than a scripted answer, and the two halves of `G1`, `G4`,
+  `G5`, `P1`, `P2` and `P8` are keyed on the same quirk ids. Still owed here: **F3 and F5**
+  (both `SV`, and both wanting `ServerModel`'s connection) and **P6**.
 
 **Step 6 — [x] Done 2026-09-08. `ServerModel` v0: shells and exec channels.**
 `Sources/ServerModel` is a package library target (`Logging`, `SFTP`, `SSHProcess`,
@@ -1226,11 +1466,43 @@ a missing manager or a 4099 that lands anyway), `FakeLoginItem`/`FakeLaunchd` (`
   launchd, not `SMAppService`, and gives up at 30 s) and **P8** (a nickname renames the
   domain in place, with the materialized set and the pending upload untouched).
 
-  Still owed to this step and not claimed: **D2, D4, D6, D8** and **E1-E6** (the write and
-  index halves, which want `SystemModel`'s replica), and **H1-H10** (the sweep, which wants
-  `ServerModel`'s exec channel). Both are other agents' steps 5-7, and nothing in this one
-  blocks them: `FakeLiveConnection` takes any `SFTPTransport`, and `FakeTransportLauncher`
-  takes a factory.
+  **The rest of step 8 landed later the same day**, in the pass that closed every remaining
+  row whose harness is the agent fakes, the `ServerModel` or both. `Tests/AgentRuntimeTests`
+  is 47 tests in nine files: `AddFlowScenarios` (the new suite **Q1-Q9**),
+  `WriteScenarios` (**D2**, **D6**, **D10**, **D11**, **G10**), `DetectionScenarios`
+  (**H8**, **H9**, **H10**, the new **H11**), `EvictionAndPinScenarios` (**G1** twice,
+  **G2**, **G3**, **G4**, **G5**, the new **G11** and **G12**), `CapabilityScenarios`
+  (**N1**, the new **N5**), `LifecycleScenarios` (**P1** twice, **P2**, **P4**, **P8**,
+  **P9**), `ReconnectScenarios` (**F5**-**F11**), `GuardScenarios` (**D5**) and
+  `ProbeScenarios` (**K13**, **K14**). `Tests/ServerModelTests` gained
+  `MasterScenarios` (**K3**-**K6**), `HelperShellScenarios` (**J9**, **J10**, **J13**),
+  `NamesAndAttributesScenarios` (**L7**, **L8**), **H4**, **H5** and **H7** in
+  `SweepScenarios` and the new **J14** in `ShellScenarios`.
+
+  Three seams were added for it, all additive and all behaviour-preserving: `SweepWindow`
+  `.forCycle`, `SweepPlan.partitionRoots` and `RemoteSweep.collect` in `AgentCore` (the
+  window, the `./name`/non-UTF-8 argv rule and the sweep read loop, so `ChangeDetector`
+  calls them instead of holding copies), `PollSchedule.paces`, `ExecChannel.reportDeath`
+  in `SSHProcess` and `ControlSocket`'s state-aware liveness (`SQ-075`: a zombie is not a
+  live master), and `AgentRuntimeTestSupport.ScriptedTerminal`/`AskpassBridge` - a real
+  `sshdrive-askpass`-shaped program with a file mailbox where the XPC connection is, so
+  section 4.2's token protocol runs for real off a Mac.
+
+  Still owed to this step and not claimed: **D4**, **D8** and **E1-E6** (the index half and
+  the two rows that want a bundle replacement under a live queue), which are
+  `SystemModel`'s.
+
+  **Three bugs the models themselves had, all found by a scenario and all fixed.** They are
+  worth naming because a simulator that is wrong is worse than no simulator: `FakeSFTPServer`'s
+  `readdir` announced the size of the **page** and then skipped any entry whose node had gone
+  since `opendir`, so our own stale-temp sweep removing a `.sshdrive-upload-*` mid-listing
+  produced a `SSH_FXP_NAME` promising more entries than it held - the client read into the next
+  packet and the channel died `badMessage` a millisecond after coming up, which is exactly what
+  a real server can never do. `FakeSFTPStream` handed a parked reader **everything** it had
+  rather than the `upTo:` it asked for, and left a satisfied read's deadline timer armed to
+  fail whichever *later* read happened to be parked when it fired. Each of the three surfaced
+  as a location that connected and immediately went offline, in a different scenario every run;
+  none of them was a product fault, and all three would have been read as one.
 
   Beside them `Tests/AgentRuntimeTests/MirroredAgentConstantsTests.swift`, the macOS-only
   guard on everything the agent's adapters mirror, in the shape step 1.3 gave the
@@ -1240,12 +1512,22 @@ a missing manager or a 4099 that lands anyway), `FakeLoginItem`/`FakeLaunchd` (`
   defaults to YES, which is why the adapter clears it (`MQ-008`); the two testing-mode bits;
   and the four `SMAppService.Status` cases behind `doctor`'s login-item line.
 
-**Step 9 — the helper.** The Rust binary already builds and tests on this box; run it against
-`FakeExecChannel` for real. Scenarios **J9-J11**, and the Tailscale process-group model.
+**Step 9 — the helper. [x] Done 2026-09-08** for `J9`, `J10` and `J13`, in
+`Tests/ServerModelTests/HelperShellScenarios.swift`: the **real** Rust binary is copied onto
+the model server and run through a real exec channel, a byte is flipped in it **in place**
+(same size, same inode), and both the `sha256sum` route and the `--version` self-digest route
+catch it - which is `SQ-067`'s point that a hash the build *embeds* cannot be the hash of that
+binary, bite-proved with a stand-in that embeds one. `ETXTBSY` over the running copy and the
+temp-name-and-rename that gets past it are `J10`. `J11` is already covered on the wire; the
+Tailscale process-group model is `J1`, done at step 6.
 
-**Step 10 — lifecycle seams.** `LoginItemControlling`, `LaunchdControlling`, `PowerObserving`,
-`NetworkPathObserving`, `PresenceReading`, `ScreenLockObserving`, `BundleInspecting`, and
-`SystemModel.Launchd`. Scenarios **P1-P4, P7, P9**.
+**Step 10 — lifecycle seams. [x] Done 2026-09-08** except `P7`, which is `release.sh` and a
+certificate and has nothing to simulate (section 7). Every protocol is in place and both
+halves are covered: `Tests/AgentRuntimeTests/LifecycleScenarios.swift` for what the *agent*
+decides against `FakeLoginItem`/`FakeLaunchd`/`RecordingEndpoint` (**P1**, **P2**, **P4**,
+**P8**, **P9**), `Tests/SystemModelTests/LifecycleScenarios.swift` for what launchd,
+`SMAppService` and LaunchServices do to it (**P1**, **P2**, **P3**, **P5**, **P8**), keyed on
+the same `MQ-061`-`MQ-063`.
 
 **Step 11 — the seeding apparatus.** `docs/spikes/macos-version-sweep.md` (the runbook that
 measures every quirk on a new OS in one session), the §6.3 checklist wired into
@@ -1274,6 +1556,23 @@ existing `SSHDRIVE_TESTBED=1` gate and are skipped.
 `Package.swift` keeps `platforms: [.macOS(.v14)]` (it constrains the macOS build only) and gains
 the seven new targets. Every target must compile for Linux; that is enforced by the Linux job,
 not by convention.
+
+### On the Mac
+
+The **same** `swift test` runs on the build VM and must be green there too. It is not a second
+suite: it is the same scenarios against a different box, and a row that cannot run there skips
+by name rather than being branched out.
+
+```sh
+rsync -a --delete --exclude .git --exclude helper/target ./ alec@100.114.204.5:sshdrive/
+ssh alec@100.114.204.5 'cd ~/sshdrive/Packages/SSHDriveCore && swift test'
+```
+
+As of 2026-09-08: **813 XCTest with 41 skipped and 51 swift-testing here, 827 XCTest with 45
+skipped and the same 51 on Darwin.** The extra fourteen are the macOS-only mirrored-constant
+assertions; the Darwin-only skips are `H7` (`SQ-080`, APFS will not hold the name), `J10` and
+`J1`'s bite-proof. There is **no `timeout` on macOS** and none of the shells the runbooks
+assume, so a long run is started detached on the VM and polled.
 
 ### What `Apps/` still needs a Mac for
 

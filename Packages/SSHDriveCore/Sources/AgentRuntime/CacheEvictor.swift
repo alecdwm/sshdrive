@@ -254,10 +254,23 @@ public actor CacheEvictor {
             // take the whole container, `--all` still has to drop what it can.
             report["rootContainerError"] = root["errorDescription"] as? String ?? "refused"
             report["mode"] = "file by file (the root container was refused)"
+            // Logged and **not interpreted** (`MQ-033`, `MQ-034`): the two measured
+            // refusals - a kept child under the container, and a policy the system has not
+            // re-read since an unpin - arrive as different domains and different codes and
+            // neither names a reason, so the code below them is identical in both cases.
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): the root container refused eviction (\(report["rootContainerError"] as? String ?? "refused", privacy: .public)); walking the materialized set instead. The error names no reason and nothing is read from it (MQ-033, MQ-034)."
+            )
         } else if pinsRemoved > 0 {
             report["mode"] = "file by file (the pins were just removed)"
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): \(pinsRemoved, privacy: .public) pin(s) were just removed, so the one call on the root container is not attempted; it fails for 5-10 s after an unpin and names no reason (MQ-034)."
+            )
         } else {
             report["mode"] = "file by file (pins are in place)"
+            Log.agent.notice(
+                "\(self.locationID, privacy: .public): a pin is in place, so the one call on the root container is not attempted; it meets a kept child and fails as a whole (MQ-033)."
+            )
         }
 
         let identifiers =
@@ -303,6 +316,17 @@ public actor CacheEvictor {
     /// finishes, and the row's only afterwards, so the later of the two is the save the
     /// TTL means. The atime is recorded for the log and decided on by nobody
     /// (`EvictionPlan`, 2026-09-05).
+    ///
+    /// **There is deliberately no TCC guard here** (`MQ-060`). The `getUserVisibleURL`
+    /// and the `lstat` below reach our *own* domain's mount under
+    /// `~/Library/CloudStorage`, which `tccd` evaluates as
+    /// `kTCCServiceFileProviderDomain` with our domain as the indirect object and allows
+    /// silently - no prompt, no `EPERM` - so a pre-flight check, a permission prompt or a
+    /// fallback path would all be code defending against something that does not happen,
+    /// and `sshdrive doctor` carries no line for it either (section 7). A `stat` that does
+    /// fail for any reason is simply absent: the candidate keeps the index's own
+    /// `last_fetch` and mtime and the TTL is decided from those, which is the same answer
+    /// the loop gives for a file the system has not yet written to disk.
     private func withTimes(_ candidates: [EvictionPlan.Candidate]) async
         -> [EvictionPlan.Candidate]
     {

@@ -264,6 +264,165 @@ extension AgentScenarios {
             await harness.manager.dropRuntime(locationID: location.id)
         }
 
+        /// **F5** - a call waits for the attempt in flight.
+        ///
+        /// Section 6.3 rule 2, and the number it turns on: two reads three seconds apart
+        /// during a 20 s connect both wait for the **one** attempt, and the wait is bounded
+        /// by *that attempt's own remaining deadline* - the 60 s authentication deadline of
+        /// section 4.2 measured from the spawn of `ssh`, which already contains the 15 s
+        /// `ConnectTimeout` - never by 60 s from now and never by the two added together.
+        ///
+        /// Failing the second call fast instead was considered and rejected: the first
+        /// enumeration after login or wake arrives during the connect, the system never
+        /// retries an enumeration on its own (`MQ-001`, and `MQ-007` measured that it will
+        /// hold one for the full 60 s and take the answer), so Finder would show the folder
+        /// as unavailable until the user clicked again. A spinner for the length of one
+        /// connect is the better of the two.
+        ///
+        /// Everything here is on `VirtualAgentClock`: the 20 s connect and the three
+        /// seconds between the reads are model time and cost the suite nothing.
+        @Test func f5TwoCallsWaitForTheOneAttemptInFlight() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas")
+            _ = try await harness.manager.runtime(for: location)
+            await harness.manager.detector(locationID: location.id)?.stop()
+            await harness.manager.evictor(locationID: location.id)?.stop()
+            await harness.quiesceConnects()
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+
+            // A server that accepts the TCP connection and then takes its time: 20 s of
+            // connect, which is section 6.3 rule 3's world with nothing else in it.
+            await gate.setFault(
+                unreachable: nil, hangMilliseconds: nil, connectHangMilliseconds: 20_000)
+            await gate.drop(reason: "the master was killed", reconnect: false)
+            let attemptsBefore = harness.launcher.attempts
+            // The transport every call goes through, held directly: two calls on one
+            // `LocationRuntime` would serialise on the actor and never meet the gate
+            // together, which is not what section 6.3 is about.
+            let transport = ReconnectingTransport(gate: gate, locationID: location.id)
+
+            let gateAttemptsBefore = await gate.attempts
+            async let firstRead = transport.readdir(.root)
+            // The gate counts the attempt when it starts it; the launcher counts it when
+            // the 20 s of connect are over, which is exactly the window under test.
+            await harness.settle {
+                await gate.attempts == gateAttemptsBefore + 1 && harness.clock.sleeperCount >= 1
+            }
+            #expect(await gate.attempts == gateAttemptsBefore + 1, "F5: the first call connects")
+            #expect(
+                harness.launcher.attempts == attemptsBefore,
+                "F5: and it is still in the connect while the second call arrives")
+
+            // Three seconds in, a second call arrives. It waits on the same attempt.
+            harness.clock.advance(3)
+            async let secondRead = transport.lstat(.root)
+            await harness.settle { await gate.waitedCalls == 1 }
+
+            // The attempt finishes. Both calls run.
+            harness.clock.advance(17)
+            let entries = try await firstRead
+            let attributes = try await secondRead
+            #expect(entries.isEmpty, "an empty root is still an answer, and both calls got one")
+            #expect(attributes.type == .directory, "F5: the second call ran on the same connection")
+
+            #expect(
+                harness.launcher.attempts == attemptsBefore + 1,
+                "F5: one attempt, not one per call")
+            #expect(await gate.attempts == gateAttemptsBefore + 1)
+            #expect(await gate.waitedCalls == 1, "F5: and the second call waited for it")
+            let bound = try #require(await gate.lastWaitBoundSeconds)
+            #expect(
+                abs(bound - (CircuitBreaker.authenticationDeadlineSeconds - 3)) < 0.001,
+                "F5: bounded by what is left of the attempt's own deadline - 57 s, not 60")
+            #expect(
+                bound < CircuitBreaker.authenticationDeadlineSeconds,
+                "F5: a fresh 60 s from now would be the deadline plus the time already spent")
+            let connected = await gate.isConnected
+            #expect(connected)
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **F11** - the network path gate fails fast, and a returning path connects at once.
+        ///
+        /// Section 6.3 rule 1: `NWPathMonitor` says there is no path at all, so the call is
+        /// `.serverUnreachable` immediately and **no `ssh` is spawned**. Waiting out a
+        /// connect timeout instead is what freezes Finder, and it is the one case where the
+        /// answer is free.
+        ///
+        /// Rule 2's other half is here too: "a path change ... resets the breaker". A
+        /// location that was backing off when the Wi-Fi went does not owe that backoff to
+        /// the network that just came back - waiting it out would mean a mount that
+        /// reconnects up to a minute after the user can see they are online again. The
+        /// backoff is a reconnect schedule (rule 5), not a punishment.
+        ///
+        /// The kill and the socket half of a dropped master are `K5`/`K6`; what this
+        /// asserts is that the launcher was never asked while the path was down.
+        @Test func f11NoNetworkPathFailsFastAndSpawnsNothing() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas")
+            await harness.installSystemObservers()
+            _ = try await harness.manager.runtime(for: location)
+            await harness.manager.detector(locationID: location.id)?.stop()
+            await harness.manager.evictor(locationID: location.id)?.stop()
+            await harness.quiesceConnects()
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+
+            // A failed attempt first, so the breaker is genuinely backing off when the path
+            // goes: that is the state the returning path has to clear.
+            harness.launcher.fail(classification: .transient, stderr: "no route to host")
+            await gate.drop(reason: "the link went")
+            await harness.settle { await (gate.report()["state"] as? String)?.hasPrefix("backing off") == true }
+            #expect(await gate.report()["retryScheduled"] as? Bool == true)
+
+            await harness.network.setAvailable(false)
+            await harness.settle()
+            let attemptsWhileDown = harness.launcher.attempts
+            #expect(await gate.report()["hasNetworkPath"] as? Bool == false)
+
+            let transport = ReconnectingTransport(gate: gate, locationID: location.id)
+            let failFastBefore = await gate.failFastCalls
+            let sleepersWhileDown = harness.clock.sleeperCount
+            await #expect(throws: SFTPError.noConnection) { try await transport.readdir(.root) }
+            #expect(
+                await gate.failFastCalls == failFastBefore + 1,
+                "F11: rule 1 answered it, without touching the network")
+            #expect(
+                harness.launcher.attempts == attemptsWhileDown,
+                "F11: no `ssh` is spawned at all while there is no path")
+            #expect(
+                harness.clock.sleeperCount == sleepersWhileDown,
+                "F11: and nothing new is waiting out a connect timeout")
+
+            // Not even the reconnect schedule: an attempt on an interface that is down is
+            // a spawn that can only fail.
+            harness.clock.advance(300)
+            await harness.settle()
+            #expect(
+                harness.launcher.attempts == attemptsWhileDown,
+                "F11: five minutes of backoff expiries produce nothing while the path is gone")
+
+            // The path comes back. The breaker connects at once - it does not sit out the
+            // backoff it owed the failure before the outage.
+            harness.launcher.succeed()
+            await harness.network.setAvailable(true)
+            await harness.settle { await gate.isConnected }
+            #expect(
+                harness.launcher.attempts == attemptsWhileDown + 1,
+                "F11: one attempt, the moment the path returned")
+            let connected = await gate.isConnected
+            #expect(connected)
+
+            // Bite-proof: the gate is the whole of rule 1. The same breaker, in the same
+            // state, with the path flag left alone hands out a connect - which is a spawned
+            // `ssh` on an interface that is down, and a call held for its timeout.
+            var breaker = CircuitBreaker(jitter: { $0 })
+            breaker.setNetworkPath(false)
+            #expect(breaker.admit(now: 0) == .failFast(.noNetworkPath))
+            var unguarded = CircuitBreaker(jitter: { $0 })
+            #expect(unguarded.admit(now: 0) == .connect, "without rule 1 it would dial")
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
         /// A server that can run the helper as far as the probe can tell: `auto` tries the
         /// tiers from the top, and the deployment is what refutes it.
         static let helperCapable = ChangeDetectionLadder.ServerCapabilities(

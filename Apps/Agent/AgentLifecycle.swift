@@ -36,16 +36,18 @@ enum AgentLifecycleAdapter {
         signal(SIGTERM, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
-            Log.agent.notice("SIGTERM: shutting down and exiting 0")
+            // The decision - every master down, then exit 0 - is
+            // `AgentRuntime.AgentLifecycle`, which is where `sshdrive agent stop` takes it
+            // too and where `P4` asserts it. This is the source and nothing else.
             Task {
-                await manager.shutdownAll()
-                environment.endpoint.terminate(status: 0)
+                await AgentLifecycle.shutdownAndExit(
+                    reason: "SIGTERM", manager: manager, environment: environment)
             }
             DispatchQueue.main.asyncAfter(
                 deadline: .now() + AgentLifecycle.shutdownGraceSeconds
             ) {
                 Log.agent.error("shutdown did not finish in 20 s; exiting anyway")
-                environment.endpoint.terminate(status: 0)
+                environment.endpoint.terminate(status: AgentLifecycle.exitStatus)
             }
         }
         source.resume()
@@ -85,8 +87,9 @@ enum AgentLifecycleAdapter {
                     executable: executable, originalInode: originalInode,
                     inspector: environment.bundle, clock: environment.clock)
                 guard ready else { return }
-                await manager.shutdownAll()
-                environment.endpoint.terminate(status: 0)
+                await AgentLifecycle.shutdownAndExit(
+                    reason: "a new bundle is in place", manager: manager,
+                    environment: environment)
             }
         }
         source.setCancelHandler { close(descriptor) }

@@ -100,14 +100,49 @@ public enum RemoteSweep {
         }
         defer { beater.cancel() }
 
+        let deadline = started.addingTimeInterval(timeout)
+        let outcome = await collect(
+            stream: channel.stream, sentinel: sentinel, usesPrintf: plan.usesPrintf,
+            batches: plan.batches.count, started: started, deadline: deadline)
+        // The agent stops writing and closes stdin; the wrapper reads EOF, kills whatever
+        // is left of `find` and exits. Nothing we started outlives the channel.
+        channel.endInput()
+
+        if outcome.truncated, Date() >= deadline { throw Failure.timedOut(timeout) }
+        return outcome
+    }
+
+    /// Reads one sweep off a channel and turns it into an `Outcome`.
+    ///
+    /// Split out of `run` so that a scenario can drive it against a **real** exec channel
+    /// whose remote end really died mid-sweep (`H5`), rather than reproducing the read
+    /// loop - or, worse, hand-building an `Outcome` and asserting against the thing it
+    /// just wrote. Everything the rule depends on is here: the scan for the closing
+    /// sentinel, and `truncated`.
+    ///
+    /// **The closing sentinel is the only end-of-sweep there is.** EOF is not one: an
+    /// account whose rc file leaves a background child holding stdout never sends it
+    /// (`SQ-016`), and a channel that died mid-walk sends it *early*. So the marker is the
+    /// signal, and its absence means the output is a prefix of a sweep - at which point
+    /// the server's stamp must not be stored, however plainly it arrived in the first
+    /// record. Storing it would move the window forward over changes this sweep never got
+    /// as far as reporting, and nothing would look at them again until the 30-minute
+    /// insurance pass (section 6.4).
+    public static func collect(
+        stream: ByteStream,
+        sentinel: Sentinel,
+        usesPrintf: Bool,
+        batches: Int = 1,
+        started: Date = Date(),
+        deadline: Date
+    ) async -> Outcome {
         let marker = Data(sentinel.marker)
         var payload = Data()
         var truncated = true
-        let deadline = started.addingTimeInterval(timeout)
         while Date() < deadline {
             let chunk: Data
             do {
-                chunk = try await channel.stream.read(upTo: 256 * 1024, deadline: deadline)
+                chunk = try await stream.read(upTo: 256 * 1024, deadline: deadline)
             } catch {
                 break
             }
@@ -120,11 +155,8 @@ public enum RemoteSweep {
                 break
             }
         }
-        // The agent stops writing and closes stdin; the wrapper reads EOF, kills whatever
-        // is left of `find` and exits. Nothing we started outlives the channel.
-        channel.endInput()
 
-        let parsed = SweepParser.parse(payload, usesPrintf: plan.usesPrintf)
+        let parsed = SweepParser.parse(payload, usesPrintf: usesPrintf)
         let outcome = Outcome(
             serverTime: truncated ? nil : parsed.serverTime,
             hits: parsed.hits,
@@ -132,9 +164,8 @@ public enum RemoteSweep {
             truncated: truncated,
             bytes: payload.count)
         Log.agent.notice(
-            "sweep: \(outcome.hits.count, privacy: .public) hit(s) in \(String(format: "%.2f", outcome.duration), privacy: .public)s over \(plan.batches.count, privacy: .public) batch(es), \(outcome.bytes, privacy: .public) bytes\(outcome.truncated ? " (TRUNCATED)" : "", privacy: .public)"
+            "sweep: \(outcome.hits.count, privacy: .public) hit(s) in \(String(format: "%.2f", outcome.duration), privacy: .public)s over \(batches, privacy: .public) batch(es), \(outcome.bytes, privacy: .public) bytes\(outcome.truncated ? " (TRUNCATED)" : "", privacy: .public)"
         )
-        if truncated, Date() >= deadline { throw Failure.timedOut(timeout) }
         return outcome
     }
 

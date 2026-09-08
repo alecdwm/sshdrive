@@ -45,11 +45,37 @@ public enum ControlSocket {
     /// (2026-09-04). So the type is checked too: `S_IFSOCK` with `lstat`, never following
     /// a link, and a non-socket with our prefix is left alone rather than deleted.
     public static func existingSockets() -> [String] {
-        let directory = temporaryDirectory()
+        existingSockets(in: temporaryDirectory())
+    }
+
+    /// The same scan against a named directory, so a test can hold its own `$TMPDIR`
+    /// rather than sweeping the shared one out from under whatever else is running
+    /// (`docs/testing-architecture.md` section 5, K5).
+    public static func existingSockets(in directory: String) -> [String] {
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         return entries.filter { $0.hasPrefix(namePrefix) }
             .map { (directory as NSString).appendingPathComponent($0) }
             .filter { isSocket($0) }
+    }
+
+    /// What `sshdrive doctor` reports: every `sshdrive-*` **socket** in `$TMPDIR` that no
+    /// mounted location is currently using. `doctor` diagnoses rather than repairs, so it
+    /// only names these; the sweep above is what acts on them.
+    ///
+    /// `SQ-074`: the answer for a clean install is the empty list even when `$TMPDIR` is
+    /// full of `sshdrive-nested-<uuid>.sqlite` sidecars, because a candidate is a socket
+    /// or it is not a candidate. A name-only version of this reported six orphans on a
+    /// healthy install (2026-09-04).
+    public static func orphanedSockets(
+        inUse: Set<String>, in directory: String = temporaryDirectory()
+    ) -> [String] {
+        orphanedSockets(among: existingSockets(in: directory), inUse: inUse)
+    }
+
+    /// The same answer over a listing already taken, so `doctor` can report the count of
+    /// sockets and the count of orphans out of one scan of the directory.
+    public static func orphanedSockets(among sockets: [String], inUse: Set<String>) -> [String] {
+        sockets.filter { !inUse.contains($0) }
     }
 
     /// `lstat` rather than `stat`: a symlink at that name is not our socket, and following
@@ -75,9 +101,11 @@ public enum ControlSocket {
     /// So the sweep takes the pid `-O check` prints, and if that process is still alive
     /// after the exit request it gets a TERM and then, a moment later, a KILL.
     @discardableResult
-    public static func sweepOrphans(environment: [String: String]) -> [String] {
+    public static func sweepOrphans(
+        environment: [String: String], in directory: String = temporaryDirectory()
+    ) -> [String] {
         var swept: [String] = []
-        for socket in existingSockets() {
+        for socket in existingSockets(in: directory) {
             let owner = masterPID(socket: socket, environment: environment)
             let invocation = SSHCommandBuilder.control("exit", controlPath: socket, host: "sshdrive-orphan")
             _ = try? Spawn.capture(
@@ -135,26 +163,73 @@ public enum ControlSocket {
         guard kill(pid, SIGTERM) == 0 else { return false }
         for _ in 0 ..< 10 {
             usleep(50_000)
-            if kill(pid, 0) != 0 { return true }
+            // `kill(pid, 0)` alone would never answer for a child of ours: a killed
+            // process that has not been reaped is still a pid (`SQ-075`), so the state
+            // is read too and a zombie counts as gone.
+            if kill(pid, 0) != 0 || !isLiveSSH(pid) { return true }
         }
         if isLiveSSH(pid) { _ = kill(pid, SIGKILL) }
         return true
     }
 
     /// `KERN_PROC_PID` rather than `ps`: no subprocess, and the answer is the kernel's.
+    ///
+    /// **A zombie is not alive** (`SQ-075`, measured 2026-09-04; this implementation of
+    /// the rule is inferred from the row rather than re-measured). An `ssh` mux client
+    /// killed with `-9` stays in `pgrep -f` output, and in `kill(pid, 0)`, as `Z` until
+    /// it is reaped - and every master the agent starts is a child of the agent, so the
+    /// unreaped state is the ordinary one between the kill and the `waitpid`. Reading the
+    /// name alone would make the sweep report a master it had already killed as a live
+    /// stray, sweep it again on every pass, and let the session budget of `N3` count it.
+    /// The process **state** is the one to read.
     public static func isLiveSSH(_ pid: pid_t) -> Bool {
         guard pid > 1 else { return false }
+        guard processName(of: pid) == masterProcessName else { return false }
+        return !isZombie(pid)
+    }
+
+    /// The short process name every `ssh` of ours carries — `p_comm` on Darwin,
+    /// `/proc/<pid>/comm` here — which is what keeps the sweep from ever signalling a
+    /// stranger whose pid was reused.
+    ///
+    /// Settable for one reason, and `ServerModel.FakeSSH.install()` is the only caller:
+    /// the stub `ssh` is a **shell script**, and on Darwin the kernel takes `p_comm` from
+    /// the interpreter binary rather than from the script, so a stub there is called
+    /// `dash` or `bash` however it is named (`SQ-082`). Nothing can be done about that
+    /// from the harness's side: macOS launch constraints `SIGKILL` a copy of any system
+    /// shell, ad-hoc re-signed or not, so there is no binary named `ssh` to point a
+    /// shebang at. The alternative was to leave `K4`'s liveness and both of `K6`'s
+    /// pid-based routes unrun on the Mac, which would have hidden a product bug in
+    /// exactly the branch that only runs there. Same seam, and the same rule, as
+    /// `SSHProcess.sshBinaryPath`.
+    public nonisolated(unsafe) static var masterProcessName = "ssh"
+
+    /// The short name the kernel reports for a running process, or nil.
+    public static func processName(of pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
         #if canImport(Darwin)
             var info = kinfo_proc()
             var size = MemoryLayout<kinfo_proc>.stride
             var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-            guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
-            let name = withUnsafeBytes(of: &info.kp_proc.p_comm) { raw -> String in
+            guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return nil }
+            return withUnsafeBytes(of: &info.kp_proc.p_comm) { raw -> String in
                 String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
             }
-            return name == "ssh"
         #else
-            return ProcFS.processName(of: pid) == "ssh"
+            return ProcFS.processName(of: pid)
+        #endif
+    }
+
+    /// Whether the process has exited but not yet been reaped (`SQ-075`).
+    public static func isZombie(_ pid: pid_t) -> Bool {
+        #if canImport(Darwin)
+            var info = kinfo_proc()
+            var size = MemoryLayout<kinfo_proc>.stride
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+            guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return true }
+            return Int32(info.kp_proc.p_stat) == SZOMB
+        #else
+            return ProcFS.processState(of: pid).map { $0 == "Z" } ?? true
         #endif
     }
 
@@ -171,8 +246,18 @@ public enum ControlSocket {
     /// argv contains `ControlPath=<our $TMPDIR>/sshdrive-`. `$TMPDIR` is per-user and
     /// per-boot, and nothing else writes that option, so this cannot reach a terminal's
     /// own `ssh`.
-    public static func liveMasterPIDs() -> [pid_t] {
-        let needle = "ControlPath=\((temporaryDirectory() as NSString).appendingPathComponent(namePrefix))"
+    /// The `directory` parameter names the `$TMPDIR` the needle is built from. It defaults
+    /// to ours, which is the shipping behaviour and the only one `agent stop` ever uses; a
+    /// test passes its **own** directory so that a sweep it runs cannot reach a master
+    /// another suite is holding. `swift test` runs the swift-testing suites concurrently
+    /// with XCTest in one process, and `K6` sweeping the shared `$TMPDIR` killed suite Q's
+    /// live stubs mid-`add` (2026-09-08).
+    public static func liveMasterPIDs(in directory: String = temporaryDirectory()) -> [pid_t] {
+        let needle = "ControlPath=\((directory as NSString).appendingPathComponent(namePrefix))"
+        // Read once: `masterProcessName` is a harness seam and another suite's stub can
+        // install or restore it while this loop is running, which would match the
+        // processes examined before the change and not the ones after it.
+        let expectedName = masterProcessName
         #if canImport(Darwin)
             var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_UID, Int32(bitPattern: getuid())]
             var size = 0
@@ -191,13 +276,18 @@ public enum ControlSocket {
                 let name = withUnsafeBytes(of: &entry.kp_proc.p_comm) { raw -> String in
                     String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
                 }
-                guard name == "ssh" else { continue }
+                guard name == expectedName, Int32(entry.kp_proc.p_stat) != SZOMB
+                else { continue }
                 if commandLine(of: pid)?.contains(needle) == true { pids.append(pid) }
             }
             return pids
         #else
             return ProcFS.pids().filter { pid in
-                pid > 1 && ProcFS.processName(of: pid) == "ssh"
+                // The state as well as the name: a master this sweep already killed is a
+                // zombie until it is reaped, and listing it again would have
+                // `killStrayMasters` report a kill on every pass (`SQ-075`).
+                ProcFS.processName(of: pid) == expectedName
+                    && !isZombie(pid)
                     && ProcFS.isOwnedByThisUser(pid)
                     && commandLine(of: pid)?.contains(needle) == true
             }
@@ -224,10 +314,14 @@ public enum ControlSocket {
     /// Kill every `ssh` of ours that is still running. Safe **only** where nothing of ours
     /// is meant to be connected: the agent's start, before the first connection, and its
     /// exit, after every transport has been shut down.
+    ///
+    /// `directory` is the `$TMPDIR` the argv needle is built from, defaulting to ours -
+    /// the shipping behaviour, and the only one the agent ever uses. A test passes its own
+    /// so the kill cannot reach a master another suite is holding.
     @discardableResult
-    public static func killStrayMasters() -> [pid_t] {
+    public static func killStrayMasters(in directory: String = temporaryDirectory()) -> [pid_t] {
         var killed: [pid_t] = []
-        for pid in liveMasterPIDs() where terminate(pid: pid) {
+        for pid in liveMasterPIDs(in: directory) where terminate(pid: pid) {
             killed.append(pid)
             Log.ssh.notice("killed stray ssh master \(pid, privacy: .public)")
         }

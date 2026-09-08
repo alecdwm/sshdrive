@@ -79,7 +79,12 @@ extension LocationRuntime {
             checksDone[row.path] = row.checks
         }
 
-        let now = Date().timeIntervalSince1970
+        // `environment.clock`, not `Date()`: the `held` row's `first_missing` is what the
+        // 5- and 30-minute re-checks are measured from (section 6.4), so a scenario that
+        // asserts the schedule has to be able to move both together (`H11`).
+        // `SystemAgentClock.now()` is `Date().timeIntervalSince1970`, so the agent that
+        // ships is unchanged.
+        let now = environment.clock.now()
         let decision = MassDeletionGuard.evaluate(
             MassDeletionGuard.Input(
                 directory: directory.bytes,
@@ -697,11 +702,10 @@ extension LocationRuntime {
     /// top-level directory literally named `-name` would otherwise be read as an option
     /// and the whole sweep would fail; the `./` prefix is what makes a name a path. The
     /// output then carries the same prefix, which `stripLeadingDot` takes back off.
-    public static func utf8Root(_ path: Data) -> String? {
-        if path.isEmpty { return "." }
-        guard let text = String(data: path, encoding: .utf8) else { return nil }
-        return "./" + text
-    }
+    ///
+    /// Both halves are `SweepPlan.argvRoot`, which is where `H6` and `H7` exercise them
+    /// against a real `find`; this stays as the name the rest of the agent calls it by.
+    public static func utf8Root(_ path: Data) -> String? { SweepPlan.argvRoot(path) }
 
     /// `sshdrive debug roots <name> --seed N`: marks the first N directory rows as
     /// `materialized` roots, so section 6.5's rotation can be measured at a scale that

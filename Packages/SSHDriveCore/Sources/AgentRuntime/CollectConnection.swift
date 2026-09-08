@@ -136,7 +136,11 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
         if let version = await master.remoteSoftwareVersion, !version.isEmpty {
             remoteSoftwareVersion = version
         }
-        let token = await master.askpassToken
+        // The live token is gone the moment the master died, and a failed attempt is
+        // precisely when section 4.2 wants what the session recorded: which prompt needed
+        // a human, and which stored item the server refused (which is what earns the
+        // masked retry). `lastAskpassToken` is the one that outlives the attempt.
+        let token = await master.lastAskpassToken
         let info = token.flatMap { broker.info(token: $0) }
         // The master goes either way: if it authenticated, the location's own master is
         // what mounts it, and if it did not there is nothing to keep.
