@@ -19,7 +19,7 @@ struct SSHDrive: ParsableCommand {
             Docs: https://github.com/alecdwm/sshdrive
             Run `sshdrive doctor` if a location does not appear in Finder.
             """,
-        version: "0.1.0 (milestone 10)",
+        version: "0.1.4",
         subcommands: [
             Add.self, ListCommand.self, Show.self, Status.self, SetCommand.self,
             Mount.self, Unmount.self, Remove.self, AcceptDeletions.self,
