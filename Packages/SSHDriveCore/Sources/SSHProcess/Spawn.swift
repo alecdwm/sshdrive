@@ -165,6 +165,35 @@ public enum Spawn {
         }
     }
 
+    /// `capture`, awaited instead of waited on.
+    ///
+    /// `capture` blocks the calling thread on a `DispatchGroup` until the child exits or
+    /// the deadline passes. Called from inside an `actor` that is what a cooperative pool
+    /// thread spends the next ten seconds doing, with the actor held for all of it - which
+    /// is how `sshdrive status` came to hang while Finder was listing, over one
+    /// `ssh -O check` (2026-09-09). The work is the same; it happens on a Dispatch thread
+    /// and the caller suspends, so the actor is free and no cooperative thread is parked.
+    public static func captureAsync(
+        executable: String,
+        argv: [String],
+        environment: [String: String],
+        timeout: TimeInterval,
+        newProcessGroup: Bool = false
+    ) async throws -> (exit: ProcessExit, stdout: Data, stderr: Data) {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                do {
+                    continuation.resume(
+                        returning: try capture(
+                            executable: executable, argv: argv, environment: environment,
+                            timeout: timeout, newProcessGroup: newProcessGroup))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// Runs to completion, capturing stdout and stderr, with a wall-clock deadline.
     /// Every call in this module has one: nothing here may wait for a server for ever.
     public static func capture(

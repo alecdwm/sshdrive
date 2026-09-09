@@ -227,6 +227,9 @@ public actor ChangeDetector {
     /// The same, with the enumeration already made. `DomainManager` walks the replica once
     /// and gives the answer to the root set and to section 7.2's safety net together.
     public func materializedChanged(identifiers: [String]?) async {
+        // Published for `sshdrive status`, which needs the same set for its Cache and Pins
+        // lines and has no business draining the replica a third time (section 8.1).
+        runtime.materialized.record(identifiers, at: environment.clock.now())
         _ = try? await runtime.refreshRootSet(materializedIdentifiers: identifiers)
     }
 
@@ -279,6 +282,7 @@ public actor ChangeDetector {
             locationID: locationID)
         let materialized = await environment.replica.materializedIdentifiers(
             locationID: locationID)
+        runtime.materialized.record(materialized, at: environment.clock.now())
         await runtime.setPendingPaths(await runtime.paths(forIdentifiers: pendingIdentifiers ?? []))
         _ = try? await runtime.refreshRootSet(materializedIdentifiers: materialized, now: now)
 

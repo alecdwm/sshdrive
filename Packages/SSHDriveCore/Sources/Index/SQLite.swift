@@ -61,7 +61,16 @@ public final class SQLiteConnection {
         sqlite3_close_v2(handle)
     }
 
+    /// Set by a test only, and nil in the shipping agent: called with every statement's
+    /// SQL and the transaction depth it was issued at. It is the only way to assert
+    /// section 5.3's "a directory listing is written in one transaction" - and, since
+    /// 2026-09-09, that the transaction wraps the **writes** and nothing else - from
+    /// outside SQLite (`E2` in `docs/testing-architecture.md`). One optional test per
+    /// statement, off every path that matters.
+    public var statementObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
+
     public func execute(_ sql: String) throws {
+        statementObserver?(sql, transactionDepth)
         var errorMessage: UnsafeMutablePointer<CChar>?
         let result = sqlite3_exec(handle, sql, nil, nil, &errorMessage)
         guard result == SQLITE_OK else {
@@ -72,6 +81,7 @@ public final class SQLiteConnection {
     }
 
     public func prepare(_ sql: String) throws -> SQLiteStatement {
+        statementObserver?(sql, transactionDepth)
         var statement: OpaquePointer?
         let result = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
         guard result == SQLITE_OK, let prepared = statement else {

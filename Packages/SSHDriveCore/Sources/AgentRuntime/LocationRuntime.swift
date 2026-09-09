@@ -27,6 +27,25 @@ public actor LocationRuntime {
     public let indexURL: URL
     public let backupURL: URL
 
+    /// The read-only WAL reader `sshdrive status` reads this location's index through
+    /// (section 8, `StatusIndexReader`). `nonisolated`, and deliberately so: reaching it
+    /// costs no hop onto this actor, which is the whole point - a report taken while a
+    /// listing is writing its rows must neither wait for the listing nor delay it
+    /// (2026-09-09).
+    public nonisolated let statusIndex: StatusIndexReader
+
+    /// The last drained `enumeratorForMaterializedItems()` answer, published by whichever
+    /// of section 6.4's cycle, section 7's TTL pass or the extension's
+    /// `materializedItemsDidChange` took it (section 6.5).
+    ///
+    /// `status` needs the same set for its Cache and Pins lines, and draining it a third
+    /// time is a File Provider round trip for an answer one of those three has almost
+    /// always just taken. Every *change* to the materialized set arrives as
+    /// `materializedItemsDidChange`, which refreshes this, so a fresh entry is the current
+    /// set and not merely a recent one; `status` drains for itself when there is none
+    /// (2026-09-09).
+    public nonisolated let materialized = MaterializedSnapshot()
+
     /// The identity the capability probe found. Milestone 3 runs the probe; the fake
     /// backend reports its own uid and gid so the derivation in section 5.4 has
     /// something real to work from from milestone 1 on.
@@ -168,6 +187,7 @@ public actor LocationRuntime {
         self.transport = transport
         self.indexURL = indexURL
         self.backupURL = backupURL
+        self.statusIndex = StatusIndexReader(locationID: location.id, path: indexURL.path)
         self.index = try IndexWriter(path: indexURL.path)
         self.identity = .unknown
         self.macID = macID
@@ -210,14 +230,24 @@ public actor LocationRuntime {
         let wasReconciling = index.isReconciling
         let indexPath = indexURL.path
         let environment = self.environment
+        let statusIndex = self.statusIndex
         let recovery = await IndexReconcile.recoverIfNeeded(
             locationID: location.id,
             indexURL: indexURL,
             backupURL: backupURL,
             writer: index,
             wasReconciling: wasReconciling,
-            closeReader: { await environment.readerPeers.closeReaders() },
-            reopenReader: { environment.readerPeers.reopenReaders() },
+            // Our own status reader closes with the extension's and for the same reason:
+            // it holds the `-shm` mapped, and truncating a mapped file under a live
+            // process faults it on its next access (section 5.3).
+            closeReader: {
+                await statusIndex.close()
+                await environment.readerPeers.closeReaders()
+            },
+            reopenReader: {
+                Task { await statusIndex.reopen() }
+                environment.readerPeers.reopenReaders()
+            },
             reopen: { try IndexWriter(path: indexPath) })
         if let restored = recovery.writer { index = restored }
         recoveryReport = recovery.report.asJSON
@@ -310,6 +340,11 @@ public actor LocationRuntime {
             gid: Int64(rootAttributes.gid))
         try refreshRootRow(rootAttributes)
         lastTransportError = nil
+
+        // Section 8.1's "Server free space", on the connection that is already here. One
+        // round trip beside the `realpath` and the `lstat` above, so that `status` never
+        // has to make one of its own (2026-09-09).
+        await refreshFreeSpace()
 
         // Section 5.5: "the probe tests this once, in the location root". Off the start
         // path, because it is five round trips and nothing before the first write needs
@@ -542,10 +577,21 @@ public actor LocationRuntime {
             )
         }
 
-        // One transaction for the whole listing: a directory with 10,000 entries is
-        // 10,000 autocommits otherwise, and that, not the wire, is what a large
-        // enumeration spends its time on (section 5.3).
-        try index.batch {
+        // Everything a listing can work out without holding the database's write lock is
+        // worked out here, ahead of the transaction: the child path, the incumbent row,
+        // and the finished row `RowBuilder` derives from the two. It used to run inside
+        // the `batch` below, which made the transaction - and with it every other call on
+        // this actor, `sshdrive status` included - as long as a `makeRow` per entry rather
+        // than as long as the writes (2026-09-09).
+        //
+        // Reading the incumbents out here is safe for the same reason the listing is one
+        // transaction at all: `LocationRuntime` is an actor, the agent is the index's only
+        // writer (section 3), and there is no `await` between these reads and the
+        // transaction that follows them, so nothing can write a row in between. (The one
+        // writer that is not on this actor is the reconcile walk of section 5.3, and a
+        // listing refuses to run at all while `meta.reconciling` is set.)
+        var prepared: [(row: IndexItem, existing: IndexItem?)] = []
+        prepared.reserveCapacity(classified.entries.count)
         for classifiedEntry in classified.entries {
             let entry = classifiedEntry.entry
             guard let childPath = try? directory.appending(component: entry.name) else { continue }
@@ -571,7 +617,23 @@ public actor LocationRuntime {
                 parent: containerRow,
                 existing: existing,
                 hidden: classifiedEntry.hidden)
-            try index.upsert(row)
+            prepared.append((row, existing))
+        }
+
+        // One transaction for the whole listing: a directory with 10,000 entries is
+        // 10,000 autocommits otherwise, and that, not the wire, is what a large
+        // enumeration spends its time on (section 5.3). It is still exactly one - the rule
+        // is that a listing is written atomically, not that it is written in pieces - and
+        // it now holds the writes and the deletion pass alone.
+        try index.batch {
+        for (row, existing) in prepared {
+            // A row that is byte for byte the one already stored is not written again.
+            // `IndexItem` is the whole of what `upsert` binds, so an equal row is a
+            // no-op statement, and an equal row also has the metadata version and the
+            // `hidden` the anchor test below compares - so this cannot change which
+            // anchors a listing appends, only how many rows an unchanged directory
+            // rewrites (2026-09-09).
+            if row != existing { try index.upsert(row) }
 
             // A hidden row holds its name and nothing else: it is never enumerated, and a
             // create or rename onto it fails `.filenameCollision` (sections 5.4, 5.7).
@@ -1238,23 +1300,69 @@ public actor LocationRuntime {
 
     /// Section 5.4: "`sshdrive status` lists hidden names under \"not shown\" with the
     /// reason, so the user can rename them server-side."
+    ///
+    /// `status` does not call this any more - it reads the same rows through
+    /// `statusIndex`, off this actor (section 8) - but `debug` and any caller that already
+    /// holds the runtime still can, and the sentence is the same one either way because
+    /// both derive it with `StatusIndexReader.derivedHiddenReason`.
     public func notShown() throws -> [(path: String, reason: String)] {
         try index.allItems().filter { $0.hidden != 0 }.map { row in
             (
                 path: String(decoding: row.path, as: UTF8.self),
                 reason: hiddenReasons[row.path]
-                    ?? {
-                        switch row.hidden {
-                        case RowBuilder.hiddenEscapingLink:
-                            return "a symbolic link whose target is outside this location"
-                        case RowBuilder.hiddenLocalOnly:
-                            return "kept on this Mac only"
-                        default:
-                            return "a name macOS cannot tell from another here"
-                        }
-                    }()
+                    ?? StatusIndexReader.derivedHiddenReason(row.hidden)
             )
         }
+    }
+
+    /// Everything one `status` row takes from the *live* runtime, in one entry.
+    ///
+    /// The rest of the row comes from `statusIndex`, which is off this actor entirely. This
+    /// is what is left: the channel budget, the probe's identity, the transfer scheduler's
+    /// counters, the last error, the hidden-name sentences the row builder recorded, the
+    /// last change-detection cycle, and section 7.2's re-assert counter. None of it touches
+    /// the index and none of it touches the wire.
+    ///
+    /// One call rather than eight because each of them was a hop onto this actor, and this
+    /// actor is where a directory listing's synchronous write transaction runs: eighteen
+    /// hops per location meant eighteen chances to queue behind a listing of a large folder
+    /// (2026-09-09, section 8).
+    public struct StatusFacts {
+        public var channels: [String: Any] = [:]
+        public var identity: [String: Any]?
+        public var transfers: [String: Any] = [:]
+        public var lastError: String?
+        public var hiddenReasons: [Data: String] = [:]
+        public var lastWatchCycle: [String: Any] = [:]
+        public var keptEvictedOutside = 0
+        /// What section 8.1's report would otherwise come back for: the probe the live
+        /// connection made, the free-space sentence out of `capabilities.json`, and what
+        /// the server let us hold at once.
+        public var probe: (probe: ServerProbe.Result, extensions: SFTPServerExtensions)?
+        public var freeSpace = ServerFreeSpace.unknownSentence
+        public var channelBudget: ChannelBudget = .unrestricted
+
+        public init() {}
+    }
+
+    public func statusFacts() async -> StatusFacts {
+        var facts = StatusFacts()
+        facts.channels = channelBudget.asJSON
+        facts.identity = identityReport()
+        facts.probe = await serverProbe()
+        facts.freeSpace = freeSpaceDescription()
+        facts.channelBudget = channelBudget
+        let statistics = await scheduler.stats()
+        facts.transfers = [
+            "running": statistics.running,
+            "waiting": statistics.waitingForeground + statistics.waitingBackground,
+            "admitted": statistics.admitted,
+        ]
+        facts.lastError = await lastErrorText()
+        facts.hiddenReasons = hiddenReasons
+        facts.lastWatchCycle = lastWatchCycle
+        facts.keptEvictedOutside = keptEvictedOutside
+        return facts
     }
 
     /// What the server let us hold at once, and what it cost (section 6.1). `status`
@@ -1278,7 +1386,13 @@ public actor LocationRuntime {
     /// (section 8). The channel budget's own cache is left alone - that is what
     /// `debug transport reprobe` invalidates, and section 6.1 gives it different rules.
     public func reprobeServer() async {
-        guard let ssh = await liveConnection(), let master = ssh.execMaster else { return }
+        guard let ssh = await liveConnection() else { return }
+        // `--probe` is the one command section 8 lets ask the server for something, so it
+        // is also what refreshes the free-space figure the report prints (section 8.1).
+        // It is SFTP, not a shell, so it is asked before the exec channel is: an
+        // SFTP-only account has no `id` to re-read and still has a disk.
+        await refreshFreeSpace()
+        guard let master = ssh.execMaster else { return }
         let probe = await ServerProbe.run(master: master)
         CapabilityCache.storeProbe(
             probe, extensions: await ssh.extensions,
@@ -1321,14 +1435,34 @@ public actor LocationRuntime {
 
     /// `statvfs@openssh.com`, shown in `status` as "server free space" (section 8.1). Not
     /// a capability level: Finder has no way to display it for a third-party domain.
-    public func freeSpaceDescription() async -> String? {
-        guard isRemoteBacked else { return nil }
-        guard let stats = try? await transport.statvfs(.root) else { return nil }
-        let free = stats.availableBlocks &* stats.blockSize
-        let total = stats.totalBlocks &* stats.blockSize
-        guard total > 0 else { return nil }
-        return ByteCountFormatter.string(fromByteCount: Int64(free), countStyle: .file)
-            + " of " + ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+    ///
+    /// **Taken at probe time, never by `status`.** It used to be one `transport.statvfs`
+    /// per report, and that transport is the `ReconnectingTransport`: on a location whose
+    /// connection was in progress the call waited behind section 6.3's attempt for up to
+    /// the 60 s authentication deadline, and on a location with no attempt at all it
+    /// *started* one - so `sshdrive status` hung while Finder was listing, and dialled
+    /// servers the user had not touched (2026-09-09). The round trip is spent here
+    /// instead, on the connection the probe already has, and `status` reads the cache.
+    ///
+    /// Runs against the live connection rather than through the gate, so a connection
+    /// that went away between the probe and here fails the call rather than opening one.
+    public func refreshFreeSpace() async {
+        guard isRemoteBacked, let connection = await liveConnection() else { return }
+        guard let stats = try? await connection.statvfs(.root) else { return }
+        guard let space = ServerFreeSpace.from(
+            availableBlocks: stats.availableBlocks, blockSize: stats.blockSize,
+            totalBlocks: stats.totalBlocks, at: environment.clock.now())
+        else { return }
+        CapabilityCache.storeFreeSpace(space, locationID: location.id)
+    }
+
+    /// What the last probe measured, with its age when it is old enough to matter, and
+    /// `unknown` when no probe has ever run. No wire call: see `refreshFreeSpace`.
+    public func freeSpaceDescription() -> String {
+        guard let space = CapabilityCache.freeSpace(locationID: location.id) else {
+            return ServerFreeSpace.unknownSentence
+        }
+        return space.sentence(now: environment.clock.now())
     }
 
     /// The identity section 5.4 maps modes against, and how it was found. Nil for a fake
@@ -1644,6 +1778,13 @@ public actor LocationRuntime {
         }
         report["sequence"] = try index.currentSequence()
         return report
+    }
+
+    /// `IndexWriter.observeStatements`, reachable from a scenario: the only way to assert
+    /// from outside SQLite that a listing is one transaction and that the transaction
+    /// wraps the writes alone (`E2`).
+    public func observeStatements(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        index.observeStatements(observer)
     }
 
     public func dumpIndex() throws -> [IndexItem] { try index.allItems() }

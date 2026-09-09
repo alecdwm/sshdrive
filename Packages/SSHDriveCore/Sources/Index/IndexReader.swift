@@ -149,6 +149,134 @@ public final class IndexReader {
         return (page.entries, page.newAnchor, page.hasMore)
     }
 
+    // MARK: The agent's own read-only view (section 8)
+
+    /// The queries below are not the extension's. They are what `sshdrive status` reads,
+    /// and they are here rather than on `IndexWriter` for the reason section 5.2 gives the
+    /// extension one at all: `LocationRuntime` is an actor, a directory listing writes its
+    /// rows in one synchronous transaction on it (section 5.3), and every hop `status`
+    /// made onto that actor therefore waited for a whole listing to finish. A WAL reader
+    /// never blocks the writer and never delays it, so the report is taken from a
+    /// connection of its own (2026-09-09, section 8).
+    ///
+    /// They are read-only, they call `checkMeta()` like every other read here, and the
+    /// agent remains the sole writer.
+
+    /// Like `item(identifier:)` but answering nil rather than throwing for a row that is
+    /// not there: `status` reads the identifiers the *system* says it holds content for,
+    /// and a row the index has already deleted is an ordinary outcome there, not an error.
+    public func itemIfPresent(identifier: String) throws -> IndexItem? {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT \(Self.itemColumns) FROM items WHERE identifier = ?1")
+        statement.bind(1, identifier)
+        defer { statement.reset() }
+        guard try statement.step() else { return nil }
+        return Self.decodeItem(statement)
+    }
+
+    public func item(path: Data) throws -> IndexItem? {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT \(Self.itemColumns) FROM items WHERE path = ?1")
+        statement.bind(1, path)
+        defer { statement.reset() }
+        guard try statement.step() else { return nil }
+        return Self.decodeItem(statement)
+    }
+
+    /// Every row, which is what section 5.4's "not shown" list is filtered out of.
+    public func allItems() throws -> [IndexItem] {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT \(Self.itemColumns) FROM items ORDER BY path")
+        defer { statement.reset() }
+        var rows: [IndexItem] = []
+        while try statement.step() { rows.append(Self.decodeItem(statement)) }
+        return rows
+    }
+
+    /// Every row strictly under `path`. The byte-range form of `IndexWriter.items(under:)`,
+    /// for the same reason: paths are blobs and SQLite compares blobs with `memcmp`.
+    public func items(under path: Data) throws -> [IndexItem] {
+        try checkMeta()
+        let statement: SQLiteStatement
+        if path.isEmpty {
+            statement = try database().prepare(
+                "SELECT \(Self.itemColumns) FROM items WHERE length(path) > 0 ORDER BY path")
+        } else {
+            let lower = path + Data([0x2F])
+            var upper = path
+            upper.append(0x30)
+            statement = try database().prepare(
+                "SELECT \(Self.itemColumns) FROM items WHERE path >= ?1 AND path < ?2 ORDER BY path")
+            statement.bind(1, lower)
+            statement.bind(2, upper)
+        }
+        defer { statement.reset() }
+        var rows: [IndexItem] = []
+        while try statement.step() { rows.append(Self.decodeItem(statement)) }
+        return rows
+    }
+
+    /// Every explicit pin marker (section 7.1), which is the whole of `sshdrive pins`.
+    public func pinMarkerRows() throws -> [(path: Data, marker: Int64)] {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT path, pin_state FROM items WHERE pin_state != 0 ORDER BY path")
+        defer { statement.reset() }
+        var rows: [(path: Data, marker: Int64)] = []
+        while try statement.step() {
+            guard let path = statement.data(0) else { continue }
+            rows.append((path, statement.int(1)))
+        }
+        return rows
+    }
+
+    /// The mass-deletion guard's held rows (section 6.4), for section 8's
+    /// "0 held deletions" line.
+    public func heldRows() throws -> [IndexWriter.HeldRow] {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT \(IndexWriter.heldColumns) FROM held ORDER BY path")
+        defer { statement.reset() }
+        var out: [IndexWriter.HeldRow] = []
+        while try statement.step() { out.append(IndexWriter.decodeHeld(statement)) }
+        return out
+    }
+
+    public func heldCount() throws -> Int {
+        try checkMeta()
+        let statement = try database().prepare("SELECT COUNT(*) FROM held")
+        defer { statement.reset() }
+        guard try statement.step() else { return 0 }
+        return Int(statement.int(0))
+    }
+
+    /// The change-detection root set (section 6.5), least recently listed first.
+    public func rootRows() throws -> [IndexWriter.RootRow] {
+        try checkMeta()
+        let statement = try database().prepare(
+            "SELECT path, reason, last_seen, last_listed FROM roots ORDER BY last_listed, path")
+        defer { statement.reset() }
+        var out: [IndexWriter.RootRow] = []
+        while try statement.step() {
+            out.append(
+                IndexWriter.RootRow(
+                    path: statement.data(0) ?? Data(),
+                    reason: statement.string(1) ?? "",
+                    lastSeen: statement.double(2),
+                    lastListed: statement.double(3)))
+        }
+        return out
+    }
+
+    /// `meta.reconciling`, read without `checkMeta()` throwing on it: `status` reports the
+    /// rebuild rather than failing on it (section 5.3).
+    public func isReconciling() throws -> Bool {
+        (try metaInt(IndexSchema.MetaKey.reconciling) ?? 0) != 0
+    }
+
     /// Closes the reader for the truncate window of a restore (section 5.3). The reader
     /// holds the -shm file mapped, and truncating a mapped file under a live process
     /// faults it on its next access.

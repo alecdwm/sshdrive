@@ -728,7 +728,7 @@ retry itself and the schedule behind it - and `D10` is two, one per rename seman
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | E1 | Nested transactions | A listing whose body appends anchors and deletes rows | One listing | No `cannot start a transaction within a transaction`; inner levels are `SAVEPOINT`s; an inner failure caught by its caller undoes only its own writes | U |
-| E2 | A 10,000-entry listing is one transaction | A directory with 10,000 entries | Enumerate it | One `BEGIN IMMEDIATE`, one commit; the enumeration completes | U |
+| E2 | A listing is one transaction, and holds the writes alone | A directory of new, changed, unchanged and deleted entries plus a symlink | Enumerate it twice | One `BEGIN IMMEDIATE`, one commit; every `INSERT INTO items` inside it and no per-entry row read (`WHERE path = ?1`) inside it; an unchanged row is neither rewritten nor anchored, a changed and a new row get one `modified` anchor each and the missing one a `deleted` anchor, last | U |
 | E3 | Sorted keys in the attributes blob | A six-key `LocalAttributes` | Encode it 200 times in one process | Byte-identical every time; the metadata version does not move on its own | U |
 | E4 | A local-only row survives | A `.DS_Store` local-only row | A listing that does not mention it | The row and the user's bytes survive | U |
 | E5 | The reconcile always clears its flag | A corrupt index | Restore into the live database, then a walk that hits its deadline | The restore goes through the backup API (the sidecars and the open reader keep their inode); `meta.reconciling` is cleared even on the deadline path; the walk runs after `add(domain)`, not inside `start()` | S |
@@ -906,6 +906,17 @@ and is not claimed.
 
 ### Suite N — the capability report and probes
 
+**N6, N7 and N8 added 2026-09-09**, in the same file: `sshdrive status` hung while Finder
+was listing, and two of its own lines were the cause - a `statvfs` through the reconnecting
+transport and an `ssh -O check` inside the master's actor.
+
+**N9, N10 and N11 added 2026-09-09**, beside them, for the other two causes of the same
+hang: about eighteen hops per location onto the writer's actor, which a synchronous listing
+transaction holds, and no bound on a location's section at all. N9 is the one that keeps it
+fixed - it watches the *writer's* connection while `status` runs and requires it to see
+none of the report's queries - because a parked `readdir` releases the actor and so cannot
+reproduce in one process what a 10,000-row transaction does on a Mac.
+
 **N2, N3 and N4 implemented 2026-09-08** (`SFTPWireScenarios`, `TransportScenarios`,
 `ShellScenarios`). **N1 and the new N5 implemented 2026-09-08** in
 `Tests/AgentRuntimeTests/CapabilityScenarios.swift`, where the report is built by the
@@ -919,6 +930,12 @@ is therefore SV rather than the U the row was drafted as.
 | N3 | The `MaxSessions` probe | `.debianMaxSessions` | Probe | It asks "may I hold three at once", proves each by completing the SFTP handshake, drops the bulk channel at 2 and keeps the exec channel | V |
 | N4 | A shell-less account | `.debianShells` `forcesftp` | Probe | "no shell access (ForceCommand)", never "shell output unusable", whether the account answers with SFTP framing or with a plain sentence | V |
 | N5 | The report names the server, and `fsync`/`limits` are server facts | `.tailscaleSSH`, then `.debian`/`.ownerDebian`, then a server we could not identify | `status` | Tailscale is named from the collect connection's `DEBUG1` string (`SQ-036`) and the missing `fsync`/`limits` are stated as facts **about that server** with no `upgrade:` line (`SQ-024`); OpenSSH has both (`SQ-025`); an *unidentified* server keeps the upgrade line, because it may well be an old OpenSSH. Added 2026-09-08 | SV |
+| N6 | `status` never touches the wire | A location connected, then with a connect attempt parked on the virtual clock, then with the breaker open | `status` | No `statvfs`, no `ssh -O check`, no connect attempt and no wait: the free-space figure comes from `capabilities.json` and the state word from the gate. Added 2026-09-09 | SV |
+| N7 | Free space is taken at probe time and kept | A connected location, then a `capabilities.json` written before the field existed | `status`, `status --probe` | The figure is captured by `applyConnection`, printed by `status` from the cache, printed with its age once older than an hour, refreshed by `--probe`, and `unknown` where no probe has ever run; an old file still decodes. Added 2026-09-09 | SV |
+| N8 | The state word comes from the gate | Connected, backing off, and stopped on a refused password | `status` | `online` / `offline (backing off …)` / `offline (stopped: authenticationFailed)`, with nothing spawned. Added 2026-09-09 | SV |
+| N9 | `status` reads the index through its own reader | A tree with a pin, 30 held deletions and an escaping link, and a listing parked in its `readdir` | `status` | The row is complete and correct - the same hidden names the writer would list, 30 held, the pin tree with its counts, the cache totals, the root set - the clock never moves, no third materialized enumerator is drained, and **not one of the queries appears on the writer's connection** (`SQLiteConnection.statementObserver`). Added 2026-09-09 | SV |
+| N10 | A stuck location costs its own row, not the report | Two locations, one with its materialized enumerator parked on the virtual clock | `status` with no name | Both rows print, in the order `config.json` holds them; the parked one carries `did not answer within 20 s` and the healthy one is reported in full. Added 2026-09-09 | SV |
+| N11 | A rebuild in progress, and an index that is not there yet | `meta.reconciling` set on a live location, then a `StatusIndexReader` on a path with no file | `status`, then the reader directly | The row says the index is being rebuilt, prints the rest of itself, invents no cache or pin totals, and lifts when the flag clears; a missing file is "no index yet", is not remembered, and the same reader opens it once the writer creates it. Added 2026-09-09 | SV |
 
 ### Suite P — packaging and lifecycle
 
@@ -1488,9 +1505,12 @@ a missing manager or a 4099 that lands anyway), `FakeLoginItem`/`FakeLaunchd` (`
   `sshdrive-askpass`-shaped program with a file mailbox where the XPC connection is, so
   section 4.2's token protocol runs for real off a Mac.
 
-  Still owed to this step and not claimed: **D4**, **D8** and **E1-E6** (the index half and
-  the two rows that want a bundle replacement under a live queue), which are
-  `SystemModel`'s.
+  Still owed to this step and not claimed: **D4**, **D8** and **E1**, **E3-E6** (the index
+  half and the two rows that want a bundle replacement under a live queue), which are
+  `SystemModel`'s. **E2 landed on 2026-09-09**, as `ListingScenarios` in
+  `Tests/AgentRuntimeTests`, when the listing's row building moved out of the transaction:
+  `SQLiteConnection.statementObserver` is the seam, and the two halves are what one
+  listing writes and what its transaction holds while it writes it.
 
   **Three bugs the models themselves had, all found by a scenario and all fixed.** They are
   worth naming because a simulator that is wrong is worse than no simulator: `FakeSFTPServer`'s

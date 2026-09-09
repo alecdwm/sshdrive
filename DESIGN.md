@@ -906,6 +906,24 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   So the index's transaction helper **nests**, with `SAVEPOINT` for every
   level below the outermost, which is what lets a rule about the whole
   listing and a rule about one row's atomicity both hold (2026-09-04).
+  **The transaction holds the writes and nothing else.** The rule is that
+  a listing lands atomically, not that everything a listing does happens
+  under the write lock: the path construction, the read of the incumbent
+  row and the `RowBuilder` call that turns the two into a finished row
+  are done for every entry *before* the `BEGIN IMMEDIATE`, and what the
+  transaction then contains is the upserts, the anchors and the deletion
+  pass. This matters because the location is an actor and the batch is
+  synchronous SQLite, so for as long as the transaction is open every
+  other call on that location - a fetch, a write, `sshdrive status` -
+  is waiting behind it; reading the incumbents outside it is safe for the
+  same reason the listing is one transaction at all, that the agent is
+  the index's only writer and there is no suspension point between the
+  reads and the batch. And a row that is byte for byte the one already
+  stored is not written at all: `IndexItem` is the whole of what an
+  upsert binds, so an equal row is a no-op statement, and an equal row
+  carries the same metadata version and the same `hidden`, which are what
+  decide the anchor - skipping the write cannot change which anchors a
+  listing appends (2026-09-09).
 - `anchors` is pruned to the newest 30 days and to the newest 1,000,000
   rows, both limits applying. The row cap is deliberately generous: a pin change writes
   an anchor per known descendant (§7.1), so a cap in the tens of
@@ -3271,6 +3289,49 @@ sshdrive agent start|stop|restart
 A host-key change needs no command of ours: `status` prints the
 `ssh-keygen -R` line to run (§4.3).
 
+**How `status` is built, and what it is never allowed to wait for.**
+`status` is the command a user runs *because* something looks wrong, so
+the one thing it may not do is join the queue behind whatever is wrong.
+Two rules make that true, and both were written after `sshdrive status`
+hung while Finder was listing a large folder (2026-09-09):
+
+- **It reads the index through a read-only reader of its own, never
+  through the location's writer.** `LocationRuntime` is an actor because
+  the index has a single writer by design (§3), and a directory listing
+  writes its rows inside one synchronous SQLite transaction (§5.3) - so
+  every hop `status` made onto that actor waited for a whole listing, and
+  it made about eighteen of them per location: the hidden names, the held
+  deletions, the root set, one row read per materialized file, the pin
+  tree. §5.2 already opens `index.sqlite` read-only in WAL mode for the
+  extension, and the agent's own report now does the same. A WAL reader
+  neither blocks the writer nor delays it and always sees a consistent
+  snapshot - for a listing in flight, the state before it. The agent
+  remains the sole writer. What is left on the runtime is taken in **one**
+  entry: the channel budget, the identity, the transfer counters, the last
+  error, the hidden-name sentences, the last change-detection cycle and the
+  free-space figure (§8.1). While a rebuild is running (`meta.reconciling`,
+  §5.3) the row says the index is being rebuilt and prints the rest of
+  itself, rather than printing zeroes that read as facts about the server;
+  a location that has never started has no index file, which is the same
+  kind of answer and not an error.
+- **Each location's section is bounded, and the sections run
+  concurrently.** With no `<name>` the locations are built at the same
+  time and printed in the order `config.json` holds them, and each section
+  runs under a 20 s deadline on the agent's clock - the same bound §5.2's
+  File Provider calls carry, and well inside the CLI's own timeout. A
+  location that has stopped answering therefore costs its own row a
+  `did not answer within 20 s` note; the other locations are reported in
+  full. A report about three good locations is worth having when the
+  fourth is the one that has gone.
+
+`status` also does not walk the replica for a set someone else has just
+walked. The materialized set feeds §6.5's root set, §7's TTL pass and this
+report; the first two take it on their own schedules and publish it, and
+every *change* to it arrives as `materializedItemsDidChange`, so an entry
+taken within five minutes is the current set and not merely a recent one.
+`status` drains `enumeratorForMaterializedItems()` for itself only when
+there is no such entry.
+
 ### 8.1 Capability report in `sshdrive status`
 
 Several features run at different levels depending on what the remote server
@@ -3332,6 +3393,26 @@ The catalogue of server-dependent features:
 `statvfs@openssh.com` is probed and shown in `status` as "server free
 space", but Finder has no way to display it for a third-party domain, so it
 is not a capability level.
+
+**It is measured at probe time and cached, and `status` never measures it.**
+It is the one line of the report that is a live number rather than a
+property of the server, and asking for it from `status` meant a wire call
+through §6.3's gate: on a location whose connection was in progress the call
+waited behind that attempt, up to the 60 s authentication deadline, and on a
+location with no attempt at all it *started* one - a status command dialling
+a server the user had not touched. So the `statvfs` is made where a
+connection already exists and a round trip is already being spent: on every
+connection, beside the `realpath` and `lstat` that bring a location up, and
+again on `status --probe`, which is the one form §8 lets ask the server for
+anything. The figure and the wall-clock time it was taken go in
+`capabilities.json` beside the probe, `status` renders what is there, and a
+figure older than an hour is printed with its age (`1.8 TB of 4.0 TB (as of
+3h ago)`) so it is not read as this minute's. A location that has never
+connected shows `unknown`; a `capabilities.json` written before the field
+existed is one of those, not an error. The same rule covers the state word
+beside it: `online`/`offline (<reason>)` comes from the connection gate and
+the breaker, never from an `ssh -O check`, which spawns a process and waits
+up to ten seconds for it inside the master's actor (2026-09-09).
 
 Every line in the report follows one shape so all permutations read the same
 way: a level glyph, the feature name, the level in use, and, whenever the
@@ -4051,6 +4132,10 @@ there, so that this list cannot drift from the body.
 - **A directory listing is written in one transaction,** which is the
   difference between an `ls` of a 10,000-entry directory timing out and
   completing (2026-09-04, §5.3).
+- **That transaction holds the writes alone,** and an unchanged row is
+  not rewritten: the row building happens before the `BEGIN IMMEDIATE`,
+  because every other call on the location waits behind an open one
+  (2026-09-09, §5.3).
 - **Calls wait for an in-flight connection attempt,** bounded by its
   deadline; only an open breaker fails fast (§6.3).
 - **Reconnection stops on auth and host-key failures;** host keys are the
@@ -4461,6 +4546,23 @@ there, so that this list cannot drift from the body.
   invalidates the cached budget so the next connect re-probes. A budget
   measured in a broken moment used to outlive the moment for the life of the
   install (2026-09-08, §6.1, §8.1).
+- **`status` never dials; free space is taken at probe time and cached.**
+  `statvfs` is made on the connection the probe already has and kept in
+  `capabilities.json` with its timestamp, `--probe` refreshes it, and the
+  online/offline word comes from the connection gate rather than from
+  `ssh -O check`. Both used to reach the wire from a command that is only
+  meant to read state, and both could block for as long as a connect attempt
+  (2026-09-09, §8.1, §6.3, §6.1).
+- **`status` reads the index through a read-only reader, and each location's
+  section is bounded.** The report never hops onto the location's writer for
+  anything the index can answer - §5.2's read-only WAL reader answers it
+  instead, so a report taken while a listing is writing its rows neither waits
+  for the listing nor delays it - and what is left of the runtime is taken in
+  one entry. With no `<name>` the locations are built concurrently under a
+  20 s deadline each, so one that has stopped answering costs its own row a
+  note rather than the command; and the materialized set is reused from
+  whichever of §6.5's cycle, §7's pass or `materializedItemsDidChange`
+  published it last (2026-09-09, §8, §5.2, §6.5).
 - **Tests encode measured behaviour and run on Linux; the VM only seeds them.**
   Every decision moves out of `Apps/` into the package behind named protocols,
   a `SystemModel` (fileproviderd + Finder + launchd) and a `ServerModel`

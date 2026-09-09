@@ -516,6 +516,9 @@ public actor DomainManager {
             locationID: locationID)
         await detectors[locationID]?.materializedChanged(identifiers: identifiers)
         guard let runtime = runtimes[locationID] else { return }
+        // A location with no detector still publishes it: `status` is the third reader of
+        // this set and the one that must not walk the replica for itself (section 8.1).
+        runtime.materialized.record(identifiers, at: environment.clock.now())
         let reasserted =
             (try? await runtime.reassertKeptItems(materializedIdentifiers: identifiers)) ?? []
         guard !reasserted.isEmpty else { return }

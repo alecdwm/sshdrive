@@ -129,6 +129,7 @@ public actor CacheEvictor {
             // "the user evicted everything" (section 6.5).
             return ["skipped": "the system has no domain for this location"]
         }
+        runtime.materialized.record(identifiers, at: environment.clock.now())
         let candidates = await withTimes(await rows(for: identifiers))
         let decisions = EvictionPlan.decide(candidates, ttl: effectiveTTLSeconds, now: now)
         let wanted = decisions.filter(\.evict).sorted { $0.lastUse < $1.lastUse }

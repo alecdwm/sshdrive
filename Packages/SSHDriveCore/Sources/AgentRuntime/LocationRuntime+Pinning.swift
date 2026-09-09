@@ -46,36 +46,13 @@ extension LocationRuntime {
         for (path, marker) in markers.markers.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }) {
             var rows = try index.items(under: path)
             if let own = try index.item(path: path) { rows.append(own) }
-            var files = 0
-            var bytes: Int64 = 0
-            var downloadedFiles = 0
-            var downloadedBytes: Int64 = 0
-            for row in rows where row.type != "directory" {
-                files += 1
-                bytes += row.size
-                let isDownloaded =
-                    materialized.map { $0.contains(row.identifier) } ?? (row.lastFetch != nil)
-                if isDownloaded {
-                    downloadedFiles += 1
-                    downloadedBytes += row.size
-                }
-            }
-            var entry: [String: Any] = [
-                "path": String(decoding: path, as: UTF8.self),
-                "state": marker == .pinned ? "pinned" : "excluded",
-                "kept": marker == .pinned,
-                "files": files,
-                "bytes": bytes,
-                "downloadedFiles": downloadedFiles,
-                "downloadedBytes": downloadedBytes,
-                // The depth is what the CLI indents by: an exclusion inside a pin is drawn
-                // under it (section 7.1).
-                "depth": markers.ancestorMarkerDepth(of: path),
-            ]
-            if let covering = markers.nearestAncestorMarker(of: path) {
-                entry["under"] = String(decoding: covering.path, as: UTF8.self)
-            }
-            out.append(entry)
+            // One definition of what a pin row says, shared with the read-only reader
+            // `status` uses (section 8): two copies would drift, and the numbers here are
+            // what the user is told a subtree costs.
+            out.append(
+                StatusIndexReader.pinEntry(
+                    path: path, marker: marker, rows: rows, markers: markers,
+                    materialized: materialized))
         }
         return out
     }
@@ -387,19 +364,7 @@ extension LocationRuntime {
         var out: [EvictionPlan.Candidate] = []
         for identifier in identifiers {
             guard let row = try index.item(identifier: identifier) else { continue }
-            out.append(
-                EvictionPlan.Candidate(
-                    identifier: identifier,
-                    path: String(decoding: row.path, as: UTF8.self),
-                    isDirectory: row.type == "directory",
-                    // Section 5.4's local-only row: there is nothing on the server to
-                    // fetch back, so evicting it would take the user's file.
-                    isLocalOnly: row.hidden == 3,
-                    kept: row.kept,
-                    size: row.size,
-                    lastFetch: row.lastFetch,
-                    mtime: Double(row.mtime),
-                    atime: nil))
+            out.append(StatusIndexReader.candidate(row: row))
         }
         return out
     }

@@ -118,6 +118,17 @@ public actor FakeTransport: SFTPTransport {
         refusedPaths = Set(paths.map(\.bytes))
     }
 
+    /// Run before every `readdir` answers, and awaited.
+    ///
+    /// It is what lets a scenario hold a directory listing open and look at the world
+    /// while it is in flight - `N9`, where `sshdrive status` must answer in full while a
+    /// listing of a large folder is running. Nil clears it.
+    private var onReaddir: (@Sendable (RelativePath) async -> Void)?
+
+    public func setOnReaddir(_ body: (@Sendable (RelativePath) async -> Void)?) {
+        onReaddir = body
+    }
+
     private func checkWritable(_ path: RelativePath) throws {
         guard !refusedPaths.isEmpty else { return }
         for refused in refusedPaths {
@@ -164,6 +175,7 @@ public actor FakeTransport: SFTPTransport {
     }
 
     public func readdir(_ path: RelativePath) async throws -> [SFTPDirectoryEntry] {
+        if let onReaddir { await onReaddir(path) }
         let node = try node(at: path)
         guard node.type == .directory else { throw SFTPError.failure("Failure") }
         return node.children

@@ -217,6 +217,9 @@ public actor ConnectionGate {
     private var retry: Task<Void, Never>?
     /// Section 6.1: a second consecutive per-request deadline miss drops the master too.
     private var consecutiveDeadlineMisses = 0
+    /// Set by `shutdown()` and never cleared: the gate is torn down once, at `agent stop`,
+    /// a TERM or a `remove`, and nothing may bring a master back after it.
+    private var shutdownRequested = false
     private var lastFailureText: String?
     private var lastClassification: SSHExitClassification?
     /// Counters for the spike and for `debug breaker`.
@@ -361,6 +364,9 @@ public actor ConnectionGate {
 
     private func startAttempt() -> Task<any LiveConnection, Error> {
         if let attempt { return attempt }
+        if shutdownRequested {
+            return Task { throw SFTPError.noConnection }
+        }
         attempts += 1
         let location = self.location
         let askpassPath = self.askpassPath
@@ -402,6 +408,12 @@ public actor ConnectionGate {
 
     private func recordSuccess(_ transport: any LiveConnection) async {
         attempt = nil
+        // The attempt outran the shutdown (see `shutdown()`): this master is nobody's, and
+        // the gate is not going to be asked again.
+        guard !shutdownRequested else {
+            await transport.shutdown()
+            return
+        }
         retry?.cancel()
         retry = nil
         let wasDown = !breaker.isUp
@@ -588,13 +600,32 @@ public actor ConnectionGate {
         await connectInBackground(trigger: "an explicit reconnect")
     }
 
+    /// The last thing that happens to a gate: every schedule cancelled, the attempt in
+    /// flight abandoned, and the master shut down.
+    ///
+    /// **The connection is taken out of the actor before it is awaited**, exactly as
+    /// `drop` does it. `LiveConnection.shutdown()` is a nonisolated `async` call, so the
+    /// gate is released for the length of it, and the shutdown really does arrive twice:
+    /// `DomainManager.shutdownAll` runs `gate.shutdown()` and `runtime.shutdownTransport()`
+    /// in one task group and the runtime's is `gate.shutdown()` again. With `connection`
+    /// still set across the await, the second caller saw it and ran `-O exit` on the same
+    /// master a second time - on a real master that is a stray `ssh -O exit` against a
+    /// socket that has already gone, and it is what made `P4` flaky (2026-09-09).
+    ///
+    /// `shutdownRequested` is the other half: `startAttempt`'s task is not synchronously
+    /// cancellable - `launcher.connect` spawns an `ssh` and only notices a cancel where it
+    /// happens to await - so an attempt that lands after this point would otherwise install
+    /// a live master into a gate nobody will ever shut down again. It is shut down here
+    /// instead, and no new attempt is ever started.
     public func shutdown() async {
+        shutdownRequested = true
         retry?.cancel()
         retry = nil
         attempt?.cancel()
         attempt = nil
-        if let connection { await connection.shutdown() }
+        let live = connection
         connection = nil
+        if let live { await live.shutdown() }
     }
 
     // MARK: Faults

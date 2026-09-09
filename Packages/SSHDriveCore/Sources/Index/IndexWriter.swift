@@ -213,6 +213,13 @@ public final class IndexWriter {
         try connection.transaction(body)
     }
 
+    /// The test seam of `SQLiteConnection.statementObserver`, which is how `E2` asserts
+    /// that a listing is one transaction and that the transaction holds the writes alone.
+    /// Nil in the shipping agent.
+    public func observeStatements(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        connection.statementObserver = observer
+    }
+
     public func children(ofParent identifier: String) throws -> [IndexItem] {
         let statement = try connection.prepare(
             "SELECT \(Self.columns) FROM items WHERE parent = ?1 ORDER BY path")
@@ -654,7 +661,10 @@ public final class IndexWriter {
         return Self.decodeHeld(statement)
     }
 
-    private static func decodeHeld(_ statement: SQLiteStatement) -> HeldRow {
+    /// Internal rather than private: the read-only `IndexReader` decodes the same
+    /// rows for the agent's own `status` path (section 8), and two copies of a column
+    /// order are one drift away from a wrong report.
+    static func decodeHeld(_ statement: SQLiteStatement) -> HeldRow {
         HeldRow(
             path: statement.data(0) ?? Data(),
             dir: statement.data(1) ?? Data(),
@@ -721,7 +731,7 @@ public final class IndexWriter {
         return Int(statement.int(0))
     }
 
-    private static let heldColumns = "path, dir, first_missing, recheck_at, checks, reason"
+    static let heldColumns = "path, dir, first_missing, recheck_at, checks, reason"
 
     // MARK: backup
 

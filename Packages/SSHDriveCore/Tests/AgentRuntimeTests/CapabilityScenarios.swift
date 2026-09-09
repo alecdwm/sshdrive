@@ -3,6 +3,7 @@ import AgentRuntime
 import AgentRuntimeTestSupport
 import Config
 import Foundation
+import Index
 import SFTP
 import ServerModel
 import Testing
@@ -191,7 +192,507 @@ extension AgentScenarios {
             #expect(durable["note"] == nil)
         }
 
+        /// **N6** - `status` never touches the wire.
+        ///
+        /// `sshdrive status` hung while Finder was listing, and two of its lines were why.
+        /// The capability report ended in `runtime.freeSpaceDescription()` ->
+        /// `transport.statvfs(.root)`, and that transport is the `ReconnectingTransport`:
+        /// section 6.3's gate holds a call behind a connect attempt for up to the 60 s
+        /// authentication deadline, and where there is no attempt at all it *starts* one.
+        /// So a report the user asked for could dial a server they had not touched, and a
+        /// report asked for during a reconnect waited out the reconnect. Section 8 gives
+        /// `--probe` as the way to ask for a connection on purpose, and this is the rest of
+        /// the command promising not to.
+        ///
+        /// Three states, because the failure is different in each: connected (a call would
+        /// have succeeded and cost a round trip), connecting (a call would have *waited*),
+        /// and backing off (a call would have failed fast, but the free-space line would
+        /// have been silently empty rather than the last known figure).
+        @Test func n6StatusNeverDialsAndNeverWaits() async throws {
+            let harness = try AgentHarness(clock: VirtualAgentClock())
+            let location = try await harness.addLocation(nickname: "nas")
+            let runtime = try await harness.manager.runtime(for: location)
+            await harness.quiesceConnects()
+
+            // 1. Connected. The probe already paid for the one `statvfs` (`applyConnection`),
+            // and `status` may not pay for another.
+            let live = try #require(harness.launcher.live)
+            #expect(live.statvfsCount == 1, "the free-space figure is taken at connect")
+            let statvfsBefore = live.statvfsCount
+            let attemptsBefore = harness.launcher.attempts
+            let wallBefore = harness.clock.now()
+
+            var rows = try await harness.control("status", ["name": "nas"])
+            var row = try #require((rows["locations"] as? [[String: Any]])?.first)
+            #expect(row["state"] as? String == "online")
+            #expect(live.statvfsCount == statvfsBefore, "N6: status made no statvfs")
+            #expect(live.aliveCheckCount == 0, "N6: and no `ssh -O check`")
+            #expect(harness.launcher.attempts == attemptsBefore, "N6: and dialled nothing")
+            #expect(harness.clock.now() == wallBefore, "N6: and waited for nothing")
+
+            // 2. An attempt in progress. `--connect-hang` is section 6.3 rule 3 on its own:
+            // the attempt is parked on the virtual clock and every call that reaches the
+            // gate would be held on it, bounded only by the attempt's own deadline.
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+            await gate.setFault(
+                unreachable: nil, hangMilliseconds: nil, connectHangMilliseconds: 30_000)
+            await gate.drop(reason: "the master was killed")
+            await harness.settle { harness.clock.sleeperCount > 0 }
+            #expect(await gate.isConnected == false)
+
+            let waitedBefore = await gate.waitedCalls
+            let gateAttemptsBefore = await gate.attempts
+            rows = try await harness.control("status", ["name": "nas"])
+            row = try #require((rows["locations"] as? [[String: Any]])?.first)
+            #expect(await gate.waitedCalls == waitedBefore, "N6: no call of ours waited on the gate")
+            #expect(await gate.attempts == gateAttemptsBefore, "N6: and none started an attempt")
+            #expect(harness.clock.now() == wallBefore, "N6: the clock never had to move")
+            #expect((row["state"] as? String)?.hasPrefix("offline") == true)
+
+            // 3. The breaker open. Let the parked attempt fail, so the location is backing
+            // off with nothing in flight - the state where a call would have failed fast and
+            // the report would have had nothing to print.
+            harness.launcher.fail()
+            await gate.setFault(
+                unreachable: nil, hangMilliseconds: nil, connectHangMilliseconds: 0)
+            await harness.clock.advanceAndSettle(30)
+            await harness.settle { await gate.isConnected == false }
+            let failFastBefore = await gate.failFastCalls
+            rows = try await harness.control("status", ["name": "nas"])
+            row = try #require((rows["locations"] as? [[String: Any]])?.first)
+            #expect(
+                await gate.failFastCalls == failFastBefore,
+                "N6: status did not even reach the gate to be refused by it")
+            #expect((row["state"] as? String)?.hasPrefix("offline") == true)
+
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **N7** - the free-space figure is taken at probe time and kept.
+        ///
+        /// It is the one number in section 8.1's report that is a live measurement rather
+        /// than a property of the server, which is exactly why it was the line that dialled.
+        /// It is captured where a connection already exists - `applyConnection` on every
+        /// connection, and `reprobeServer` on `--probe` - and lives in `capabilities.json`
+        /// beside the probe. `status` renders what is there, with its age once it is old
+        /// enough that the user should not read it as this minute's figure, and `unknown`
+        /// where no probe has ever run. A `capabilities.json` written before the key existed
+        /// decodes as one that has never been probed, not as an error.
+        @Test func n7FreeSpaceIsCapturedAtProbeTimeAndCached() async throws {
+            let harness = try AgentHarness(clock: VirtualAgentClock())
+            let location = try await harness.addLocation(nickname: "nas")
+            let runtime = try await harness.manager.runtime(for: location)
+            await harness.quiesceConnects()
+
+            // Captured by the connection, from `FakeTransport`'s 4 GiB / 2 GiB free.
+            let stored = try #require(CapabilityCache.freeSpace(locationID: location.id))
+            #expect(stored.totalBytes == 4096 * (1 << 20))
+            #expect(stored.freeBytes == 4096 * (1 << 19))
+            #expect(stored.capturedAt == harness.clock.now())
+
+            var rows = try await harness.control("status", ["name": "nas"])
+            var capabilities = try #require(
+                ((rows["locations"] as? [[String: Any]])?.first)?["capabilities"] as? [String: Any])
+            #expect(
+                capabilities["serverFreeSpace"] as? String
+                    == stored.sentence(now: harness.clock.now()),
+                "N7: what status prints is what the probe stored")
+            #expect((capabilities["serverFreeSpace"] as? String)?.contains("as of") == false)
+
+            // Old enough to matter: the line says when it was taken rather than letting the
+            // user read a figure from this morning as this minute's.
+            let old = ServerFreeSpace(
+                freeBytes: stored.freeBytes, totalBytes: stored.totalBytes,
+                capturedAt: harness.clock.now() - 2 * 3600)
+            CapabilityCache.storeFreeSpace(old, locationID: location.id)
+            rows = try await harness.control("status", ["name": "nas"])
+            capabilities = try #require(
+                ((rows["locations"] as? [[String: Any]])?.first)?["capabilities"] as? [String: Any])
+            #expect(
+                (capabilities["serverFreeSpace"] as? String)?.contains("(as of 2h ago)") == true,
+                "N7: an hour is where the age starts being printed")
+
+            // `--probe` is the one command that may ask the server, so it is what refreshes
+            // the figure: the stored timestamp moves to now.
+            _ = try await harness.control("status", ["name": "nas", "probe": "true"])
+            let refreshed = try #require(CapabilityCache.freeSpace(locationID: location.id))
+            #expect(refreshed.capturedAt == harness.clock.now(), "N7: --probe re-took it")
+            #expect(refreshed.freeBytes == stored.freeBytes)
+
+            // A `capabilities.json` written before the key existed. It decodes as a probe
+            // with no free-space figure, and `status` says so in a word rather than failing.
+            let unprobed = try await harness.addLocation(nickname: "old", host: "old")
+            Self.cacheProbe(of: .debian, locationID: unprobed.id)
+            let raw = try #require(
+                try? Data(contentsOf: GroupContainer.capabilitiesURL(locationID: unprobed.id)))
+            #expect(
+                !String(decoding: raw, as: UTF8.self).contains("freeSpace"),
+                "N7: the fixture really is a file written without the field")
+            #expect(CapabilityCache.probe(locationID: unprobed.id) != nil, "N7: and still decodes")
+            #expect(CapabilityCache.freeSpace(locationID: unprobed.id) == nil)
+            rows = try await harness.control("status", ["name": "old"])
+            capabilities = try #require(
+                ((rows["locations"] as? [[String: Any]])?.first)?["capabilities"] as? [String: Any])
+            #expect(
+                capabilities["serverFreeSpace"] as? String == ServerFreeSpace.unknownSentence,
+                "N7: never probed is `unknown`, not a missing line and not a guess")
+
+            _ = runtime
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **N8** - online and offline come from the gate.
+        ///
+        /// The state word used to be `runtime.isConnected()` ->
+        /// `SSHBackedTransport.isMasterAlive()` -> `SSHMaster.check()`, which spawns
+        /// `ssh -O check` and waits up to ten seconds for it *inside the master's actor*:
+        /// a cooperative pool thread parked, and every other caller of that master queued
+        /// behind it, for one word of one line of `status`. The gate already holds the
+        /// connection and the breaker already knows why there is not one, so both halves
+        /// of the answer are there for free, and section 8's wording is unchanged:
+        /// `online`, or `offline (<reason>)`.
+        @Test func n8TheStateWordComesFromTheGate() async throws {
+            let harness = try AgentHarness(clock: VirtualAgentClock())
+            let location = try await harness.addLocation(nickname: "nas")
+            _ = try await harness.manager.runtime(for: location)
+            await harness.quiesceConnects()
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+            let live = try #require(harness.launcher.live)
+
+            #expect(await Self.stateWord(harness, "nas") == "online")
+            #expect(live.aliveCheckCount == 0, "N8: nothing spawned an `ssh -O check`")
+
+            // Backing off. The reason is the breaker's own sentence, so the user is told
+            // that the location is retrying rather than only that it is down.
+            harness.launcher.fail()
+            await gate.drop(reason: "the master was killed")
+            await harness.settle { await gate.isConnected == false }
+            let backingOff = await Self.stateWord(harness, "nas")
+            #expect(backingOff.hasPrefix("offline ("), "section 8's wording is unchanged")
+            #expect(backingOff.contains("backing off"))
+            #expect(live.aliveCheckCount == 0)
+
+            // Stopped until the user acts. Section 6.3 rule 6: an auth failure gets no
+            // reconnect schedule at all, and that is the one the user has to be told about.
+            harness.launcher.fail(classification: .authenticationFailed, stderr: "Permission denied")
+            // The breaker's backoff is also a reconnect schedule (section 6.3 rule 5), so
+            // the next attempt is the one the clock brings round - and it is the attempt
+            // that meets the refused password.
+            await harness.clock.advanceAndSettle(5)
+            await harness.settle { await gate.stateSentence().contains("stopped") }
+            let stopped = await Self.stateWord(harness, "nas")
+            #expect(stopped == "offline (stopped: authenticationFailed)")
+            #expect(live.aliveCheckCount == 0, "N8: still nothing spawned")
+
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+
+        /// **N9** - `status` reads the index through its own reader, never through the
+        /// writer.
+        ///
+        /// The other half of what made `sshdrive status` hang while Finder was listing
+        /// (N6 is the wire half). `LocationRuntime` is an actor, a directory listing writes
+        /// its rows in one **synchronous** SQLite transaction on it (section 5.3), and
+        /// `status` used to make about eighteen hops onto that actor per location - the
+        /// hidden names, the held rows, the root set, one `item(identifier:)` per
+        /// materialized file, the pin tree, and eight more. Any of them could queue behind
+        /// a listing of a large folder.
+        ///
+        /// Two things are asserted, because either alone would pass for the wrong reason:
+        ///
+        /// 1. **With a listing in flight**, `status` answers in full and answers
+        ///    *correctly* - the same hidden names the writer would have listed, the held
+        ///    deletions, the pin tree with its counts, and the cache totals - and the clock
+        ///    never moves.
+        /// 2. **The writer's connection is not the one that answered.** Every read a
+        ///    `status` makes of the index is watched through `SQLiteConnection`'s statement
+        ///    observer, which is the writer's; not one of the queries appears on it.
+        ///
+        /// The second is the load-bearing one. A parked `readdir` suspends
+        /// `enumerateChanges` and therefore *releases* the actor, so a scenario in one
+        /// process cannot hold the actor the way a real 10,000-row transaction does; what
+        /// it can do is prove that `status` no longer asks that actor for any of it
+        /// (2026-09-09).
+        @Test func n9StatusReadsTheIndexThroughItsOwnReader() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas", backend: .fake)
+            let runtime = try await harness.manager.runtime(for: location)
+            try await harness.manager.addDomain(for: location)
+            let fake = try #require(await runtime.transport as? FakeTransport)
+
+            // A tree with something for every line of section 8's report: a pin with files
+            // under it, a directory the mass-deletion guard will hold, and a link that
+            // leaves the location, which is section 5.4's "not shown".
+            try await fake.apply(.createDirectory(path: try RelativePath(string: "Docs"), mode: 0o755))
+            for index in 0 ..< 3 {
+                try await fake.apply(
+                    .createFile(
+                        path: try RelativePath(string: "Docs/doc\(index).txt"),
+                        contents: Data(repeating: 0x61, count: 100), mode: 0o644))
+            }
+            try await fake.apply(
+                .createDirectory(path: try RelativePath(string: "Photos"), mode: 0o755))
+            for index in 0 ..< 40 {
+                try await fake.apply(
+                    .createFile(
+                        path: try RelativePath(string: "Photos/p\(index).jpg"),
+                        contents: Data("p\(index)".utf8), mode: 0o644))
+            }
+            try await fake.apply(
+                .createSymlink(path: try RelativePath(string: "escape"), target: "/etc/passwd"))
+
+            _ = try await runtime.enumerateItems(
+                container: IndexWriter.rootIdentifier, pageToken: nil)
+            let (docs, _) = try await runtime.identifier(forPath: "Docs")
+            _ = try await runtime.enumerateItems(container: docs, pageToken: nil)
+            let (photos, _) = try await runtime.identifier(forPath: "Photos")
+            _ = try await runtime.enumerateItems(container: photos, pageToken: nil)
+
+            // A pin, and the system holding content for the three files under it.
+            _ = try await harness.control("pin", ["name": "nas", "path": "Docs"])
+            var downloaded: [String] = []
+            for index in 0 ..< 3 {
+                downloaded.append(try await runtime.identifier(forPath: "Docs/doc\(index).txt").0)
+            }
+            harness.replica.setMaterialized(downloaded, locationID: location.id)
+            // The extension's own signal, which is what publishes the set `status` reads
+            // rather than draining a third enumerator for it (section 6.5).
+            await harness.manager.materializedItemsChanged(locationID: location.id)
+
+            // 30 of 40 gone: section 6.4's guard holds them rather than reporting them.
+            for index in 0 ..< 30 {
+                try await fake.apply(
+                    .delete(path: try RelativePath(string: "Photos/p\(index).jpg"), recursive: false))
+            }
+            let application = await runtime.runPollCycle(fullSweep: true)
+            #expect(application.held == 30, "the guard is holding, so status has something to print")
+
+            let viaWriter = try await runtime.notShown().map(\.path)
+            #expect(!viaWriter.isEmpty, "the escaping link is recorded and not shown")
+
+            // A listing, parked in the middle of its `readdir`.
+            let parked = Counter()
+            let clock = harness.clock
+            await fake.setOnReaddir { _ in
+                parked.bump()
+                await clock.sleep(seconds: 3600)
+            }
+            let listing = Task { try await runtime.enumerateChanges(container: photos) }
+            await harness.settle { parked.value > 0 }
+            #expect(parked.value > 0, "N9: the listing is in flight")
+
+            // Everything the writer's connection is asked while `status` runs.
+            let statements = ListingScenarios.Statements()
+            await runtime.observeStatements { sql, depth in statements.record(sql, depth) }
+            let wallBefore = harness.clock.now()
+            let materializedBefore = harness.replica.callsMatching {
+                if case .materialized = $0 { return true }
+                return false
+            }.count
+
+            let rows = try await harness.control("status", ["name": "nas"])
+            await runtime.observeStatements(nil)
+
+            let row = try #require((rows["locations"] as? [[String: Any]])?.first)
+            #expect(harness.clock.now() == wallBefore, "N9: status waited for nothing")
+            #expect(row["indexUnavailable"] == nil, "N9: the index answered")
+
+            let notShown = try #require(row["notShown"] as? [[String: Any]])
+            #expect(
+                Set(notShown.compactMap { $0["path"] as? String }) == Set(viaWriter),
+                "N9: the reader lists exactly the names the writer would have")
+            #expect((notShown.first?["reason"] as? String ?? "").isEmpty == false)
+
+            let held = try #require(row["heldDeletions"] as? [[String: Any]])
+            #expect(held.count == 30, "N9: the held deletions come from the reader")
+
+            let pins = try #require(row["pins"] as? [[String: Any]])
+            let docsPin = try #require(pins.first { $0["path"] as? String == "Docs" })
+            #expect(docsPin["state"] as? String == "pinned")
+            #expect(docsPin["files"] as? Int == 3)
+            #expect(docsPin["downloadedFiles"] as? Int == 3, "N9: from the published set")
+
+            let cache = try #require(row["cache"] as? [String: Any])
+            #expect(cache["files"] as? Int == 3)
+            #expect(cache["bytes"] as? Int64 == 300)
+            #expect(cache["keptFiles"] as? Int == 3, "the three under the pin are kept")
+
+            let watch = try #require(row["watch"] as? [String: Any])
+            #expect((watch["roots"] as? Int ?? 0) > 0, "N9: the root set comes from the reader")
+
+            // The load-bearing half: none of that touched the writer.
+            let sql = statements.all().map(\.sql)
+            #expect(
+                !sql.contains { $0.contains("FROM held") },
+                "N9: the held rows were not read on the writer's connection")
+            #expect(
+                !sql.contains { $0.contains("pin_state != 0") },
+                "N9: nor the pin markers")
+            #expect(
+                !sql.contains { $0.contains("FROM items ORDER BY path") },
+                "N9: nor the whole item table the hidden-name list is filtered out of")
+            #expect(
+                !sql.contains { $0.contains("FROM roots") }, "N9: nor the root set")
+            #expect(
+                materializedBefore
+                    == harness.replica.callsMatching {
+                        if case .materialized = $0 { return true }
+                        return false
+                    }.count,
+                "N9: and status drained no third materialized enumerator (section 6.5)")
+
+            // And the listing that was held finishes normally once it is let go.
+            await harness.clock.advanceAndSettle(3600)
+            _ = try await listing.value
+            #expect(parked.value >= 1, "N9: the listing really did run through the hold")
+            await fake.setOnReaddir(nil)
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **N10** - one location that has stopped answering costs its own row, not the
+        /// report.
+        ///
+        /// `status` with no name is a report about every location, and section 8's output
+        /// prints them in the order `config.json` holds. Before this they were built one
+        /// after another with no bound at all, so the fourth location's wedged File
+        /// Provider call - S1 measured `remove(domain)` not returning within three minutes -
+        /// took the whole command out through the CLI's own timeout, and the user learnt
+        /// nothing about the three that were fine.
+        ///
+        /// So: the sections run concurrently, each under `Deadline.statusSeconds` on the
+        /// agent's own clock, and a section that runs out prints its row with a note in
+        /// place of what it could not read.
+        @Test func n10AStuckLocationPrintsANoteAndNotTheReport() async throws {
+            let harness = try AgentHarness()
+            let stuck = try await harness.addLocation(nickname: "nas", backend: .fake)
+            let healthy = try await harness.addLocation(nickname: "spare", backend: .fake)
+
+            // The materialized enumerator is the one File Provider call a `status` section
+            // still makes for a location nothing has published a set for, and it is the
+            // shape of call that wedges. Parked for `nas` and only for `nas`.
+            let clock = harness.clock
+            let stuckID = stuck.id
+            harness.replica.setOnMaterializedIdentifiers { locationID in
+                guard locationID == stuckID else { return }
+                await clock.sleep(seconds: 3600)
+            }
+
+            for location in [stuck, healthy] {
+                _ = try await harness.manager.runtime(for: location)
+                try await harness.manager.addDomain(for: location)
+            }
+
+            let report = Task { try await harness.control("status", [:]) }
+            // Both sections are in flight and the stuck one is parked on the clock: three
+            // sleepers, the two deadlines and the parked call.
+            await harness.settle { harness.clock.sleeperCount >= 3 }
+            // Then let the healthy section run out. Its remaining work is a handful of
+            // in-memory reads, and `settle` is the suite's idiom for "let what was started
+            // run to a standstill"; a cancelled sleep is not removed from the driven
+            // clock's waiters, so the sleeper count cannot say it for us.
+            await harness.settle(timeoutSeconds: 1) { false }
+            await harness.clock.advanceAndSettle(Deadline.statusSeconds)
+
+            let rows = try #require(try await report.value["locations"] as? [[String: Any]])
+            #expect(rows.count == 2)
+            #expect(
+                rows.map { $0["name"] as? String } == ["nas", "spare"],
+                "N10: printed in the order config.json holds, whatever order they finished in")
+
+            let stuckRow = rows[0]
+            let note = try #require(stuckRow["note"] as? String)
+            #expect(note.contains("did not answer within 20 s"), "N10: the row says so")
+            #expect(stuckRow["name"] as? String == "nas")
+            #expect(stuckRow["destination"] != nil, "N10: what cost nothing is still printed")
+
+            let healthyRow = rows[1]
+            #expect(healthyRow["note"] == nil, "N10: the healthy location is unaffected")
+            #expect(healthyRow["state"] as? String == "online")
+            #expect(healthyRow["cache"] != nil, "N10: and is reported in full")
+            #expect(healthyRow["watch"] != nil)
+
+            harness.replica.setOnMaterializedIdentifiers(nil)
+            await harness.clock.advanceAndSettle(3600)
+            for location in [stuck, healthy] {
+                await harness.manager.dropRuntime(locationID: location.id)
+            }
+        }
+
+        /// **N11** - a rebuild in progress, and an index that is not there yet.
+        ///
+        /// Section 5.3's restore sets `meta.reconciling` for the whole replica walk, and
+        /// section 5.2 makes any read of the index during it answer "unreachable", never
+        /// "no such item". `status` is a read of the index like any other, so it says the
+        /// index is being rebuilt and prints the rest of the row - it does not print zeroes,
+        /// which would read as facts about the server, and it does not fail the command.
+        ///
+        /// The second half is the state a location is in before it has ever started: the
+        /// file is not there, which is not an error and is not permanent.
+        @Test func n11AReconcilingIndexAndOneThatIsNotThereYet() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas", backend: .fake)
+            let runtime = try await harness.manager.runtime(for: location)
+            try await harness.manager.addDomain(for: location)
+            _ = try await runtime.enumerateItems(
+                container: IndexWriter.rootIdentifier, pageToken: nil)
+
+            // Section 5.3's flag, set the way `IndexReconcile` sets it.
+            let writer = try harness.indexWriter(locationID: location.id)
+            try writer.setReconciling(true)
+
+            let rows = try await harness.control("status", ["name": "nas"])
+            let row = try #require((rows["locations"] as? [[String: Any]])?.first)
+            let unavailable = try #require(row["indexUnavailable"] as? String)
+            #expect(unavailable.contains("rebuilt"), "N11: the row says why, in words")
+            #expect((row["notShown"] as? [[String: Any]])?.isEmpty == true)
+            #expect((row["heldDeletions"] as? [[String: Any]])?.isEmpty == true)
+            #expect(row["cache"] == nil, "N11: no cache totals are invented for a rebuild")
+            #expect(row["pins"] == nil)
+            #expect(row["state"] as? String == "online", "N11: the rest of the row still prints")
+            #expect(row["channels"] != nil)
+
+            try writer.setReconciling(false)
+            let after = try await harness.control("status", ["name": "nas"])
+            let afterRow = try #require((after["locations"] as? [[String: Any]])?.first)
+            #expect(afterRow["indexUnavailable"] == nil, "N11: and it lifts by itself")
+            #expect(afterRow["cache"] != nil)
+
+            // A location that has never started has no `index.sqlite` at all. Not an error,
+            // and not remembered: the writer creates the file when it starts, and the next
+            // read opens it.
+            let missing = harness.container.appendingPathComponent("nowhere/index.sqlite")
+            let reader = StatusIndexReader(locationID: "unstarted", path: missing.path)
+            let empty = await reader.report(hiddenReasons: [:], materialized: [])
+            #expect(empty.unavailable == "this location has no index yet")
+            #expect(empty.pins.isEmpty)
+            #expect(empty.cacheCandidates.isEmpty)
+
+            try FileManager.default.createDirectory(
+                at: missing.deletingLastPathComponent(), withIntermediateDirectories: true)
+            _ = try IndexWriter(path: missing.path)
+            let born = await reader.report(hiddenReasons: [:], materialized: [])
+            #expect(born.unavailable == nil, "N11: the same reader opens it once it exists")
+
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// A counter a `@Sendable` hook can bump from wherever it runs.
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+            func bump() { lock.lock(); count += 1; lock.unlock() }
+        }
+
         // MARK: fixtures
+
+        /// The `state` word of one `status` row, which is what section 8 prints after the
+        /// destination.
+        static func stateWord(_ harness: AgentHarness, _ name: String) async -> String {
+            let rows = try? await harness.control("status", ["name": name])
+            return ((rows?["locations"] as? [[String: Any]])?.first)?["state"] as? String ?? ""
+        }
 
         /// The sentence that may only ever come from a server's own refusal.
         static let blameSentence = "the server cannot run the remote helper"

@@ -57,6 +57,8 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     private var _tccDenied = false
     /// A hook on `pendingIdentifiers`; see `setOnPendingIdentifiers`.
     private var _onPending: (@Sendable (String) -> Void)?
+    /// A hook on `materializedIdentifiers`; see `setOnMaterializedIdentifiers`.
+    private var _onMaterialized: (@Sendable (String) async -> Void)?
     private var _evicted: [String] = []
     /// A domain the system has no manager for: every call for it answers "no news"
     /// (section 6.5), which is never "the user evicted everything".
@@ -239,10 +241,24 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     }
 
     public func materializedIdentifiers(locationID: String) async -> [String]? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         _calls.append(.materialized(locationID: locationID))
-        if _unmanaged.contains(locationID) { return nil }
-        return _materialized[locationID] ?? []
+        let hook = _onMaterialized
+        let unmanaged = _unmanaged.contains(locationID)
+        let answer = _materialized[locationID] ?? []
+        lock.unlock()
+        // Awaited with the lock down, exactly like `pendingIdentifiers`' hook. This is the
+        // one File Provider call `status` can still make for a location whose materialized
+        // set nothing has published recently, so it is where `N10` parks a location to
+        // watch the per-location deadline fire (section 8).
+        await hook?(locationID)
+        return unmanaged ? nil : answer
+    }
+
+    /// Runs on every `materializedIdentifiers`, before the answer is given, and is
+    /// awaited - so a scenario may park the call there. Nil clears it.
+    public func setOnMaterializedIdentifiers(_ body: (@Sendable (String) async -> Void)?) {
+        lock.lock(); _onMaterialized = body; lock.unlock()
     }
 
     public func pendingIdentifiers(locationID: String) async -> [String]? {

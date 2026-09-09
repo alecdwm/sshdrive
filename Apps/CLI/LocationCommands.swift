@@ -370,6 +370,13 @@ struct Status: ParsableCommand {
                 + "   \(row["mounted"] as? Bool == true ? "mounted" : "not mounted")"
                 + "   \(row["state"] as? String ?? "")"
                 + "   TTL \(row["cacheTTL"] as? String ?? "")")
+            // Section 8: a location whose section ran out of its 20 s deadline, and an
+            // index that is being rebuilt (section 5.3). Both say so rather than printing
+            // zeroes that read as facts about the server.
+            if let note = row["note"] as? String { print("       \(note)") }
+            if let unavailable = row["indexUnavailable"] as? String {
+                print("       index  \(unavailable)")
+            }
             if let transfers = row["transfers"] as? [String: Any] {
                 print("       transfers \(transfers["running"] as? Int ?? 0) running, "
                     + "\(transfers["waiting"] as? Int ?? 0) waiting, "

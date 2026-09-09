@@ -346,6 +346,45 @@ public enum CapabilityCache {
         return (result, extensions, at)
     }
 
+    /// Section 8.1's "Server free space", taken at probe time.
+    ///
+    /// `statvfs` is a wire call and `status` may not make one (section 6.3's gate would
+    /// hold it behind a connect attempt, or start one), so the figure is captured where a
+    /// connection already exists - the probe, on every connection and on `--probe` - and
+    /// read from here afterwards. A file written before this key existed simply has no
+    /// free-space line, which is what `status` prints as "unknown" (2026-09-09).
+    public static func storeFreeSpace(_ space: ServerFreeSpace, locationID: String) {
+        merge(
+            locationID: locationID,
+            [
+                "freeSpace": [
+                    "freeBytes": Int(clamping: space.freeBytes),
+                    "totalBytes": Int(clamping: space.totalBytes),
+                    "capturedAt": space.capturedAt,
+                ] as [String: Any]
+            ])
+    }
+
+    public static func freeSpace(locationID: String) -> ServerFreeSpace? {
+        guard let stored = read(locationID: locationID)["freeSpace"] as? [String: Any],
+            let total = CapabilityCache.double(stored["totalBytes"]), total > 0
+        else { return nil }
+        return ServerFreeSpace(
+            freeBytes: UInt64(max(0, CapabilityCache.double(stored["freeBytes"]) ?? 0)),
+            totalBytes: UInt64(total),
+            capturedAt: CapabilityCache.double(stored["capturedAt"]) ?? 0)
+    }
+
+    /// `JSONSerialization` hands back an `Int`, a `Double` or an `NSNumber` depending on
+    /// what was written and which Foundation is under us; the numbers here are byte counts
+    /// well inside a `Double`'s exact range, so one reader covers all three.
+    private static func double(_ value: Any?) -> Double? {
+        if let number = value as? Double { return number }
+        if let number = value as? Int { return Double(number) }
+        if let number = value as? NSNumber { return number.doubleValue }
+        return nil
+    }
+
     /// The server's identification string, captured once by the collect connection of
     /// section 4.2 (`add`, `passwd`, `set host|user|port|identity`), which is the only
     /// `ssh` the agent runs that ever sees one (section 6.1, section 8.1; 2026-09-08).

@@ -290,18 +290,37 @@ public enum LocationCommands {
 
     /// `mounted` / `online` / `offline` / `not mounted`, without connecting anything: a
     /// `list` that dialled every server would take a minute on a laptop in a train.
+    ///
+    /// **Answered from the gate, never from `ssh -O check`.** The gate is what holds a
+    /// location's connection (section 6.3), so it already knows: `connected` is the whole
+    /// of "online", and the breaker's own sentence - backing off, no network path,
+    /// stopped until the user acts - is the whole of the reason. It used to go
+    /// `runtime.isConnected()` -> `SSHBackedTransport.isMasterAlive()` ->
+    /// `SSHMaster.check()`, which spawns `ssh -O check` and waits up to 10 s for it while
+    /// holding the master's actor, so a `status` printed while Finder was listing blocked
+    /// a cooperative thread and everything queued behind that actor with it (2026-09-09).
     static func stateWord(_ location: Location) async -> String {
         guard location.mounted else { return "not mounted" }
-        guard let runtime = await AgentCommandContext.manager.startedRuntime(locationID: location.id)
+        guard await AgentCommandContext.manager.startedRuntime(locationID: location.id) != nil
         else { return "idle (not connected)" }
-        if await runtime.isConnected() { return "online" }
-        // Section 6.3: "offline" is not the whole answer any more. The breaker knows
-        // whether the location is backing off, has no path at all, or has stopped until
-        // the user acts, and section 4.2's stop is the one the user has to be told about.
-        if let gate = await AgentCommandContext.manager.gate(locationID: location.id) {
-            return "offline (\(await gate.stateSentence()))"
+        guard let gate = await AgentCommandContext.manager.gate(locationID: location.id) else {
+            // No gate is a `.fake` backend: there is no connection to be offline from.
+            return "online"
         }
-        return "offline"
+        if await gate.isConnected { return "online" }
+        // Section 6.3: "offline" is not the whole answer. The breaker knows whether the
+        // location is backing off, has no path at all, or has stopped until the user acts,
+        // and section 4.2's stop is the one the user has to be told about.
+        return "offline (\(await gate.stateSentence()))"
+    }
+
+    /// Section 8.1's "Server free space" for a location with no runtime up: whatever the
+    /// last probe left in `capabilities.json`, with its age, or `unknown`.
+    static func cachedFreeSpace(locationID: String) async -> String {
+        guard let space = CapabilityCache.freeSpace(locationID: locationID) else {
+            return ServerFreeSpace.unknownSentence
+        }
+        return space.sentence(now: AgentCommandContext.manager.environment.clock.now())
     }
 
     // MARK: show
@@ -396,7 +415,8 @@ public enum LocationCommands {
             report["capabilities"] = CapabilityReport.make(
                 probe: cached.probe, extensions: cached.extensions, location: location,
                 allowsExecChannel: budget.allowsExecChannel, probedAt: cached.probedAt,
-                cached: true, helper: helperState(location: location, cached: cached.probe)).asJSON
+                cached: true, freeSpace: await cachedFreeSpace(locationID: location.id),
+                helper: helperState(location: location, cached: cached.probe)).asJSON
         }
         return try ControlCommands.json(report)
     }
@@ -701,110 +721,223 @@ public enum LocationCommands {
 
     // MARK: status
 
+    /// `sshdrive status [<name>]` (sections 8, 8.1).
+    ///
+    /// **Nothing here waits on the location's writer for anything it can read for
+    /// itself.** `status` used to make about eighteen hops onto `LocationRuntime` per
+    /// location - the hidden names, the held rows, the root set, one `item(identifier:)`
+    /// per materialized file, the pin tree, the channel budget, the identity, the
+    /// scheduler, the last error, the free space - and `LocationRuntime` is an actor whose
+    /// index writes a directory listing in one synchronous SQLite transaction (section
+    /// 5.3). Any of those hops could therefore queue behind a listing of a large folder,
+    /// and `sshdrive status` hung while Finder was walking one (2026-09-09). So:
+    ///
+    /// - everything that is in the index is read through `runtime.statusIndex`, the
+    ///   read-only WAL reader section 5.2 gives this database, off the writer entirely;
+    /// - everything else the runtime knows is taken in **one** entry, `statusFacts()`;
+    /// - the materialized set comes from the snapshot section 6.5's cycle and section 7's
+    ///   pass already publish, and is drained only when there is none that is fresh;
+    /// - with no `<name>` the locations run concurrently, printed back in the order
+    ///   `config.json` holds them;
+    /// - and each location's section is bounded by `Deadline.statusSeconds`, so one
+    ///   location that has stopped answering costs its own row a note and not the report.
     private static func status(_ arguments: [String: String]) async throws -> Data {
-        let file = try await AgentCommandContext.manager.configuration()
+        let manager = AgentCommandContext.manager
+        let file = try await manager.configuration()
         let wanted: [Location]
         if let name = arguments["name"], !name.isEmpty {
-            wanted = [try await AgentCommandContext.manager.location(named: name)]
+            wanted = [try await manager.location(named: name)]
         } else {
             wanted = file.locations
         }
         let forceProbe = arguments["probe"] == "true"
-        let domains = (try? await AgentCommandContext.manager.existingDomainDescriptions()) ?? []
+        let domains = (try? await manager.existingDomainDescriptions()) ?? []
 
-        var rows: [[String: Any]] = []
-        for location in wanted {
-            var row: [String: Any] = [
-                "id": location.id,
-                "name": location.displayName,
-                "destination": destinationText(location),
-                "mounted": domains.contains { $0.hasSuffix("(\(location.id))") },
-                "state": await stateWord(location),
-                "cacheTTL": location.cacheTTL.rawValue,
-                "permissions": location.permissions.rawValue,
-                "watchMode": location.watchMode.rawValue,
-                "identity": location.agentDependent
-                    ? "key agent" : "IdentityAgent=none",
-                "secrets": location.secrets.compactMap { SecretKey(account: $0)?.report },
-            ]
-            // The location must be up for a live probe; a `status` that dialled a server
-            // the user has not touched would be a surprise, so only `--probe` connects.
-            var runtime = await AgentCommandContext.manager.startedRuntime(locationID: location.id)
-            if runtime == nil, forceProbe, location.mounted {
-                runtime = try? await AgentCommandContext.manager.runtime(for: location)
+        var built = [StatusRow?](repeating: nil, count: wanted.count)
+        if wanted.count <= 1 {
+            for (index, location) in wanted.enumerated() {
+                built[index] = await statusRow(
+                    location: location,
+                    mounted: domains.contains { $0.hasSuffix("(\(location.id))") },
+                    forceProbe: forceProbe)
             }
-            if let runtime {
-                row["channels"] = await runtime.channelReport()
-                if let identity = await runtime.identityReport() { row["identityProbe"] = identity }
-                row["notShown"] = (try? await runtime.notShown())?.map {
-                    ["path": $0.path, "reason": $0.reason]
-                } ?? []
-                let statistics = await runtime.schedulerStatistics()
-                row["transfers"] = [
-                    "running": statistics.running,
-                    "waiting": statistics.waitingForeground + statistics.waitingBackground,
-                    "admitted": statistics.admitted,
-                ] as [String: Any]
-                row["lastError"] = await runtime.lastErrorText() ?? "none"
-                if let capability = try? await capabilityReport(
-                    location: location, runtime: runtime, forceProbe: forceProbe,
-                    detector: await AgentCommandContext.manager.detector(locationID: location.id))
-                {
-                    row["capabilities"] = capability.asJSON
+        } else {
+            // The sections are independent - separate runtimes, separate indexes, separate
+            // gates - and one location backing off should not add its wait to the next
+            // one's. The order is put back below, because section 8's output is the order
+            // `config.json` holds.
+            await withTaskGroup(of: (Int, StatusRow).self) { group in
+                for (index, location) in wanted.enumerated() {
+                    let mounted = domains.contains { $0.hasSuffix("(\(location.id))") }
+                    group.addTask {
+                        (
+                            index,
+                            await statusRow(
+                                location: location, mounted: mounted, forceProbe: forceProbe)
+                        )
+                    }
                 }
-            } else if let cached = CapabilityCache.probe(locationID: location.id) {
+                for await (index, row) in group { built[index] = row }
+            }
+        }
+        return try ControlCommands.json(["locations": built.compactMap { $0?.fields }])
+    }
+
+    /// One row's worth of `[String: Any]`, as something a `Task` may carry.
+    ///
+    /// A class rather than a dictionary because `Deadline.run` and `withTaskGroup` want a
+    /// `Sendable` result and `[String: Any]` is not one; the fields are only ever touched
+    /// by the one task building this row, and then read after it has finished.
+    final class StatusRow: @unchecked Sendable {
+        var fields: [String: Any]
+        init(_ fields: [String: Any]) { self.fields = fields }
+    }
+
+    /// The part of a row that costs nothing, then everything else under one deadline.
+    private static func statusRow(
+        location: Location, mounted: Bool, forceProbe: Bool
+    ) async -> StatusRow {
+        let row = StatusRow([
+            "id": location.id,
+            "name": location.displayName,
+            "destination": destinationText(location),
+            "mounted": mounted,
+            "cacheTTL": location.cacheTTL.rawValue,
+            "permissions": location.permissions.rawValue,
+            "watchMode": location.watchMode.rawValue,
+            "identity": location.agentDependent ? "key agent" : "IdentityAgent=none",
+            "secrets": location.secrets.compactMap { SecretKey(account: $0)?.report },
+        ])
+        let clock = AgentCommandContext.manager.environment.clock
+        do {
+            try await Deadline.run(
+                "the \(location.displayName) section of status",
+                seconds: Deadline.statusSeconds, clock: clock
+            ) {
+                await fillStatusRow(row, location: location, mounted: mounted, forceProbe: forceProbe)
+            }
+        } catch let expired as Deadline.Expired {
+            // Section 8's row still prints. What it cannot say, it says it cannot say:
+            // a report about the other locations is worth having, and the CLI's own 120 s
+            // timeout would otherwise take the whole command with this one location.
+            row.fields["note"] = expired.shortDescription
+            if row.fields["state"] == nil { row.fields["state"] = "not answering" }
+        } catch {
+            row.fields["note"] = error.localizedDescription
+        }
+        return row
+    }
+
+    private static func fillStatusRow(
+        _ row: StatusRow, location: Location, mounted: Bool, forceProbe: Bool
+    ) async {
+        let manager = AgentCommandContext.manager
+        row.fields["state"] = await stateWord(location)
+
+        // The location must be up for a live probe; a `status` that dialled a server the
+        // user has not touched would be a surprise, so only `--probe` connects.
+        var runtime = await manager.startedRuntime(locationID: location.id)
+        if runtime == nil, forceProbe, location.mounted {
+            runtime = try? await manager.runtime(for: location)
+        }
+        let detector = await manager.detector(locationID: location.id)
+
+        guard let runtime else {
+            if let cached = CapabilityCache.probe(locationID: location.id) {
                 let budget = CapabilityCache.channelBudget(locationID: location.id) ?? .unrestricted
-                row["capabilities"] = CapabilityReport.make(
+                row.fields["capabilities"] = CapabilityReport.make(
                     probe: cached.probe, extensions: cached.extensions, location: location,
                     allowsExecChannel: budget.allowsExecChannel, probedAt: cached.probedAt,
                     cached: true,
+                    freeSpace: await cachedFreeSpace(locationID: location.id),
                     advertisedExtensions: CapabilityCache.advertisedExtensions(
                         locationID: location.id),
                     helper: helperState(location: location, cached: cached.probe),
                     software: CapabilityCache.software(locationID: location.id)).asJSON
-                row["channels"] = budget.asJSON
+                row.fields["channels"] = budget.asJSON
             }
-            // Section 6.4: the tier in use, the cadence, the last sweep and where the
-            // location sits on the fallback ladder, plus anything the mass-deletion guard
-            // is holding (section 8's "0 held deletions" line).
-            if let detector = await AgentCommandContext.manager.detector(locationID: location.id) {
-                var watch = await detector.status()
-                if let runtime { watch.merge(await runtime.watchReport()) { live, _ in live } }
-                row["watch"] = watch
-            } else if let runtime {
-                row["watch"] = await runtime.watchReport()
-            }
-            if let runtime {
-                row["heldDeletions"] = (try? await runtime.heldReport()) ?? []
-                // Section 8.1's Cache and Pins lines: "1.2 GB materialized (312 files),
-                // 480 MB kept   TTL 1d   next eviction sweep in 3m", and the pin tree.
-                // The materialized set is the system's own, so this is the one place
-                // `status` walks the replica; it is skipped for an unmounted location,
-                // which has no replica to walk.
-                if row["mounted"] as? Bool == true {
-                    let materialized =
-                        await AgentCommandContext.manager.environment.replica.materializedIdentifiers(locationID: location.id)
-                        ?? []
-                    let candidates =
-                        (try? await runtime.evictionRows(identifiers: materialized)) ?? []
-                    var cache = await runtime.cacheReport(candidates: candidates)
-                    if let evictor = await AgentCommandContext.manager.evictor(locationID: location.id) {
-                        cache["nextPassInSeconds"] = max(
-                            0, await evictor.nextRunAt() - Date().timeIntervalSince1970)
-                        let pass = await evictor.lastPass
-                        if !pass.isEmpty { cache["lastPass"] = pass }
-                    }
-                    row["cache"] = cache
-                    row["pins"] =
-                        (try? await runtime.pinsReport(materialized: Set(materialized))) ?? []
-                }
-            }
-            // Section 4.3: a changed host key needs no command of ours; `status` prints
-            // the `ssh-keygen -R` line to run.
-            if let text = await hostKeyAdvice(location) { row["hostKeyAdvice"] = text }
-            rows.append(row)
+            if let detector { row.fields["watch"] = await detector.status() }
+            return
         }
-        return try ControlCommands.json(["locations": rows])
+
+        // One entry on the writer's actor, for the things only it holds. Everything below
+        // this line is either off it or out of the index's read-only reader.
+        let facts = await runtime.statusFacts()
+        row.fields["channels"] = facts.channels
+        if let identity = facts.identity { row.fields["identityProbe"] = identity }
+        row.fields["transfers"] = facts.transfers
+        row.fields["lastError"] = facts.lastError ?? "none"
+        if let capability = try? await capabilityReport(
+            location: location, runtime: runtime, forceProbe: forceProbe, detector: detector,
+            facts: forceProbe ? nil : facts)
+        {
+            row.fields["capabilities"] = capability.asJSON
+        }
+
+        // Section 8.1's Cache and Pins lines need the system's own materialized set. It is
+        // published by section 6.4's cycle, section 7's pass and the extension's
+        // `materializedItemsDidChange`, and every *change* to it arrives as the last of
+        // those - so a fresh entry is the current set, and `status` walks the replica only
+        // when there is none (2026-09-09).
+        var materialized: [String]?
+        if mounted {
+            let now = manager.environment.clock.now()
+            if let fresh = runtime.materialized.fresh(at: now) {
+                materialized = fresh
+            } else {
+                materialized = await manager.environment.replica.materializedIdentifiers(
+                    locationID: location.id)
+                runtime.materialized.record(materialized, at: now)
+            }
+            materialized = materialized ?? []
+        }
+
+        // Everything the index can answer, from the read-only reader (section 5.2).
+        let index = await runtime.statusIndex.report(
+            hiddenReasons: facts.hiddenReasons, materialized: materialized)
+        row.fields["notShown"] = index.notShown
+        row.fields["heldDeletions"] = index.held
+        if let unavailable = index.unavailable {
+            // Section 5.3's rebuild, or a location that has never started. The row says so
+            // rather than printing zeroes that read as facts about the server.
+            row.fields["indexUnavailable"] = unavailable
+        }
+
+        // Section 6.4: the tier in use, the cadence, the last sweep and where the location
+        // sits on the fallback ladder. The detector is the authority where there is one,
+        // which is why it is merged over the index's stored answer and not under it.
+        var watch = index.watch
+        if !facts.lastWatchCycle.isEmpty { watch["lastCycle"] = facts.lastWatchCycle }
+        if let detector {
+            watch.merge(await detector.status()) { _, live in live }
+        }
+        row.fields["watch"] = watch
+
+        if mounted, index.unavailable == nil {
+            let totals = EvictionPlan.totals(index.cacheCandidates)
+            var cache: [String: Any] = [
+                "files": totals.files,
+                "bytes": totals.bytes,
+                "keptFiles": totals.keptFiles,
+                "keptBytes": totals.keptBytes,
+                "ttl": location.cacheTTL.rawValue,
+                "keptEvictedOutside": facts.keptEvictedOutside,
+            ]
+            if let evictor = await manager.evictor(locationID: location.id) {
+                cache["nextPassInSeconds"] = max(
+                    0, await evictor.nextRunAt() - Date().timeIntervalSince1970)
+                let pass = await evictor.lastPass
+                if !pass.isEmpty { cache["lastPass"] = pass }
+            }
+            row.fields["cache"] = cache
+            row.fields["pins"] = index.pins
+        }
+
+        // Section 4.3: a changed host key needs no command of ours; `status` prints the
+        // `ssh-keygen -R` line to run.
+        if let text = hostKeyAdvice(location, lastError: facts.lastError) {
+            row.fields["hostKeyAdvice"] = text
+        }
     }
 
     /// Section 6.4: "Since it does place our code on the remote machine, `sshdrive add`
@@ -869,31 +1002,55 @@ public enum LocationCommands {
     ///   authority on the running tier and on where tier 2 has got to. Passed in rather
     ///   than looked up so `add`'s report and `status`'s report are built by the same
     ///   code from the same source, and so a scenario can hand it one (`N1`, `P9`).
+    /// - Parameter facts: what `status` already took from the runtime in its one entry
+    ///   (`statusFacts()`). Passing them is what keeps the report from making three more
+    ///   hops onto an actor a directory listing may be holding (2026-09-09, section 8);
+    ///   `add` and `--probe` pass nil, because `--probe` has just moved all three.
     public static func capabilityReport(
         location: Location, runtime: LocationRuntime, forceProbe: Bool,
-        detector: ChangeDetector?
+        detector: ChangeDetector?, facts: LocationRuntime.StatusFacts? = nil
     ) async throws -> CapabilityReport {
         if forceProbe { await runtime.reprobeServer() }
-        guard let live = await runtime.serverProbe() else {
+        // The three values `status` already took in its one entry on the runtime; `add`
+        // and `--probe` hand in nothing and they are read here, as they always were.
+        let probe: (probe: ServerProbe.Result, extensions: SFTPServerExtensions)?
+        if let facts { probe = facts.probe } else { probe = await runtime.serverProbe() }
+        let allowsExecChannel: Bool
+        if let facts {
+            allowsExecChannel = facts.channelBudget.allowsExecChannel
+        } else {
+            allowsExecChannel = await runtime.channelBudgetValue().allowsExecChannel
+        }
+        let freeSpaceSentence: String
+        if let facts {
+            freeSpaceSentence = facts.freeSpace
+        } else {
+            freeSpaceSentence = await runtime.freeSpaceDescription()
+        }
+        guard let live = probe else {
             guard let cached = CapabilityCache.probe(locationID: location.id) else {
                 throw SSHDriveAgentError.notImplemented.asNSError("no probe for this location")
             }
             return CapabilityReport.make(
                 probe: cached.probe, extensions: cached.extensions, location: location,
-                allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,
+                allowsExecChannel: allowsExecChannel,
                 probedAt: cached.probedAt, cached: true,
+                freeSpace: freeSpaceSentence,
                 advertisedExtensions: CapabilityCache.advertisedExtensions(
                     locationID: location.id),
                 helper: helperState(location: location, cached: cached.probe),
                 software: CapabilityCache.software(locationID: location.id))
         }
-        let freeSpace = await runtime.freeSpaceDescription()
+        // Read from `capabilities.json`, never from the wire: `--probe` has already
+        // refreshed it above if that is what this call is, and `status` on its own may
+        // not dial (section 8.1, 2026-09-09).
+        let freeSpace = freeSpaceSentence
         // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
         // to (section 6.4).
         let status = await detector?.status()
         return CapabilityReport.make(
             probe: live.probe, extensions: live.extensions, location: location,
-            allowsExecChannel: await runtime.channelBudgetValue().allowsExecChannel,
+            allowsExecChannel: allowsExecChannel,
             probedAt: CapabilityCache.probe(locationID: location.id)?.probedAt ?? Date(),
             cached: false, freeSpace: freeSpace,
             advertisedExtensions: CapabilityCache.advertisedExtensions(locationID: location.id),
@@ -955,9 +1112,12 @@ public enum LocationCommands {
 
     /// "A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`
     /// line to run" (section 8, section 4.3).
-    private static func hostKeyAdvice(_ location: Location) async -> String? {
-        guard let runtime = await AgentCommandContext.manager.startedRuntime(locationID: location.id),
-            let error = await runtime.lastErrorText(),
+    ///
+    /// Takes the sentence `status` already read rather than going back to the runtime for
+    /// it: `lastErrorText()` reaches `SSHMaster` for the master's own stderr, and one
+    /// report has no reason to make that hop twice (2026-09-09).
+    private static func hostKeyAdvice(_ location: Location, lastError: String?) -> String? {
+        guard let error = lastError,
             error.lowercased().contains("host key")
                 || error.lowercased().contains("remote host identification has changed")
         else { return nil }

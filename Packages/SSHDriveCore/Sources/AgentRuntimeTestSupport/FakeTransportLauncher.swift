@@ -29,6 +29,8 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     private let lock = NSLock()
     private var _alive = true
     private var _shutdowns = 0
+    private var _statvfs = 0
+    private var _aliveChecks = 0
 
     public init(
         transport: any SFTPTransport,
@@ -48,6 +50,17 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     /// drop takes every master, and the wake brings up new ones.
     public var shutdownCount: Int { lock.lock(); defer { lock.unlock() }; return _shutdowns }
 
+    /// How many `statvfs` calls reached this connection. Section 8.1's free-space figure
+    /// is taken at probe time and read from `capabilities.json` afterwards, so `status`
+    /// must never move this number (2026-09-09).
+    public var statvfsCount: Int { lock.lock(); defer { lock.unlock() }; return _statvfs }
+
+    /// How many liveness checks reached this connection. On a real one this is
+    /// `SSHBackedTransport.isMasterAlive()` -> `SSHMaster.check()`, which spawns
+    /// `ssh -O check` and waits up to ten seconds for it; `status` answers online/offline
+    /// from the gate instead and must never move this number (2026-09-09).
+    public var aliveCheckCount: Int { lock.lock(); defer { lock.unlock() }; return _aliveChecks }
+
     /// The master dying under us without a call noticing - a `kill -9`, a link that went.
     public func killMaster() { lock.lock(); _alive = false; lock.unlock() }
 
@@ -64,6 +77,7 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
 
     public func isMasterAlive() async -> Bool {
         lock.lock(); defer { lock.unlock() }
+        _aliveChecks += 1
         return _alive
     }
 
@@ -130,7 +144,8 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
         try await inner.readlink(path)
     }
     public func statvfs(_ path: RelativePath) async throws -> SFTPFilesystemStats {
-        try await inner.statvfs(path)
+        lock.lock(); _statvfs += 1; lock.unlock()
+        return try await inner.statvfs(path)
     }
 }
 
