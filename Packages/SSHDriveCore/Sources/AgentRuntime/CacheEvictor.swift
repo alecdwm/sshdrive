@@ -74,9 +74,14 @@ public actor CacheEvictor {
         )
     }
 
-    public func stop() {
-        loop?.cancel()
+    /// Cancels the loop and returns when the pass it was running has finished, for the
+    /// same reason `ChangeDetector.stop()` does: the caller's next move is to shut the
+    /// transport down, and a pass that outlives the call evicts against it.
+    public func stop() async {
+        let running = loop
         loop = nil
+        running?.cancel()
+        await running?.value
     }
 
     /// `sshdrive set <name> cache-ttl <value>` takes effect at once rather than at the next

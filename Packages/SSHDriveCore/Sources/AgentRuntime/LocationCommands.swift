@@ -294,11 +294,11 @@ public enum LocationCommands {
     /// **Answered from the gate, never from `ssh -O check`.** The gate is what holds a
     /// location's connection (section 6.3), so it already knows: `connected` is the whole
     /// of "online", and the breaker's own sentence - backing off, no network path,
-    /// stopped until the user acts - is the whole of the reason. It used to go
+    /// stopped until the user acts - is the whole of the reason. The other route,
     /// `runtime.isConnected()` -> `SSHBackedTransport.isMasterAlive()` ->
-    /// `SSHMaster.check()`, which spawns `ssh -O check` and waits up to 10 s for it while
-    /// holding the master's actor, so a `status` printed while Finder was listing blocked
-    /// a cooperative thread and everything queued behind that actor with it (2026-09-09).
+    /// `SSHMaster.check()`, spawns `ssh -O check` and waits up to 10 s for it with the
+    /// master's actor held, which a report may not do: a `status` printed while Finder is
+    /// listing would queue behind that actor along with everything else.
     static func stateWord(_ location: Location) async -> String {
         guard location.mounted else { return "not mounted" }
         guard await AgentCommandContext.manager.startedRuntime(locationID: location.id) != nil
@@ -724,13 +724,12 @@ public enum LocationCommands {
     /// `sshdrive status [<name>]` (sections 8, 8.1).
     ///
     /// **Nothing here waits on the location's writer for anything it can read for
-    /// itself.** `status` used to make about eighteen hops onto `LocationRuntime` per
-    /// location - the hidden names, the held rows, the root set, one `item(identifier:)`
-    /// per materialized file, the pin tree, the channel budget, the identity, the
-    /// scheduler, the last error, the free space - and `LocationRuntime` is an actor whose
-    /// index writes a directory listing in one synchronous SQLite transaction (section
-    /// 5.3). Any of those hops could therefore queue behind a listing of a large folder,
-    /// and `sshdrive status` hung while Finder was walking one (2026-09-09). So:
+    /// itself.** A row is about eighteen facts - the hidden names, the held rows, the
+    /// root set, one `item(identifier:)` per materialized file, the pin tree, the channel
+    /// budget, the identity, the scheduler, the last error, the free space - and
+    /// `LocationRuntime` is an actor whose index writes a directory listing in one
+    /// synchronous SQLite transaction (section 5.3), so a hop onto it for any of them
+    /// waits for a listing of a large folder to finish. So:
     ///
     /// - everything that is in the index is read through `runtime.statusIndex`, the
     ///   read-only WAL reader section 5.2 gives this database, off the writer entirely;
@@ -878,7 +877,7 @@ public enum LocationCommands {
         // published by section 6.4's cycle, section 7's pass and the extension's
         // `materializedItemsDidChange`, and every *change* to it arrives as the last of
         // those - so a fresh entry is the current set, and `status` walks the replica only
-        // when there is none (2026-09-09).
+        // when there is none.
         var materialized: [String]?
         if mounted {
             let now = manager.environment.clock.now()
@@ -1004,7 +1003,7 @@ public enum LocationCommands {
     ///   code from the same source, and so a scenario can hand it one (`N1`, `P9`).
     /// - Parameter facts: what `status` already took from the runtime in its one entry
     ///   (`statusFacts()`). Passing them is what keeps the report from making three more
-    ///   hops onto an actor a directory listing may be holding (2026-09-09, section 8);
+    ///   hops onto an actor a directory listing may be holding (section 8);
     ///   `add` and `--probe` pass nil, because `--probe` has just moved all three.
     public static func capabilityReport(
         location: Location, runtime: LocationRuntime, forceProbe: Bool,
@@ -1012,7 +1011,7 @@ public enum LocationCommands {
     ) async throws -> CapabilityReport {
         if forceProbe { await runtime.reprobeServer() }
         // The three values `status` already took in its one entry on the runtime; `add`
-        // and `--probe` hand in nothing and they are read here, as they always were.
+        // and `--probe` hand in nothing, so they are read here.
         let probe: (probe: ServerProbe.Result, extensions: SFTPServerExtensions)?
         if let facts { probe = facts.probe } else { probe = await runtime.serverProbe() }
         let allowsExecChannel: Bool
@@ -1043,7 +1042,7 @@ public enum LocationCommands {
         }
         // Read from `capabilities.json`, never from the wire: `--probe` has already
         // refreshed it above if that is what this call is, and `status` on its own may
-        // not dial (section 8.1, 2026-09-09).
+        // not dial (section 8.1).
         let freeSpace = freeSpaceSentence
         // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
         // to (section 6.4).
@@ -1115,7 +1114,7 @@ public enum LocationCommands {
     ///
     /// Takes the sentence `status` already read rather than going back to the runtime for
     /// it: `lastErrorText()` reaches `SSHMaster` for the master's own stderr, and one
-    /// report has no reason to make that hop twice (2026-09-09).
+    /// report has no reason to make that hop twice.
     private static func hostKeyAdvice(_ location: Location, lastError: String?) -> String? {
         guard let error = lastError,
             error.lowercased().contains("host key")

@@ -174,20 +174,55 @@ public final class AgentHarness: @unchecked Sendable {
         await manager.installSystemObservers()
     }
 
-    /// Waits until the launcher has been asked for nothing new for a few scheduler
+    /// Waits until the agent has touched a server with nothing new for a few scheduler
     /// windows: the two timers a mounted location carries can have a cycle in flight when
     /// a scenario stops them, and a transport call from that cycle legitimately connects.
     /// A scenario that is about what one *event* did quiesces first.
-    public func quiesceConnects(windows: Int = 6) async {
+    ///
+    /// **Connect attempts are not the whole of the activity.** Everything the reconnect
+    /// sequence does - the identity, the channel budget, the rename-semantics probe and
+    /// its two temp files, the root row - happens on a connection that is already up and
+    /// reaches the launcher not at all, so attempts alone would call an agent quiet in
+    /// the middle of its setup: `F5` then finds the probe's temp files in the listing it
+    /// asserts is empty, and the call after its drop connects the gate it has just put
+    /// into a backoff, taking the attempt it is measuring.
+    ///
+    /// **A window is a real millisecond, not a handful of scheduler turns.** Yielding
+    /// hands the executor on; it does not hand a background task the CPU it needs to make
+    /// progress, so on a loaded box six windows of yields can pass inside one step of the
+    /// reconnect sequence and the harness would call that quiet.
+    public func quiesceConnects(windows: Int = 6, timeoutSeconds: Double = 5) async {
         var stable = 0
-        var last = launcher.attempts
-        var rounds = 0
-        while stable < windows, rounds < 200 {
-            rounds += 1
-            await settle()
-            let now = launcher.attempts
-            if now == last { stable += 1 } else { stable = 0; last = now }
+        var last = activity
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while stable < windows, Date() < deadline {
+            for _ in 0 ..< 5 { await Task.yield() }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+            let recovering = await someGateIsRecovering()
+            let now = activity
+            if recovering || now != last {
+                stable = 0
+                last = now
+            } else {
+                stable += 1
+            }
         }
+    }
+
+    /// Everything the agent has asked of a server, as one number: the attempts to connect
+    /// plus every call answered by every connection those attempts produced.
+    private var activity: Int {
+        launcher.attempts + launcher.connections.reduce(0) { $0 + $1.callCount }
+    }
+
+    /// Whether any location is still running the reconnect sequence a successful attempt
+    /// starts. It is dispatched on a task of its own and its steps are seconds of remote
+    /// work, so a connection reported as up is not an agent that has finished.
+    private func someGateIsRecovering() async -> Bool {
+        for gate in await manager.startedGates() {
+            if await gate.recoveriesInFlight > 0 { return true }
+        }
+        return false
     }
 
     /// Lets whatever the last call started run to a standstill.

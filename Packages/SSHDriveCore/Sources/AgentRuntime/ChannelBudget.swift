@@ -351,8 +351,8 @@ public enum CapabilityCache {
     /// `statvfs` is a wire call and `status` may not make one (section 6.3's gate would
     /// hold it behind a connect attempt, or start one), so the figure is captured where a
     /// connection already exists - the probe, on every connection and on `--probe` - and
-    /// read from here afterwards. A file written before this key existed simply has no
-    /// free-space line, which is what `status` prints as "unknown" (2026-09-09).
+    /// read from here afterwards. A `capabilities.json` with no free-space key yields no
+    /// line, which is what `status` prints as "unknown".
     public static func storeFreeSpace(_ space: ServerFreeSpace, locationID: String) {
         merge(
             locationID: locationID,

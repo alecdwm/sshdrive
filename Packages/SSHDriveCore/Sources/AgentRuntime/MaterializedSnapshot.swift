@@ -6,9 +6,9 @@ import Foundation
 /// Three things walk the system's materialized set: section 6.4's change-detection cycle
 /// (which sources the `materialized` reason of the root set from it), section 7's TTL pass
 /// (which is what it is *for*), and `sshdrive status` (whose Cache and Pins lines report
-/// what is downloaded). The first two already take it on their own schedules, so the third
-/// was paying for a walk of the replica to learn what one of the others had learnt a
-/// moment earlier.
+/// what is downloaded). The first two already take it on their own schedules, so a walk of
+/// the replica for the third is paid to learn what one of the others learnt a moment
+/// earlier.
 ///
 /// What makes reusing it correct rather than merely cheap is that the set does not change
 /// silently: the extension reports `materializedItemsDidChange` whenever it moves, and the

@@ -168,11 +168,10 @@ public enum Spawn {
     /// `capture`, awaited instead of waited on.
     ///
     /// `capture` blocks the calling thread on a `DispatchGroup` until the child exits or
-    /// the deadline passes. Called from inside an `actor` that is what a cooperative pool
-    /// thread spends the next ten seconds doing, with the actor held for all of it - which
-    /// is how `sshdrive status` came to hang while Finder was listing, over one
-    /// `ssh -O check` (2026-09-09). The work is the same; it happens on a Dispatch thread
-    /// and the caller suspends, so the actor is free and no cooperative thread is parked.
+    /// the deadline passes, so an `actor` calling it holds both itself and a cooperative
+    /// pool thread for as long as the child runs, and every other caller of that actor
+    /// queues behind. This does the same work on a Dispatch thread and suspends the
+    /// caller, leaving the actor free and no cooperative thread parked.
     public static func captureAsync(
         executable: String,
         argv: [String],

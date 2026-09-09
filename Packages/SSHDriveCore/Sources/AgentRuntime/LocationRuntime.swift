@@ -30,8 +30,7 @@ public actor LocationRuntime {
     /// The read-only WAL reader `sshdrive status` reads this location's index through
     /// (section 8, `StatusIndexReader`). `nonisolated`, and deliberately so: reaching it
     /// costs no hop onto this actor, which is the whole point - a report taken while a
-    /// listing is writing its rows must neither wait for the listing nor delay it
-    /// (2026-09-09).
+    /// listing is writing its rows must neither wait for the listing nor delay it.
     public nonisolated let statusIndex: StatusIndexReader
 
     /// The last drained `enumeratorForMaterializedItems()` answer, published by whichever
@@ -42,8 +41,7 @@ public actor LocationRuntime {
     /// time is a File Provider round trip for an answer one of those three has almost
     /// always just taken. Every *change* to the materialized set arrives as
     /// `materializedItemsDidChange`, which refreshes this, so a fresh entry is the current
-    /// set and not merely a recent one; `status` drains for itself when there is none
-    /// (2026-09-09).
+    /// set and not merely a recent one; `status` drains for itself when there is none.
     public nonisolated let materialized = MaterializedSnapshot()
 
     /// The identity the capability probe found. Milestone 3 runs the probe; the fake
@@ -343,7 +341,7 @@ public actor LocationRuntime {
 
         // Section 8.1's "Server free space", on the connection that is already here. One
         // round trip beside the `realpath` and the `lstat` above, so that `status` never
-        // has to make one of its own (2026-09-09).
+        // has to make one of its own.
         await refreshFreeSpace()
 
         // Section 5.5: "the probe tests this once, in the location root". Off the start
@@ -496,6 +494,47 @@ public actor LocationRuntime {
         public init() {}
     }
 
+    /// How many `readlink`s a listing keeps in the air at once: section 6.2's window, the
+    /// same sixteen a transfer and a `readdir` use. It is a window and not a fan-out -
+    /// one more goes out for each answer that lands - so a directory of ten thousand
+    /// links costs sixteen requests of channel, not ten thousand.
+    public static let readlinkWindow = 16
+
+    /// The target of every link in one listing, keyed by the link's own path bytes.
+    ///
+    /// A link whose `readlink` failed is absent, and so is a name that cannot be joined
+    /// to the directory at all; both are what section 5.7 hides. Non-throwing by
+    /// construction: no single link may fail the listing it was found in.
+    private func readlinks(
+        in directory: RelativePath, entries: [SFTPDirectoryEntry]
+    ) async -> [Data: String] {
+        let paths: [RelativePath] = entries.compactMap { entry in
+            guard entry.attributes.type == .symlink, entry.attributes.symlinkTarget == nil
+            else { return nil }
+            return try? directory.appending(component: entry.name)
+        }
+        guard !paths.isEmpty else { return [:] }
+        // Hoisted out of the actor so the child tasks call the transport directly rather
+        // than hopping back through `self` for each one, which would serialise them again.
+        let transport = self.transport
+        return await withTaskGroup(of: (Data, String?).self) { group in
+            var targets: [Data: String] = [:]
+            targets.reserveCapacity(paths.count)
+            var next = 0
+            func issue(into group: inout TaskGroup<(Data, String?)>) {
+                let path = paths[next]
+                next += 1
+                group.addTask { (path.bytes, try? await transport.readlink(path)) }
+            }
+            while next < min(LocationRuntime.readlinkWindow, paths.count) { issue(into: &group) }
+            while let (bytes, target) = await group.next() {
+                if let target { targets[bytes] = target }
+                if next < paths.count { issue(into: &group) }
+            }
+            return targets
+        }
+    }
+
     /// One listing, diffed against the index. Every difference becomes a row change and
     /// an anchor, so the working set carries it to the system whatever else happens
     /// (section 5.3).
@@ -544,19 +583,20 @@ public actor LocationRuntime {
         // file it just wrote.
         let dirty = await writer.inFlightPaths()
 
-        // SFTP v3's `readdir` carries attributes but no link target, so every link in the
-        // listing costs one `readlink`. Section 5.7 wants the lexical check "done once per
-        // link at enumeration time", and this is that once: the answer is stored on the
-        // row and the extension never repeats it.
-        var targets: [Data: String] = [:]
-        for entry in entries where entry.attributes.type == .symlink
-            && entry.attributes.symlinkTarget == nil
-        {
-            guard let childPath = try? directory.appending(component: entry.name) else { continue }
-            if let target = try? await transport.readlink(childPath) {
-                targets[childPath.bytes] = target
-            }
-        }
+        // SFTP v3's `readdir` carries attributes but no link target (`SQ-031`), so every
+        // link in the listing costs one `readlink`. Section 5.7 wants the lexical check
+        // "done once per link at enumeration time", and this is that once: the answer is
+        // stored on the row and the extension never repeats it.
+        //
+        // They go out **through the transport's window rather than one at a time**: they
+        // are independent requests on one channel, which is the same thing section 6.2
+        // pipelines a transfer with. One at a time, a directory of a thousand links is a
+        // thousand serial round trips - a listing costing the link count times the link
+        // latency. Nothing about the result depends on the order they come back in: each
+        // answer is filed under its own path, and a link whose `readlink` failed is simply
+        // absent from the map, which is what section 5.7 turns into an omitted row. One
+        // failure cannot fail the listing.
+        let targets = await readlinks(in: directory, entries: entries)
 
         var result = ReconcileResult()
         var seenPaths: Set<Data> = []
@@ -565,7 +605,7 @@ public actor LocationRuntime {
         // so the incumbents go in first: without them the shown name would flip every time
         // a hash-ordered readdir came back in a different order.
         var visibleNames: Set<Data> = []
-        for child in try index.children(ofParent: containerRow.identifier) where child.hidden == 0 {
+        for child in try index.childKeys(ofParent: containerRow.identifier) where child.hidden == 0 {
             if let last = (try? RelativePath.fromIndexBytes(child.path))?.lastComponent {
                 visibleNames.insert(last)
             }
@@ -579,10 +619,10 @@ public actor LocationRuntime {
 
         // Everything a listing can work out without holding the database's write lock is
         // worked out here, ahead of the transaction: the child path, the incumbent row,
-        // and the finished row `RowBuilder` derives from the two. It used to run inside
-        // the `batch` below, which made the transaction - and with it every other call on
+        // and the finished row `RowBuilder` derives from the two. Inside the `batch`
+        // below, this work would make the transaction - and with it every other call on
         // this actor, `sshdrive status` included - as long as a `makeRow` per entry rather
-        // than as long as the writes (2026-09-09).
+        // than as long as the writes.
         //
         // Reading the incumbents out here is safe for the same reason the listing is one
         // transaction at all: `LocationRuntime` is an actor, the agent is the index's only
@@ -590,11 +630,17 @@ public actor LocationRuntime {
         // transaction that follows them, so nothing can write a row in between. (The one
         // writer that is not on this actor is the reconcile walk of section 5.3, and a
         // listing refuses to run at all while `meta.reconciling` is set.)
-        var prepared: [(row: IndexItem, existing: IndexItem?)] = []
-        prepared.reserveCapacity(classified.entries.count)
-        for classifiedEntry in classified.entries {
-            let entry = classifiedEntry.entry
-            guard let childPath = try? directory.appending(component: entry.name) else { continue }
+        //
+        // The paths are gathered first so that the incumbent rows can be read on one
+        // compiled statement, bound once per path and answered in the order asked. The
+        // question put to the index is unchanged - the row at this path, or none - and it
+        // is asked by path rather than by parent on purpose (`IndexWriter.rows(atPaths:)`
+        // says why).
+        var wanted: [(path: RelativePath, hidden: Int64, entry: Int)] = []
+        wanted.reserveCapacity(classified.entries.count)
+        for (offset, classifiedEntry) in classified.entries.enumerated() {
+            guard let childPath = try? directory.appending(component: classifiedEntry.entry.name)
+            else { continue }
             seenPaths.insert(childPath.bytes)
             // A path the agent is uploading to right now is skipped whole: its row is
             // written by the upload's own post-upload `lstat` (section 5.5).
@@ -605,35 +651,67 @@ public actor LocationRuntime {
             } else {
                 hiddenReasons[childPath.bytes] = classifiedEntry.reason
             }
+            wanted.append((childPath, classifiedEntry.hidden, offset))
+        }
+        let incumbents = try index.rows(atPaths: wanted.map { $0.path.bytes })
 
-            let existing = try index.item(path: childPath.bytes)
-            var attributes = entry.attributes
+        /// What the transaction below needs to know about an entry, worked out here: the
+        /// finished row, and the three answers its incumbent gives. The incumbent row
+        /// itself is deliberately **not** carried across - a second `IndexItem` per entry
+        /// is twenty-odd fields to retain and release for three questions.
+        struct Prepared {
+            var row: IndexItem
+            /// The stored row is byte for byte this one, so `upsert` would be a no-op.
+            var unchanged: Bool
+            /// The user has been shown this name, so hiding it now is a deletion.
+            var wasVisible: Bool
+            /// New, or its metadata version or visibility moved: one `modified` anchor.
+            var anchored: Bool
+        }
+
+        var prepared: [Prepared] = []
+        prepared.reserveCapacity(wanted.count)
+        for (position, item) in wanted.enumerated() {
+            let (childPath, hidden, offset) = item
+            var attributes = classified.entries[offset].entry.attributes
             if attributes.type == .symlink, attributes.symlinkTarget == nil {
                 attributes.symlinkTarget = targets[childPath.bytes]
             }
+            let existing = incumbents[position]
             let row = try makeRow(
                 path: childPath,
                 attributes: attributes,
                 parent: containerRow,
                 existing: existing,
-                hidden: classifiedEntry.hidden)
-            prepared.append((row, existing))
+                hidden: hidden)
+            prepared.append(
+                Prepared(
+                    row: row,
+                    unchanged: row == existing,
+                    wasVisible: existing?.hidden == 0,
+                    anchored: existing == nil || existing?.metadataVersion != row.metadataVersion
+                        || existing?.hidden != row.hidden))
         }
 
         // One transaction for the whole listing: a directory with 10,000 entries is
         // 10,000 autocommits otherwise, and that, not the wire, is what a large
-        // enumeration spends its time on (section 5.3). It is still exactly one - the rule
-        // is that a listing is written atomically, not that it is written in pieces - and
-        // it now holds the writes and the deletion pass alone.
+        // enumeration spends its time on (section 5.3). Exactly one, and it holds the
+        // writes and the deletion pass alone: the rule is that a listing is written
+        // atomically, not that everything a listing works out happens under the lock.
         try index.batch {
-        for (row, existing) in prepared {
+        // Both write statements are compiled once and held for the whole pass, so the
+        // rows and their anchors land interleaved, in listing order, with nothing
+        // gathered into an array in between.
+        try index.writingListing { writer in
+        for entry in prepared {
+            let row = entry.row
             // A row that is byte for byte the one already stored is not written again.
             // `IndexItem` is the whole of what `upsert` binds, so an equal row is a
             // no-op statement, and an equal row also has the metadata version and the
             // `hidden` the anchor test below compares - so this cannot change which
             // anchors a listing appends, only how many rows an unchanged directory
-            // rewrites (2026-09-09).
-            if row != existing { try index.upsert(row) }
+            // rewrites.
+            if !entry.unchanged { try writer.upsert(row) }
 
             // A hidden row holds its name and nothing else: it is never enumerated, and a
             // create or rename onto it fails `.filenameCollision` (sections 5.4, 5.7).
@@ -643,8 +721,8 @@ public actor LocationRuntime {
                 // A name that was shown and is now hidden - a newcomer took the slot, or
                 // the incumbent was renamed away - has to reach the system as a deletion,
                 // or the replica keeps a file no enumeration will ever mention again.
-                if let existing, existing.hidden == 0 {
-                    try index.appendAnchor(identifier: row.identifier, kind: .deleted)
+                if entry.wasVisible {
+                    try writer.appendAnchor(identifier: row.identifier, kind: .deleted)
                     result.deleted.append(row.identifier)
                 }
                 continue
@@ -652,12 +730,11 @@ public actor LocationRuntime {
 
             let snapshot = LocationRuntime.snapshot(from: row)
             result.items.append(snapshot)
-            if existing == nil || existing?.metadataVersion != row.metadataVersion
-                || existing?.hidden != row.hidden
-            {
-                try index.appendAnchor(identifier: row.identifier, kind: .modified)
+            if entry.anchored {
+                try writer.appendAnchor(identifier: row.identifier, kind: .modified)
                 result.changed.append(snapshot)
             }
+        }
         }
 
         // Deleted rows are deleted: no tombstones (section 5.3) - but a deletion inferred
@@ -668,7 +745,7 @@ public actor LocationRuntime {
         // listing that does not mention it is not evidence that it went (section 5.4).
         var missing: [(path: Data, identifier: String)] = []
         var knownNonHidden = 0
-        for child in try index.children(ofParent: containerRow.identifier)
+        for child in try index.childKeys(ofParent: containerRow.identifier)
         where child.hidden != RowBuilder.hiddenLocalOnly {
             if child.hidden == 0 { knownNonHidden += 1 }
             guard !seenPaths.contains(child.path) else { continue }
@@ -1323,10 +1400,10 @@ public actor LocationRuntime {
     /// last change-detection cycle, and section 7.2's re-assert counter. None of it touches
     /// the index and none of it touches the wire.
     ///
-    /// One call rather than eight because each of them was a hop onto this actor, and this
-    /// actor is where a directory listing's synchronous write transaction runs: eighteen
-    /// hops per location meant eighteen chances to queue behind a listing of a large folder
-    /// (2026-09-09, section 8).
+    /// One call rather than eight because each is a hop onto this actor, and this actor is
+    /// where a directory listing's synchronous write transaction runs: eighteen hops per
+    /// location would be eighteen chances to queue behind a listing of a large folder
+    /// (section 8).
     public struct StatusFacts {
         public var channels: [String: Any] = [:]
         public var identity: [String: Any]?
@@ -1436,13 +1513,12 @@ public actor LocationRuntime {
     /// `statvfs@openssh.com`, shown in `status` as "server free space" (section 8.1). Not
     /// a capability level: Finder has no way to display it for a third-party domain.
     ///
-    /// **Taken at probe time, never by `status`.** It used to be one `transport.statvfs`
-    /// per report, and that transport is the `ReconnectingTransport`: on a location whose
-    /// connection was in progress the call waited behind section 6.3's attempt for up to
-    /// the 60 s authentication deadline, and on a location with no attempt at all it
-    /// *started* one - so `sshdrive status` hung while Finder was listing, and dialled
-    /// servers the user had not touched (2026-09-09). The round trip is spent here
-    /// instead, on the connection the probe already has, and `status` reads the cache.
+    /// **Taken at probe time, never by `status`.** A `transport.statvfs` per report would
+    /// go through the `ReconnectingTransport`: on a location whose connection is in
+    /// progress the call waits behind section 6.3's attempt for up to the 60 s
+    /// authentication deadline, and on a location with no attempt at all it *starts* one,
+    /// dialling a server the user has not touched. The round trip is spent here instead,
+    /// on the connection the probe already has, and `status` reads the cache.
     ///
     /// Runs against the live connection rather than through the gate, so a connection
     /// that went away between the probe and here fails the call rather than opening one.
@@ -1785,6 +1861,13 @@ public actor LocationRuntime {
     /// wraps the writes alone (`E2`).
     public func observeStatements(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
         index.observeStatements(observer)
+    }
+
+    /// `IndexWriter.observeCompilations`, reachable from a scenario: how `E2`'s cost half
+    /// asserts that a listing compiles a constant number of statements whatever its size
+    /// (section 5.3).
+    public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        index.observeCompilations(observer)
     }
 
     public func dumpIndex() throws -> [IndexItem] { try index.allItems() }

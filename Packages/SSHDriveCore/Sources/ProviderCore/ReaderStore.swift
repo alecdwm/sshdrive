@@ -113,6 +113,8 @@ public final class IndexReaderStore: ReaderStoring {
         if let reader { return reader }
         let url = try GroupContainer.indexURL(locationID: locationID)
         let opened = try IndexReader(path: url.path)
+        opened.observeStatements(statementObserver)
+        opened.observeCompilations(compileObserver)
         reader = opened
         return opened
     }
@@ -134,8 +136,11 @@ public final class IndexReaderStore: ReaderStoring {
         guard useReader, readiness.canRead else { return nil }
         do {
             let reader = try open()
-            let row = try reader.item(identifier: identifier.rawValue)
-            lastGeneration = try? reader.generation()
+            // One meta read and one row read, and no third statement for the generation:
+            // the meta check has already read it, and `item(for:)` arrives in bulk
+            // (section 5.2).
+            let (row, generation) = try reader.itemAndGeneration(identifier: identifier.rawValue)
+            lastGeneration = generation
             return ItemView(snapshot: row.snapshot, rootDisplayName: rootDisplayName)
         } catch IndexError.noSuchItem {
             throw ProviderFailure.noSuchItem
@@ -222,6 +227,30 @@ public final class IndexReaderStore: ReaderStoring {
             return nil
         }
     }
+
+    // MARK: The test seam of section 5.2's statement cache
+
+    /// `IndexReader.observeStatements` and `.observeCompilations`, reachable from a
+    /// scenario, and kept here so a reader opened later in the store's life is observed
+    /// too. `E7` is what reads them: an `item(for:)` storm must cost one statement a call
+    /// and a constant number of compilations however long it runs.
+    /// Both are nil in the shipping extension.
+    public func observeStatements(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        lock.lock()
+        statementObserver = observer
+        reader?.observeStatements(observer)
+        lock.unlock()
+    }
+
+    public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        lock.lock()
+        compileObserver = observer
+        reader?.observeCompilations(observer)
+        lock.unlock()
+    }
+
+    private var statementObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
+    private var compileObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
 
     // MARK: The state file
 

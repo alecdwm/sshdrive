@@ -5,6 +5,7 @@ import Config
 import Foundation
 import Index
 import SFTP
+import ServerModel
 import Testing
 import XPCProtocols
 
@@ -23,7 +24,7 @@ extension AgentScenarios {
         /// identifier, its versions **and** its row, a changed one and a new one each get
         /// one `modified` anchor, the missing one gets one `deleted` anchor, and nothing
         /// else is anchored at all. This is what pins the row-building and the anchors
-        /// down while the work moves in and out of the transaction (2026-09-09).
+        /// down whatever moves in and out of the transaction.
         @Test func e2ASecondListingWritesExactlyWhatChanged() async throws {
             let harness = try AgentHarness()
             let (fake, runtime) = try await Self.tree(harness)
@@ -92,9 +93,8 @@ extension AgentScenarios {
         /// Section 5.3 wants the listing written atomically; what it does not want is the
         /// row building held inside the write lock, because `LocationRuntime` is an actor
         /// and everything else about the location - `sshdrive status` included - waits
-        /// behind it. The per-entry read (`SELECT ... WHERE path = ?1`) is the marker: it
-        /// used to be issued once per entry inside the transaction, and it must now be
-        /// issued only outside it (2026-09-09).
+        /// behind it. The per-entry read (`SELECT ... WHERE path = ?1`) is the marker:
+        /// once per entry, and only outside the transaction.
         @Test func e2TheTransactionHoldsTheWritesAlone() async throws {
             let harness = try AgentHarness()
             let (fake, runtime) = try await Self.tree(harness)
@@ -130,6 +130,122 @@ extension AgentScenarios {
             #expect(
                 !recorded.contains { $0.sql.hasPrefix("INSERT INTO items") && $0.depth == 0 },
                 "and none of them outside it")
+        }
+
+        /// **E2**, the cost half - what a large first listing compiles.
+        ///
+        /// The rows are the contract above; this is the price of writing them. Compiled
+        /// per execution, a listing of 2,000 entries is 8,006 compilations - the incumbent
+        /// read, the row, the anchor and a `SELECT last_insert_rowid()` for every entry -
+        /// plus a `SAVEPOINT` opened and released per anchor. The statement cache of
+        /// section 5.2 makes the compilations a constant, the C API answers the rowid, and
+        /// an anchor inside the listing's own transaction takes no savepoint, since a
+        /// throw fails the whole batch either way.
+        @Test func e2ALargeListingCompilesAConstantNumberOfStatements() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas", backend: .fake)
+            let fake = FakeTransport(root: "/srv/fake")
+            for index in 0 ..< 2000 {
+                try await fake.apply(
+                    .createFile(
+                        path: try RelativePath(string: String(format: "f-%05d.txt", index)),
+                        contents: Data("x".utf8), mode: 0o644))
+            }
+            let runtime = try harness.makeRuntime(location: location, transport: fake)
+            try await runtime.start()
+
+            let executed = Statements()
+            let compiled = Statements()
+            await runtime.observeStatements { sql, depth in executed.record(sql, depth) }
+            await runtime.observeCompilations { sql, depth in compiled.record(sql, depth) }
+            let listed = try await runtime.enumerateItems(
+                container: IndexWriter.rootIdentifier, pageToken: nil)
+            await runtime.observeStatements(nil)
+            await runtime.observeCompilations(nil)
+
+            #expect(listed.items.count == 2000)
+            #expect(
+                compiled.all().count <= 12,
+                "E2: a listing's compilations are a constant, not four per entry")
+            #expect(
+                executed.all().filter { $0.sql.hasPrefix("SAVEPOINT") }.isEmpty,
+                "E2: an anchor inside the listing's transaction takes no savepoint of its own")
+            #expect(
+                !executed.all().contains { $0.sql.contains("last_insert_rowid") },
+                "E2: the anchor's sequence number comes from the C API, not from a query")
+            #expect(
+                executed.all().count < 3 * 2000 + 50,
+                "E2: three statements an entry - the incumbent read, the row, the anchor")
+        }
+
+        /// **M2** (`SQ-031`): the links in one listing are read through section 6.2's
+        /// window, not one at a time.
+        ///
+        /// SFTP v3's `readdir` carries attributes but no link target, so a directory of
+        /// links is a `readlink` per link however it is written. What this pins is that
+        /// they are *concurrent*: serially, a directory of a thousand links is a thousand
+        /// round trips before the first row can be built, a first Finder listing whose
+        /// length is the link count times the link latency. Measured here with a 20 ms
+        /// answer per link: fifteen links take 0.48 s one at a time and 0.12 s through the
+        /// window, with fifteen in flight.
+        ///
+        /// And the rows are the contract, not the speed: the same rows, in the same
+        /// order, with a dangling link shown (section 5.7 draws it as an alias, dangling
+        /// or not), an escaping one hidden, and a link whose `readlink` was refused hidden
+        /// too - one refusal cannot fail the listing it was found in.
+        @Test func m2ALinkHeavyListingReadsItsTargetsThroughTheWindow() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas", backend: .fake)
+            // Over the **wire**, not over `FakeTransport`: `FakeTransport.readdir` hands
+            // back the target it knows, and a listing that is given the targets asks no
+            // `readlink` at all. `SQ-031` is the thing being tested, so it has to be the
+            // server that omits them.
+            let server = FakeSFTPServer(profile: .debian, root: "/srv/fake")
+            server.put("note.txt", contents: Data("x".utf8))
+            for index in 0 ..< 12 {
+                server.putSymlink(String(format: "link-%02d", index), target: "note.txt")
+            }
+            // The three that are not ordinary: a target nothing points at, a target that
+            // leaves the location, and one the server will refuse to answer for.
+            server.putSymlink("dangling", target: "gone.txt")
+            server.putSymlink("escaping", target: "../secrets")
+            server.putSymlink("refused", target: "note.txt")
+            let wire = try await RealSFTPTransport.connect(
+                stream: server.makeStream(), root: server.root)
+
+            let connection = FakeLiveConnection(transport: wire)
+            connection.readlinkDelay = .milliseconds(20)
+            connection.readlinkFailures = ["refused"]
+            let runtime = try harness.makeRuntime(location: location, transport: connection)
+            try await runtime.start()
+
+            let listing = try await runtime.enumerateItems(
+                container: IndexWriter.rootIdentifier, pageToken: nil)
+
+            #expect(connection.readlinkCount == 15, "SQ-031: one readlink per link, and no more")
+            #expect(
+                connection.peakReadlinksInFlight == 15,
+                "section 6.2: they go out through the window, not one at a time")
+            #expect(
+                connection.peakReadlinksInFlight <= LocationRuntime.readlinkWindow,
+                "and never more than the window")
+
+            // The rows: the twelve ordinary links and the dangling one are shown, the
+            // escaping one and the refused one are not, and the file is untouched.
+            let shown = Set(listing.items.map(\.filename))
+            var expected = Set((0 ..< 12).map { String(format: "link-%02d", $0) })
+            expected.insert("note.txt")
+            expected.insert("dangling")
+            #expect(shown == expected, "section 5.7: the escaping and the unreadable link are omitted")
+
+            let rows = try await Self.rowsByPath(runtime)
+            #expect(rows["link-00"]?.linkTarget == Data("note.txt".utf8))
+            #expect(
+                rows["dangling"]?.linkTarget == Data("gone.txt".utf8),
+                "a link is never followed, so a target that does not exist is still a target")
+            #expect(rows["escaping"]?.hidden == 1)
+            #expect(rows["refused"]?.hidden == 1, "no target, no row anyone may see")
+            #expect(rows["refused"]?.linkTarget == nil)
         }
 
         /// A statement log a `@Sendable` observer can write to from inside the actor.

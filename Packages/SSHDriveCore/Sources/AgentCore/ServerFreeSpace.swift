@@ -6,7 +6,7 @@ import Foundation
 /// status command that dialled a server the user has not touched would wait behind
 /// section 6.3's connect attempt - up to the 60 s authentication deadline - and, worse,
 /// *start* one where there was none. Section 8 gives `status --probe` as the way to ask
-/// for a connection on purpose, and nothing else in the command may (2026-09-09).
+/// for a connection on purpose, and nothing else in the command may.
 ///
 /// So the number is captured where a connection already exists and a round trip is
 /// already being spent - the capability probe of section 8.1, which runs on every

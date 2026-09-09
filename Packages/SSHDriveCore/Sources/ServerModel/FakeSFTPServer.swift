@@ -67,6 +67,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
     private var directoryPages: [Data: [[Data]]] = [:]
     private var nextHandle = 1
     private var requestLog: [String] = []
+    private var readdirRequestCount = 0
 
     /// Paths a write must fail on with `ETXTBSY` - a bare `FAILURE` on the wire
     /// (`SQ-032`). The temp-name-and-rename path is what gets past it.
@@ -190,6 +191,16 @@ public final class FakeSFTPServer: @unchecked Sendable {
 
     public func clearRequestLog() { lock.withLock { requestLog.removeAll() } }
 
+    /// How many `SSH_FXP_READDIR`s have arrived, the ones answered `EOF` included.
+    ///
+    /// It is a counter rather than a `requestLog` line because a page carries no argument
+    /// worth logging and a hundred of them would bury every other request in the log. The
+    /// pipelining scenario is what reads it: a window deeper than the directory has pages
+    /// over-issues by design, and what has to stay bounded is *how far* - at most one
+    /// window short of a wasted round trip, never a wasted round trip per page
+    /// (section 6.2).
+    public var readdirRequests: Int { lock.withLock { readdirRequestCount } }
+
     // MARK: - The stream
 
     /// A `ByteStream` whose other end is this server. Hand it straight to `SFTPClient`.
@@ -276,10 +287,17 @@ public final class FakeSFTPServer: @unchecked Sendable {
     private func children(of path: Data) -> [Data] {
         var prefix = path
         prefix.append(0x2F)
+        // Decorated with the text form before sorting rather than converting inside the
+        // comparator: a directory of ten thousand entries is 130,000 comparisons, and a
+        // `String(decoding:)` in each of them would put most of a large listing's time on
+        // the model server rather than on the code under test.
         return nodes.keys.filter { candidate in
             guard candidate.count > prefix.count, candidate.starts(with: prefix) else { return false }
             return !candidate.dropFirst(prefix.count).contains(0x2F)
-        }.sorted { text($0) < text($1) }
+        }
+        .map { (text($0), $0) }
+        .sorted { $0.0 < $1.0 }
+        .map(\.1)
     }
 
     private func formatBits(_ node: Node) -> UInt32 {
@@ -454,6 +472,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
 
         case .readdir:
             let handle = try reader.readString()
+            readdirRequestCount += 1
             guard var pages = directoryPages[handle], !pages.isEmpty else {
                 return statusPacket(id: id, .endOfFile)
             }

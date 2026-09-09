@@ -52,6 +52,23 @@ public enum NameVisibility {
     /// means on APFS. Nil when the name is not valid UTF-8, which is itself a reason to
     /// hide it.
     public static func localKey(for name: Data) -> String? {
+        guard !name.isEmpty else { return nil }
+        // An all-ASCII name is already canonically composed and folds by adding 0x20 to
+        // A-Z, so it needs neither of the two Foundation passes below - which, on a
+        // directory of ten thousand names, is the difference between a normalisation each
+        // and none at all. Every byte under 0x80 is also valid UTF-8 by definition, so the
+        // decode cannot fail either.
+        var ascii = true
+        for byte in name where byte >= 0x80 {
+            ascii = false
+            break
+        }
+        guard !ascii else {
+            var folded = [UInt8]()
+            folded.reserveCapacity(name.count)
+            for byte in name { folded.append(byte >= 0x41 && byte <= 0x5A ? byte &+ 0x20 : byte) }
+            return String(decoding: folded, as: UTF8.self)
+        }
         guard let text = String(data: name, encoding: .utf8), !text.isEmpty else { return nil }
         return text.precomposedStringWithCanonicalMapping.lowercased()
     }
@@ -77,12 +94,26 @@ public enum NameVisibility {
     /// from one poll to the next as soon as a newcomer sorted lower.
     public static func classify(entries: [SFTPDirectoryEntry], visibleNames: Set<Data>) -> Result {
         var result = Result()
+        result.entries.reserveCapacity(entries.count)
 
-        var candidates: [SFTPDirectoryEntry] = []
-        for entry in entries {
-            let name = entry.name
-            if name == Data(".".utf8) || name == Data("..".utf8) { continue }
-            if entry.attributes.type == .other {
+        // One pass over the listing: an entry that gets no row at all is recorded as
+        // skipped here, and every other one is filed under the name the Mac would
+        // collapse it onto. The entries are walked by index and never copied into a
+        // candidate array and then into a group array as well, which would be three
+        // copies of every entry in a ten-thousand-name directory before any of it is
+        // classified.
+        var candidate = [Bool](repeating: false, count: entries.count)
+        // The key each entry folds onto is needed only to *find* the collisions, so it is
+        // not kept per entry: a directory with none - which is nearly every directory -
+        // carries no second array of ten thousand strings for it.
+        var seen: [String: Int] = [:]
+        seen.reserveCapacity(entries.count)
+        var groups: [String: [Int]] = [:]
+        var unrepresentable = Set<Int>()
+        for index in entries.indices {
+            let name = entries[index].name
+            if name == dot || name == dotDot { continue }
+            if entries[index].attributes.type == .other {
                 result.skipped.append(
                     Skipped(
                         name: name,
@@ -107,47 +138,63 @@ public enum NameVisibility {
                     Skipped(name: name, reason: "the name cannot be a path component"))
                 continue
             }
-            candidates.append(entry)
+            candidate[index] = true
+            // Anything with no local key is not representable at all and is hidden on its
+            // own account, below.
+            guard let key = localKey(for: name) else {
+                unrepresentable.insert(index)
+                continue
+            }
+            if let first = seen[key] {
+                if groups[key] == nil { groups[key] = [first] }
+                groups[key]?.append(index)
+            } else {
+                seen[key] = index
+            }
         }
 
-        // Group by the name the Mac would collapse onto. Anything with no local key is
-        // not representable at all and is hidden on its own account.
-        var groups: [String: [SFTPDirectoryEntry]] = [:]
-        for entry in candidates {
-            guard let key = localKey(for: entry.name) else {
+        // Only a key more than one name maps to has anything to decide, and the answer is
+        // filed against the entries themselves so the pass below needs no key at all.
+        var winnerFor: [Int: Data] = [:]
+        for (_, group) in groups {
+            let incumbents = group.filter { visibleNames.contains(entries[$0].name) }
+            let pool = incumbents.isEmpty ? group : incumbents
+            guard let winner = pool.min(by: { byteWiseLower(entries[$0].name, entries[$1].name) })
+            else { continue }
+            for index in group { winnerFor[index] = entries[winner].name }
+        }
+
+        // In the order the server reported them, which is the order the rows are written
+        // and the pages are cut in. Walking a `[String: [entry]]` dictionary instead would
+        // hand back whatever order it happens to iterate in, which is not the same from
+        // one listing to the next even for a directory nothing has touched.
+        for index in entries.indices where candidate[index] {
+            let entry = entries[index]
+            guard !unrepresentable.contains(index) else {
                 result.entries.append(
                     Entry(
                         entry: entry, hidden: hiddenCollision,
                         reason: "the name is not valid UTF-8, which macOS cannot represent"))
                 continue
             }
-            groups[key, default: []].append(entry)
-        }
-
-        for (_, group) in groups {
-            guard group.count > 1 else {
-                result.entries.append(Entry(entry: group[0], hidden: 0, reason: ""))
+            guard let winnerName = winnerFor[index] else {
+                result.entries.append(Entry(entry: entry, hidden: 0, reason: ""))
                 continue
             }
-            let incumbents = group.filter { visibleNames.contains($0.name) }
-            let pool = incumbents.isEmpty ? group : incumbents
-            guard
-                let winner = pool.min(by: { byteWiseLower($0.name, $1.name) })
-            else { continue }
-            let winnerName = String(decoding: winner.name, as: UTF8.self)
-            for entry in group {
-                if entry.name == winner.name {
-                    result.entries.append(Entry(entry: entry, hidden: 0, reason: ""))
-                } else {
-                    result.entries.append(
-                        Entry(
-                            entry: entry, hidden: hiddenCollision,
-                            reason:
-                                "the local filesystem cannot tell it from \"\(winnerName)\"; rename one on the server"))
-                }
+            if entry.name == winnerName {
+                result.entries.append(Entry(entry: entry, hidden: 0, reason: ""))
+            } else {
+                result.entries.append(
+                    Entry(
+                        entry: entry, hidden: hiddenCollision,
+                        reason:
+                            "the local filesystem cannot tell it from \"\(String(decoding: winnerName, as: UTF8.self))\"; rename one on the server"))
             }
         }
 
         return result
     }
+
+    private static let dot = Data(".".utf8)
+    private static let dotDot = Data("..".utf8)
 }

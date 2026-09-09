@@ -158,13 +158,24 @@ public enum ItemDerivation {
         // version that moved at every agent restart would make the system re-read every
         // item it holds.
         let xattrHash = ItemDerivation.fnv1a(xattrs ?? Data())
-        return [
-            contentVersion,
-            String(mode ?? -1), String(uid ?? -1), String(gid ?? -1),
-            String(capabilities), String(fileSystemFlags),
-            kept ? "1" : "0",
-            String(xattrHash, radix: 16),
-        ].joined(separator: ":")
+        // Appended into one string rather than joined out of an array of eight: the same
+        // eight fields, the same separator, the same bytes, built once per row of every
+        // listing.
+        var out = contentVersion
+        out.reserveCapacity(contentVersion.utf8.count + 56)
+        out += ":"
+        out += String(mode ?? -1)
+        out += ":"
+        out += String(uid ?? -1)
+        out += ":"
+        out += String(gid ?? -1)
+        out += ":"
+        out += String(capabilities)
+        out += ":"
+        out += String(fileSystemFlags)
+        out += kept ? ":1:" : ":0:"
+        out += String(xattrHash, radix: 16)
+        return out
     }
 
     /// FNV-1a, 64 bit. Small, stable across processes and builds, and no dependency.

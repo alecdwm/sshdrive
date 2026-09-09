@@ -227,6 +227,15 @@ public actor ConnectionGate {
     public private(set) var failFastCalls = 0
     public private(set) var waitedCalls = 0
     public private(set) var reconnects = 0
+    /// How many reconnect sequences a successful attempt has started and not finished.
+    ///
+    /// `connected` is the master and nothing else: the identity, the channel budget, the
+    /// rename-semantics probe, the helper's stream and section 5.6's two signals all land
+    /// afterwards, on a task of their own so nothing queues behind them (see
+    /// `recordSuccess`). Until that task is done the location is still being brought up,
+    /// and it is doing remote work of its own - which is what anything that needs the
+    /// agent to be *idle* has to be able to see.
+    public private(set) var recoveriesInFlight = 0
     /// The bound the last waiting call was held under (`F5`).
     ///
     /// Section 6.3 rule 2: a call that arrives during an attempt waits for **that
@@ -431,8 +440,17 @@ public actor ConnectionGate {
         let hook = onConnected
         let id = location.id
         // Off the actor: the recovery does File Provider calls and a re-derivation, and
-        // nothing else may queue behind them.
-        Task { await hook?(id, report) }
+        // nothing else may queue behind them. Counted while it runs, because from the
+        // outside "connected" would otherwise look like "finished".
+        recoveriesInFlight += 1
+        Task { [weak self] in
+            await hook?(id, report)
+            await self?.noteRecoveryFinished()
+        }
+    }
+
+    private func noteRecoveryFinished() {
+        recoveriesInFlight = max(0, recoveriesInFlight - 1)
     }
 
     private func recordFailure(_ error: Error) async {
@@ -608,9 +626,9 @@ public actor ConnectionGate {
     /// gate is released for the length of it, and the shutdown really does arrive twice:
     /// `DomainManager.shutdownAll` runs `gate.shutdown()` and `runtime.shutdownTransport()`
     /// in one task group and the runtime's is `gate.shutdown()` again. With `connection`
-    /// still set across the await, the second caller saw it and ran `-O exit` on the same
-    /// master a second time - on a real master that is a stray `ssh -O exit` against a
-    /// socket that has already gone, and it is what made `P4` flaky (2026-09-09).
+    /// still set across the await, the second caller would find it and run `-O exit` on the
+    /// same master a second time - on a real master, a stray `ssh -O exit` against a socket
+    /// that has already gone (`P4`).
     ///
     /// `shutdownRequested` is the other half: `startAttempt`'s task is not synchronously
     /// cancellable - `launcher.connect` spawns an `ssh` and only notices a cancel where it
@@ -691,6 +709,7 @@ public actor ConnectionGate {
             "nextBackoffSeconds": breaker.nextBackoff().rounded(toPlaces: 2),
             "backoffCapSeconds": breaker.backoffCapSeconds,
             "stopped": breaker.isStopped,
+            "recovering": recoveriesInFlight > 0,
             "retryScheduled": retry != nil,
             "rearmArmed": rearm.isArmed,
             "rearmUnlockUsed": rearm.unlockTriggerUsed,

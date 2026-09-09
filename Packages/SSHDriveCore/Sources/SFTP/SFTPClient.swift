@@ -58,9 +58,14 @@ public actor SFTPClient {
         /// A ceiling on everything outstanding on this channel at once, whatever the
         /// callers ask for. Soft: it is a gate on new requests, not a hard reservation.
         public var maxOutstandingRequests = 64
-        /// How many `readdir` pages are asked for back to back (section 6.2). Ordering
-        /// does not matter because the pages are merged.
-        public var readdirPipelineDepth = 2
+        /// How many `readdir` pages are asked for back to back (section 6.2): the same
+        /// sixteen-request window a transfer uses, because `limits@openssh.com` sizes the
+        /// *request* and says nothing at all about how many may be outstanding
+        /// (`SQ-027`), and a directory handle is no different from a file handle in that
+        /// respect. At the hundred names a page OpenSSH and `pkg/sftp` both send, a
+        /// 10,000-entry directory is 101 requests: seven round trips at this depth,
+        /// against fifty at a depth of two.
+        public var readdirPipelineDepth = 16
         /// How often the deadline sweeper looks. Small enough that a 20 s deadline is
         /// accurate, large enough that a 1 GB transfer does not spend its time here.
         public var deadlineTick: Duration = .milliseconds(200)
@@ -79,6 +84,25 @@ public actor SFTPClient {
     private var nextRequestID: UInt32 = 1
     private var pending: [UInt32: PendingRequest] = [:]
     private var slotWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// The order requests were appended to the **outbox** in, recorded for the callers
+    /// that ask for it.
+    ///
+    /// `readdir` is the only one, and it is not the same thing as the request id: an id is
+    /// allocated before `acquireSlot`, so on a channel at its outstanding limit a request
+    /// can carry a lower id than one that reached the wire ahead of it. A directory's
+    /// pages are cut server-side and handed out in the order the questions arrive, so
+    /// this is the only thing that can put them back together.
+    private var wireSequence = 0
+    private var wireOrder: [UInt32: Int] = [:]
+
+    /// The most requests this channel has ever had outstanding at once.
+    ///
+    /// A pipeline's depth is invisible in its results - the same names come back either
+    /// way - so this is what a test can assert on, and what a slow listing can be
+    /// diagnosed with: a `readdir` window of one is a directory read one round trip per
+    /// page (section 6.2).
+    public private(set) var peakOutstandingRequests = 0
 
     private var inbound = [UInt8]()
     private var inboundStart = 0
@@ -164,6 +188,16 @@ public actor SFTPClient {
     /// True until the channel dies.
     public var isAlive: Bool { deathError == nil }
 
+    /// Reads `peakOutstandingRequests` and sets it back to what is outstanding now, so
+    /// the next measurement is of the next thing the caller does and not of the
+    /// handshake before it.
+    @discardableResult
+    public func takePeakOutstandingRequests() -> Int {
+        let peak = peakOutstandingRequests
+        peakOutstandingRequests = pending.count
+        return peak
+    }
+
     /// Closes the channel and fails everything outstanding.
     public func shutdown() async {
         die(with: .connectionLost)
@@ -245,6 +279,7 @@ public actor SFTPClient {
         for (_, request) in outstanding {
             request.continuation.resume(throwing: SFTPError.connectionLost)
         }
+        wireOrder.removeAll()
         let waiters = slotWaiters
         slotWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
@@ -417,7 +452,8 @@ public actor SFTPClient {
 
     /// The one place a request goes out and a reply comes back.
     private func send(
-        _ writer: SFTPPacketWriter, id: UInt32, deadline: Duration
+        _ writer: SFTPPacketWriter, id: UInt32, deadline: Duration,
+        recordingWireOrder: Bool = false
     ) async throws -> SFTPReply {
         if let deathError { throw deathError }
         // Section 5.2: cancelling the extension's `Progress` cancels the transfer's Task,
@@ -435,6 +471,11 @@ public actor SFTPClient {
             // Registering before the packet reaches the outbox is what makes a reply
             // that arrives during the write impossible to lose.
             pending[id] = PendingRequest(continuation: continuation, deadline: instant)
+            peakOutstandingRequests = max(peakOutstandingRequests, pending.count)
+            if recordingWireOrder {
+                wireSequence += 1
+                wireOrder[id] = wireSequence
+            }
             enqueue(packet)
         }
     }
@@ -632,19 +673,34 @@ public actor SFTPClient {
 
     // MARK: Directory listing
 
-    /// One `readdir` page. `nil` means the server said EOF.
-    private func readdirPage(_ handle: SFTPFileHandle) async throws -> [SFTPNameReplyEntry]? {
-        let reply = try await metadataRequest(.readdir) { $0.writeString(handle.raw) }
+    /// One `readdir` page, with the place in the wire order the question went out at.
+    /// A `nil` page means the server said EOF.
+    private func readdirPage(_ handle: SFTPFileHandle) async throws
+        -> (order: Int, page: [SFTPNameReplyEntry]?)
+    {
+        let id = allocateRequestID()
+        var writer = SFTPPacketWriter(.readdir, requestID: id)
+        writer.writeString(handle.raw)
+        let reply: SFTPReply
+        do {
+            reply = try await send(
+                writer, id: id, deadline: configuration.metadataDeadline, recordingWireOrder: true)
+        } catch {
+            // The map is keyed by request id and read after the reply, so it is the one
+            // thing here that has to be swept on the way out as well.
+            wireOrder.removeValue(forKey: id)
+            throw error
+        }
+        let order = wireOrder.removeValue(forKey: id) ?? Int(id)
         if case .status(let code, let message) = reply {
-            if code == .endOfFile { return nil }
+            if code == .endOfFile { return (order, nil) }
             if let error = code.asError(message: message) { throw error }
         }
-        return try reply.expectNames()
+        return (order, try reply.expectNames())
     }
 
-    /// The whole of a directory. Pages are asked for back to back (section 6.2); their
-    /// order does not matter because they are merged, and `.` and `..` are dropped here
-    /// rather than by every caller.
+    /// The whole of a directory. Pages are asked for back to back (section 6.2), and
+    /// `.` and `..` are dropped here rather than by every caller.
     public func listDirectory(_ path: SFTPServerPath) async throws -> [SFTPDirectoryEntry] {
         let handle = try await opendir(path)
         do {
@@ -657,37 +713,61 @@ public actor SFTPClient {
         }
     }
 
+    /// The pipelined page loop: a window of `readdirPipelineDepth` `SSH_FXP_READDIR`s on
+    /// the one handle, drained, and asked again until the server says EOF.
+    ///
+    /// Three details are load-bearing.
+    ///
+    /// - **A window, not a fan-out per page.** The whole window goes out before anything
+    ///   comes back, so a directory of `depth` pages or fewer - which is nearly every
+    ///   directory anyone opens - is *one* round trip, and a directory of a hundred pages
+    ///   is seven rather than fifty.
+    /// - **Pages are reassembled in the order the questions went out, not the order the
+    ///   answers arrive.** A directory's pages are cut server-side and handed out in
+    ///   arrival order, and nothing about a pipelined channel promises the client will
+    ///   process the replies in that order: the window is filled by concurrent child
+    ///   tasks, and which of them reaches the outbox first is the scheduler's business.
+    ///   Merging in completion order really does shuffle a listing (measured against
+    ///   `FakeSFTPServer`), and a listing's order is not ours to shuffle:
+    ///   section 5.4 breaks a collision between two *new* names by the order the listing
+    ///   reported them, so the shown name would flip between two listings of a directory
+    ///   nothing has touched.
+    /// - **The over-issue past EOF is the price of the window and is bounded by it.** The
+    ///   last batch of a directory is answered with EOF - a status, not a failure, and
+    ///   dropped here - at most `depth - 1` times.
     private func pagedReaddir(_ handle: SFTPFileHandle) async throws -> [SFTPDirectoryEntry] {
-        let depth = max(1, configuration.readdirPipelineDepth)
-        var out: [SFTPDirectoryEntry] = []
+        let depth = max(
+            1, min(configuration.readdirPipelineDepth, configuration.maxOutstandingRequests))
+        var pages: [(order: Int, page: [SFTPNameReplyEntry])] = []
         var finished = false
-        try await withThrowingTaskGroup(of: [SFTPNameReplyEntry]?.self) { group in
-            var inFlight = 0
-            for _ in 0..<depth {
-                group.addTask { try await self.readdirPage(handle) }
-                inFlight += 1
-            }
-            while inFlight > 0 {
-                guard let page = try await group.next() else { break }
-                inFlight -= 1
-                guard let page else {
-                    finished = true
-                    continue
+        while !finished {
+            try await withThrowingTaskGroup(of: (Int, [SFTPNameReplyEntry]?).self) { group in
+                for _ in 0..<depth {
+                    group.addTask { try await self.readdirPage(handle) }
                 }
-                for entry in page {
-                    if entry.filename == Data(".".utf8) || entry.filename == Data("..".utf8) {
+                while let (order, page) = try await group.next() {
+                    guard let page else {
+                        finished = true
                         continue
                     }
-                    out.append(
-                        SFTPDirectoryEntry(
-                            name: entry.filename,
-                            attributes: entry.attributes.fileAttributes(
-                                fallbackType: entry.typeFromLongname)))
+                    pages.append((order, page))
                 }
-                if !finished {
-                    group.addTask { try await self.readdirPage(handle) }
-                    inFlight += 1
+            }
+        }
+
+        pages.sort { $0.order < $1.order }
+        var out: [SFTPDirectoryEntry] = []
+        out.reserveCapacity(pages.reduce(0) { $0 + $1.page.count })
+        for (_, page) in pages {
+            for entry in page {
+                if entry.filename == Data(".".utf8) || entry.filename == Data("..".utf8) {
+                    continue
                 }
+                out.append(
+                    SFTPDirectoryEntry(
+                        name: entry.filename,
+                        attributes: entry.attributes.fileAttributes(
+                            fallbackType: entry.typeFromLongname)))
             }
         }
         return out

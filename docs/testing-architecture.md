@@ -728,11 +728,12 @@ retry itself and the schedule behind it - and `D10` is two, one per rename seman
 | Id | Name | Setup | Action | Assertion | H |
 |---|---|---|---|---|---|
 | E1 | Nested transactions | A listing whose body appends anchors and deletes rows | One listing | No `cannot start a transaction within a transaction`; inner levels are `SAVEPOINT`s; an inner failure caught by its caller undoes only its own writes | U |
-| E2 | A listing is one transaction, and holds the writes alone | A directory of new, changed, unchanged and deleted entries plus a symlink | Enumerate it twice | One `BEGIN IMMEDIATE`, one commit; every `INSERT INTO items` inside it and no per-entry row read (`WHERE path = ?1`) inside it; an unchanged row is neither rewritten nor anchored, a changed and a new row get one `modified` anchor each and the missing one a `deleted` anchor, last | U |
+| E2 | A listing is one transaction, holds the writes alone, and compiles a constant number of statements | A directory of new, changed, unchanged and deleted entries plus a symlink | Enumerate it twice | One `BEGIN IMMEDIATE`, one commit; every `INSERT INTO items` inside it and no per-entry row read (`WHERE path = ?1`) inside it; an unchanged row is neither rewritten nor anchored, a changed and a new row get one `modified` anchor each and the missing one a `deleted` anchor, last; and a 2,000-entry listing compiles at most twelve statements, with no `SAVEPOINT` and no `last_insert_rowid()` | U |
 | E3 | Sorted keys in the attributes blob | A six-key `LocalAttributes` | Encode it 200 times in one process | Byte-identical every time; the metadata version does not move on its own | U |
 | E4 | A local-only row survives | A `.DS_Store` local-only row | A listing that does not mention it | The row and the user's bytes survive | U |
 | E5 | The reconcile always clears its flag | A corrupt index | Restore into the live database, then a walk that hits its deadline | The restore goes through the backup API (the sidecars and the open reader keep their inode); `meta.reconciling` is cleared even on the deadline path; the walk runs after `add(domain)`, not inside `start()` | S |
 | E6 | `held.dir` follows a rename | A held deletion under a directory | Rename the directory | Both `held.path` and `held.dir` are rewritten; the 5- and 30-minute re-checks resolve | U |
+| E7 | A ten-thousand-entry first listing | 10,000 entries on the wire (`FakeSFTPServer` + `RealSFTPTransport`): files with varied sizes, mtimes and modes, 50 subdirectories, 20 symlinks, dot names and two collisions | Enumerate every page, then `item(for:)` all of them through `IndexReaderStore`, then replay the anchors through the working set | The counts, not the clock: one `opendir`, at most one window of readdir over-issue, one `readlink` per link and no `stat` per entry; a constant number of statement compilations and at most three statement executions per entry inside one `BEGIN IMMEDIATE` with no `SAVEPOINT`; one statement per `item(for:)`; no log line per entry; and one loose wall-clock guard. Added 2026-09-09 | V |
 
 ### Suite F — offline, the breaker, reconnection
 
@@ -906,16 +907,16 @@ and is not claimed.
 
 ### Suite N — the capability report and probes
 
-**N6, N7 and N8 added 2026-09-09**, in the same file: `sshdrive status` hung while Finder
-was listing, and two of its own lines were the cause - a `statvfs` through the reconnecting
-transport and an `ssh -O check` inside the master's actor.
+**N6, N7 and N8 added 2026-09-09**, in the same file, for the two lines of `status` that
+can reach the wire: the free-space `statvfs` through the reconnecting transport, and the
+state word through an `ssh -O check` inside the master's actor.
 
-**N9, N10 and N11 added 2026-09-09**, beside them, for the other two causes of the same
-hang: about eighteen hops per location onto the writer's actor, which a synchronous listing
-transaction holds, and no bound on a location's section at all. N9 is the one that keeps it
-fixed - it watches the *writer's* connection while `status` runs and requires it to see
-none of the report's queries - because a parked `readdir` releases the actor and so cannot
-reproduce in one process what a 10,000-row transaction does on a Mac.
+**N9, N10 and N11 added 2026-09-09**, beside them, for the two ways a report can wait:
+about eighteen hops per location onto the writer's actor, which a synchronous listing
+transaction holds, and an unbounded section per location. N9 is the load-bearing one - it
+watches the *writer's* connection while `status` runs and requires it to see none of the
+report's queries - because a parked `readdir` releases the actor and so cannot reproduce in
+one process what a 10,000-row transaction does on a Mac.
 
 **N2, N3 and N4 implemented 2026-09-08** (`SFTPWireScenarios`, `TransportScenarios`,
 `ShellScenarios`). **N1 and the new N5 implemented 2026-09-08** in
@@ -1508,9 +1509,19 @@ a missing manager or a 4099 that lands anyway), `FakeLoginItem`/`FakeLaunchd` (`
   Still owed to this step and not claimed: **D4**, **D8** and **E1**, **E3-E6** (the index
   half and the two rows that want a bundle replacement under a live queue), which are
   `SystemModel`'s. **E2 landed on 2026-09-09**, as `ListingScenarios` in
-  `Tests/AgentRuntimeTests`, when the listing's row building moved out of the transaction:
-  `SQLiteConnection.statementObserver` is the seam, and the two halves are what one
-  listing writes and what its transaction holds while it writes it.
+  `Tests/AgentRuntimeTests`: `SQLiteConnection.statementObserver` is the seam, and the two
+  halves are what one listing writes and what its transaction holds while it writes it. A
+  **third half** landed the same day with the index's statement cache: what a large listing
+  *compiles*. `SQLiteConnection.compileObserver` is that seam - it fires only when
+  `sqlite3_prepare_v2` actually runs - and the assertion is that a 2,000-entry listing
+  compiles a handful of statements rather than 8,006, takes no savepoint per anchor, and
+  never asks `SELECT last_insert_rowid()`.
+  **E7 landed on 2026-09-09** beside it, in `Tests/AgentRuntimeTests/LargeListingScenarios.swift`:
+  the same questions at ten thousand entries and over the wire, with the `item(for:)`
+  storm and the working-set replay on the other side of the index. It counts the wire
+  round trips, the compilations, the statement executions per entry, the `readlink`s and
+  the log lines, prints what each phase took, and guards the clock only loosely - the
+  numbers move with the box, the counts do not.
 
   **Three bugs the models themselves had, all found by a scenario and all fixed.** They are
   worth naming because a simulator that is wrong is worse than no simulator: `FakeSFTPServer`'s

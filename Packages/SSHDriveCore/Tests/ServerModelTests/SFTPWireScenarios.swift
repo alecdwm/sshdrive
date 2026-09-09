@@ -114,6 +114,90 @@ final class SFTPWireScenarios: XCTestCase {
         XCTAssertEqual(limits?.maxOpenHandles, 20_475)
     }
 
+    // MARK: - SQ-051 / SQ-027: what bounds a 10,000-entry listing
+
+    /// `SQ-051`: ten thousand entries is a hundred `readdir` pages at the hundred names a
+    /// page every server here sends, and what bounds the *latency* of that first Finder
+    /// listing is not the bytes but how many of those pages are in the air at once.
+    ///
+    /// At a window of two that is fifty serial round trips - on a 30 ms link, one and a
+    /// half seconds of a directory that transfers in a tenth of one. The window is section
+    /// 6.2's sixteen, the same one a transfer uses, because `limits@openssh.com` sizes the
+    /// request and says nothing about how many may be outstanding (`SQ-027`) and a
+    /// directory handle is no different.
+    ///
+    /// Measured here, on the wire, both ways: depth 2 gives a peak of 2 requests in flight
+    /// and 51 round trips; depth 16 gives 16 and 7. The price is the over-issue at the end
+    /// - the window is filled before EOF can come back - and it is bounded by one window
+    /// per listing, not by one wasted request per page.
+    func testSQ051_theReaddirWindowIsWhatBoundsATenThousandEntryListing() async throws {
+        struct Listing {
+            var names: [String]
+            /// Compared instead of the array itself: a mismatch of ten thousand names
+            /// prints ten thousand names twice.
+            var fingerprint: String {
+                "\(names.count) \(names.first ?? "-") \(names.last ?? "-") \(names.hashValue)"
+            }
+            var readdirs: Int
+            var peakInFlight: Int
+            /// The serial round trips a real link would have paid for: the client cannot
+            /// have more than `peakInFlight` questions in the air, so it waits at least
+            /// this many times however fast the server answers.
+            var roundTrips: Int { Int((Double(readdirs) / Double(peakInFlight)).rounded(.up)) }
+        }
+
+        func list(depth: Int, entries: Int) async throws -> Listing {
+            let server = FakeSFTPServer(profile: .debian)
+            server.putDirectory("many")
+            for index in 0 ..< entries {
+                server.put(String(format: "many/f-%05d", index), contents: Data("x".utf8))
+            }
+            var configuration = SFTPClient.Configuration()
+            configuration.readdirPipelineDepth = depth
+            let transport = try await RealSFTPTransport.connect(
+                stream: server.makeStream(), root: server.root, configuration: configuration)
+            // The handshake and the `realpath` are not part of the measurement.
+            await transport.client.takePeakOutstandingRequests()
+            let listed = try await transport.readdir(try RelativePath(string: "many"))
+            return Listing(
+                names: listed.map { String(decoding: $0.name, as: UTF8.self) },
+                readdirs: server.readdirRequests,
+                peakInFlight: await transport.client.takePeakOutstandingRequests())
+        }
+
+        let expected = (0 ..< 10_000).map { String(format: "f-%05d", $0) }
+
+        // A window of two: two questions in the air, and fifty waits for the answer.
+        let narrow = try await list(depth: 2, entries: 10_000)
+        XCTAssertEqual(narrow.names.count, 10_000)
+        XCTAssertEqual(narrow.names, expected, "every name, in the server's own order")
+        XCTAssertEqual(narrow.peakInFlight, 2, "the old depth: two pages in the air")
+        XCTAssertEqual(narrow.readdirs, 102)
+        XCTAssertEqual(narrow.roundTrips, 51, "which is fifty-one serial round trips")
+
+        // Section 6.2's sixteen: one window, seven waits.
+        let wide = try await list(depth: 16, entries: 10_000)
+        XCTAssertEqual(
+            wide.fingerprint, narrow.fingerprint,
+            "the same names in the same order, merged by page and not by arrival")
+        XCTAssertEqual(
+            wide.peakInFlight, 16,
+            "section 6.2's window, filled: sixteen readdirs outstanding on the one handle")
+        XCTAssertEqual(
+            wide.roundTrips, 7,
+            "seven round trips for a hundred pages, not one per two pages")
+        XCTAssertLessThanOrEqual(
+            wide.readdirs, narrow.readdirs + 15,
+            "SQ-027: the over-issue past EOF is bounded by one window per listing")
+
+        // A directory that fits inside the window is one round trip, which is the case
+        // that matters most: almost every directory a user opens is this one.
+        let small = try await list(depth: 16, entries: 250)
+        XCTAssertEqual(small.names.count, 250)
+        XCTAssertEqual(small.readdirs, 16, "one window: three pages and thirteen EOFs")
+        XCTAssertEqual(small.roundTrips, 1, "three pages and an EOF, all asked at once")
+    }
+
     // MARK: - L1: containment, and the symlink `opendir` follows
 
     /// **L1** (`SQ-030`): a directory swapped on the server for a link to `/etc` is read

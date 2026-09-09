@@ -194,7 +194,15 @@ extension AgentScenarios {
             await harness.power.wake()
             // An attempt *started* is not a master back up: the gate records the connection
             // when the attempt returns, which is what `status` and every later call read.
-            await harness.settle { await firstGate.isConnected }
+            // Both gates, not the first one: the wake reaches them one after the other, and
+            // "one new master per location" is a count of what has happened, so waiting on
+            // one of the two reads it while the other is still spawning.
+            let secondGate = try #require(await harness.manager.gate(locationID: second.id))
+            await harness.settle {
+                let first = await firstGate.isConnected
+                let second = await secondGate.isConnected
+                return first && second
+            }
             #expect(
                 harness.launcher.attempts == attemptsBeforeSleep + 2,
                 "F6: one new master per location after wake")

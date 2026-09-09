@@ -103,14 +103,24 @@ public actor ChangeDetector {
         )
     }
 
-    public func stop() {
-        loop?.cancel()
+    /// Cancels the loop and returns when the cycle it was running has finished.
+    ///
+    /// The wait is the point. `Task.cancel()` only asks, and a cycle already inside
+    /// `runCycle` keeps listing, keeps writing rows and keeps calling the transport -
+    /// which `DomainManager.dropRuntime` shuts down on the next line, and which a
+    /// scenario has often just dropped. A cycle that outlives the call re-connects a gate
+    /// a scenario has put into its backoff, and the stray attempt takes the one the
+    /// scenario is measuring.
+    public func stop() async {
+        let running = loop
         loop = nil
+        running?.cancel()
         sleeper?.cancel()
         sleeper = nil
         let stream = helper
         helper = nil
         Task { await stream?.stop() }
+        await running?.value
     }
 
     /// The loop's sleep, held where `nudge()` can cancel it.

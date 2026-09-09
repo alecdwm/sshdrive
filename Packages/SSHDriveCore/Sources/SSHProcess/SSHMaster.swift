@@ -214,12 +214,11 @@ public actor SSHMaster {
     /// nothing about the server or the TCP connection, so it is the cheap "is our child
     /// sane" check; the per-request deadline is the real liveness probe (section 6.1).
     ///
-    /// "Cheap" is about the server, not about us: it still spawns an `ssh` and waits for
-    /// it, and it used to do that synchronously inside this actor - up to ten seconds of a
-    /// cooperative pool thread with the master's actor held, which every other caller then
-    /// queued behind (2026-09-09). It awaits now, so the actor is released while the child
-    /// runs. Nothing on the `status` path calls it any more; what does is section 6.4's
-    /// "did the helper's stream die with the connection or on its own", which has to know.
+    /// "Cheap" is about the server, not about us: it spawns an `ssh` and waits up to ten
+    /// seconds for it, so it suspends rather than blocking and the actor is released
+    /// while the child runs. Nothing on the `status` path may call it; the caller that
+    /// does is section 6.4's "did the helper's stream die with the connection or on its
+    /// own", which has to know.
     public func check() async -> Bool {
         let invocation = SSHCommandBuilder.control(
             "check", controlPath: configuration.controlPath, host: configuration.target.host

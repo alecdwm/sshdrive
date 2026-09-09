@@ -194,20 +194,18 @@ extension AgentScenarios {
 
         /// **N6** - `status` never touches the wire.
         ///
-        /// `sshdrive status` hung while Finder was listing, and two of its lines were why.
-        /// The capability report ended in `runtime.freeSpaceDescription()` ->
-        /// `transport.statvfs(.root)`, and that transport is the `ReconnectingTransport`:
-        /// section 6.3's gate holds a call behind a connect attempt for up to the 60 s
-        /// authentication deadline, and where there is no attempt at all it *starts* one.
-        /// So a report the user asked for could dial a server they had not touched, and a
-        /// report asked for during a reconnect waited out the reconnect. Section 8 gives
-        /// `--probe` as the way to ask for a connection on purpose, and this is the rest of
-        /// the command promising not to.
+        /// The free-space line of the capability report is the one that could dial: a
+        /// `transport.statvfs(.root)` goes through the `ReconnectingTransport`, and section
+        /// 6.3's gate holds a call behind a connect attempt for up to the 60 s
+        /// authentication deadline, or *starts* one where there is no attempt at all. A
+        /// report must neither dial a server the user has not touched nor wait out a
+        /// reconnect. Section 8 gives `--probe` as the way to ask for a connection on
+        /// purpose, and this is the rest of the command promising not to.
         ///
-        /// Three states, because the failure is different in each: connected (a call would
-        /// have succeeded and cost a round trip), connecting (a call would have *waited*),
-        /// and backing off (a call would have failed fast, but the free-space line would
-        /// have been silently empty rather than the last known figure).
+        /// Three states, because the failure would be different in each: connected (a call
+        /// succeeds and costs a round trip), connecting (a call *waits*), and backing off
+        /// (a call fails fast, and the free-space line is silently empty rather than the
+        /// last known figure).
         @Test func n6StatusNeverDialsAndNeverWaits() async throws {
             let harness = try AgentHarness(clock: VirtualAgentClock())
             let location = try await harness.addLocation(nickname: "nas")
@@ -271,7 +269,7 @@ extension AgentScenarios {
         /// **N7** - the free-space figure is taken at probe time and kept.
         ///
         /// It is the one number in section 8.1's report that is a live measurement rather
-        /// than a property of the server, which is exactly why it was the line that dialled.
+        /// than a property of the server, which is why it is the line that could dial.
         /// It is captured where a connection already exists - `applyConnection` on every
         /// connection, and `reprobeServer` on `--probe` - and lives in `capabilities.json`
         /// beside the probe. `status` renders what is there, with its age once it is old
@@ -343,18 +341,24 @@ extension AgentScenarios {
 
         /// **N8** - online and offline come from the gate.
         ///
-        /// The state word used to be `runtime.isConnected()` ->
-        /// `SSHBackedTransport.isMasterAlive()` -> `SSHMaster.check()`, which spawns
+        /// The other route to the word, `runtime.isConnected()` ->
+        /// `SSHBackedTransport.isMasterAlive()` -> `SSHMaster.check()`, spawns
         /// `ssh -O check` and waits up to ten seconds for it *inside the master's actor*:
         /// a cooperative pool thread parked, and every other caller of that master queued
         /// behind it, for one word of one line of `status`. The gate already holds the
         /// connection and the breaker already knows why there is not one, so both halves
-        /// of the answer are there for free, and section 8's wording is unchanged:
-        /// `online`, or `offline (<reason>)`.
+        /// of the answer are there for free, in section 8's wording: `online`, or
+        /// `offline (<reason>)`.
         @Test func n8TheStateWordComesFromTheGate() async throws {
             let harness = try AgentHarness(clock: VirtualAgentClock())
             let location = try await harness.addLocation(nickname: "nas")
             _ = try await harness.manager.runtime(for: location)
+            // The two timers a mounted location carries would otherwise call the transport
+            // mid-scenario, and a call that meets a dropped gate connects - which is right,
+            // and would put the location back online underneath the word being read
+            // (sections 6.4, 6.6).
+            await harness.manager.detector(locationID: location.id)?.stop()
+            await harness.manager.evictor(locationID: location.id)?.stop()
             await harness.quiesceConnects()
             let gate = try #require(await harness.manager.gate(locationID: location.id))
             let live = try #require(harness.launcher.live)
@@ -366,7 +370,14 @@ extension AgentScenarios {
             // that the location is retrying rather than only that it is down.
             harness.launcher.fail()
             await gate.drop(reason: "the master was killed")
-            await harness.settle { await gate.isConnected == false }
+            // The drop reconnects (section 6.1), so the word is read after that attempt has
+            // failed rather than while it is still in flight: one call through the gate
+            // waits for exactly the attempt the drop started and comes back when the
+            // breaker has been told how it went. `isConnected == false` is not that
+            // moment - it is true as soon as `drop` returns, with the attempt still
+            // running, and the word there is `connecting`, truthfully.
+            let transport = ReconnectingTransport(gate: gate, locationID: location.id)
+            await #expect(throws: SFTPError.noConnection) { try await transport.readdir(.root) }
             let backingOff = await Self.stateWord(harness, "nas")
             #expect(backingOff.hasPrefix("offline ("), "section 8's wording is unchanged")
             #expect(backingOff.contains("backing off"))
@@ -391,13 +402,13 @@ extension AgentScenarios {
         /// **N9** - `status` reads the index through its own reader, never through the
         /// writer.
         ///
-        /// The other half of what made `sshdrive status` hang while Finder was listing
-        /// (N6 is the wire half). `LocationRuntime` is an actor, a directory listing writes
-        /// its rows in one **synchronous** SQLite transaction on it (section 5.3), and
-        /// `status` used to make about eighteen hops onto that actor per location - the
-        /// hidden names, the held rows, the root set, one `item(identifier:)` per
-        /// materialized file, the pin tree, and eight more. Any of them could queue behind
-        /// a listing of a large folder.
+        /// The index half of keeping `status` off the writer; N6 is the wire half.
+        /// `LocationRuntime` is an actor, a directory listing writes its rows in one
+        /// **synchronous** SQLite transaction on it (section 5.3), and a row is about
+        /// eighteen questions per location - the hidden names, the held rows, the root
+        /// set, one `item(identifier:)` per materialized file, the pin tree, and eight
+        /// more. Asked on that actor, any of them queues behind a listing of a large
+        /// folder.
         ///
         /// Two things are asserted, because either alone would pass for the wrong reason:
         ///
@@ -412,8 +423,7 @@ extension AgentScenarios {
         /// The second is the load-bearing one. A parked `readdir` suspends
         /// `enumerateChanges` and therefore *releases* the actor, so a scenario in one
         /// process cannot hold the actor the way a real 10,000-row transaction does; what
-        /// it can do is prove that `status` no longer asks that actor for any of it
-        /// (2026-09-09).
+        /// it can do is prove that `status` asks that actor for none of it.
         @Test func n9StatusReadsTheIndexThroughItsOwnReader() async throws {
             let harness = try AgentHarness()
             let location = try await harness.addLocation(nickname: "nas", backend: .fake)
@@ -554,11 +564,11 @@ extension AgentScenarios {
         /// report.
         ///
         /// `status` with no name is a report about every location, and section 8's output
-        /// prints them in the order `config.json` holds. Before this they were built one
-        /// after another with no bound at all, so the fourth location's wedged File
-        /// Provider call - S1 measured `remove(domain)` not returning within three minutes -
-        /// took the whole command out through the CLI's own timeout, and the user learnt
-        /// nothing about the three that were fine.
+        /// prints them in the order `config.json` holds. Built one after another with no
+        /// bound, a fourth location's wedged File Provider call - S1 measured
+        /// `remove(domain)` not returning within three minutes - takes the whole command
+        /// out through the CLI's own timeout and the user learns nothing about the three
+        /// that are fine.
         ///
         /// So: the sections run concurrently, each under `Deadline.statusSeconds` on the
         /// agent's own clock, and a section that runs out prints its row with a note in

@@ -22,7 +22,10 @@ public enum IndexSchema {
         /// reading rows that are still being rebuilt (section 5.2).
         public static let reconciling = "reconciling"
         /// Bumped whenever the agent has replaced the database's contents wholesale.
-        /// The reader re-reads its cached prepared statements and schema on a change.
+        /// The reader reads it with the other two keys in the check it makes on every
+        /// call, and hands it to the extension's state file (section 5.2). It is not what
+        /// invalidates the statement cache: a `sqlite3_prepare_v2` statement re-prepares
+        /// itself after a schema change, and the restore purges the cache anyway.
         public static let generation = "generation"
         /// The canonical absolute remote root this index was built against (section 9.1).
         public static let remoteRoot = "remote_root"
@@ -185,14 +188,105 @@ public struct IndexItem: Equatable, Sendable {
     /// The last path component, decoded for display and for the item's filename. A name
     /// that is not valid UTF-8 never reaches here: it is hidden (section 5.4).
     public var filename: String {
-        guard let last = path.split(separator: 0x2F).last else { return "" }
-        return String(decoding: last, as: UTF8.self)
+        guard !path.isEmpty else { return "" }
+        // The bytes after the last slash, without cutting the whole path into components
+        // to reach them: every snapshot and every `item(for:)` asks for this.
+        guard let slash = path.lastIndex(of: 0x2F) else {
+            return String(decoding: path, as: UTF8.self)
+        }
+        return String(decoding: path[path.index(after: slash)...], as: UTF8.self)
     }
 
     /// "size-mtime-generation" at every tier (section 5.3).
     public static func contentVersion(size: Int64, mtime: Int64, generation: Int64) -> String {
         "\(size)-\(mtime)-\(generation)"
     }
+
+    /// A fresh item identifier: "a UUID minted the first time we see a path"
+    /// (section 5.3), in the same uppercase hyphenated spelling `UUID().uuidString` gives.
+    ///
+    /// The bytes come from a generator seeded once per process out of the system's rather
+    /// than from `Foundation.UUID()`, which asks the platform for entropy on every call.
+    /// A first listing of a ten-thousand-entry directory mints ten thousand identifiers,
+    /// and `Foundation.UUID()` spends seventy milliseconds of that one call
+    /// (section 5.3). What a seeded generator gives up is unpredictability - an item
+    /// identifier is a local name for a row, never a secret and never a capability - and
+    /// what it keeps is the shape, the spelling and 122 bits of distinctness.
+    public static func mintIdentifier() -> String {
+        var bytes = IdentifierSource.shared.next16()
+        // Version 4, variant 1, as `uuid_generate_random` sets them.
+        bytes.6 = (bytes.6 & 0x0F) | 0x40
+        bytes.8 = (bytes.8 & 0x3F) | 0x80
+        // Written straight into the string's own storage. Appending 36 `Character`s to a
+        // `String` instead costs more than `UUID()` does.
+        return String(unsafeUninitializedCapacity: 36) { out in
+            var cursor = 0
+            withUnsafeBytes(of: bytes) { raw in
+                for offset in 0 ..< 16 {
+                    if offset == 4 || offset == 6 || offset == 8 || offset == 10 {
+                        out[cursor] = 0x2D
+                        cursor += 1
+                    }
+                    let byte = raw[offset]
+                    out[cursor] = IdentifierSource.hex[Int(byte >> 4)]
+                    out[cursor + 1] = IdentifierSource.hex[Int(byte & 0x0F)]
+                    cursor += 2
+                }
+            }
+            return 36
+        }
+    }
+}
+
+/// The identifier generator behind `IndexItem.mintIdentifier()`: xoshiro256**, seeded
+/// once from `SystemRandomNumberGenerator` and shared, because the alternative is a trip
+/// to the kernel for every row a listing writes.
+final class IdentifierSource: @unchecked Sendable {
+    static let shared = IdentifierSource()
+    static let hex: [UInt8] = Array("0123456789ABCDEF".utf8)
+
+    private let lock = NSLock()
+    private var state: (UInt64, UInt64, UInt64, UInt64)
+
+    private init() {
+        var system = SystemRandomNumberGenerator()
+        state = (system.next(), system.next(), system.next(), system.next())
+    }
+
+    func next16() -> (
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8,
+        UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8, UInt8
+    ) {
+        lock.lock()
+        let high = next()
+        let low = next()
+        lock.unlock()
+        return (
+            UInt8(truncatingIfNeeded: high >> 56), UInt8(truncatingIfNeeded: high >> 48),
+            UInt8(truncatingIfNeeded: high >> 40), UInt8(truncatingIfNeeded: high >> 32),
+            UInt8(truncatingIfNeeded: high >> 24), UInt8(truncatingIfNeeded: high >> 16),
+            UInt8(truncatingIfNeeded: high >> 8), UInt8(truncatingIfNeeded: high),
+            UInt8(truncatingIfNeeded: low >> 56), UInt8(truncatingIfNeeded: low >> 48),
+            UInt8(truncatingIfNeeded: low >> 40), UInt8(truncatingIfNeeded: low >> 32),
+            UInt8(truncatingIfNeeded: low >> 24), UInt8(truncatingIfNeeded: low >> 16),
+            UInt8(truncatingIfNeeded: low >> 8), UInt8(truncatingIfNeeded: low)
+        )
+    }
+
+    /// Called under the lock.
+    private func next() -> UInt64 {
+        let result = rotl(state.1 &* 5, 7) &* 9
+        let t = state.1 << 17
+        state.2 ^= state.0
+        state.3 ^= state.1
+        state.1 ^= state.2
+        state.0 ^= state.3
+        state.2 ^= t
+        state.3 = rotl(state.3, 45)
+        return result
+    }
+
+    private func rotl(_ x: UInt64, _ k: UInt64) -> UInt64 { (x << k) | (x >> (64 - k)) }
 }
 
 /// One change-stream entry.

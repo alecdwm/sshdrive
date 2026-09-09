@@ -704,7 +704,19 @@ in WAL mode, from the group container, and answers `item(for:)` and the
 working-set change enumerator from it directly, with no agent involved,
 which also means they keep working while the agent is restarting. The
 agent remains the only writer, and that is what makes this safe: WAL
-readers never block the writer and always see a consistent snapshot. A
+readers never block the writer and always see a consistent snapshot.
+Both sides cache their compiled statements by SQL text: the index runs a
+fixed and very small set of them, a listing is three statements once per
+entry and an `item(for:)` is one, and compiling each afresh is most of
+what either costs. A statement is taken out of the cache to be
+handed out and put back, reset and cleared, when its caller is done, so a
+second caller asking for the same SQL while the first is still stepping
+compiles one of its own and nothing is ever rebound under a live reader.
+Where a caller runs the same statement for every entry of a listing it
+holds the one it was handed for the whole pass instead of going back to
+the cache per row (§5.3).
+`sqlite3_prepare_v2` re-prepares a kept statement after a schema change,
+so neither the migration nor the restore needs to invalidate anything. A
 read-only WAL connection still has to open the `-shm` file for writing,
 because readers publish their read marks through it; the group
 container is writable by the sandboxed extension, which is what makes a
@@ -728,6 +740,13 @@ judged worse.
 
 The `meta` table carries three things the reader checks on every call:
 the schema version, a `reconciling` flag, and a `generation` counter.
+`item(for:)` arrives in bulk, so they are not read in a statement of
+their own at all: they ride on the row's own query as three scalar
+subqueries, and answering one `item(for:)` is one statement. A row that
+is not there is the one exception - there is then no row to carry the
+three values, so the check is asked in its own right before
+`.noSuchItem` is answered, because a rebuild in progress must never look
+like a deletion.
 An extension that finds a schema version newer than it understands falls
 back to asking the agent for items, which it can always do, so a
 mid-upgrade mismatch degrades to the slow path rather than failing.
@@ -736,9 +755,9 @@ the working-set enumerator with `.serverUnreachable` rather than reading
 rows that are still being rebuilt, since a missing row answered with
 `.noSuchItem` would delete the user's file. `generation` is bumped by
 the agent whenever it has replaced the database's contents wholesale (a
-restore, §5.3); the reader re-reads its cached prepared statements and
-schema on a change. The database file itself is never replaced under the
-reader, so the inode is stable and no re-`stat` is needed. S3 confirms
+restore, §5.3), and the reader hands it to the extension's state file
+(§5.2) from the same read. The database file itself is never replaced
+under the reader, so the inode is stable and no re-`stat` is needed. S3 confirms
 the reader works from inside the sandbox while the agent writes, that it
 sees the flag and the counter promptly, and measures both paths. The
 reader is kept only if the measurement earns it: the XPC path is the
@@ -809,7 +828,11 @@ held(path BLOB PK, dir BLOB, first_missing REAL, recheck_at REAL)   -- mass-dele
 meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generation counter (§5.2)
 ```
 
-- Identifier = UUID minted the first time we see a path. The root is the
+- Identifier = UUID minted the first time we see a path, from a
+  generator seeded once per process rather than from the platform's
+  per-call entropy: a first listing of a ten-thousand-entry directory
+  mints ten thousand of them, and an item identifier is a local name for
+  a row, never a secret and never a capability. The root is the
   one exception: it is a permanent row with the empty path and the
   identifier `NSFileProviderItemIdentifier.rootContainer`, created when the
   domain is, so it can carry a pin state and xattrs like any other item.
@@ -906,6 +929,12 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   So the index's transaction helper **nests**, with `SAVEPOINT` for every
   level below the outermost, which is what lets a rule about the whole
   listing and a rule about one row's atomicity both hold (2026-09-04).
+  The anchor is the one thing that takes no level of its own: an `INSERT`
+  is atomic by itself, nothing inside the batch catches an error, and a
+  throw rolls the whole listing back either way, so a `SAVEPOINT` and a
+  `RELEASE` per anchor - four thousand `sqlite3_exec` calls in a
+  two-thousand-entry listing - would buy nothing. The deletion, which
+  writes a row and its anchor together, takes one.
   **The transaction holds the writes and nothing else.** The rule is that
   a listing lands atomically, not that everything a listing does happens
   under the write lock: the path construction, the read of the incumbent
@@ -923,7 +952,15 @@ meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generat
   upsert binds, so an equal row is a no-op statement, and an equal row
   carries the same metadata version and the same `hidden`, which are what
   decide the anchor - skipping the write cannot change which anchors a
-  listing appends (2026-09-09).
+  listing appends.
+  **Nothing a listing does is once per entry that could be once per
+  listing.** The incumbent rows are read on one compiled statement bound
+  once per path and answered in the order asked, and the write pass holds
+  the row statement and the anchor statement open for its whole length,
+  so ten thousand entries cost three statement *executions* each and a
+  handful of compilations in all - not a trip to the cache, a wrapper and
+  two resets per row. The rows and their anchors land interleaved, in
+  listing order, and the deletion pass runs after all of them.
 - `anchors` is pruned to the newest 30 days and to the newest 1,000,000
   rows, both limits applying. The row cap is deliberately generous: a pin change writes
   an anchor per known descendant (§7.1), so a cap in the tens of
@@ -1122,8 +1159,11 @@ one already visible in the index keeps its slot, and among newcomers the
 byte-wise lowest name is shown; the rest are recorded with `hidden = 2`.
 `readdir` order is not stable across polls on hash-ordered directories, so
 it cannot be the tie-breaker: the visible name must not flip from one cycle
-to the next. Left to itself the system copes rather than failing - it renames
-the item already in its replica to `<name> 2.<ext>` and does not report that
+to the next. The *rows* are written, and the pages of §5.2 cut, in the
+order the server reported the entries in, which at least makes two
+listings of a directory nothing has touched agree with each other. Left to
+itself the system copes rather than failing - it renames the item
+already in its replica to `<name> 2.<ext>` and does not report that
 rename back, so the server name is untouched (S3, 2026-09-04) - but the user
 is then looking at a name the server does not have, which is why we hide one
 instead. Names that are not valid UTF-8 are hidden the same way, which is why
@@ -1503,7 +1543,15 @@ check. "Once per link at enumeration time" costs a round trip of its own:
 SFTP v3's `readdir` carries attributes but no target, so every link a
 listing reports needs a `readlink` before its row can be built. That is
 the price of the check, it is paid once per link rather than once per
-look, and a directory of ordinary files pays nothing.
+look, and a directory of ordinary files pays nothing. A directory of
+links pays it **through §6.2's window rather than one link at a time**:
+the requests are independent, they go out sixteen at a time on the one
+channel with one more issued for each answer that lands, and the listing
+costs a round trip per sixteen links rather than one per link. Order is
+not part of the answer - each target is filed under its own path - and a
+`readlink` that fails leaves its link with no target, which is the empty
+target the check below hides. One refusal never fails the listing it was
+found in.
 
 What the Mac makes of the links it is given was measured on macOS 26.4
 (S8, 2026-09-04). The system creates a **real symlink** under
@@ -2026,7 +2074,41 @@ outstanding, so the chunk size is the server's and the depth is ours. OpenSSH
 9.2 and 9.7 both answer 255 KiB reads and writes inside a 256 KiB packet
 (measured against the testbed, 2026-09-04), which makes the window about 4 MiB;
 without the extension the chunk falls back to a conservative 32 KB, and sixteen
-of those is a 512 KiB window. `readdir` pages are requested back to back.
+of those is a 512 KiB window.
+
+`readdir` uses the same window. A page carries about a hundred names on every
+server we have measured, so a directory of ten thousand entries is a hundred
+pages, and what bounds the first Finder listing of it is not the bytes but how
+many of those questions are in the air at once: at a depth of two it is fifty
+serial round trips, three quarters of a second on a 15 ms link for a directory
+that transfers in a tenth of one. The client fills a window of sixteen
+`SSH_FXP_READDIR`s on the one handle, drains it, and asks again until the server
+answers EOF - seven round trips for that directory, and **one** for any
+directory of sixteen pages or fewer, which is nearly every directory anyone
+opens. Three things follow. The pages are reassembled in the order the
+*questions* went out, not the order the answers arrive: a directory's pages are
+cut server-side and handed out in arrival order, the window is filled by
+concurrent requests, and merging in completion order really does shuffle a
+listing - which section 5.4 must not have, because it breaks a collision between
+two new names by the order the listing reported them. The order a request went
+out in is not its request id either, since an id is allocated before the
+outstanding-request gate; it is recorded when the packet is appended to the
+outbox. And the window over-issues at the end, because it is filled before EOF
+can come back: at most fifteen extra requests per listing, each answered with an
+EOF status and dropped, which is the price of never paying a round trip per
+page.
+
+One thing about the window is **not** measured yet and is a VM item against
+`ts-ssh`: OpenSSH's `sftp-server` reads its requests one at a time, so sixteen
+outstanding `readdir`s on one handle are answered strictly in order, but Go's
+`pkg/sftp` - Tailscale SSH's SFTP subsystem, and the owner's own server -
+dispatches requests to a pool of workers, and `os.File.Readdir` is not
+documented as safe to call from two of them at once. Depth two has been in use
+against that server since milestone 2 with no listing anyone has questioned, and
+sixteen is eight times the exposure. What to look for is a listing of a large
+directory on `ts-ssh` that returns a name twice or loses one; if it does, the
+depth becomes a server-fingerprint question (§8.1 already tells `pkg/sftp` from
+`sftp-server` by its extension set) rather than one number.
 The client exposes a `protocol SFTPTransport` whose methods take
 `RelativePath` values only (§9.1).
 
@@ -3292,18 +3374,17 @@ A host-key change needs no command of ours: `status` prints the
 **How `status` is built, and what it is never allowed to wait for.**
 `status` is the command a user runs *because* something looks wrong, so
 the one thing it may not do is join the queue behind whatever is wrong.
-Two rules make that true, and both were written after `sshdrive status`
-hung while Finder was listing a large folder (2026-09-09):
+Two rules make that true:
 
 - **It reads the index through a read-only reader of its own, never
   through the location's writer.** `LocationRuntime` is an actor because
   the index has a single writer by design (§3), and a directory listing
   writes its rows inside one synchronous SQLite transaction (§5.3) - so
-  every hop `status` made onto that actor waited for a whole listing, and
-  it made about eighteen of them per location: the hidden names, the held
-  deletions, the root set, one row read per materialized file, the pin
-  tree. §5.2 already opens `index.sqlite` read-only in WAL mode for the
-  extension, and the agent's own report now does the same. A WAL reader
+  a hop onto that actor waits for a whole listing, and a row is about
+  eighteen of them per location: the hidden names, the held deletions,
+  the root set, one row read per materialized file, the pin tree. §5.2
+  opens `index.sqlite` read-only in WAL mode for the extension, and the
+  agent's own report does the same. A WAL reader
   neither blocks the writer nor delays it and always sees a consistent
   snapshot - for a listing in flight, the state before it. The agent
   remains the sole writer. What is left on the runtime is taken in **one**
@@ -3396,11 +3477,11 @@ is not a capability level.
 
 **It is measured at probe time and cached, and `status` never measures it.**
 It is the one line of the report that is a live number rather than a
-property of the server, and asking for it from `status` meant a wire call
-through §6.3's gate: on a location whose connection was in progress the call
-waited behind that attempt, up to the 60 s authentication deadline, and on a
-location with no attempt at all it *started* one - a status command dialling
-a server the user had not touched. So the `statvfs` is made where a
+property of the server, and asking for it from `status` would be a wire call
+through §6.3's gate: on a location whose connection is in progress the call
+waits behind that attempt, up to the 60 s authentication deadline, and on a
+location with no attempt at all it *starts* one - a status command dialling
+a server the user has not touched. So the `statvfs` is made where a
 connection already exists and a round trip is already being spent: on every
 connection, beside the `realpath` and `lstat` that bring a location up, and
 again on `status --probe`, which is the one form §8 lets ask the server for
@@ -3412,7 +3493,7 @@ connected shows `unknown`; a `capabilities.json` written before the field
 existed is one of those, not an error. The same rule covers the state word
 beside it: `online`/`offline (<reason>)` comes from the connection gate and
 the breaker, never from an `ssh -O check`, which spawns a process and waits
-up to ten seconds for it inside the master's actor (2026-09-09).
+up to ten seconds for it inside the master's actor.
 
 Every line in the report follows one shape so all permutations read the same
 way: a level glyph, the feature name, the level in use, and, whenever the
@@ -4337,6 +4418,28 @@ there, so that this list cannot drift from the body.
   outermost level: §5.3's "a listing is one transaction" wraps calls that are
   each a transaction of their own, and SQLite has no nested `BEGIN`
   (2026-09-04, §5.3).
+- **Both sides of the index cache their compiled statements,** and the reader's
+  three `meta` keys ride on the row's own query: a 2,000-entry listing compiled
+  8,006 statements and an `item(for:)` five, where the fixed set is a handful
+  and one (2026-09-09, §5.2, §5.3).
+- **A listing binds one compiled statement per kind, not per entry,** and mints
+  its identifiers from a generator seeded once per process: a first listing of
+  ten thousand entries is bounded compilations, bounded wire round trips and
+  three statement executions an entry, which is what `E7` counts
+  (2026-09-09, §5.2, §5.3).
+- **A listing's entries are classified and written in the order the server
+  reported them,** rather than in the order a dictionary of collision keys
+  happened to iterate, so two listings of a directory nothing has touched cut
+  their pages the same way (2026-09-09, §5.4).
+- **An anchor appended inside a listing's transaction takes no savepoint,** and
+  its sequence number comes from `sqlite3_last_insert_rowid` rather than from a
+  `SELECT` (2026-09-09, §5.3).
+- **`readdir` is pipelined to the same depth as a transfer, sixteen rather than
+  two,** and its pages are reassembled in the order the questions went out
+  rather than the order the answers arrive (2026-09-09, §6.2).
+- **A listing reads its links' targets through that window too,** sixteen
+  `readlink`s in flight rather than one, with a failure still costing only its
+  own link (2026-09-09, §5.7, §6.2).
 - **`sshdrive add` also takes the nickname as a first positional argument,**
   which is what people write; `--nickname` is unchanged (2026-09-04, §8).
 - **The eviction after a conflict copy has to be retried:** an `evictItem`

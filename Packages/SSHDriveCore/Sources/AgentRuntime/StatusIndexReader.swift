@@ -9,10 +9,10 @@ import Logging
 ///
 /// `LocationRuntime` is an actor because the index has a single writer by design, and a
 /// directory listing writes its rows inside one **synchronous** SQLite transaction on it
-/// (section 5.3). Every hop `status` made onto that actor therefore queued behind whatever
-/// listing was in flight, and `status` made eighteen of them per location: the hidden
-/// names, the held deletions, the root set, the eviction rows, the pin tree. A `status`
-/// run while Finder was walking a large folder waited for the walk (2026-09-09).
+/// (section 5.3), so a hop onto that actor queues behind whatever listing is in flight.
+/// A row is about eighteen of those hops per location - the hidden names, the held
+/// deletions, the root set, the eviction rows, the pin tree - which is a report that waits
+/// for Finder to finish walking a large folder.
 ///
 /// Section 5.2 already sanctions the answer: `index.sqlite` is opened **read-only in WAL
 /// mode**, which is what the extension does for `item(for:)` and the working set. A WAL

@@ -354,6 +354,10 @@ public actor DomainManager {
 
     public func gate(locationID: String) -> ConnectionGate? { gates[locationID] }
 
+    /// Every gate that is up, for a caller that has to ask all of them something -
+    /// whether any location is still running the reconnect sequence, say.
+    public func startedGates() -> [ConnectionGate] { Array(gates.values) }
+
     public func dropRuntime(locationID: String) async {
         if let detector = detectors.removeValue(forKey: locationID) { await detector.stop() }
         if let evictor = evictors.removeValue(forKey: locationID) { await evictor.stop() }

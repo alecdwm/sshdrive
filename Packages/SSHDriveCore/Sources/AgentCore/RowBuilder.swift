@@ -137,7 +137,7 @@ public struct RowBuilder: Sendable {
             xattrs: blob)
 
         let row = IndexItem(
-            identifier: existing?.identifier ?? UUID().uuidString,
+            identifier: existing?.identifier ?? IndexItem.mintIdentifier(),
             path: path.bytes,
             parent: parent.identifier,
             type: attributes.type.rawValue,

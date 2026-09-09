@@ -34,18 +34,52 @@ public final class IndexReader {
     /// Any SQLite error, a corrupt page, a not-a-database header during the truncate
     /// window, a missing table, is answered by the caller as serverUnreachable, never as
     /// noSuchItem, so a rebuild in progress can never look like a deletion (section 5.3).
-    private func checkMeta() throws {
-        let version = try metaInt(IndexSchema.MetaKey.schemaVersion) ?? 0
+    ///
+    /// The three keys are read in **one** statement: a `SELECT value FROM meta WHERE
+    /// key = ?1` each, with the row read and the generation the caller wants after it,
+    /// makes an `item(for:)` five statements where two will do, and the system issues
+    /// `item(for:)` in bulk (section 5.2). A key that is missing, or whose value is not a
+    /// number, reads as 0.
+    @discardableResult
+    private func checkMeta() throws -> Int64 {
+        let statement = try database().prepare(
+            "SELECT key, value FROM meta WHERE key IN (?1, ?2, ?3)")
+        statement.bind(1, IndexSchema.MetaKey.schemaVersion)
+        statement.bind(2, IndexSchema.MetaKey.reconciling)
+        statement.bind(3, IndexSchema.MetaKey.generation)
+        defer { statement.reset() }
+        var version: Int64 = 0
+        var reconciling: Int64 = 0
+        var generation: Int64 = 0
+        while try statement.step() {
+            let value = statement.string(1).flatMap(Int64.init) ?? 0
+            switch statement.string(0) {
+            case IndexSchema.MetaKey.schemaVersion: version = value
+            case IndexSchema.MetaKey.reconciling: reconciling = value
+            case IndexSchema.MetaKey.generation: generation = value
+            default: break
+            }
+        }
+        return try judge(version: version, reconciling: reconciling, generation: generation)
+    }
+
+    /// The three answers the meta check produces, whichever statement read them.
+    ///
+    /// A schema newer than this build is the extension's cue to fall back to the agent; a
+    /// database being reconciled answers nothing at all; anything else hands back the
+    /// generation the caller wants for the state file (section 5.2). A key that is
+    /// missing, or whose value is not a number, reads as 0.
+    private func judge(version: Int64, reconciling: Int64, generation: Int64) throws -> Int64 {
         guard version <= IndexSchema.version else {
             throw IndexError.schemaTooNew(found: Int(version))
         }
-        if (try metaInt(IndexSchema.MetaKey.reconciling) ?? 0) != 0 {
+        if reconciling != 0 {
             throw IndexError.reconciling
         }
-        let generation = try metaInt(IndexSchema.MetaKey.generation) ?? 0
         if generation != cachedGeneration {
             cachedGeneration = generation
         }
+        return generation
     }
 
     private func metaInt(_ key: String) throws -> Int64? {
@@ -105,13 +139,46 @@ public final class IndexReader {
 
     /// One row read and a field-by-field copy, with no ancestor walk (section 5.2).
     public func item(identifier: String) throws -> IndexItem {
-        try checkMeta()
+        try itemAndGeneration(identifier: identifier).item
+    }
+
+    /// The same row, with the `meta.generation` the check above already read.
+    ///
+    /// The extension's store wants both on every `item(for:)` - the row for the system and
+    /// the generation for the state file `doctor` reads (section 5.2) - and asking for the
+    /// generation separately is a meta statement per call on top of the check.
+    public func itemAndGeneration(identifier: String) throws -> (item: IndexItem, generation: Int64) {
+        // The meta check rides on the row's own query as three scalar subqueries, so an
+        // `item(for:)` is **one** statement rather than two: the system issues them in
+        // bulk and a whole statement of overhead per call is a third of what one costs
+        // (section 5.2). The three values are judged before the row is returned, exactly
+        // as `checkMeta()` judges them for every other read here, and one query is if
+        // anything the firmer answer - the row and the meta keys come from one snapshot.
         let statement = try database().prepare(
-            "SELECT \(Self.itemColumns) FROM items WHERE identifier = ?1")
+            """
+            SELECT \(Self.itemColumns), \
+            (SELECT value FROM meta WHERE key = ?2), \
+            (SELECT value FROM meta WHERE key = ?3), \
+            (SELECT value FROM meta WHERE key = ?4) \
+            FROM items WHERE identifier = ?1
+            """)
         statement.bind(1, identifier)
+        statement.bind(2, IndexSchema.MetaKey.schemaVersion)
+        statement.bind(3, IndexSchema.MetaKey.reconciling)
+        statement.bind(4, IndexSchema.MetaKey.generation)
         defer { statement.reset() }
-        guard try statement.step() else { throw IndexError.noSuchItem }
-        return Self.decodeItem(statement)
+        guard try statement.step() else {
+            // No row here says nothing about the database's health, and a rebuild in
+            // progress must never look like a deletion (section 5.3): the meta check is
+            // asked in its own right before the answer is given.
+            try checkMeta()
+            throw IndexError.noSuchItem
+        }
+        let generation = try judge(
+            version: statement.string(23).flatMap(Int64.init) ?? 0,
+            reconciling: statement.string(24).flatMap(Int64.init) ?? 0,
+            generation: statement.string(25).flatMap(Int64.init) ?? 0)
+        return (Self.decodeItem(statement), generation)
     }
 
     public func children(ofParent identifier: String) throws -> [IndexItem] {
@@ -154,10 +221,9 @@ public final class IndexReader {
     /// The queries below are not the extension's. They are what `sshdrive status` reads,
     /// and they are here rather than on `IndexWriter` for the reason section 5.2 gives the
     /// extension one at all: `LocationRuntime` is an actor, a directory listing writes its
-    /// rows in one synchronous transaction on it (section 5.3), and every hop `status`
-    /// made onto that actor therefore waited for a whole listing to finish. A WAL reader
-    /// never blocks the writer and never delays it, so the report is taken from a
-    /// connection of its own (2026-09-09, section 8).
+    /// rows in one synchronous transaction on it (section 5.3), and a hop onto that actor
+    /// waits for a whole listing to finish. A WAL reader neither blocks the writer nor
+    /// waits for it, so the report is taken from a connection of its own (section 8).
     ///
     /// They are read-only, they call `checkMeta()` like every other read here, and the
     /// agent remains the sole writer.
@@ -286,7 +352,32 @@ public final class IndexReader {
 
     /// Reopens after the agent's `reopenIndexReader` callback.
     public func reopen() throws {
-        connection = try SQLiteConnection(path: path, mode: .readOnly)
+        let opened = try SQLiteConnection(path: path, mode: .readOnly)
+        opened.statementObserver = statementObserver
+        opened.compileObserver = compileObserver
+        connection = opened
         cachedGeneration = -1
+    }
+
+    // MARK: The test seam of section 5.2's statement cache
+
+    /// Kept on the reader rather than only on the connection so that a close and reopen
+    /// - the truncate window of a restore (section 5.3) - does not silently stop a test
+    /// counting. Both are nil in the shipping extension.
+    private var statementObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
+    private var compileObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
+
+    /// Every statement this reader *executes*.
+    public func observeStatements(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        statementObserver = observer
+        connection?.statementObserver = observer
+    }
+
+    /// Every statement this reader *compiles*, which is what says the cache is working:
+    /// an `item(for:)` storm must compile a constant number and not five per call
+    /// (section 5.2).
+    public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        compileObserver = observer
+        connection?.compileObserver = observer
     }
 }

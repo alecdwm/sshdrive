@@ -191,7 +191,8 @@ final class NestedTransactionTests: XCTestCase {
         try index.ensureRoot(mode: 0o755, uid: 0, gid: 0)
 
         try index.batch {
-            // Both of these are `connection.transaction` calls in their own right.
+            // `appendAnchor` takes a transaction of its own when there is not one open
+            // already, and `delete` always does; either way a `batch` around them holds.
             try index.appendAnchor(identifier: "a", kind: .modified)
             try index.appendAnchor(identifier: "b", kind: .modified)
         }

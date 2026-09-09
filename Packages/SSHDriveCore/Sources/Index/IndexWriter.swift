@@ -112,8 +112,8 @@ public final class IndexWriter {
         try setMeta(IndexSchema.MetaKey.reconciling, value ? "1" : "0")
     }
 
-    /// Bumped whenever the contents have been replaced wholesale. The reader re-reads its
-    /// cached prepared statements on a change (section 5.2).
+    /// Bumped whenever the contents have been replaced wholesale, which is what the
+    /// extension's state file reports and what `doctor` reads (section 5.2).
     public func bumpGeneration() throws {
         let current = Int64(try meta(IndexSchema.MetaKey.generation) ?? "0") ?? 0
         try setMeta(IndexSchema.MetaKey.generation, String(current + 1))
@@ -138,29 +138,84 @@ public final class IndexWriter {
         return root
     }
 
+    private static let upsertStatement = """
+        INSERT INTO items (
+            identifier, path, parent, type, size, mtime, mtime_ns, inode, uid, gid, mode,
+            generation, content_version, metadata_version, last_fetch, pin_state, kept,
+            capabilities, fs_flags, link_target, hidden, xattrs, local_content)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21, ?22, ?23)
+        ON CONFLICT(identifier) DO UPDATE SET
+            path = excluded.path, parent = excluded.parent, type = excluded.type,
+            size = excluded.size, mtime = excluded.mtime, mtime_ns = excluded.mtime_ns,
+            inode = excluded.inode, uid = excluded.uid, gid = excluded.gid,
+            mode = excluded.mode, generation = excluded.generation,
+            content_version = excluded.content_version,
+            metadata_version = excluded.metadata_version,
+            last_fetch = excluded.last_fetch, pin_state = excluded.pin_state,
+            kept = excluded.kept, capabilities = excluded.capabilities,
+            fs_flags = excluded.fs_flags, link_target = excluded.link_target,
+            hidden = excluded.hidden, xattrs = excluded.xattrs,
+            local_content = excluded.local_content
+        """
+
     /// Writes a finished row. Every derived field is already computed by the caller: a
     /// row is a finished item (section 5.2).
     public func upsert(_ item: IndexItem) throws {
-        let statement = try connection.prepare("""
-            INSERT INTO items (
-                identifier, path, parent, type, size, mtime, mtime_ns, inode, uid, gid, mode,
-                generation, content_version, metadata_version, last_fetch, pin_state, kept,
-                capabilities, fs_flags, link_target, hidden, xattrs, local_content)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                    ?18, ?19, ?20, ?21, ?22, ?23)
-            ON CONFLICT(identifier) DO UPDATE SET
-                path = excluded.path, parent = excluded.parent, type = excluded.type,
-                size = excluded.size, mtime = excluded.mtime, mtime_ns = excluded.mtime_ns,
-                inode = excluded.inode, uid = excluded.uid, gid = excluded.gid,
-                mode = excluded.mode, generation = excluded.generation,
-                content_version = excluded.content_version,
-                metadata_version = excluded.metadata_version,
-                last_fetch = excluded.last_fetch, pin_state = excluded.pin_state,
-                kept = excluded.kept, capabilities = excluded.capabilities,
-                fs_flags = excluded.fs_flags, link_target = excluded.link_target,
-                hidden = excluded.hidden, xattrs = excluded.xattrs,
-                local_content = excluded.local_content
-            """)
+        let statement = try connection.prepare(Self.upsertStatement)
+        IndexWriter.bind(item, into: statement)
+        try statement.run()
+    }
+
+    /// The two statements a listing's write pass binds, compiled once and held for the
+    /// length of the pass (section 5.3).
+    ///
+    /// A directory of ten thousand entries writes ten thousand rows and up to ten thousand
+    /// anchors, interleaved in listing order. Going back to the statement cache for each
+    /// of them is a dictionary round trip, a wrapper allocation and two resets per write;
+    /// gathering them into arrays first and writing each kind in a run of its own costs a
+    /// copy of every row instead. Holding both statements open costs neither, and the
+    /// order the writes land in is exactly the order the caller makes them in.
+    public struct ListingWriter {
+        fileprivate let rowStatement: SQLiteStatement
+        fileprivate let anchorStatement: SQLiteStatement
+        fileprivate final class Counter { var rows = 0; var anchors = 0 }
+        fileprivate let counter = Counter()
+
+        /// One finished row, bound and stepped exactly as `upsert` binds and steps it.
+        public func upsert(_ item: IndexItem) throws {
+            if counter.rows > 0 { rowStatement.noteExecution() }
+            counter.rows += 1
+            IndexWriter.bind(item, into: rowStatement)
+            try rowStatement.run()
+        }
+
+        /// One anchor, appended inside the transaction the caller already holds.
+        public func appendAnchor(identifier: String, kind: IndexAnchorEntry.Kind) throws {
+            if counter.anchors > 0 { anchorStatement.noteExecution() }
+            counter.anchors += 1
+            anchorStatement.bind(1, identifier)
+            anchorStatement.bind(2, kind.rawValue)
+            anchorStatement.bind(3, Date().timeIntervalSince1970)
+            try anchorStatement.run()
+        }
+    }
+
+    /// Runs `body` with both of a listing's write statements held open. The caller is
+    /// already inside the listing's one transaction; nothing here opens another.
+    public func writingListing<T>(_ body: (ListingWriter) throws -> T) throws -> T {
+        let writer = ListingWriter(
+            rowStatement: try connection.prepare(Self.upsertStatement),
+            anchorStatement: try connection.prepare(
+                "INSERT INTO anchors (changed_identifier, change_kind, at) VALUES (?1, ?2, ?3)"))
+        defer {
+            writer.rowStatement.reset()
+            writer.anchorStatement.reset()
+        }
+        return try body(writer)
+    }
+
+    private static func bind(_ item: IndexItem, into statement: SQLiteStatement) {
         statement.bind(1, item.identifier)
         statement.bind(2, item.path)
         statement.bind(3, item.parent)
@@ -184,7 +239,6 @@ public final class IndexWriter {
         statement.bind(21, item.hidden)
         statement.bind(22, item.xattrs)
         statement.bind(23, item.localContent)
-        try statement.run()
     }
 
     public func item(identifier: String) throws -> IndexItem? {
@@ -204,6 +258,34 @@ public final class IndexWriter {
         return IndexReader.decodeItem(statement)
     }
 
+    /// The rows a listing's entries already have, by path, on one compiled statement.
+    ///
+    /// Exactly `item(path:)` per path and nothing else - the same question, the same
+    /// answer, and paths that have no row are simply absent - but the statement is
+    /// compiled and handed out once rather than ten thousand times. It is keyed by path
+    /// and not by parent on purpose: a helper rename into a directory the index has never
+    /// listed leaves a row whose `path` is under this directory and whose `parent` is not
+    /// this row (section 6.4), and `items.path` is UNIQUE, so a listing that failed to
+    /// find it would mint a second identifier for a path that already has one and the
+    /// insert would fail (section 5.3).
+    /// Answered in the order asked, one element per path, so the caller needs no
+    /// dictionary and no second hash of every path it already has.
+    public func rows(atPaths paths: [Data]) throws -> [IndexItem?] {
+        guard !paths.isEmpty else { return [] }
+        var out: [IndexItem?] = []
+        out.reserveCapacity(paths.count)
+        let statement = try connection.prepare("SELECT \(Self.columns) FROM items WHERE path = ?1")
+        defer { statement.reset() }
+        var first = true
+        for path in paths {
+            if first { first = false } else { statement.noteExecution() }
+            statement.bind(1, path)
+            out.append(try statement.step() ? IndexReader.decodeItem(statement) : nil)
+            statement.reset()
+        }
+        return out
+    }
+
     /// Runs `body` inside one transaction. A directory listing writes a row per entry
     /// and an anchor per change, and a `data/many` with 10,000 entries is 10,000
     /// autocommits without this - each its own WAL frame and fsync, which is most of the
@@ -220,6 +302,13 @@ public final class IndexWriter {
         connection.statementObserver = observer
     }
 
+    /// The other half of the seam: called only when a statement is actually compiled, so
+    /// a test can assert that a listing's compilations are a constant rather than a
+    /// multiple of its entries (section 5.3). Nil in the shipping agent.
+    public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
+        connection.compileObserver = observer
+    }
+
     public func children(ofParent identifier: String) throws -> [IndexItem] {
         let statement = try connection.prepare(
             "SELECT \(Self.columns) FROM items WHERE parent = ?1 ORDER BY path")
@@ -227,6 +316,41 @@ public final class IndexWriter {
         defer { statement.reset() }
         var rows: [IndexItem] = []
         while try statement.step() { rows.append(IndexReader.decodeItem(statement)) }
+        return rows
+    }
+
+    /// The three fields a listing's own bookkeeping needs from the children it already
+    /// knows: which names are taken, which rows the listing did not mention, and whether
+    /// the user was ever shown them (sections 5.4, 6.4).
+    public struct ChildKey: Equatable, Sendable {
+        public var identifier: String
+        public var path: Data
+        public var hidden: Int64
+
+        public init(identifier: String, path: Data, hidden: Int64) {
+            self.identifier = identifier
+            self.path = path
+            self.hidden = hidden
+        }
+    }
+
+    /// `children(ofParent:)` without the twenty other columns. A listing asks for the
+    /// incumbents twice - once for section 5.4's name rules, once for the deletion pass -
+    /// and a whole `IndexItem` per row would be two blob copies and a `LocalAttributes`
+    /// worth of decoding per row per listing that nothing reads (section 5.3).
+    public func childKeys(ofParent identifier: String) throws -> [ChildKey] {
+        let statement = try connection.prepare(
+            "SELECT identifier, path, hidden FROM items WHERE parent = ?1 ORDER BY path")
+        statement.bind(1, identifier)
+        defer { statement.reset() }
+        var rows: [ChildKey] = []
+        while try statement.step() {
+            rows.append(
+                ChildKey(
+                    identifier: statement.string(0) ?? "",
+                    path: statement.data(1) ?? Data(),
+                    hidden: statement.int(2)))
+        }
         return rows
     }
 
@@ -371,9 +495,21 @@ public final class IndexWriter {
     // MARK: anchors
 
     /// Appends one change-stream entry and returns its sequence number.
+    ///
+    /// The transaction is taken only when there is not one already. Inside a listing's
+    /// `batch`, a `SAVEPOINT` per anchor would be two `sqlite3_exec` calls around one
+    /// `INSERT` that is atomic by itself - 4,000 of them in a 2,000-entry listing - and
+    /// would buy nothing: a savepoint's only effect is to let an error inside it be
+    /// caught and undone on its own, nothing catches one here, and a throw fails the
+    /// whole batch either way (section 5.3, gotcha 45).
     @discardableResult
     public func appendAnchor(identifier: String, kind: IndexAnchorEntry.Kind) throws -> Int64 {
-        try connection.transaction { try appendAnchorLocked(identifier: identifier, kind: kind) }
+        if connection.isInTransaction {
+            return try appendAnchorLocked(identifier: identifier, kind: kind)
+        }
+        return try connection.transaction {
+            try appendAnchorLocked(identifier: identifier, kind: kind)
+        }
     }
 
     @discardableResult
@@ -384,14 +520,7 @@ public final class IndexWriter {
         statement.bind(2, kind.rawValue)
         statement.bind(3, Date().timeIntervalSince1970)
         try statement.run()
-        return sqliteLastInsertRowID()
-    }
-
-    private func sqliteLastInsertRowID() -> Int64 {
-        let statement = try? connection.prepare("SELECT last_insert_rowid()")
-        guard let statement, (try? statement.step()) == true else { return 0 }
-        defer { statement.reset() }
-        return statement.int(0)
+        return connection.lastInsertRowID
     }
 
     /// The same working-set change stream the extension's reader serves, answered from
@@ -759,6 +888,10 @@ public final class IndexWriter {
     /// anchors that came back are the backup's, so the caller expires them (section 5.3)
     /// and the agent answers the resulting fresh anchor with one full sweep.
     public func restore(fromBackupAt url: URL) throws {
+        // Nothing compiled against the contents that are about to be replaced is kept:
+        // `sqlite3_prepare_v2` would re-prepare them, but an idle statement is one more
+        // thing for `sqlite3_backup_init` to call a use of the destination.
+        connection.purgeStatementCache()
         let source = try SQLiteConnection(path: url.path, mode: .readOnly)
         guard let backup = sqlite3_backup_init(connection.rawHandle, "main", source.rawHandle, "main")
         else {

@@ -253,8 +253,8 @@ enum IndexReconcile {
     ) -> Bool {
         do {
             // `restore(fromBackupAt:)` bumps `meta.generation` itself - that is the
-            // signal the reader re-reads its cached prepared statements on (section 5.2) -
-            // so the generation is deliberately not bumped a second time here.
+            // signal that says the contents were replaced wholesale (section 5.2) - so
+            // the generation is deliberately not bumped a second time here.
             try writer.restore(fromBackupAt: backupURL)
             // The anchors that came back are the backup's, and the system may hold one
             // newer than any of them. Expiring them makes the extension answer

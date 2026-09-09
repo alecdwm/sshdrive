@@ -30,15 +30,27 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
     /// The validated components, as raw server bytes.
     public let components: [Data]
 
+    /// The path as raw bytes, "a/b/c", with no leading slash. This is what the index
+    /// stores in its BLOB `path` column.
+    ///
+    /// Stored rather than computed: a listing asks for it four or five times per entry -
+    /// the seen set, the in-flight set, the incumbent row read, the row itself - so
+    /// computing it would rebuild the same `Data` fifty thousand times over a directory of
+    /// ten thousand entries (section 5.3). It is derived from `components` and nothing
+    /// else.
+    public let bytes: Data
+
     /// The location root itself.
     public static let root = RelativePath()
 
     private init() {
         components = []
+        bytes = Data()
     }
 
-    private init(validated: [Data]) {
+    private init(validated: [Data], bytes: Data) {
         components = validated
+        self.bytes = bytes
     }
 
     /// Builds a path from raw component bytes, validating each.
@@ -47,6 +59,7 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
             try RelativePath.validate(component)
         }
         self.components = components
+        self.bytes = RelativePath.join(components)
     }
 
     /// Builds a path from a "a/b/c" string. Leading and trailing slashes are allowed and
@@ -71,13 +84,21 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
 
     /// The parent path, or nil at the root.
     public var parent: RelativePath? {
-        guard !components.isEmpty else { return nil }
-        return RelativePath(validated: Array(components.dropLast()))
+        guard let last = components.last else { return nil }
+        // The parent's bytes are this path's without the last component and the slash
+        // that precedes it; at depth one they are empty.
+        let trimmed = bytes.count - last.count
+        let cut = trimmed > 0 ? trimmed - 1 : 0
+        return RelativePath(
+            validated: Array(components.dropLast()), bytes: Data(bytes.prefix(cut)))
     }
 
     public func appending(component: Data) throws -> RelativePath {
         try RelativePath.validate(component)
-        return RelativePath(validated: components + [component])
+        var joined = bytes
+        if !joined.isEmpty { joined.append(0x2F) }
+        joined.append(component)
+        return RelativePath(validated: components + [component], bytes: joined)
     }
 
     public func appending(component: String) throws -> RelativePath {
@@ -85,7 +106,9 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
     }
 
     public func appending(_ other: RelativePath) -> RelativePath {
-        RelativePath(validated: components + other.components)
+        RelativePath(
+            validated: components + other.components,
+            bytes: RelativePath.join(components + other.components))
     }
 
     /// True when `self` is `other` or lies under it.
@@ -94,15 +117,24 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
         return Array(components.prefix(other.components.count)) == other.components
     }
 
-    /// The path as raw bytes, "a/b/c", with no leading slash. This is what the index
-    /// stores in its BLOB `path` column.
-    public var bytes: Data {
+    private static func join(_ components: [Data]) -> Data {
         var out = Data()
         for (offset, component) in components.enumerated() {
             if offset > 0 { out.append(0x2F) }
             out.append(component)
         }
         return out
+    }
+
+    /// Two paths are the same path when their bytes are: a component may not contain a
+    /// slash, so the joined form and the component list determine one another exactly,
+    /// and comparing one `Data` beats comparing an array of them.
+    public static func == (lhs: RelativePath, rhs: RelativePath) -> Bool {
+        lhs.bytes == rhs.bytes
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(bytes)
     }
 
     /// Builds a path from the bytes `bytes` produced.

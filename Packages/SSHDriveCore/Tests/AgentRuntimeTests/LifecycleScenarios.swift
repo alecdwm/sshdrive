@@ -235,7 +235,11 @@ extension AgentScenarios {
             let gate = try #require(await stopHarness.manager.gate(locationID: restarted.id))
             stopHarness.launcher.live?.killMaster()
             await gate.drop(reason: "the master was killed")
-            await stopHarness.settle { stopHarness.launcher.attempts == 2 }
+            // The second *master*, not the second attempt: the launcher counts an attempt
+            // when it starts one and hands the connection over when it is finished, so a
+            // scenario that waits for the count reads `connections` while the master it
+            // wants is still being made.
+            await stopHarness.settle { stopHarness.launcher.connections.count == 2 }
             await stopHarness.quiesceConnects()
             let restartedMasters = stopHarness.launcher.connections
             #expect(restartedMasters.count == 2, "the location holds a second master")
