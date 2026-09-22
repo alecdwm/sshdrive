@@ -1,0 +1,71 @@
+site_name: SSH Drive
+site_description: Mount SFTP locations in Finder on macOS, through Apple's File Provider framework.
+site_url: https://alecdwm.github.io/sshdrive/
+repo_url: https://github.com/alecdwm/sshdrive
+repo_name: alecdwm/sshdrive
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: shadcn
+  icon: assets/icon-256.png
+  show_title: true
+  show_stargazers: true
+  topbar_sections: false
+  show_datetime: false
+  hide_source_files: false
+  pygments_style:
+    light: shadcn-light
+    dark: github-dark
+  # The icon's blue, #4F82BD, in oklch.
+  accent: "oklch(59.7% 0.106 253.03)"
+
+markdown_extensions:
+  - tables
+  - admonition
+  - attr_list
+  - fenced_code
+  - footnotes
+  - codehilite:
+      guess_lang: false
+  - toc:
+      permalink: true
+  - pymdownx.blocks.details
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Install and use: install.md
+  - Troubleshooting: troubleshooting.md
+  - Release: release.md
+  - Design:
+      - Goals and non-goals: design/goals.md
+      - Platform facts: design/platform.md
+      - Components and identifiers: design/components.md
+      - The location model: design/locations.md
+      - Secrets and host keys: design/secrets.md
+      - The File Provider extension: design/extension.md
+      - Item identifiers and the index: design/item-index.md
+      - Names, permissions and attributes: design/names-and-attributes.md
+      - Writes, conflicts and atomicity: design/writes.md
+      - Offline behaviour: design/offline.md
+      - Symlinks: design/symlinks.md
+      - SSH process management: design/ssh.md
+      - The SFTP client: design/sftp.md
+      - Remote change detection: design/change-detection.md
+      - The root set: design/root-set.md
+      - Cache eviction: design/eviction.md
+      - Pinning: design/pinning.md
+      - The CLI: design/cli.md
+      - Security: design/security.md
+      - Packaging, install and release: design/packaging.md
+      - Testing: design/testing.md
+      - Future work: design/future-work.md
+  - Measured behaviour:
+      - The quirk catalog: quirks/README.md
+      - macOS quirks: quirks/macos.md
+      - Server quirks: quirks/servers.md
