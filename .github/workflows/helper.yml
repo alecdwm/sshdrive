@@ -1,28 +1,28 @@
-# Builds the remote helper (DESIGN.md section 6.4 tier 2) for every target section 6.4
-# names, and emits the layout section 3 and section 10.1 specify:
+# Builds the remote helper (change detection tier 2, docs/design/change-detection.md) for
+# every target it names, and emits the layout the bundle and the release expect
+# (docs/design/components.md, docs/design/packaging.md):
 #
 #   Resources/helper/sshdrive-helper-<version>-<os>-<arch>
 #   Resources/helper/manifest.json          version + sha256 + size for each binary
 #
-# Section 10.1's release flow is "a Linux job feeding a macOS job": the Linux and FreeBSD
-# targets are cross-compiled in a Linux job, "since `cross` needs Docker and GitHub's macOS
-# runners do not provide it"; the macOS job builds `darwin/arm64` natively with `cargo`,
-# ad-hoc signs it - "arm64 macOS refuses to run unsigned code even over ssh" - collects the
-# Linux job's artifacts, and records every hash into the app's manifest.
+# A Linux job feeds a macOS job. The Linux and FreeBSD targets are cross-compiled on a
+# Linux runner, because `cross` needs Docker and GitHub's macOS runners do not provide it;
+# the macOS job builds `darwin/arm64` natively with `cargo`, ad-hoc signs it (arm64 macOS
+# refuses to run unsigned code even over ssh), collects the Linux job's artifacts, and
+# records every hash into the app's manifest.
 #
-# Two departures from the letter of section 10.1, both recorded in section 13 (2026-09-05):
+# Two things that are not obvious from the target list:
 #
-#   * `cross` is used for FreeBSD only. The four musl targets link with rustc's own
+#   * `cross` is used for FreeBSD only. The three musl targets link with rustc's own
 #     `rust-lld` and its bundled self-contained objects (helper/.cargo/config.toml), which
 #     needs no Docker and no cross C toolchain, so they build in seconds on a plain runner.
 #   * `freebsd/aarch64` is not built. `aarch64-unknown-freebsd` is a tier 3 Rust target with
 #     no prebuilt `rust-std`, so it cannot be built - or even `cargo check`ed - without
-#     `-Z build-std` on nightly. Section 6.4's own list stops at `freebsd/x86_64`; this file
-#     is the place that would have to change if that stops being true.
+#     `-Z build-std` on nightly. The helper's FreeBSD support stops at `freebsd/x86_64`, and
+#     this file is the place that would have to change if that stops being true.
 #
-# This workflow is not the release workflow. It builds and publishes the helper artifacts;
-# section 10.1's step 2 onwards (xcodebuild, notarize, DMG, cask) is milestone 10 and will
-# consume `helper-bundle` from here.
+# This is not the release workflow. It builds and publishes the helper artifacts;
+# .github/workflows/release.yml calls it and consumes `helper-bundle`.
 
 name: helper
 
@@ -39,8 +39,8 @@ on:
       - "scripts/build-helper.sh"
       - ".github/workflows/helper.yml"
   workflow_dispatch:
-  # Section 10.1's release flow is triggered by a `v*` tag and runs this first. Exposed as
-  # a callable workflow rather than a second `push:` trigger, because one `on.push` cannot
+  # The release workflow is triggered by a `v*` tag and runs this first. Exposed as a
+  # callable workflow rather than a second `push:` trigger, because one `on.push` cannot
   # carry both a path filter (what the branch builds want) and a tag filter (what a release
   # wants) without the paths silently applying to the tag too.
   workflow_call:
@@ -129,10 +129,9 @@ jobs:
       - name: Build darwin/arm64
         run: scripts/build-helper.sh aarch64-apple-darwin
 
-      # Section 10.1: the macOS job "collects the Linux job's artifacts, and records every
-      # hash into the app's manifest". Downloading them into the same directory and
-      # re-running the script is what does both, since the manifest is derived from the
-      # directory's contents.
+      # The macOS job collects the Linux job's artifacts and records every hash into the
+      # app's manifest. Downloading them into the same directory and re-running the script
+      # is what does both, since the manifest is derived from the directory's contents.
       - uses: actions/download-artifact@v4
         with:
           name: helper-linux
@@ -145,9 +144,9 @@ jobs:
 
       - name: The helper must answer for itself
         run: |
-          # `--version` prints the digest of its own executable, which is what section
-          # 6.4's "size plus its own --version output" fallback verifies against on a
-          # server with no sha256sum. It has to agree with the manifest.
+          # `--version` prints the digest of its own executable, which is what the
+          # "size plus its own --version output" fallback verifies against on a server
+          # with no sha256sum. It has to agree with the manifest.
           BIN=$(ls Resources/helper/sshdrive-helper-*-darwin-aarch64)
           LINE=$("$BIN" --version)
           echo "$LINE"
@@ -158,7 +157,7 @@ jobs:
           esac
           grep -q "$DIGEST" Resources/helper/manifest.json
 
-      - name: Every target section 6.4 names is present
+      - name: Every target the release ships is present
         run: |
           cat Resources/helper/manifest.json
           for target in linux-x86_64 linux-aarch64 linux-armv7 darwin-aarch64 freebsd-x86_64; do
@@ -166,7 +165,8 @@ jobs:
               || { echo "missing $target"; exit 1; }
           done
 
-      # This is what `SSH Drive.app/Contents/Resources/helper/` is copied from (section 3).
+      # This is what `SSH Drive.app/Contents/Resources/helper/` is copied from
+      # (docs/design/components.md).
       - uses: actions/upload-artifact@v4
         with:
           name: helper-bundle
