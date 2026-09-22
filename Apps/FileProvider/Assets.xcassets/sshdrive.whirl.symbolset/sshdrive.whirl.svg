@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!--Generator: Hand-built to the SF Symbols custom-symbol template layout (Regular-M only)-->
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="3300" height="2200">
+ <!--glyph: "sshdrive.whirl", point size: 100.0, template writer version: "custom"-->
+ <g id="Notes">
+  <rect height="2200" id="artboard" style="fill:white;opacity:1" width="3300" x="0" y="0"/>
+  <line style="fill:none;stroke:black;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="292" y2="292"/>
+  <text style="stroke:none;fill:black;font-family:sans-serif;font-size:13;font-weight:bold;" transform="matrix(1 0 0 1 263 322)">Weight/Scale Variations</text>
+  <text style="stroke:none;fill:black;font-family:sans-serif;font-size:13;" transform="matrix(1 0 0 1 263 1030)">Medium</text>
+ </g>
+ <g id="Guides">
+  <line id="Baseline-S" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="696" y2="696"/>
+  <line id="Capline-S" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="625.541" y2="625.541"/>
+  <line id="Baseline-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1126.0" y2="1126.0"/>
+  <line id="Capline-M" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1055.54" y2="1055.54"/>
+  <line id="Baseline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1556" y2="1556"/>
+  <line id="Capline-L" style="fill:none;stroke:#27AAE1;opacity:1;stroke-width:0.5;" x1="263" x2="3036" y1="1485.54" y2="1485.54"/>
+  <line id="left-margin-Regular-M" style="fill:none;stroke:#00AEEF;stroke-width:0.5;opacity:1.0;" x1="1400.00" x2="1400.00" y1="1030.79" y2="1150.12"/>
+  <line id="right-margin-Regular-M" style="fill:none;stroke:#00AEEF;stroke-width:0.5;opacity:1.0;" x1="1483.61" x2="1483.61" y1="1030.79" y2="1150.12"/>
+ </g>
+ <g id="Symbols">
+  <g id="Regular-M">
+   <path d="M1441.805 1042.498 L1483.610 1066.634 L1483.610 1114.906 L1441.805 1139.042 L1400.000 1114.906 L1400.000 1066.634 Z M1407.400 1070.906 L1407.400 1110.634 L1441.805 1130.498 L1476.210 1110.634 L1476.210 1070.906 L1441.805 1051.042 Z M1456.701 1064.969 L1471.598 1090.770 L1456.701 1116.571 L1426.909 1116.571 L1412.013 1090.770 L1426.909 1064.969 Z M1431.181 1072.369 L1420.558 1090.770 L1431.181 1109.171 L1452.429 1109.171 L1463.053 1090.770 L1452.429 1072.369 Z M1454.624 1083.369 L1454.624 1098.171 L1441.805 1105.572 L1428.987 1098.171 L1428.987 1083.369 L1441.805 1075.968 Z"/>
+  </g>
+ </g>
+</svg>
