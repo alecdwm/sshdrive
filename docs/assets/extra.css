@@ -3,3 +3,11 @@
 .typography > h1:first-child {
   display: none;
 }
+
+/* The theme gives every sidebar link a fixed 30px height, so a title that wraps to a
+   second line overlaps the next entry. Let the link grow with its text instead. */
+a[data-sidebar="menu-button"] {
+  height: auto;
+  min-height: 30px;
+  padding-block: 5px;
+}
