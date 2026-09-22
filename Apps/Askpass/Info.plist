@@ -5,16 +5,17 @@
 	<!--
 	  Embedded as an __info_plist section (CREATE_INFOPLIST_SECTION_IN_BINARY). The
 	  identifier is what the agent's code requirement matches: a bare tool's default
-	  signing identifier is its product name, which would be refused (section 3.1).
+	  signing identifier is its product name, which would be refused
+	  (docs/design/components.md).
 	-->
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
 	<string>sshdrive-askpass</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.4</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 </dict>

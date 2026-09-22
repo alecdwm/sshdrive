@@ -1,18 +1,18 @@
-# The remote helper of DESIGN.md section 6.4 tier 2: one static binary we upload to the
+# The remote helper (tier 2 of docs/design/change-detection.md): one static binary we upload to the
 # server, which watches the served tree and streams NDJSON events back over an exec
 # channel.
 #
-# Two rules shape this manifest. It has to cross-compile to every target in section 10.1
+# Two rules shape this manifest. It has to cross-compile to every target docs/design/packaging.md names
 # from a Linux box with no C toolchain, so the only dependency is `libc` (pure Rust
 # bindings; nothing to compile in C). And it is uploaded over a link the user is also
 # using for their files, so it is built small.
 
 [package]
 name = "sshdrive-helper"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.74"
-description = "SSH Drive remote change-detection helper (DESIGN.md section 6.4 tier 2)"
+description = "SSH Drive remote change-detection helper"
 license = "MIT"
 publish = false
 

@@ -632,11 +632,14 @@ public enum ControlCommands {
         }
     }
 
-    static let agentVersion = "0.1.0-milestone1"
+    /// The release version, from the repository's VERSION file through
+    /// `scripts/set-version.sh`. The same string the CLI's `--version` prints and the
+    /// bundle's `CFBundleShortVersionString`.
+    static let agentVersion = SSHDriveVersion.string
 
     // MARK: doctor
 
-    /// The checks section 8 lists. Two of them, "CLI on PATH" and "agent reachable", the
+    /// The `doctor` checks. Two of them, "CLI on PATH" and "agent reachable", the
     /// CLI adds itself: the first it can only see from the terminal, and the second is
     /// implied by this call having arrived at all.
     private static func doctor() async -> [[String: Any]] {

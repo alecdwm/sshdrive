@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>XPC!</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.4</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>5</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionFileProviderDocumentGroup</key>
@@ -32,18 +32,17 @@
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
 		<!--
 		  Pin and unpin get their own Finder context-menu entries, shown conditionally on
-		  pin state (DESIGN.md sections 2, 7.2). Handled since milestone 8 in
-		  NSFileProviderCustomAction.performAction, which forwards to the agent; the
-		  identifiers are also in XPCProtocols/Identifiers.swift and must be edited
-		  together. S6 recorded where Finder puts them: at the very bottom of the
-		  contextual menu, at the top level, one of the pair at a time, and on the window
-		  background but never on the sidebar row.
+		  pin state (docs/design/pinning.md). NSFileProviderCustomAction.performAction
+		  handles them and forwards to the agent; the identifiers are also in
+		  XPCProtocols/Identifiers.swift and must be edited together. Finder puts them at
+		  the very bottom of the contextual menu, at the top level, one of the pair at a
+		  time, and on the window background but never on the sidebar row.
 
 		  The bound key is "fileproviderItems", lower-case p, and it is a key path on the
 		  evaluated object, not a substitution variable: "$fileProviderItems" throws
 		  "Can't get value for 'fileProviderItems' in bindings {}" and the whole rule is
-		  then dropped. It is the only spelling in the dyld shared cache (s6-8,
-		  2026-09-04). The rules are the "at least one" form of section 7.2, so a mixed
+		  then dropped. It is the only spelling in the dyld shared cache (measured on
+		  macOS 26.4, 2026-09-04). The rules are the "at least one" form, so a mixed
 		  selection shows both entries; that form is also false on an empty selection,
 		  where the "all selected items" form ("SUBQUERY(...).@count ==
 		  fileproviderItems.@count") would be 0 == nil-count, i.e. true, and would show
@@ -69,10 +68,11 @@
 			</dict>
 		</array>
 		<!--
-		  Section 7.2's pin badge. A decoration is declared here and attached to an item
-		  through NSFileProviderItemDecorating.decorations (Item.swift), which serves it
-		  for every *kept* item - the effect, not the marker, so an excluded folder inside
-		  a kept one shows nothing and its parent still does (section 7.1.1).
+		  The pin badge (docs/design/pinning.md). A decoration is declared here and
+		  attached to an item through NSFileProviderItemDecorating.decorations
+		  (Item.swift), which serves it for every *kept* item - the effect, not the
+		  marker, so an excluded folder inside a kept one shows nothing and its parent
+		  still does.
 
 		  The keys are the four NSFileProviderItemDecoration.h names, not
 		  NSFileProviderDecoration*-prefixed ones: Identifier, BadgeImageType, Label and

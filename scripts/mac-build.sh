@@ -48,6 +48,13 @@ KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 
 WHAT="${1:-all}"
 
+# The Info.plists carry $(MARKETING_VERSION) and $(CURRENT_PROJECT_VERSION), which
+# project.yml supplies from the VERSION file. A tree where any derived location has drifted
+# is not built.
+"$REPO_ROOT/scripts/set-version.sh" --check
+VERSION="$(tr -d ' \t\r\n' <"$REPO_ROOT/VERSION")"
+echo "==> SSH Drive $VERSION"
+
 echo "==> syncing $REPO_ROOT to $MAC_HOST:$MAC_DIR"
 # helper/target is the Rust crate's build directory on the Linux side: hundreds of
 # megabytes of object files for targets the Mac cannot use. Resources/helper - the
@@ -84,11 +91,11 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "signed" ]; then
 fi
 
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "signed" ]; then
-	# The remote helper (DESIGN.md section 6.4 tier 2) goes into
-	# Contents/Resources/helper/ *before* the signature is applied, because signing the
-	# app seals whatever is inside it.
+	# The remote helper (change detection tier 2) goes into Contents/Resources/helper/
+	# *before* the signature is applied, because signing the app seals whatever is inside
+	# it.
 	#
-	# CI builds every target section 10.1 names and ships them in the release; a
+	# CI builds every target the release ships (.github/workflows/helper.yml); a
 	# developer build takes whatever `scripts/build-helper.sh` left in Resources/helper
 	# on the Linux side, which rsync brought over with the rest of the tree. An absent
 	# directory is not an error: the app then has no helper, `HelperDeployer.manifest()`
@@ -117,9 +124,9 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "app" ] || [ "$WHAT" = "sign" ]; then
 	# innermost first, with the real identifiers and the real entitlement files.
 	#
 	# An ad-hoc signature has no Apple anchor and no team OU, so it does NOT satisfy the
-	# agent's peer code requirement (Sources/XPCProtocols/CodeRequirement.swift). Write a
-	# replacement into ~/.sshdrive-spike-peer-requirement on the Mac to relax it for a
-	# spike; see docs/spikes/milestone-1.md. `signed` mode needs no such override.
+	# agent's peer code requirement (Sources/XPCProtocols/CodeRequirement.swift). A
+	# one-line replacement in ~/.sshdrive-spike-peer-requirement on the Mac relaxes it,
+	# in Debug builds only. `signed` mode needs no such override.
 	#
 	# keychain-access-groups is stripped from the agent's entitlements here. AMFI kills an
 	# ad-hoc signed binary that carries a restricted entitlement at exec ("The file is
@@ -154,23 +161,25 @@ if [ "$WHAT" = "signed" ]; then
 	#   embedded.provisionprofile   AMFI accepts a restricted entitlement only when the
 	#                               bundle embeds a profile whose own entitlements allow
 	#                               it and whose ProvisionedDevices list this Mac. That
-	#                               is what unblocks keychain-access-groups on the agent
-	#                               (S1 d1/d2), and testing-mode on the appex.
+	#                               is what unblocks keychain-access-groups on the agent,
+	#                               and testing-mode on the appex.
 	#   com.apple.application-identifier / team-identifier
 	#                               written into the signed entitlements to match the
 	#                               profile, the way Xcode does it. Both are themselves
 	#                               restricted and both appear in the profiles.
-	#   --options runtime           the hardened runtime section 3.1 requires on every
-	#                               executable.
+	#   --options runtime           the hardened runtime every executable is signed with
+	#                               (docs/design/components.md).
 	#   --timestamp=none            no notarization here, and the VM is not always able
-	#                               to reach Apple's timestamp server. Milestone 10's
-	#                               Developer ID + notarize path must NOT pass this.
+	#                               to reach Apple's timestamp server. The Developer ID
+	#                               and notarize path in scripts/release.sh must NOT pass
+	#                               this: notarization rejects a signature with no secure
+	#                               timestamp.
 	#   inside-out order            the CLI, askpass and the appex first, then the app,
 	#                               because signing the wrapper seals whatever is inside.
 	#
 	# The extension keeps only the sandbox, the app group and (with its profile) the
 	# testing-mode key. It never gets keychain-access-groups: the agent is the only
-	# process with keychain access (section 3.1).
+	# process with keychain access (docs/design/components.md).
 	if [ "$UNLOCK_KEYCHAIN" = "1" ]; then
 		echo "==> unlocking the login keychain for codesign"
 		ssh -o BatchMode=yes "$MAC_HOST" \
@@ -195,11 +204,10 @@ if [ "$WHAT" = "signed" ]; then
 		# In particular NOT com.apple.application-identifier. Xcode writes that key for a
 		# profile-signed app, and adding it here makes AMFI refuse to let *launchd* start
 		# the agent -- AMFI logs a Launch Constraint Violation, launch type 0. The
-		# agent is the main executable of the app bundle itself (section 3), and an executable
+		# agent is the main executable of the app bundle itself, and an executable
 		# carrying an application identifier may only be launched as an app, not as a
 		# launchd job. Without the key the same bundle, the same profile and the same
-		# restricted keychain-access-groups entitlement all work.
-		# See docs/spikes/results.md, 2026-09-04 signed pass, S1(a1).
+		# restricted keychain-access-groups entitlement all work (measured 2026-09-04).
 		cp Apps/Agent/SSHDrive.entitlements \$WORK/agent.plist
 		PB=/usr/libexec/PlistBuddy
 
@@ -221,7 +229,7 @@ if [ "$WHAT" = "signed" ]; then
 
 		cp \"\$APP_PROFILE\" \"\$APP/Contents/embedded.provisionprofile\"
 
-		# --- inside out. The CLI and askpass carry no entitlements at all (section 3.1)
+		# --- inside out. The CLI and askpass carry no entitlements at all
 		#     and are signed with their explicit identifiers, because a bare tool would
 		#     otherwise be signed as its product name and fail the peer requirement.
 		codesign --force --sign \"\$IDENTITY\" --options runtime --timestamp=none \

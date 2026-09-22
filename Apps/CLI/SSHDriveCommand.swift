@@ -1,25 +1,28 @@
 import ArgumentParser
+import Config
 import Foundation
 import XPCProtocols
 import Logging
 
-/// `sshdrive`, the only user interface (DESIGN.md section 8).
+/// `sshdrive`, the only user interface (docs/design/cli.md).
 ///
-/// Milestone 3 adds section 8's user-facing half: `add` with the `ssh -G` display and the
-/// relayed prompts of section 4.2, `list`, `show`, `remove`, `set`, `mount`, `unmount` and
-/// `status` with section 8.1's capability report. `evict`, `pin`, `pins` and
-/// `accept-deletions` arrived with milestones 6 to 8, and `logs` with milestone 10.
-/// `passwd` and `test` are still to come.
+/// Every subcommand is one XPC request to the agent and its reply, printed here: the CLI
+/// itself runs no `ssh`, touches no keychain and calls no File Provider API. `logs` is
+/// the exception; it execs `/usr/bin/log`.
 @main
 struct SSHDrive: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sshdrive",
         abstract: "Mount SFTP locations in Finder.",
         discussion: """
+            A command that changes something prints nothing when it works; prompts,
+            warnings and errors always appear, and `-v` after the subcommand prints the
+            full report.
+
             Docs: https://github.com/alecdwm/sshdrive
             Run `sshdrive doctor` if a location does not appear in Finder.
             """,
-        version: "0.1.4",
+        version: SSHDriveVersion.string,
         subcommands: [
             Add.self, ListCommand.self, Show.self, Status.self, SetCommand.self,
             Mount.self, Unmount.self, Remove.self, AcceptDeletions.self,

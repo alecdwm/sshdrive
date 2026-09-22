@@ -1,17 +1,22 @@
 #!/bin/sh
-# Build, sign, notarize and package a release of SSH Drive (DESIGN.md section 10).
+# Build, sign, notarize and package a release of SSH Drive
+# (docs/design/packaging.md, docs/release.md).
 #
-# There is no Swift toolchain on the machine this repo is usually edited from, so every
-# step runs on the Mac over ssh, exactly as scripts/mac-build.sh does. Nothing here
-# mutates git on either side.
+# Every step needs Xcode, `codesign`, `hdiutil` and `notarytool`, none of which exist on
+# the Linux machine this repo is usually edited from, so by default the script drives a
+# Mac over ssh exactly as scripts/mac-build.sh does. With RELEASE_LOCAL=1 it runs the same
+# commands on the machine it is started on, which is what .github/workflows/release.yml
+# does on a macOS runner. Nothing here mutates git on either side.
 #
 # What it does, in order:
 #
 #   1. sync the tree to the Mac and regenerate the Xcode project
+#      (RELEASE_LOCAL=1: no sync; the checkout is built where it is)
 #   2. xcodebuild -configuration Release, unsigned (see mac-build.sh for why)
 #   3. embed the helper binaries from Resources/helper, before signing seals them
 #   4. sign inside out with the Developer ID Application identity and the hardened
-#      runtime, embedding the Developer ID provisioning profile when one is present
+#      runtime, embedding the Developer ID provisioning profile when one authorises the
+#      signing certificate
 #   5. codesign --verify --deep --strict and spctl --assess on the app
 #   6. build the DMG with hdiutil: the app plus an /Applications symlink
 #   7. xcrun notarytool submit --wait, then stapler staple on the DMG and on the app
@@ -19,9 +24,9 @@
 #
 # Step 7 takes its credentials in one of two ways, in this order:
 #
-#   an App Store Connect API key   NOTARY_KEY (a .p8 path *on the Mac*), NOTARY_KEY_ID
-#                                  and NOTARY_ISSUER. NOTARY_KEY defaults to the single
-#                                  ~/Developer/AuthKey_*.p8 on the Mac when there is
+#   an App Store Connect API key   NOTARY_KEY (a .p8 path on the build machine),
+#                                  NOTARY_KEY_ID and NOTARY_ISSUER. NOTARY_KEY defaults to
+#                                  the single ~/Developer/AuthKey_*.p8 there when there is
 #                                  exactly one. This is the route that works headlessly.
 #   a notarytool keychain profile  NOTARY_PROFILE (default sshdrive-notary), used only
 #                                  when the three variables above are unset and the
@@ -32,47 +37,78 @@
 #                                  unlocked - so the profile has to be made at the
 #                                  console, and the API key is the headless route.
 #
-# With neither available, step 7 is skipped loudly and without failing the run: the script
-# prints exactly what material is missing and stops with the unnotarized DMG in place.
+# With neither available the run stops after the DMG, printing what is missing, and exits
+# 0 - unless RELEASE_REQUIRE_NOTARIZATION=1, where it fails instead. The same pairing
+# applies to the provisioning profile and RELEASE_REQUIRE_PROFILE. Both default to 1 when
+# CI is set, because an unnotarized DMG or a build without keychain-access-groups is not
+# something to publish by accident.
 #
-# The .p8 key stays on the Mac. It is never copied into this repo, into the bundle or into
-# the DMG.
+# The .p8 key stays on the build machine. It is never copied into this repo, into the
+# bundle or into the DMG.
 #
 # Usage:
 #   scripts/release.sh                  everything above
 #   scripts/release.sh build            1-5 only (a signed Release app, no DMG)
 #   scripts/release.sh dmg              1-6 (a signed Release app and a DMG, no notarize)
-#   scripts/release.sh notarize         7-8 against the DMG already on the Mac
-#   scripts/release.sh install          install the Release app already built on the Mac
-#                                       into /Applications over ssh, the way the cask's
-#                                       upgrade path does (stop, replace, re-register the
-#                                       login item). Also runs after `all` when
-#                                       RELEASE_INSTALL=1 is set.
+#   scripts/release.sh notarize         7-8 against the DMG already built
+#   scripts/release.sh install          install the Release app already built into
+#                                       /Applications, the way the cask's upgrade path
+#                                       does (stop, replace, re-register the login item).
+#                                       Also runs after `all` when RELEASE_INSTALL=1.
 #
 # Environment:
-#   MAC_HOST, MAC_DIR, XCODEGEN     as in scripts/mac-build.sh
-#   VERSION                         the release version; default: from Apps/Agent/Info.plist
-#   SIGN_IDENTITY                   default: the Developer ID Application below
-#   RELEASE_PROFILE                 the Developer ID provisioning profile *on the Mac*.
-#                                   Default: ~/Developer/SSH_Drive_Developer_ID.provisionprofile,
+#   RELEASE_LOCAL                   1 to run every step on this machine instead of over
+#                                   ssh. Implied by an empty MAC_HOST. MAC_DIR is then the
+#                                   repository root and no sync happens.
+#   MAC_HOST, MAC_DIR, XCODEGEN     as in scripts/mac-build.sh. XCODEGEN defaults to
+#                                   plain `xcodegen` (on PATH) when running locally.
+#   VERSION                         the release version; default: the VERSION file at the
+#                                   repo root, which scripts/set-version.sh stamps into
+#                                   the project, the helper crate and the cask
+#   SIGN_IDENTITY                   the signing certificate's SHA-1; default: the
+#                                   Developer ID Application below
+#   RELEASE_PROFILE                 the Developer ID provisioning profile, on whichever
+#                                   machine builds. Default:
+#                                   ~/Developer/SSH_Drive_Developer_ID.provisionprofile,
 #                                   else the single match of
 #                                   ~/Developer/SSH_Drive*Developer*ID*.provisionprofile.
-#                                   Embedded only if it exists.
+#                                   Embedded only if it authorises SIGN_IDENTITY.
+#   RELEASE_REQUIRE_PROFILE         1 to fail rather than sign without
+#                                   keychain-access-groups. Default 1 under CI.
+#   RELEASE_REQUIRE_NOTARIZATION    1 to fail rather than stop cleanly when there are no
+#                                   notarization credentials. Default 1 under CI.
 #   NOTARY_KEY, NOTARY_KEY_ID, NOTARY_ISSUER
-#                                   App Store Connect API key on the Mac (preferred)
+#                                   App Store Connect API key (preferred)
 #   NOTARY_PROFILE                  notarytool keychain profile; default sshdrive-notary
 #   UNLOCK_KEYCHAIN/KEYCHAIN_PASSWORD  as in scripts/mac-build.sh
+#   KEYCHAIN_PATH                   the keychain to unlock; default the login keychain.
+#                                   CI passes the temporary keychain it imported the
+#                                   certificate into.
 #   RELEASE_INSTALL                 when 1, `scripts/release.sh` (with no argument, i.e.
 #                                   `all`) also runs the `install` step at the end
 
 set -eu
 
 MAC_HOST="${MAC_HOST:-alec@100.114.204.5}"
-MAC_DIR="${MAC_DIR:-~/sshdrive}"
-XCODEGEN="${XCODEGEN:-~/bin/xcodegen/bin/xcodegen}"
 SCHEME="${SCHEME:-SSH Drive}"
 CONFIGURATION=Release
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Where the build steps run. Locally, the tree that is built is this checkout, so there is
+# nothing to sync and MAC_DIR is the repository root; over ssh, MAC_DIR is a path on
+# MAC_HOST and is left unquoted in the commands below so the remote shell expands its ~.
+# Neither form survives a path with a space in it.
+if [ "${RELEASE_LOCAL:-0}" = "1" ] || [ -z "$MAC_HOST" ]; then
+	RELEASE_LOCAL=1
+	MAC_DIR="${MAC_DIR:-$REPO_ROOT}"
+	XCODEGEN="${XCODEGEN:-xcodegen}"
+	mac() { sh -c "$1"; }
+else
+	RELEASE_LOCAL=0
+	MAC_DIR="${MAC_DIR:-~/sshdrive}"
+	XCODEGEN="${XCODEGEN:-~/bin/xcodegen/bin/xcodegen}"
+	mac() { ssh -o BatchMode=yes "$MAC_HOST" "$1"; }
+fi
 
 # The Developer ID Application certificate in the Mac's login keychain, by SHA-1 hash
 # rather than by name: two certificates can share a name, and `codesign` then refuses with
@@ -85,10 +121,25 @@ NOTARY_KEY_ID="${NOTARY_KEY_ID:-}"
 NOTARY_ISSUER="${NOTARY_ISSUER:-}"
 UNLOCK_KEYCHAIN="${UNLOCK_KEYCHAIN:-1}"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
-# Resolved against the *Mac's* home directory below when left empty.
+# Unquoted where it is used, so a leading ~ is expanded by the shell that runs the unlock.
+KEYCHAIN_PATH="${KEYCHAIN_PATH:-~/Library/Keychains/login.keychain-db}"
+# Resolved against the build machine's home directory below when left empty.
 RELEASE_PROFILE="${RELEASE_PROFILE:-${APP_PROFILE:-}}"
 
-VERSION="${VERSION:-$(/usr/bin/awk '/<key>CFBundleShortVersionString<\/key>/{getline; gsub(/.*<string>|<\/string>.*/,""); print; exit}' "$REPO_ROOT/Apps/Agent/Info.plist" 2>/dev/null || echo 0.1.0)}"
+# A release that signs without keychain-access-groups runs, mounts and syncs and cannot
+# reach a stored password or key passphrase, and an unnotarized DMG is refused by
+# Gatekeeper on every other Mac. Both are useful states to build by hand and neither is
+# publishable, so under CI they are failures unless the caller says otherwise.
+RELEASE_REQUIRE_PROFILE="${RELEASE_REQUIRE_PROFILE:-${CI:+1}}"
+RELEASE_REQUIRE_PROFILE="${RELEASE_REQUIRE_PROFILE:-0}"
+RELEASE_REQUIRE_NOTARIZATION="${RELEASE_REQUIRE_NOTARIZATION:-${CI:+1}}"
+RELEASE_REQUIRE_NOTARIZATION="${RELEASE_REQUIRE_NOTARIZATION:-0}"
+
+# One version for the whole product. The Info.plists carry $(MARKETING_VERSION), so the
+# app's own version comes from project.yml, which is stamped from this same file; the
+# check refuses to build a tree where any of them has drifted.
+"$REPO_ROOT/scripts/set-version.sh" --check
+VERSION="${VERSION:-$(tr -d ' \t\r\n' <"$REPO_ROOT/VERSION")}"
 DMG_NAME="SSH-Drive-${VERSION}.dmg"
 
 WHAT="${1:-all}"
@@ -96,18 +147,20 @@ WHAT="${1:-all}"
 # ---------------------------------------------------------------- 1. sync and generate
 
 if [ "$WHAT" != "notarize" ] && [ "$WHAT" != "install" ]; then
-	echo "==> syncing $REPO_ROOT to $MAC_HOST:$MAC_DIR"
-	rsync -a --delete --exclude .git --exclude helper/target "$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
+	if [ "$RELEASE_LOCAL" = "0" ]; then
+		echo "==> syncing $REPO_ROOT to $MAC_HOST:$MAC_DIR"
+		rsync -a --delete --exclude .git --exclude helper/target "$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
+	fi
 
 	echo "==> generating the Xcode project"
-	ssh -o BatchMode=yes "$MAC_HOST" "cd $MAC_DIR && $XCODEGEN generate"
+	mac "cd $MAC_DIR && $XCODEGEN generate"
 fi
 
 # ---------------------------------------------------------------- 2-5. build and sign
 
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 	echo "==> xcodebuild ($SCHEME, Release, unsigned; signing happens below)"
-	ssh -o BatchMode=yes "$MAC_HOST" "cd $MAC_DIR && xcodebuild \
+	mac "cd $MAC_DIR && xcodebuild \
 		-project 'SSH Drive.xcodeproj' \
 		-scheme '$SCHEME' \
 		-configuration Release \
@@ -121,9 +174,9 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 		build"
 
 	# The helper binaries go in before the signature, because signing the app seals
-	# whatever is inside it (section 6.4 tier 2, section 10.1).
+	# whatever is inside it (docs/design/change-detection.md, docs/design/packaging.md).
 	echo "==> embedding the helper"
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
 		if [ -f Resources/helper/manifest.json ]; then
@@ -137,9 +190,8 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 	'"
 
 	if [ "$UNLOCK_KEYCHAIN" = "1" ]; then
-		echo "==> unlocking the login keychain for codesign"
-		ssh -o BatchMode=yes "$MAC_HOST" \
-			"security unlock-keychain -p '$KEYCHAIN_PASSWORD' ~/Library/Keychains/login.keychain-db"
+		echo "==> unlocking $KEYCHAIN_PATH for codesign"
+		mac "security unlock-keychain -p '$KEYCHAIN_PASSWORD' $KEYCHAIN_PATH"
 	fi
 
 	# Release signing. The differences from mac-build.sh's `signed` mode, all of them
@@ -152,31 +204,32 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 	#                                         secure timestamp. This needs the Mac to
 	#                                         reach timestamp.apple.com.
 	#   the appex's *release* entitlements    no com.apple.developer.fileprovider.testing-mode:
-	#                                         it is a debug-only key (section 3.1) and a
-	#                                         release build has no profile granting it.
+	#                                         it is a debug-only key
+	#                                         (docs/design/components.md) and a release
+	#                                         build has no profile granting it.
 	#   the agent keeps keychain-access-groups
 	#                                         which is the whole reason the bundle embeds
-	#                                         a Developer ID profile (section 3.1).
+	#                                         a Developer ID profile.
 	#   still no com.apple.application-identifier on the agent
 	#                                         an executable carrying one may only be
 	#                                         launched as an app, and AMFI refuses to let
-	#                                         launchd start it (S1 a1, 2026-09-04).
-	# Resolve the Developer ID profile on the Mac, and check that it actually authorises
-	# this signature before embedding it.
+	#                                         launchd start it.
+	# Resolve the Developer ID profile, and check that it actually authorises this
+	# signature before embedding it.
 	#
 	# AMFI matches the *certificate*: a profile carries the DeveloperCertificates it was
 	# created for, and one made against a different Developer ID Application certificate
 	# than the one signing here is not merely ignored - every restricted entitlement in
 	# the bundle becomes unsatisfied, amfid answers "No matching profile found" (-413) and
 	# the agent is SIGKILLed at exec. Such a build notarizes perfectly and then will not
-	# launch, which is the worst possible order to find out in (measured 2026-09-05; see
-	# docs/spikes/milestone-10.md). So it is checked here, before signing.
+	# launch, which is the worst possible order to find out in (measured on macOS 26.4,
+	# 2026-09-05). So it is checked here, before signing.
 	#
 	# The glob deliberately requires both "Developer" and "ID" in the name: the other
 	# profile in that directory is SSH_Drive_FileProvider_Testing, which grants
-	# com.apple.developer.fileprovider.testing-mode - a debug-only key (section 3.1) that
-	# must never be embedded in, or signed into, a release.
-	RESOLVED_PROFILE="$(ssh -o BatchMode=yes "$MAC_HOST" "sh -c '
+	# com.apple.developer.fileprovider.testing-mode - a debug-only key that must never be
+	# embedded in, or signed into, a release.
+	RESOLVED_PROFILE="$(mac "sh -c '
 		p=\"$RELEASE_PROFILE\"
 		if [ -z \"\$p\" ]; then
 			p=\"\$HOME/Developer/SSH_Drive_Developer_ID.provisionprofile\"
@@ -186,24 +239,28 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 			fi
 		fi
 		[ -f \"\$p\" ] && printf %s \"\$p\"
-	'")"
+	'" || true)"
 	PROFILE_CERTS=""
 	if [ -n "$RESOLVED_PROFILE" ]; then
-		PROFILE_CERTS="$(ssh -o BatchMode=yes "$MAC_HOST" \
+		# No profile is a state the caller is told about, not one that kills the run
+		# here, so neither of these two substitutions may fail under set -e.
+		PROFILE_CERTS="$(mac \
 			"security cms -D -i '$RESOLVED_PROFILE' | plutil -convert xml1 -o - - | \
-			 python3 -c 'import hashlib,plistlib,sys; print(\" \".join(hashlib.sha1(c).hexdigest().upper() for c in plistlib.loads(sys.stdin.buffer.read()).get(\"DeveloperCertificates\",[])))'")"
+			 python3 -c 'import hashlib,plistlib,sys; print(\" \".join(hashlib.sha1(c).hexdigest().upper() for c in plistlib.loads(sys.stdin.buffer.read()).get(\"DeveloperCertificates\",[])))'" || true)"
 	fi
 	EMBED_PROFILE=""
 	case " $PROFILE_CERTS " in
 	*" $(printf %s "$SIGN_IDENTITY" | tr 'a-f' 'A-F') "*) EMBED_PROFILE="$RESOLVED_PROFILE" ;;
 	esac
 	if [ -z "$EMBED_PROFILE" ]; then
+		if [ "$RELEASE_LOCAL" = "1" ]; then WHERE="this machine"; else WHERE="$MAC_HOST"; fi
 		echo
 		echo "	WARNING -------------------------------------------------------"
 		if [ -z "$RESOLVED_PROFILE" ]; then
-			echo "	No Developer ID provisioning profile found on $MAC_HOST at"
+			echo "	No Developer ID provisioning profile found on $WHERE at"
 			echo "	  ~/Developer/SSH_Drive_Developer_ID.provisionprofile"
 			echo "	(or a single ~/Developer/SSH_Drive*Developer*ID*.provisionprofile)."
+			echo "	RELEASE_PROFILE names one explicitly."
 		else
 			echo "	$RESOLVED_PROFILE does not authorise the signing identity."
 			echo "	  signing certificate: $SIGN_IDENTITY"
@@ -213,15 +270,20 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 			echo "	naming a different Developer ID certificate does not merely fail to"
 			echo "	help: it makes AMFI kill the agent at exec (-413)."
 		fi
-		echo "	Signing WITHOUT keychain-access-groups. The build runs, mounts and"
-		echo "	syncs; it cannot reach the keychain, so no stored password or key"
-		echo "	passphrase is usable (DESIGN.md section 3.1)."
+		echo "	Without it the build signs WITHOUT keychain-access-groups: it runs,"
+		echo "	mounts and syncs, and no stored password or key passphrase is usable"
+		echo "	(docs/design/components.md)."
 		echo "	---------------------------------------------------------------"
 		echo
+		if [ "$RELEASE_REQUIRE_PROFILE" = "1" ]; then
+			echo "	RELEASE_REQUIRE_PROFILE=1: refusing to build a release nobody can" >&2
+			echo "	store a password in. Set it to 0 to build one anyway." >&2
+			exit 1
+		fi
 	fi
 
 	echo "==> signing Release with $SIGN_IDENTITY"
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
 		IDENTITY=\"$SIGN_IDENTITY\"
@@ -274,16 +336,16 @@ fi
 # ---------------------------------------------------------------- 6. the DMG
 
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "dmg" ]; then
-	# Section 10's DMG: the app and a symlink to /Applications, so the window is a
-	# drag-and-drop install for anyone who opens it by hand. The cask uses the app
-	# directly and never sees the window.
+	# The app and a symlink to /Applications, so the window is a drag-and-drop install for
+	# anyone who opens it by hand. The cask uses the app directly and never sees the
+	# window (docs/design/packaging.md).
 	#
 	# UDZO is the compressed read-only format every cask expects; `hdiutil create -srcfolder`
 	# on a staging directory is used rather than attaching and detaching a read-write
-	# image, because a headless VM has no Finder to lay icons out with and the layout
+	# image, because a headless machine has no Finder to lay icons out with and the layout
 	# would not survive anyway.
 	echo "==> building $DMG_NAME"
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
 		STAGE=/tmp/sshdrive-dmg
@@ -298,7 +360,8 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "dmg" ]; then
 		# The disk image is signed too, not only the app inside it. A stapled but unsigned
 		# DMG is refused by Gatekeeper on the download path: spctl -a -t open --context
 		# context:primary-signature answers \"rejected / source=no usable signature\"
-		# whatever the stapled ticket says (measured 2026-09-05). Homebrew does not care -
+		# whatever the stapled ticket says (measured on macOS 26.4, 2026-09-05). Homebrew
+		# does not care -
 		# it reads the app out of the image - but a person who double-clicks the download
 		# does.
 		codesign --force --sign \"$SIGN_IDENTITY\" --timestamp \"dist/$DMG_NAME\"
@@ -312,12 +375,12 @@ fi
 if [ "$WHAT" = "all" ] || [ "$WHAT" = "notarize" ]; then
 	echo "==> notarization"
 
-	# Route 1: an App Store Connect API key on the Mac. Preferred, because it is the only
-	# one that can be set up without sitting at the machine.
+	# Route 1: an App Store Connect API key. Preferred, because it is the only one that
+	# can be set up without sitting at the machine.
 	if [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ] && [ -z "$NOTARY_KEY" ]; then
-		# Exactly one ~/Developer/AuthKey_*.p8 on the Mac, or nothing: two keys is an
-		# ambiguity the caller has to resolve, not a guess this script should make.
-		NOTARY_KEY="$(ssh -o BatchMode=yes "$MAC_HOST" \
+		# Exactly one ~/Developer/AuthKey_*.p8 on the build machine, or nothing: two keys
+		# is an ambiguity the caller has to resolve, not a guess this script should make.
+		NOTARY_KEY="$(mac \
 			'set -- $HOME/Developer/AuthKey_*.p8; [ $# -eq 1 ] && [ -f "$1" ] && printf %s "$1"' \
 			2>/dev/null || true)"
 	fi
@@ -327,7 +390,7 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "notarize" ]; then
 	if [ -n "$NOTARY_KEY" ] && [ -n "$NOTARY_KEY_ID" ] && [ -n "$NOTARY_ISSUER" ]; then
 		NOTARY_ARGS="--key '$NOTARY_KEY' --key-id '$NOTARY_KEY_ID' --issuer '$NOTARY_ISSUER'"
 		NOTARY_ROUTE="App Store Connect API key $NOTARY_KEY_ID ($NOTARY_KEY)"
-	elif ssh -o BatchMode=yes "$MAC_HOST" \
+	elif mac \
 		"xcrun notarytool history --keychain-profile '$NOTARY_PROFILE' >/dev/null 2>&1"; then
 		NOTARY_ARGS="--keychain-profile '$NOTARY_PROFILE'"
 		NOTARY_ROUTE="notarytool keychain profile $NOTARY_PROFILE"
@@ -346,14 +409,14 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "notarize" ]; then
 	Give it either of these and re-run \`scripts/release.sh notarize\`.
 
 	1. An App Store Connect API key (works headlessly; preferred).
-	   Put the .p8 on the Mac ($MAC_HOST), for example at
+	   Put the .p8 on the machine that builds, for example at
 	   ~/Developer/AuthKey_<KEYID>.p8, and run:
 
 	     NOTARY_KEY_ID=<KEYID> NOTARY_ISSUER=<ISSUER-UUID> \\
 	         scripts/release.sh notarize
 
-	   NOTARY_KEY defaults to the single ~/Developer/AuthKey_*.p8 on
-	   the Mac; pass it explicitly if there is more than one.
+	   NOTARY_KEY defaults to the single ~/Developer/AuthKey_*.p8
+	   there; pass it explicitly if there is more than one.
 
 	2. A notarytool keychain profile named "$NOTARY_PROFILE". This one
 	   must be created **at the Mac's console**, not over ssh: the
@@ -368,6 +431,10 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "notarize" ]; then
 	------------------------------------------------------------------
 
 EOF
+		if [ "$RELEASE_REQUIRE_NOTARIZATION" = "1" ]; then
+			echo "==> RELEASE_REQUIRE_NOTARIZATION=1: an unnotarized DMG is not a release." >&2
+			exit 1
+		fi
 		echo "==> stopping cleanly after the DMG. Nothing else failed."
 		exit 0
 	fi
@@ -376,7 +443,7 @@ EOF
 	# The app is submitted and stapled first, then the DMG is rebuilt around the stapled
 	# app and notarized in its own right: stapling a DMG staples the image, not the app
 	# inside it, so a copy dragged out of an un-rebuilt DMG would carry no ticket.
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
 		mkdir -p dist
@@ -411,11 +478,11 @@ fi
 
 if [ "$WHAT" != "build" ] && [ "$WHAT" != "install" ]; then
 	echo "==> sha256"
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		shasum -a 256 \"dist/$DMG_NAME\" | tee \"dist/$DMG_NAME.sha256\"
 		echo
-		echo \"packaging/homebrew-tap/Casks/sshdrive.rb wants:\"
+		echo \"packaging/cask/sshdrive.rb wants:\"
 		echo \"  version \\\"$VERSION\\\"\"
 		echo \"  sha256 \\\"\$(shasum -a 256 \"dist/$DMG_NAME\" | cut -d\" \" -f1)\\\"\"
 	'"
@@ -431,13 +498,15 @@ elif [ "$WHAT" = "all" ] && [ "${RELEASE_INSTALL:-0}" = "1" ]; then
 fi
 
 if [ "$INSTALL_NOW" = "1" ]; then
-	# Installs the Release app already built on the Mac (build/Build/Products/Release)
-	# into /Applications over ssh, the way the cask's `uninstall`/`postflight` upgrade path
-	# does it (docs/spikes/results.md, "the upgrade path"): stop the currently installed
-	# agent, kill it outright, replace the bundle, `unregister` + `open -g` to bring the
-	# login item back, then print the same lines a person would check by hand.
-	echo "==> installing the Release build on $MAC_HOST"
-	ssh -o BatchMode=yes "$MAC_HOST" "sh -eu -c '
+	# Installs the Release app already built (build/Build/Products/Release) into
+	# /Applications, the way the cask's `uninstall`/`postflight` upgrade path does it:
+	# stop the currently installed agent, kill it outright, replace the bundle,
+	# `unregister` + `open -g` to bring the login item back, then print the same lines a
+	# person would check by hand. This is how the upgrade path is exercised without a
+	# cask to upgrade through.
+	if [ "$RELEASE_LOCAL" = "1" ]; then WHERE="this machine"; else WHERE="$MAC_HOST"; fi
+	echo "==> installing the Release build on $WHERE"
+	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
 		INSTALLED=\"/Applications/SSH Drive.app\"

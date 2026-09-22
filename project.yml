@@ -34,13 +34,19 @@ packages:
 
 settings:
   base:
+    # Stamped from the repository's VERSION file by scripts/set-version.sh, which is also
+    # what the four hand-written Info.plists read as $(MARKETING_VERSION) and
+    # $(CURRENT_PROJECT_VERSION), the second an integer derived from the first because
+    # LaunchServices compares CFBundleVersion numerically. Edit VERSION, not this.
+    MARKETING_VERSION: 0.1.4
+    CURRENT_PROJECT_VERSION: 104
     DEVELOPMENT_TEAM: RWGDZAYBM8
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: "Developer ID Application"
     ENABLE_HARDENED_RUNTIME: YES
-    # Keep Contents/MacOS to the four executables section 3 lists: Xcode's debug-dylib
-    # split would otherwise add "SSH Drive.debug.dylib" and "__preview.dylib" beside them,
-    # and the agent's peer requirement is written against real executables.
+    # Keep Contents/MacOS to the four executables of docs/design/components.md: Xcode's
+    # debug-dylib split would otherwise add "SSH Drive.debug.dylib" and "__preview.dylib"
+    # beside them, and the agent's peer requirement is written against real executables.
     ENABLE_DEBUG_DYLIB: NO
     SWIFT_VERSION: "5.9"
     MACOSX_DEPLOYMENT_TARGET: "14.0"

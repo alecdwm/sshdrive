@@ -21,13 +21,21 @@ Local.xcconfig
 # macOS
 .DS_Store
 
-# The helper crate builds here (DESIGN.md section 10.1 ships them from CI)
+# The helper crate builds here (the release workflow ships them from CI)
 helper/target/
 # A locally built helper embedded into the bundle by scripts/mac-build.sh
 Resources/helper/
 
-# The Homebrew tap is its own repository (alecdwm/homebrew-tap), checked out here for convenience.
+# The Homebrew tap is its own repository (alecdwm/homebrew-tap), checked out here for convenience;
+# the tracked cask template is packaging/cask/sshdrive.rb.
 packaging/homebrew-tap/
+
+# Release output of scripts/release.sh (the DMG and its .sha256).
+dist/
 
 # The testbed Tailscale auth key lives here (testbed/.env.example is the template).
 testbed/.env
+
+# The MkDocs site build (docs/ is the source; GitHub Pages builds it in CI).
+site/
+.cache/
