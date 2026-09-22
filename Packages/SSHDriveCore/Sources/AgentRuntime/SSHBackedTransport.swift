@@ -11,8 +11,7 @@ import XPCProtocols
 /// login shell.
 ///
 /// The snapshot is taken once and reused, because taking it runs the user's rc files and
-/// costs up to ten seconds. `refresh()` retakes it at agent start and on every `add`,
-/// `test` and `passwd`.
+/// costs up to ten seconds. `refresh()` retakes it at agent start and on every `add`.
 public actor AgentSSHEnvironment {
     public static let shared = AgentSSHEnvironment()
 

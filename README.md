@@ -77,7 +77,7 @@ macOS 14 or newer. SFTP only, so it is not `sshfs` and not a general SSH client.
 ## When something is wrong
 
 `sshdrive doctor` first: it checks the install and names what to fix. Then
-[troubleshooting](https://alecdwm.github.io/sshdrive/troubleshooting/), which is organised
+[troubleshooting](https://sshdrive.shirls.org/troubleshooting/), which is organised
 by what `doctor` says. Then `sshdrive logs`.
 
 ## Uninstalling
@@ -100,11 +100,11 @@ brew uninstall --cask sshdrive     # or: brew zap --cask sshdrive
 ## Building it
 
 `scripts/mac-build.sh` builds and tests on a Mac over ssh, and `docs/release.md` is the
-release procedure. The [design](https://alecdwm.github.io/sshdrive/design/goals/) pages
-are how it works; [testing](https://alecdwm.github.io/sshdrive/design/testing/) is how it
+release procedure. The [design](https://sshdrive.shirls.org/design/goals/) pages
+are how it works; [testing](https://sshdrive.shirls.org/design/testing/) is how it
 is checked.
 
 ## Links
 
-- Docs: <https://alecdwm.github.io/sshdrive/>
+- Docs: <https://sshdrive.shirls.org/>
 - Source and issues: <https://github.com/alecdwm/sshdrive>

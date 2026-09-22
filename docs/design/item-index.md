@@ -5,26 +5,42 @@ stay stable across renames. The agent keeps a per-domain SQLite index, the
 only copy of everything we know about the remote tree:
 
 ```
-items(identifier TEXT PK, path BLOB UNIQUE, parent TEXT, type, size, mtime,
+items(identifier TEXT PK, path BLOB UNIQUE, parent TEXT,
       -- path is BLOB: server names are bytes and need not be UTF-8
+      type TEXT,                     -- file | directory | symlink
+      size INTEGER, mtime INTEGER,   -- whole-second mtime
       mtime_ns INTEGER, inode INTEGER,  -- when the helper or a GNU sweep reports them
       uid INTEGER, gid INTEGER, mode INTEGER,
-      generation INTEGER DEFAULT 0,  -- bumped when ns-mtime or inode evidence shows a change SFTP cannot (below)
-      content_version TEXT, last_fetch REAL,
+      generation INTEGER DEFAULT 0,  -- bumped when ns-mtime or inode evidence shows a
+                                     -- change SFTP cannot (below)
+      content_version TEXT, metadata_version TEXT,  -- the two versions the system holds
+      last_fetch REAL,
       pin_state INTEGER DEFAULT 0,   -- 0 inherit, 1 pinned, -1 excluded: the marker
-      kept INTEGER DEFAULT 0,        -- effective state, derived by the agent from the markers at and above
-      capabilities INTEGER,          -- NSFileProviderItemCapabilities bitmask, derived by the agent
-      fs_flags INTEGER,              -- NSFileProviderFileSystemFlags bitmask, derived by the agent
-      link_target BLOB,              -- Mac-side symlink target after the relative rewrite; null for non-links
+      kept INTEGER DEFAULT 0,        -- effective state, derived by the agent from the
+                                     -- markers at and above
+      capabilities INTEGER,          -- NSFileProviderItemCapabilities bitmask, derived
+      fs_flags INTEGER,              -- NSFileProviderFileSystemFlags bitmask, derived
+      link_target BLOB,              -- Mac-side symlink target after the relative
+                                     -- rewrite; null for non-links
       hidden INTEGER DEFAULT 0,      -- 1 symlink omitted, 2 name collision, 3 local-only
-      xattrs BLOB,                   -- Finder tags and other extended attributes, local only
+      xattrs BLOB,                   -- Finder tags and other extended attributes, local
       local_content BLOB)            -- bytes of a local-only item such as .DS_Store
-anchors(seq INTEGER PK, changed_identifier TEXT, change_kind TEXT)
-roots(path BLOB, reason TEXT, last_seen REAL, PRIMARY KEY (path, reason))
-                                   -- change-detection root set; one directory may carry
-                                   -- several reasons, and leaves the set only when the last one goes
-held(path BLOB PK, dir BLOB, first_missing REAL, recheck_at REAL)   -- mass-deletion guard
-meta(key TEXT PK, value TEXT)       -- schema version, reconciling flag, generation counter
+anchors(seq INTEGER PK AUTOINCREMENT, changed_identifier TEXT,
+        change_kind TEXT,            -- modified | deleted
+        at REAL)                     -- when the change was recorded
+roots(path BLOB, reason TEXT,        -- materialized | pinned | viewed
+      last_seen REAL,                -- when the reason was last refreshed; the viewed LRU key
+      last_listed REAL DEFAULT 0,    -- when tier 0 last listed it; the rotation key
+      PRIMARY KEY (path, reason))    -- the change-detection root set; one directory may
+                                     -- carry several reasons, and leaves the set only
+                                     -- when the last one goes
+held(path BLOB PK, dir BLOB, first_missing REAL, recheck_at REAL,
+     checks INTEGER DEFAULT 0,       -- re-checks made, at 5 and 30 minutes
+     reason TEXT)                    -- why the deletion is held, for status
+                                     -- (the mass-deletion guard)
+meta(key TEXT PK, value TEXT)        -- schema_version (3), reconciling, generation,
+                                     -- remote_root, sweep_server_time, last_full_sweep,
+                                     -- watch_tier
 ```
 
 The marker and effective-state columns are described in [pinning](pinning.md),

@@ -24,7 +24,10 @@ struct UnconfiguredReplica: ReplicaControlling {
     func addDomain(_ domain: ReplicaDomain, testingModes: [String]) async throws {
         complain("addDomain")
     }
-    func removeDomain(_ domain: ReplicaDomain) async throws { complain("removeDomain") }
+    func removeDomain(_ domain: ReplicaDomain, mode: DomainRemovalMode) async throws -> String? {
+        complain("removeDomain")
+        return nil
+    }
     func signalEnumerator(locationID: String, container: ProviderItemIdentifier) async throws {
         complain("signalEnumerator")
     }

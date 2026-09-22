@@ -34,12 +34,23 @@ import XPCProtocols
 /// reports are dictionaries rather than typed errors on purpose, because the codes say
 /// nothing about why (`MQ-017`, `MQ-018`, `MQ-019`) and nothing above this seam may
 /// branch on one.
+/// How a domain is removed: `NSFileProviderManager.DomainRemovalMode`, without the
+/// import. `remove --keep-files` asks for `.preserveDownloadedUserData`; every other
+/// removal (unmount, a stranded domain, a failed `add`) throws the cache away.
+public enum DomainRemovalMode: String, Sendable, Equatable {
+    case removeAll
+    case preserveDownloadedUserData
+}
+
 public protocol ReplicaControlling: Sendable {
     /// Every domain the system holds for our provider, as `(identifier, displayName)`.
     func domains() async throws -> [ReplicaDomain]
     /// `add(domain)`. The same identifier with a new display name renames in place.
     func addDomain(_ domain: ReplicaDomain, testingModes: [String]) async throws
-    func removeDomain(_ domain: ReplicaDomain) async throws
+    /// `remove(domain, mode:)`. Under `.preserveDownloadedUserData` the system moves the
+    /// domain's downloaded files to a folder it chooses and answers that folder's path;
+    /// nil means it kept nothing.
+    func removeDomain(_ domain: ReplicaDomain, mode: DomainRemovalMode) async throws -> String?
 
     func signalEnumerator(locationID: String, container: ProviderItemIdentifier) async throws
     func signalErrorResolved(locationID: String) async throws

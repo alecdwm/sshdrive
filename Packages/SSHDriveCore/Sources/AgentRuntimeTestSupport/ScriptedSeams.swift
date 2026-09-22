@@ -410,7 +410,7 @@ public final class RecordingEndpoint: AgentEndpoint, @unchecked Sendable {
 
 // MARK: The terminal
 
-/// The tty `add`, `passwd` and `set` relay their prompts and notes to, as a recorder.
+/// The tty `add` and `set` relay their prompts and notes to, as a recorder.
 ///
 /// `P9` asserts the **order** of what `add` printed: the upload sentence before the
 /// report, because the sentence describes what is about to happen and the report

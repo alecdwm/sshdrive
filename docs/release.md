@@ -5,8 +5,7 @@ signs, notarizes and staples the app, attaches `SSH-Drive-<version>.dmg` to a Gi
 release, and pushes the updated cask to `alecdwm/homebrew-tap`.
 
 ```sh
-scripts/set-version.sh 0.2.0        # VERSION, project.yml, the crate, Version.swift, the cask
-(cd helper && cargo build)          # so Cargo.lock is what cargo would write
+scripts/set-version.sh 0.2.0        # VERSION, project.yml, the crate, Cargo.lock, Version.swift, the cask
 git commit -am "Bump to 0.2.0"
 git tag v0.2.0
 git push origin main v0.2.0
@@ -62,8 +61,8 @@ base64 -i DeveloperID.p12 | pbcopy                     # DEVELOPER_ID_P12_BASE64
 # 2. the provisioning profile
 base64 -i ~/Developer/SSH_Drive_Developer_ID.provisionprofile | pbcopy
 
-# 3. the App Store Connect API key. developer.apple.com > Users and Access > Integrations
-#    > Keys > +. Download the .p8 once; Apple will not offer it again.
+# 3. the App Store Connect API key. appstoreconnect.apple.com > Users and Access >
+#    Integrations > App Store Connect API > Team Keys > +. Download the .p8 once; Apple will not offer it again.
 base64 -i ~/Developer/AuthKey_XXXXXXXXXX.p8 | pbcopy
 ```
 

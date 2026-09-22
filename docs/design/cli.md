@@ -8,156 +8,169 @@ with `open -g` once, as the postflight does
 ([packaging](packaging.md)), waits for the service, and retries; a
 registered but disabled item gets the Login Items instruction of
 [the extension page](extension.md) instead. All prompts use a hidden tty
-read and can be avoided for scripting with flags or stdin.
+read, and a script avoids them with flags: `--no-password` and
+`--trust-first` for `add`, `-y` for `remove`.
 
 A command that changes state prints nothing on success beyond prompts,
-warnings and errors. The global `-v` / `--verbose` flag restores the full
+warnings and errors. The `-v` / `--verbose` flag restores the full
 report: the `ssh -G` resolution, the attribution of each value against
-`~/.ssh/config`, and, for `add`, the capability report. The commands whose
-job is to report - `list`, `show`, `status`, `pins`, `logs`, `doctor` -
-print their output either way.
+`~/.ssh/config`, and, for `add`, the capability report. It belongs to
+each subcommand and is typed after it (`sshdrive add -v nas alec@nas`).
+The commands whose job is to report - `list`, `show`, `status`, `pins`,
+`logs`, `doctor` - print their output either way.
 
 ```
-sshdrive [-v|--verbose] <command> [args]
+sshdrive <command> [args] [-v|--verbose]
 
 sshdrive add [user@]host-or-alias[:port] [--nickname NAME] [--remote-path PATH]
-             [--user USER] [--port N] [--identity PATH] [-o SSHOPTION]…
-             [--jump HOP[,HOP]…] [--permissions mode|none]
-             [--password | --password-stdin | --no-password]
+             [--user USER] [--port N] [--identity PATH] [-o SSHOPTION]...
+             [--jump HOP[,HOP]...] [--permissions mode|none] [--no-password]
              [--cache-ttl 1h] [--trust-first]
 sshdrive add <nickname> [user@]host-or-alias[:port] [same flags]
         The same command. A second positional argument makes the first the
-        nickname, because `sshdrive add nas alec@nas` is what people write
-        and what a script reads better as; `--nickname` still works and
-        `--remote-path` is also spelled `--path`.
-        The agent runs `ssh -G`; under `-v` the resolution and the
-        attribution against `~/.ssh/config` are printed (locations.md).
-        Whatever the verbosity, `add` warns when the terminal's `PATH` or
-        `SSH_AUTH_SOCK` differs from the login shell snapshot the agent
-        will use (secrets.md) and when the resolved `proxycommand` is a
-        hand-written `ssh` (ssh.md).
+        nickname, because "sshdrive add nas alec@nas" is what people write
+        and what a script reads better as; --nickname still works and
+        --remote-path is also spelled --path.
+        The agent runs ssh -G; under -v the resolution and the
+        attribution against ~/.ssh/config are printed (locations.md).
+        Whatever the verbosity, add warns when the terminal's PATH or
+        SSH_AUTH_SOCK differs from the login shell snapshot the agent
+        will use (secrets.md) and when the resolved proxycommand is a
+        hand-written ssh (ssh.md).
         The agent then connects once with the same command it will use
         later, in its own environment (secrets.md, ssh.md): the host-key
         question and any password or passphrase prompt are relayed to the
         terminal and stored on success. Refuses locations that need a touch
         or a one-time code on every connection, naming the key that asked
-        for the touch and the `--identity` that avoids it (secrets.md).
+        for the touch and the --identity that avoids it (secrets.md).
         Then the agent records the location, probes the server, and adds
-        the File Provider domain. Under `-v` the capability report is
-        printed (below); `sshdrive status` shows it at any time. Says so if
+        the File Provider domain. Under -v the capability report is
+        printed (below); sshdrive status shows it at any time. Says so if
         the helper will be deployed (change-detection.md, tier 2).
-        `--password` reads the password from the terminal before connecting
-        and `--password-stdin` from stdin, for scripts; `--no-password`
-        answers every password prompt with the skip (secrets.md), so the
-        location is key-only or is not created.
+        --no-password answers every password prompt with the skip
+        (secrets.md), so the location is key-only or is not created.
 
-sshdrive list                     table: name, host, secrets, mounted, TTL, state
-sshdrive show <name>              full detail: ssh binary and version, `ssh -G` resolution,
-                                  environment snapshot (ssh.md), whether the location runs with
-                                  IdentityAgent=none or through the key agent (ssh.md), the
-                                  ProxyJump chain the agent built, mount path, last error
-sshdrive remove <name> [--keep-files]
+sshdrive list [--json]            table: name, host, secrets, mounted, TTL, state
+sshdrive show <name> [--json]     full detail: ssh binary and version, ssh -G resolution,
+                                  environment snapshot (ssh.md), whether the location
+                                  runs with IdentityAgent=none or through the key agent
+                                  (ssh.md), the ProxyJump chain the agent built, mount
+                                  path, last error
+sshdrive remove <name> [--keep-files] [--force] [-y|--yes]
                                   removes domain + config, and each keychain item the
                                   location names that no remaining location also names
-                                  (secrets.md keys items by user@hostname:port, so two locations
-                                  on one host share one); on its last connection removes the
-                                  helper binary and its directory from the server when no other
-                                  location of this Mac on the same user@hostname:port uses them
-                                  (another Mac's helper running from there keeps its inode and
-                                  re-uploads on its next connection);
-                                  refuses while uploads are pending unless
-                                  --force; --keep-files uses the system's
-                                  preserve-downloaded-data removal mode so cached files are
-                                  kept in the folder the system chooses
-sshdrive remove --all             every location; run it before `brew uninstall` (packaging.md)
+                                  (secrets.md keys items by user@hostname:port, so two
+                                  locations on one host share one); on its last
+                                  connection removes the helper binary and its directory
+                                  from the server when no other location of this Mac on
+                                  the same user@hostname:port uses them (another Mac's
+                                  helper running from there keeps its inode and
+                                  re-uploads on its next connection); refuses while
+                                  uploads are pending unless --force; --keep-files uses
+                                  the system's preserve-downloaded-data removal mode so
+                                  cached files are kept in the folder the system chooses.
+                                  Replacing a stored password or passphrase is remove,
+                                  then add
+sshdrive remove --all             every location; run it before brew uninstall (packaging.md)
 sshdrive mount <name> / unmount <name>
                                   add/remove the File Provider domain without
                                   forgetting the location
-sshdrive set <name> nickname|cache-ttl|remote-path|host|port|user|identity|watch-mode|helper|permissions|create-check <value>
-                                  nickname renames the domain **in place**: one
-                                  `add(domain)` on the identifier the system already holds,
-                                  which renames the mount directory under
-                                  `~/Library/CloudStorage` and the sidebar entry, keeps every
-                                  cached file and leaves a pending upload pending (macOS 26.4,
-                                  2026-09-05), so it is not refused and drops nothing;
+sshdrive set <name> <key> <value> [--force]
+        keys: nickname, cache-ttl, remote-path, host, port, user, identity,
+        watch-mode, helper, permissions, create-check
+                                  nickname renames the domain in place: one
+                                  add(domain) on the identifier the system already
+                                  holds, which renames the mount directory under
+                                  ~/Library/CloudStorage and the sidebar entry, keeps
+                                  every cached file and leaves a pending upload pending
+                                  (macOS 26.4, 2026-09-05), so it is not refused and
+                                  drops nothing;
                                   remote-path re-creates the domain, since a new root
-                                  invalidates every path in the index, so it is refused while
-                                  uploads are pending and warns that the cache is dropped
-                                  otherwise;
+                                  invalidates every path in the index, so it is refused
+                                  while uploads are pending and warns that the cache is
+                                  dropped otherwise;
                                   host, user, port and identity change what the stored
                                   secrets are keyed on or which key is offered, so they
-                                  re-run the collect connection exactly as passwd does
-                                  (secrets.md) before the change is saved;
+                                  re-run the collect connection, as add does
+                                  (secrets.md), before the change is saved;
                                   watch-mode: auto|poll|sweep|helper (change-detection.md);
                                   helper on|off: allow the remote helper (default on);
                                   permissions mode|none: map server mode bits to Finder
                                   capabilities (names-and-attributes.md);
-                                  create-check auto|lstat: force the lstat preflight before
-                                  every create and rename regardless of the probe (writes.md)
+                                  create-check auto|lstat: force the lstat preflight
+                                  before every create and rename regardless of the probe
+                                  (writes.md).
+                                  Every change restarts the location's connection, which
+                                  also clears a stopped breaker (offline.md)
 sshdrive set <name> option add|remove <SSHOPTION>
                                   edit the extra -o list
-sshdrive passwd <name>            re-run the collect connection through the agent (secrets.md) and
-                                  replace stored secrets; an item shared with other
-                                  locations is replaced for them too, and passwd names them
-sshdrive test <name>              connect + list root, print timing, run the
-                                  capability probe and print the report (below)
 sshdrive status [<name>] [--json] [--probe]
-                                  per-domain state, sync errors, hidden names, and the
-                                  capability report (below); --probe re-runs the server
-                                  probe instead of using the cached result
-sshdrive evict <name> [path] [--all] [--unpin-all]
+                                  per-location state, the last connection error, held
+                                  deletions, hidden names, and the capability report
+                                  (below); --probe re-runs the server probe instead of
+                                  using the cached result. Upload and sync errors are not
+                                  listed
+sshdrive evict <name> [path] [--all] [--unpin-all] [--json]
 sshdrive accept-deletions <name> [path]
                                   apply deletions the mass-deletion guard is holding
                                   (change-detection.md)
-sshdrive pin <name> <remote-path>
+sshdrive pin <name> <remote-path> [--json]
                                   keep a folder or file fully offline (pinning.md); same
-                                  effect as Finder's "Keep Downloaded" entry.
-                                  `/` or `.` pins the whole location
-sshdrive unpin <name> <remote-path>
+                                  effect as the Finder context-menu action.
+                                  / or . pins the whole location
+sshdrive unpin <name> <remote-path> [--json]
                                   clears an explicit pin, or excludes the path if it
                                   inherits a pin from a folder above (pinning.md)
-sshdrive pins [<name>] [--export | --import FILE]
-                                  tree of pins and exclusions with cached size and file counts
-sshdrive logs [--follow] [<name>] [--last 1h] [--debug]
-                                  our subsystem's unified log, through `/usr/bin/log show` and
-                                  `log stream` with a subsystem predicate, since `OSLogStore`'s
-                                  local store is not open to a standard user. The predicate is
-                                  not only ours: everything the *system* decides about a domain
-                                  is logged by `fileproviderd` under Apple's subsystem and never
-                                  reaches ours, so the query is
-                                  `subsystem == "org.shirls.sshdrive"` **or** a `fileproviderd`
-                                  line naming us, and a `<name>` narrows both halves to that
-                                  location - ours by the domain identifier or the display name,
-                                  since our lines carry one or the other, and fileproviderd's by
-                                  the identifier, which is all it knows. `--info` is always
-                                  passed, because `log show` hides the info level and most of the
-                                  transport's detail is there. The CLI `exec`s `log`, so Ctrl-C
-                                  ends a `--follow`; it is the one command that is not a request
-                                  to the agent, and it asks the agent only which location a
-                                  `<name>` means, falling back to matching that text when the
-                                  agent is not running - which is exactly when someone wants the
-                                  log
-sshdrive doctor                   checks: app in /Applications, quarantine attribute stripped,
-                                  extension registered (pluginkit), login item enabled and agent
-                                  reachable, app group container writable, CLI on PATH, ssh
-                                  version, macOS version, login shell snapshot obtained (ssh.md);
-                                  reminds that `remove --all` must precede `brew uninstall`
-                                  (packaging.md)
+sshdrive pins <name> [--export | --import FILE] [--json]
+                                  tree of pins and exclusions with cached size and file
+                                  counts
+sshdrive logs [<name>] [-f|--follow] [--last 1h] [--debug] [--print-command]
+                                  our subsystem's unified log, through /usr/bin/log show
+                                  and log stream with a subsystem predicate, since
+                                  OSLogStore's local store is not open to a standard
+                                  user. The predicate is not only ours: everything the
+                                  system decides about a domain is logged by
+                                  fileproviderd under Apple's subsystem and never reaches
+                                  ours, so the query is
+                                  subsystem == "org.shirls.sshdrive" or a fileproviderd
+                                  line naming us, and a <name> narrows both halves to
+                                  that location - ours by the domain identifier or the
+                                  display name, since our lines carry one or the other,
+                                  and fileproviderd's by the identifier, which is all it
+                                  knows. --info is always passed, because log show hides
+                                  the info level and most of the transport's detail is
+                                  there. The CLI execs log, so Ctrl-C ends a --follow; it
+                                  is the one command that is not a request to the agent,
+                                  and it asks the agent only which location a <name>
+                                  means, falling back to matching that text when the
+                                  agent is not running - which is exactly when someone
+                                  wants the log
+sshdrive doctor [--json]          checks: app in /Applications, quarantine attribute
+                                  stripped, extension registered (pluginkit), login item
+                                  enabled and agent reachable, app group container
+                                  writable, CLI on PATH, ssh version, macOS version,
+                                  login shell snapshot obtained (ssh.md); reminds that
+                                  remove --all must precede brew uninstall (packaging.md)
 sshdrive agent start|stop|restart
-                                  stop asks the agent to exit cleanly; launchd leaves it down
-                                  until the next mach lookup, which any CLI command or extension
-                                  call causes, so stop is a pause, not a disable (packaging.md).
-                                  Disabling is the Login Items switch in System Settings.
-                                  **stop shuts every location's master and mux clients down
-                                  before exiting**, the same thing `remove` does per location:
-                                  exiting without it leaves an `ssh -N` per location holding a
-                                  connection to a server, with a control socket the next start
-                                  unlinks out from under it, and the sweep then has nothing to
-                                  ask (ssh.md). The reply is sent first - the CLI is waiting on
-                                  it, and `-O exit` against an unreachable server takes seconds -
-                                  and a 20 s backstop exits anyway. A TERM from the cask's
-                                  `uninstall` stanza takes the same path and exits 0
-                                  (packaging.md).
+                                  stop asks the agent to exit cleanly; launchd leaves it
+                                  down until the next mach lookup, which any CLI command
+                                  or extension call causes, so stop is a pause, not a
+                                  disable (packaging.md). Disabling is the Login Items
+                                  switch in System Settings.
+                                  stop shuts every location's master and mux clients
+                                  down before exiting, the same thing remove does per
+                                  location: exiting without it leaves an ssh -N per
+                                  location holding a connection to a server, with a
+                                  control socket the next start unlinks out from under
+                                  it, and the sweep then has nothing to ask (ssh.md).
+                                  The reply is sent first - the CLI is waiting on it, and
+                                  -O exit against an unreachable server takes seconds -
+                                  and a 20 s backstop exits anyway. A TERM from the
+                                  cask's uninstall stanza takes the same path and exits 0
+                                  (packaging.md). A restart also clears every stopped
+                                  breaker, since the breaker lives in the agent's memory
+sshdrive debug ...                test and diagnosis hooks; debug breaker <name> --connect
+                                  clears a stopped breaker and attempts once (offline.md)
 ```
 
 `<name>` resolves nickname, then host, then id prefix.
@@ -211,7 +224,7 @@ entry.
 ## Capability report in `sshdrive status`
 
 Several features run at different levels depending on what the remote server
-offers. The probe runs on every connection and on `sshdrive test` and
+offers. The probe runs on every connection and on
 `status --probe`; the result is cached in
 `domains/<id>/capabilities.json` with a timestamp and the server banner. It
 consists of the SFTP `extensions` list from the SFTP init reply, whether
@@ -241,7 +254,7 @@ from two pieces of evidence that are available at different times:
   and a mux client never speaks to the server at all
   ([SSH process management](ssh.md)), so the one connection that can read it
   is the **collect connection** ([secrets](secrets.md)) - a real, fresh
-  `ssh` the agent makes once per `add`, `passwd` or
+  `ssh` the agent makes once per `add` or
   `set host|user|port|identity`. That connection alone runs at `DEBUG1`,
   the version is taken out of its stderr, and the `debug1:`/`debug2:`/
   `debug3:` lines are stripped again before the exit classifier or
@@ -254,8 +267,8 @@ from two pieces of evidence that are available at different times:
   and `statvfs@openssh.com` and nothing else, which is what a Tailscale
   SSH node answers.
 
-`status` prints what the two together can say - `Tailscale   SFTP: Go
-pkg/sftp` - and nothing at all when they can say nothing, rather than a
+`status` prints what the two together can say on a `server software` line -
+`Tailscale   SFTP: Go pkg/sftp` - and nothing at all when they can say nothing, rather than a
 line reading "unknown". "Not OpenSSH" and "not identified" are different
 answers and are kept apart: only the first changes any wording, because
 an unidentified server may well be an old OpenSSH.
@@ -273,7 +286,7 @@ The catalogue of server-dependent features:
 | Transfer sizing | `limits@openssh.com` · conservative 32 KB requests | OpenSSH ≥ 8.5 |
 | Collision-safe create | server-enforced (non-overwriting `rename` fails on an existing name) · `lstat` preflight, one extra round trip per create/rename | a server whose plain `rename` refuses to overwrite, as OpenSSH does |
 
-`statvfs@openssh.com` is probed and shown in `status` as "server free
+`statvfs@openssh.com` is probed and shown in `status` as "Server free
 space", but Finder has no way to display it for a third-party domain, so it
 is not a capability level.
 
@@ -304,72 +317,85 @@ level is not the best one, an indented `upgrade:` line naming the concrete
 requirement. Glyphs: `●` best available level, `◐` a fallback is in use, `○`
 the feature is off entirely. A summary counts how many features are at `●`.
 
+`status` prints one section per location and `status <name>` prints only that
+one, in the same form. The first line is the name, the destination, whether
+it is mounted, the state word and the cache TTL. Under it come the transfer
+counters, the identity mode with the `permissions` and `watch-mode` settings,
+the channel budget, the identity the probe found, the names not shown, the
+change-detection tier with its cadence, cycle and root counts and its last
+cycle, the cache and the next eviction pass, the pins, the held deletions,
+the last connection error, the `ssh-keygen -R` advice, and last the
+capability report. A line with nothing to say is left out, except the held
+deletions, which read `0 held deletions`. The transfer, identity-probe, cache
+and pin lines need the location's runtime and are absent until it has
+started. Pending uploads and conflicts are not part of the report.
+
 ```
 $ sshdrive status
-nas    alec@nas.tail1234.ts.net:22   mounted  online   2 pending uploads   cache 1.2 GB / TTL 1d
-       capabilities 7/8 optimal, 1 upgradeable          probed 3m ago
-work   alec@build.example.org:22     mounted  offline since 14:02   0 pending   cache 210 MB / TTL 1h
-       capabilities poll-only (SFTP-only account), 7 upgradeable   probed 2h ago (cached)
+nas   alec@nas.example.net   mounted   online   TTL 1h
+       transfers 0 running, 0 waiting, 0 admitted
+       identity IdentityAgent=none   permissions mode   watch-mode auto
+       channels 3 at a time, bulk channel, shell
+       server sees us as uid=1000(alec) gid=1000 groups=27,100,1000
+       not shown  lib/current (a symbolic link whose target is outside this location)
+       watch helper   every 60s (active)   212 cycle(s)   9 root(s)
+         last cycle 41s ago: 3 changed, 0 deleted, 0 held, 1 listed, 0.04s
+       cache 1.2 GB materialized (312 files), 480 MB kept   TTL 1h   next eviction pass in 3m
+       pins  Documents/thesis   (a leading ! is an exclusion; sshdrive pins nas shows the tree)
+       0 held deletions
+       Capabilities  8/8 optimal   probed 3m ago
+         server software  OpenSSH_9.2p1 Debian-2+deb12u3   SFTP: OpenSSH sftp-server
+       ● change detection     helper 0.1.4 at /home/alec/.cache/sshdrive (push, ~1s)
+             note: ignores: .sshdrive-upload-*  .*.swp  *~  .#*  4913
+       ● rename detection     helper move events
+       ● change evidence      ns-mtime + inode
+       ● permissions          mapped (uid=1000(alec) gid=1000 groups=27,100,1000)
+       ● atomic overwrite     posix-rename@openssh.com
+       ● durable writes       fsync@openssh.com
+       ● transfer sizing      limits@openssh.com
+       ● collision-safe create server-enforced
+       Server free space  1.8 TB of 4.0 TB
 
-$ sshdrive status nas
-SSH Drive - nas
-  Server    alec@nas.tail1234.ts.net:22   OpenSSH_9.6   Linux x86_64   shell access: yes
-            ssh resolves nas via ~/.ssh/config (user, port, identityfile)
-            ssh /usr/bin/ssh (OpenSSH_9.6p1); env: PATH and SSH_AUTH_SOCK from /bin/zsh -il, snapshot 2h ago
-  State     mounted at ~/Library/CloudStorage/SSHDrive-nas   online   last change 12s ago
-  Auth      passphrase stored for ~/.ssh/id_nas   host key in ~/.ssh/known_hosts
-  Sync      2 pending uploads (14.1 MB)   0 conflicts   0 held deletions   last error none
-  Cache     1.2 GB materialized (312 files), 480 MB kept   TTL 1d   next eviction sweep in 3m
-  Pins      Documents/thesis   Photos/2026
-  Not shown 1 name (case collision: build/Makefile vs build/makefile)
-
-  Capabilities  7/8 optimal   probed 3m ago
-  ● change detection   helper 1.2.0 at ~/.cache/sshdrive (push, ~1s)   watch-mode auto
-        ignores: .sshdrive-upload-*  .*.swp  *~  .#*  4913
-  ● rename detection   helper move events
-  ● change evidence    ns-mtime + inode
-  ● permissions        mapped (uid 1000, groups 1000 100)
-  ● atomic overwrite   posix-rename@openssh.com
-  ● durable writes     fsync@openssh.com
-  ◐ transfer sizing    conservative 32 KB requests
-        upgrade: limits@openssh.com (OpenSSH ≥ 8.5) — server does not advertise it
-  ● collision-safe create   server-enforced
-  Server free space  1.8 TB of 4.0 TB
-
-$ sshdrive status work
-SSH Drive - work
-  Server    alec@build.example.org:22   OpenSSH_8.2   unknown OS   shell access: no (SFTP-only account)
-  …
-  Capabilities  1/8 optimal   probed 2h ago (cached; offline)
-  ◐ change detection   poll (SFTP readdir every 60s while active)
-        upgrade: shell access on the server enables the helper (push); plain shell access enables remote sweep
-  ◐ rename detection   delete + create (identifiers not preserved on remote renames)
-        upgrade: the helper, which needs shell access
-  ◐ change evidence    size + mtime (same-second rewrites of equal size are missed)
-        upgrade: shell access
-  ◐ permissions        everything shown writable; permission errors appear after upload
-        upgrade: shell access
-  ◐ atomic overwrite   remove + rename (brief window where the file is absent)
-        upgrade: posix-rename@openssh.com (OpenSSH ≥ 4.9) — server did not advertise it
-  ◐ durable writes     none; uploads are complete when the server acknowledges the write
-        upgrade: fsync@openssh.com (OpenSSH ≥ 6.3)
-  ◐ transfer sizing    conservative 32 KB requests
-        upgrade: limits@openssh.com (OpenSSH ≥ 8.5)
-  ● collision-safe create   server-enforced
+work   backup@files.example.org   mounted   online   TTL 1h
+       transfers 0 running, 0 waiting, 0 admitted
+       identity IdentityAgent=none   permissions mode   watch-mode auto
+       channels 3 at a time, bulk channel, shell
+       watch poll   every 60s (active)   38 cycle(s)   4 root(s)
+         note: the server cannot run the remote helper; the account has no shell access
+         last cycle 22s ago: 0 changed, 0 deleted, 0 held, 4 listed, 0.31s
+       cache 210 MB materialized (48 files)   TTL 1h   next eviction pass in 3m
+       0 held deletions
+       Capabilities  4/8 optimal   probed 2h ago
+         server software  OpenSSH_8.9p1 Ubuntu-3ubuntu0.10   SFTP: OpenSSH sftp-server
+       ◐ change detection     poll (SFTP readdir every 60s while active)
+             note: the server cannot run the remote helper
+             upgrade: shell access on the server enables the helper (push); plain shell access enables remote sweep
+       ◐ rename detection     delete + create (identifiers not preserved on remote renames)
+             upgrade: the helper, which needs shell access
+       ◐ change evidence      size + mtime (same-second rewrites of equal size are missed)
+             upgrade: shell access
+       ◐ permissions          everything shown writable; permission errors appear after upload
+             upgrade: shell access
+       ● atomic overwrite     posix-rename@openssh.com
+       ● durable writes       fsync@openssh.com
+       ● transfer sizing      limits@openssh.com
+       ● collision-safe create server-enforced
+       Server free space  610 GB of 2 TB (as of 2h ago)
 ```
 
 Rules that keep the format stable across permutations:
 
 - A runtime downgrade (for example the helper's stream died with an error
-  that was not the network's and the location fell back to sweep) shows the level in use with `◐` and a `note:` line giving the
-  reason and time, in addition to the `upgrade:` line.
+  that was not the network's and the location fell back to sweep) shows the
+  level in use with `◐` and a `note:` line giving the reason and time, in
+  addition to the `upgrade:` line.
 - A user-forced `watch-mode` below the best available shows `◐` with
   `note: forced by watch-mode <x>` and no `upgrade:` line, since the user
   chose it.
 - **While the helper is being deployed** - the tier is chosen and the binary
   is still going up the wire, which is exactly where `sshdrive add` writes its
-  one report - the line shows the sweep level with `note: the helper is being
-  deployed on this connection; \`sshdrive status\` shows it once it is up` and
+  one report - the line shows the sweep level with ``note: the helper is being
+  deployed on this connection; `sshdrive status` shows it once it is up`` and
   **no `upgrade:` line**: there is nothing for the user to do, and the note a
   server that genuinely cannot run it would carry is a claim about the server
   that is not true yet. `add` waits a few seconds for that first attempt to
@@ -377,22 +403,22 @@ Rules that keep the format stable across permutations:
   and this is what is printed when it runs out.
 - When the helper is not the active tier on a server with shell access, the
   change-detection line carries a `note:` saying why: `helper off (user
-  setting)`, `helper unsupported: <os>/<arch>`, `no writable directory for
+  setting)` followed by the `sshdrive set <name> helper on` that turns it back
+  on, `helper unsupported: <uname -sm>`, `no writable directory for
   helper`, `cache directory is noexec`, `helper upload failed: <reason>`,
   or `the server will not give the helper a channel of its own
   (MaxSessions 2)`. Whatever the deployment actually said is what is
-  printed, verbatim, rather than the category it falls into.
-  The `upgrade:` line then names the fix, so a user who turned it off sees
-  `sshdrive set nas helper on` and a user on an unsupported platform sees
-  the request to file an issue with the `uname -sm` output.
-- On a server where the probe found ACL evidence and `permissions`
-  is `mode`, the permissions line carries `note: ACLs detected (<evidence>);
-  mode bits may understate access` and, in place of `upgrade:`,
-  `consider: sshdrive set <name> permissions none`. With `permissions none`
-  it shows `◐` and `note: forced by permissions none`, like a forced
-  watch-mode.
+  printed, verbatim, rather than the category it falls into. The
+  `upgrade:` line under it names the level the note stands between the
+  location and: `the remote helper (push events, real renames)`.
+- With `permissions none` the permissions line shows `◐`, the level
+  `everything shown writable` and `note: forced by permissions none`, with
+  no `upgrade:` line, like a forced watch-mode. `set create-check lstat`
+  does the same to the collision-safe-create line
+  (`note: forced by create-check lstat`).
 - `--json` emits the same data: an array of `{feature, level, best, glyph,
-  upgrade, note}` objects plus the probe timestamp, for scripting, and
+  upgrade, note}` objects plus the probe timestamp, the optimal and
+  total counts, whether the probe was cached, the server software, and
   `sftpExtensions`: **every** name the server advertised in `SSH_FXP_VERSION`,
   in the order it sent them, not only the five levels above depend on. A line
   saying the server did not advertise `fsync@openssh.com` is a claim about the
@@ -407,5 +433,6 @@ Rules that keep the format stable across permutations:
   `note: fsync@openssh.com is an OpenSSH extension and <server> does not
   implement it`, with no `upgrade:` line. Where the software is unknown
   nothing changes.
-- When offline, the cached probe is shown with "(cached; offline)" and no
-  guesses are made about what changed.
+- A location whose runtime is not up shows the probe cached in
+  `capabilities.json`, marked `probed <age> (cached)`, and no guesses are
+  made about what changed since.

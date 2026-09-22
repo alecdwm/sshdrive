@@ -9,7 +9,7 @@ public enum SSHRole: String, Sendable, Equatable {
     case muxClient
     /// `-O check` / `-O exit`.
     case controlCommand
-    /// The two-pass verification connection `add` and `passwd` make
+    /// The two-pass verification connection `add` makes
     /// (docs/design/secrets.md).
     case collect
 }
@@ -22,7 +22,7 @@ public enum SSHExitClassification: String, Sendable, Equatable {
     /// `-O check`; a failing check drops the master and reconnects through the breaker,
     /// a passing one retries the channel once.
     case masterLost
-    /// Reconnection stops until `sshdrive test`, `passwd`, or a settings change: a stale
+    /// Reconnection stops until the stop is cleared or the gate rebuilt: a stale
     /// password retried every minute is a `fail2ban` ban within the hour.
     case authenticationFailed
     /// `known_hosts` said no. Stops reconnection the same way (docs/design/secrets.md).

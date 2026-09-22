@@ -20,7 +20,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     public enum Call: Equatable, Sendable {
         case domains
         case addDomain(identifier: String, displayName: String, testingModes: [String])
-        case removeDomain(identifier: String)
+        case removeDomain(identifier: String, mode: DomainRemovalMode)
         case signalEnumerator(locationID: String, container: String)
         case signalErrorResolved(locationID: String)
         case materialized(locationID: String)
@@ -218,11 +218,21 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         if let failure { throw failure.error }
     }
 
-    public func removeDomain(_ domain: ReplicaDomain) async throws {
+    /// Where a removal under `.preserveDownloadedUserData` says it put a domain's files.
+    /// The system chooses the real folder; this one only has to be predictable.
+    public func preservedPath(for domain: ReplicaDomain) -> String {
+        mountRoot.deletingLastPathComponent()
+            .appendingPathComponent("Preserved \(domain.displayName)").path
+    }
+
+    public func removeDomain(
+        _ domain: ReplicaDomain, mode: DomainRemovalMode
+    ) async throws -> String? {
         lock.lock()
-        _calls.append(.removeDomain(identifier: domain.identifier))
+        _calls.append(.removeDomain(identifier: domain.identifier, mode: mode))
         _domains.removeAll { $0.identifier == domain.identifier }
         lock.unlock()
+        return mode == .preserveDownloadedUserData ? preservedPath(for: domain) : nil
     }
 
     public func signalEnumerator(

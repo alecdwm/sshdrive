@@ -51,7 +51,7 @@ directories under a pin root.
 
 Enumerating the system's materialized set is not free, so the last one read
 is published for anything else that wants it: `sshdrive status` reuses
-whichever of the tier 0 cycle, the eviction pass (`docs/design/eviction.md`)
+whichever of the tier 0 cycle, the eviction pass ([docs/design/eviction.md](eviction.md))
 or `materializedItemsDidChange` published it last rather than enumerating
 again.
 
@@ -59,11 +59,13 @@ A remote rename of a directory reaches tiers 0 and 1 as delete + create of
 the whole subtree. Cached content under it is discarded and, if pinned,
 re-downloaded. The helper reports the rename and keeps identifiers and
 content. Recognising moves heuristically at the polling tiers is future
-work (`docs/design/future-work.md`).
+work ([docs/design/future-work.md](future-work.md)).
 
 ## Eviction and pin maintenance
 
-The eviction loop (`docs/design/eviction.md`) and the kept-subtree walk
-(`docs/design/pinning.md`) run here on timers. The agent is not sandboxed,
-so it can `stat` files under `~/Library/CloudStorage/…` directly for their
-access time.
+The eviction loop ([docs/design/eviction.md](eviction.md)) and the kept-subtree walk
+([docs/design/pinning.md](pinning.md)) run here on timers. The agent is not sandboxed,
+so it can `stat` files under `~/Library/CloudStorage/…` directly. The TTL
+takes the replica's mtime from that `stat`; atime is read and logged
+beside the decision and decides nothing
+([docs/design/eviction.md](eviction.md)).

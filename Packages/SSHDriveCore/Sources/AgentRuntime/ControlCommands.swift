@@ -454,8 +454,9 @@ public enum ControlCommands {
             // The breaker, as the agent holds it: state, backoff, the counters, and the
             // authentication-deadline re-arm flags. `--drop` runs `-O exit` on the master
             // without touching config, which is "the connection died" without a `kill`;
-            // `--reset` is the `sshdrive test` reset; `--connect` clears a stop the way
-            // `test` does and attempts once.
+            // `--reset` is the reset a path change or a wake makes; `--connect` clears a
+            // stop and attempts once, which is how a user recovers a stopped location
+            // without restarting the agent.
             let location = try await resolveLocation(arguments)
             _ = try? await resolveRuntime(arguments)
             guard let gate = await AgentCommandContext.manager.gate(locationID: location.id) else {
@@ -673,7 +674,7 @@ public enum ControlCommands {
             "login item", loginItemOK, statusText,
             remedy: loginItemOK == true
                 ? nil
-                : "Enable SSH Drive in System Settings > General > Login Items, "
+                : "Enable SSH Drive in System Settings > General > Login Items & Extensions, "
                     + "or run: open -g -a \"SSH Drive\"")
 
         // The app group container, which is where the index and config.json live.
@@ -770,7 +771,9 @@ public enum ControlCommands {
                     + "provisioning profile issued for the certificate the bundle was "
                     + "signed with. An ad-hoc build cannot have one, and a profile made "
                     + "for a different Developer ID certificate does not count. Passwords "
-                    + "and key passphrases are all that stop working. See docs/release.md.")
+                    + "and key passphrases are all that stop working. Reinstall with "
+                    + "`brew reinstall --cask sshdrive`, or use a key the agent needs no "
+                    + "stored secret for.")
 
         // The login shell snapshot: `PATH` and `SSH_AUTH_SOCK` as a fresh
         // login shell has them, which is what makes a key agent socket exported from

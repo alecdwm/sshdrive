@@ -10,14 +10,14 @@ system may host several instances in one process, so nothing is global.
 Every call that touches the network or changes anything is forwarded to
 the agent (see Talking to the agent, below); `item(for:)` and the
 working-set change stream are answered from the index by the extension
-itself:
+itself whenever its reader is usable, and by the agent when it is not:
 
 | System call | What the agent does |
 |---|---|
 | `enumerator(for: container)` → `enumerateItems` | `opendir/readdir` the mapped path over SFTP, reconcile with the index, return items. Records the folder as recently viewed ([the root set](root-set.md)). |
-| `enumerator(for: container)` → `enumerateChanges(from:)` | Same, diffed against the index; this is how a folder refreshes when Finder shows it. |
-| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by [change detection](change-detection.md) from the index, in the extension. Never touches the network, and touches the agent only on the schema-mismatch fallback and to say that it has answered `.syncAnchorExpired` and handed out a fresh anchor ([the index](item-index.md)). |
-| `item(for: identifier)` | Read the index row, in the extension. Never touches the network, and touches the agent only on the schema-mismatch fallback. |
+| `enumerator(for: container)` → `enumerateChanges(from:)` | Same, diffed against the index. The system does not call it in practice: a folder is enumerated once, ever, and every later change reaches Finder through the working set ([the root set](root-set.md)). |
+| `enumerator(for: .workingSet)` → `enumerateChanges(from:)` | Read the anchors recorded by [change detection](change-detection.md) from the index, in the extension. Never touches the network. When the reader is not usable - not yet declared ready, dropped after a SQLite error, a schema newer than this build, or `meta.reconciling` set - the call goes to the agent, which runs the same query on its own connection. The agent is also told when the extension has answered `.syncAnchorExpired` and handed out a fresh anchor ([the index](item-index.md)). |
+| `item(for: identifier)` | Read the index row, in the extension. Never touches the network. When the reader is not usable, for the same reasons as the working set, the call goes to the agent, which answers from its own connection or, while reconciling, refuses with `.serverUnreachable`. |
 | `fetchContents(for:)` / `fetchPartialContents` | Download through the file handle the extension opened on its temp file; the extension then returns that URL. Partial fetches serve range requests for large media. The `Progress` the extension returns is fed by byte counts from the agent, and cancelling it cancels the transfer. The agent `lstat`s before and after the download; if size or mtime moved in between, the file changed under the transfer and the download is made again, once, after which a still-moving file fails the fetch as `.serverUnreachable` so the system retries later rather than keeping a torn copy. The item returned carries the version the final `lstat` read. |
 | `createItem` | `mkdir`, `symlink` ([symlinks](symlinks.md)), or upload-to-temp + non-overwriting `rename` into place ([writes](writes.md)). |
 | `modifyItem` | Depending on `changedFields`: rename/move (non-overwriting `rename`, with every descendant's path rewritten in the index, see [the index](item-index.md)), content (upload + `posix-rename`, then a post-upload `lstat` that records the new version, see [writes](writes.md)), attributes (`setstat` mtime; execute bits from `fileSystemFlags`, see [names and attributes](names-and-attributes.md)), extended attributes (stored locally). |
@@ -80,7 +80,9 @@ the agent for each one would put an XPC call on the hottest path in the
 extension. So the extension opens `domains/<id>/index.sqlite` read-only,
 in WAL mode, from the group container, and answers `item(for:)` and the
 working-set change enumerator from it directly, with no agent involved,
-which also means they keep working while the agent is restarting. The
+which also means they keep working while the agent is restarting. When
+the reader cannot answer, the call is handed to the agent rather than
+failed (below and [the index](item-index.md)). The
 agent remains the only writer, and that is what makes this safe: WAL
 readers never block the writer and always see a consistent snapshot.
 Both sides cache their compiled statements by SQL text: the index runs a
@@ -132,12 +134,14 @@ three values, so the check is asked in its own right before
 like a deletion.
 An extension that finds a schema version newer than it understands falls
 back to asking the agent for items, which it can always do, so a
-mid-upgrade mismatch degrades to the slow path rather than failing.
-While `reconciling` is set ([the index](item-index.md)) the extension
-answers `item(for:)` and
-the working-set enumerator with `.serverUnreachable` rather than reading
-rows that are still being rebuilt, since a missing row answered with
-`.noSuchItem` would delete the user's file. `generation` is bumped by
+mid-upgrade mismatch degrades to the slow path rather than failing. The
+same hand-off covers a reader the agent has not yet declared ready and a
+reader dropped after any SQLite error. While `reconciling` is set
+([the index](item-index.md)) the reader does not read rows that are still
+being rebuilt: it hands the call to the agent, and the agent refuses
+every File Provider call with `.serverUnreachable` until the walk
+finishes, since a missing row answered with `.noSuchItem` would delete
+the user's file. `generation` is bumped by
 the agent whenever it has replaced the database's contents wholesale (a
 restore, see [the index](item-index.md)), and the reader hands it to the
 extension's state file from the same read. The database file itself is

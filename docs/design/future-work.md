@@ -32,12 +32,6 @@ Not planned for v1, recorded so the design leaves room for them:
   platform in question is usually cheaper.
 - **Submitting the cask to homebrew-cask** so the tap is unnecessary.
 
-## Not yet built
-
-Commands the CLI page describes that do not exist yet: `passwd`, `test` and `add
---password-stdin`. The mechanism each needs is there (`debug breaker --connect` clears a
-stop the way `test` would), only the commands are missing.
-
 ## Not yet measured
 
 - The helper's kqueue path has never run on a BSD: the testbed has no BSD server, so

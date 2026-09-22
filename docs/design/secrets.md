@@ -102,8 +102,8 @@ password prompt with no stored item is answered the same way, and since
 with the prompt text in `status`, which is the right outcome for a server
 that has started asking for a credential the location does not have.
 
-**Collecting secrets** happens once, in `sshdrive add` (and again in
-`sshdrive passwd`). The CLI does not run `ssh`. It asks the agent to make
+**Collecting secrets** happens once, in `sshdrive add` (and again when
+`sshdrive set` changes the host, user, port or identity). The CLI does not run `ssh`. It asks the agent to make
 the verification connection, and the agent runs the exact command it will
 use later, in its own environment ([SSH process management](ssh.md)), with
 the token marked *collect*. For every prompt the agent has no stored answer
@@ -125,8 +125,9 @@ second location on a host whose password has since changed finds the shared
 `ssh` uses it for its single prompt (`NumberOfPasswordPrompts=1`) and is
 refused. `add` then repeats the collect connection with the stored items for
 that host masked, so every prompt reaches the terminal, and on success
-replaces the item for every location that names it, saying so exactly as
-`passwd` does.
+replaces the item for every location that names it. Replacing a stored secret on purpose is
+`sshdrive remove` followed by `sshdrive add`: `remove` deletes each item no
+other location names, and the new `add` collects it again.
 
 The terminal the user is typing in can still differ from the snapshot: a
 tmux session, a forwarded agent socket or a directory-scoped environment
@@ -163,7 +164,8 @@ the mount waits for it after login", and its reconnects use the transient
 retry of [the SSH page](ssh.md) while the agent is unavailable: a key-agent
 socket that is missing or refuses, probed before the spawn at the path
 `ssh -G` resolves for `identityagent`, is a transient failure and not an
-authentication one. `passwd` repeats the same two steps. Whichever pass
+authentication one. The collect connection of `set host|user|port|identity`
+repeats the same two steps. Whichever pass
 succeeded is how the location connects from then on: a first-pass location
 runs with `IdentityAgent=none` for good, so no key agent is ever consulted
 for it and none can prompt.
@@ -216,7 +218,7 @@ the agent kills it. The
 and banner phase ([offline behaviour](offline.md)), because the agent has
 no signal for when that phase ended; a `ProxyCommand` that takes ten
 seconds to hand over a connection leaves fifty for authentication.
-**The collect connection of `add` and `passwd` is the one exception**,
+**The collect connection is the one exception**,
 and it has to be: its prompts go to a terminal, so a user reading a
 fingerprint off the screen and typing a password for each hop of a chain
 routinely spends longer than that, and a 60 s kill lands in the middle of
@@ -236,14 +238,15 @@ connection failure. For the agent-dependent case reconnection stops
 and `sshdrive status` says
 "authentication did not complete within 60 s; a key agent may be waiting
 for a touch or approval", with the fix: use a stored passphrase, a
-key-agent key that does not prompt, or a password, then `sshdrive test`.
+key-agent key that does not prompt, or a password, then
+`sshdrive debug breaker <name> --connect`.
 
 A deadline stop is not final, though, because its commonest cause is a
 1Password or Secretive key agent that only wants its approval given while
 somebody is at the keyboard: after every sleep the master is dropped
 ([SSH process management](ssh.md)), the reconnect blocks on a prompt nobody
-is there to answer, and the deadline fires. Leaving it stopped until
-`sshdrive test` would make the mount die every morning for exactly the key
+is there to answer, and the deadline fires. Leaving it stopped until the
+user clears the stop by hand would make the mount die every morning for exactly the key
 agents [goals and non-goals](goals.md) names as supported.
 So a location stopped by the deadline is **re-armed for one attempt**
 when a human is demonstrably present. A File Provider request on its own
@@ -307,8 +310,8 @@ does it through a file in the group container, never the environment.
   agent recognises that on stderr, marks the domain `.notAuthenticated`,
   stops reconnecting ([SSH process management](ssh.md)), and
   `sshdrive status` shows the fingerprint
-  `ssh` reported and the fix: `ssh-keygen -R <host>` followed by
-  `sshdrive test <name>`.
+  `ssh` reported and the fix: `ssh-keygen -R <host>`, accepting the new
+  key with `ssh` once, and `sshdrive debug breaker <name> --connect`.
 
 We keep no host-key state of our own, so `ssh`, `sftp` and SSH Drive can
 never disagree about a server.

@@ -193,12 +193,12 @@ So:
   to its end before the sentinel is printed, and the `exit` stops it ever
   reading stdin as script again.
 - **Background children never share the script's stdin.** `find` and the
-  helper are started with `</dev/null`, so the wrapper is the only reader
+  helper are started with `< /dev/null`, so the wrapper is the only reader
   of the heartbeat lines and a child cannot swallow them and get itself
   killed for silence. The helper still needs input of its own - its root
   set and its pings - and only one process may read a pipe, so the wrapper
   stays the reader and **relays** those lines into a FIFO the helper is
-  given instead; a server where `mkfifo` fails runs it `</dev/null` with
+  given instead; a server where `mkfifo` fails runs it `< /dev/null` with
   its roots on its argv.
 - **Output is NUL-delimited** wherever a filename can appear (`-print0`,
   NDJSON from the helper) and parsed as

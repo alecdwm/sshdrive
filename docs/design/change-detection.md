@@ -8,7 +8,7 @@ directory, since a deletion is only visible as an absence in its parent's
 listing), diffs against the index, and turns into working-set anchors,
 followed by `signalEnumerator(for: .workingSet)`. Nothing on the File
 Provider side knows which tier is active, and the version format
-(`docs/design/item-index.md`) is the same at every tier so that a tier change
+([docs/design/item-index.md](item-index.md)) is the same at every tier so that a tier change
 is invisible too.
 
 | Tier | Mode | Needs on the server | Latency | Cost per cycle |
@@ -22,7 +22,7 @@ level, both of them: a mount that takes no change is diagnosed by whether
 the events arrived, whether applying them changed anything, and whether the
 signal went out, and none of those can be reconstructed afterwards.
 
-**Scope** is the root set (`docs/design/root-set.md`). When it changes, the
+**Scope** is the root set ([docs/design/root-set.md](root-set.md)). When it changes, the
 helper (tier 2) is sent the new set on its stdin and applies it live; the
 polling tiers read it at the start of every cycle.
 
@@ -36,10 +36,10 @@ user has set `helper off` for the location. That last condition is tier
 2's alone and is easy to miss: a sweep opens an exec channel, spends half
 a second on it and gives it back, while the helper's stream holds one for
 the life of the connection. At a `MaxSessions` of 2 there is exactly one
-spare channel and the probe, `sshdrive test` and the 30-minute insurance
-sweep below all want it, so a helper that never gave it back would cost
-the location all three; the channel budget therefore answers "may I hold
-one open", not only "may I open one" (`docs/design/ssh.md`). A tier that
+spare channel and both the probe and the 30-minute insurance
+sweep below want it, so a helper that never gave it back would cost
+the location both; the channel budget therefore answers "may I hold
+one open", not only "may I open one" ([docs/design/ssh.md](ssh.md)). A tier that
 fails at runtime drops the location one tier down and records why, which
 `sshdrive status` shows - but **for how long depends on what failed**. A
 failure that will be just as true on the next connection costs the tier for
@@ -67,8 +67,8 @@ not. A "full sweep" is the
 tier 1 sweep with its window opened back to the last server timestamp
 the index recorded, unbounded when there is none (a fresh or rebuilt
 index), or at tier 0 a `readdir` of every root with the rotation
-(`docs/design/root-set.md`) suspended for that one cycle; the same sweep
-serves a fresh working-set anchor (`docs/design/item-index.md`).
+([docs/design/root-set.md](root-set.md)) suspended for that one cycle; the same sweep
+serves a fresh working-set anchor ([docs/design/item-index.md](item-index.md)).
 
 **Schedule for tiers 0 and 1.** Every 60 s while the user has touched the
 domain in the last 10 minutes (a File Provider request for it that was
@@ -91,11 +91,13 @@ final fallback for everyone else.
 ## Tier 1: remote sweep
 
 One `sh -s` exec channel per cycle, fed a script on stdin
-(`docs/design/security.md`) that runs:
+([docs/design/security.md](security.md)) that runs:
 
 ```
 find "$@" -maxdepth 1 \( -type d -o -type f \) -cmin -<N> -print0     # working-set roots
-find "$@"             \( -type d -o -type f \) -cmin -<N> -print0     # pin roots, excluded subtrees pruned with -path … -prune
+find "$@"             \( -type d -o -type f \) -cmin -<N> -print0     # pin roots
+                                                                    # (excluded subtrees pruned
+                                                                    # with -path … -prune)
 ```
 
 Two invocations because `-maxdepth` applies to every starting point of one
@@ -137,11 +139,11 @@ back under the recursive watch. Both files and directories are matched: a direct
 changes on create, delete and rename inside it, but an in-place edit
 changes only the file's own, so the file test is needed too. There is no `-xdev`: a NAS root routinely contains separate
 mounts (ZFS datasets, bind mounts), and containment comes from not following
-links (`docs/design/security.md`), not from staying on one filesystem. On
+links ([docs/design/security.md](security.md)), not from staying on one filesystem. On
 GNU `find` the sweep replaces `-print0` with
 `-printf '%p\0%y\0%s\0%T@\0%i\0%m\0%U\0%G\0'`,
 so every hit arrives with its type, size, nanosecond mtime, inode, mode
-and owner and needs no follow-up `stat` (`docs/design/item-index.md`);
+and owner and needs no follow-up `stat` ([docs/design/item-index.md](item-index.md));
 elsewhere the returned paths are `stat`ed over SFTP, one round trip each.
 Both time tests and `-printf` cost a `stat` per entry on the server, and
 that is most of what a sweep spends: over a million-file tree on Debian,
@@ -157,11 +159,11 @@ otherwise be read as an option and take the whole sweep with it; the
 prefix comes back on every path and is stripped before the path
 reaches the `RelativePath` constructor. And a root whose bytes are not
 valid UTF-8 cannot travel at all: `set --` is a String pipeline end to
-end (`docs/design/security.md`), so such a root is left out of the `find`
+end ([docs/design/security.md](security.md)), so such a root is left out of the `find`
 argv and listed at tier 0 in the same cycle instead, which watches it at
 the same cadence and only loses the server-side walk. The sweep's own
 output ends with the channel's sentinel printed a second time, exactly as
-the login-shell snapshot does (`docs/design/ssh.md`), so the agent stops
+the login-shell snapshot does ([docs/design/ssh.md](ssh.md)), so the agent stops
 reading on the closing marker rather than on EOF - which an account whose
 rc file leaves a background child holding stdout never sends.
 
@@ -181,7 +183,7 @@ measured - Debian with `ClientAliveInterval` unset, Debian with it set to
 wrapper below is not a workaround for a common misconfiguration; on every
 server there is, it is the only thing that ever kills what we started. So
 nothing is ever started bare: the stdin script
-(`docs/design/security.md`) starts the command in the background with its
+([docs/design/security.md](security.md)) starts the command in the background with its
 stdin redirected from `/dev/null`, so the child cannot consume the
 heartbeat lines, and then loops reading stdin, and the agent writes a
 heartbeat line every 15 s. When no line has arrived for 60 s, or stdin
@@ -238,7 +240,7 @@ A single static binary, `sshdrive-helper`, built from this repo in Rust for
 QNAP boxes), `darwin/arm64` and `freebsd/x86_64`, embedded
 in `SSH Drive.app`. A platform outside that list is the one case where
 a server with shell access stays at the sweep tier, and `status` asks
-for an issue with the `uname -sm` output (`docs/design/cli.md`), since
+for an issue with the `uname -sm` output ([docs/design/cli.md](cli.md)), since
 adding a target is cheaper than any other push mechanism. Deployment
 happens over the existing connection:
 
@@ -254,6 +256,7 @@ happens over the existing connection:
    on a shared host.
    "Executable" is tested by actually running the uploaded binary with
    `--version`, which catches `noexec` mounts.
+
 2. Upload `sshdrive-helper-<version>-<os>-<arch>` over SFTP if
    `sha256sum`/`shasum` of the remote copy does not match the hash embedded in
    the app. Where the server has neither tool, verification is the remote
@@ -264,7 +267,7 @@ happens over the existing connection:
    hash of that file, and the digest it computes is the same claim
    `sha256sum` would have made, so the fallback is the good path's check
    rather than a weaker one. The upload goes to a temp name and is renamed
-   into place like every other upload (`docs/design/writes.md`), never
+   into place like every other upload ([docs/design/writes.md](writes.md)), never
    written over the existing file: a helper of the same version may be
    running from that path for another Mac, writing over a running executable
    fails with `ETXTBSY` on Linux, and the rename leaves the old inode to the
@@ -274,14 +277,15 @@ happens over the existing connection:
    versions, and each keeps its own file without deleting the other's
    while it is in use.
 
-   This deployment is the one exception to the `RelativePath` chokepoint
-   (`docs/design/security.md`), since it writes outside every location root
-   by design. What the SFTP layer exposes for it is a probe-chosen absolute
-   directory plus one filename component, no `..` and no nesting, and
-   nothing on the File Provider path can build one.
+    This deployment is the one exception to the `RelativePath` chokepoint
+    ([docs/design/security.md](security.md)), since it writes outside every location root
+    by design. What the SFTP layer exposes for it is a probe-chosen absolute
+    directory plus one filename component, no `..` and no nesting, and
+    nothing on the File Provider path can build one.
+
 3. Start `<path>/sshdrive-helper watch --json --root <root> --roots-from-stdin`
    from the same `sh -s` wrapper script as every other remote command
-   (`docs/design/security.md`), its path and root single-quoted into the
+   ([docs/design/security.md](security.md)), its path and root single-quoted into the
    script and never on the command line, feed it the root set, and read
    NDJSON events:
    `{"op":"create|modify|delete|rename|overflow","path":…,"from":…,
@@ -295,33 +299,33 @@ happens over the existing connection:
    quietly. A path that is valid UTF-8 travels as `path`; one that is not
    travels as `path_b64`, base64 of the raw server bytes, because a JSON
    string is UTF-8 by definition and a filename need not be
-   (`docs/design/names-and-attributes.md`) - which is the one thing tier 1
+   ([docs/design/names-and-attributes.md](names-and-attributes.md)) - which is the one thing tier 1
    cannot do at all, since `set --` is a String pipeline end to end. The
    agent sends a ping line every 15 s in return and the helper exits after
    60 s without one, so it never outlives the connection (see the
    lifetime rule above on why sshd cannot be relied on for that).
 
-   **How that stdin reaches it.** Background children never share the
-   script's stdin - `find` and the helper are started `</dev/null` so they
-   cannot swallow the heartbeat lines (`docs/design/security.md`) - and
-   this step says the helper is *fed* on its stdin. Both cannot be the
-   channel's stdin, and only one process may read a pipe. So the wrapper
-   stays the only reader and **relays** every line it reads into a FIFO it
-   makes in the helper's own directory, which the child is given as its
-   stdin. A server where `mkfifo` fails is not a failure: the helper is
-   then started `</dev/null` with the root set of that moment on its own
-   argv, watches what it was given, and the wrapper is its only kill
-   switch, exactly as for every other remote command. The FIFO is swept on
-   every deployment rather than trusted to clean itself up: the wrapper's
-   `EXIT` trap removes its own, and the trap does not run when the wrapper
-   is `SIGKILL`ed, which is every abrupt client kill and the case the
-   wrapper exists for.
+    **How that stdin reaches it.** Background children never share the
+    script's stdin - `find` and the helper are started `< /dev/null` so they
+    cannot swallow the heartbeat lines ([docs/design/security.md](security.md)) - and
+    this step says the helper is *fed* on its stdin. Both cannot be the
+    channel's stdin, and only one process may read a pipe. So the wrapper
+    stays the only reader and **relays** every line it reads into a FIFO it
+    makes in the helper's own directory, which the child is given as its
+    stdin. A server where `mkfifo` fails is not a failure: the helper is
+    then started `< /dev/null` with the root set of that moment on its own
+    argv, watches what it was given, and the wrapper is its only kill
+    switch, exactly as for every other remote command. The FIFO is swept on
+    every deployment rather than trusted to clean itself up: the wrapper's
+    `EXIT` trap removes its own, and the trap does not run when the wrapper
+    is `SIGKILL`ed, which is every abrupt client kill and the case the
+    wrapper exists for.
 
 What it adds over the polling tiers: inotify/FSEvents/kqueue used
 directly, so a change arrives in about a second instead of a poll
 interval, root-set changes applied live, real
 rename events with identifiers preserved (a rename onto an existing path is
-applied as a modify of that path, `docs/design/item-index.md`), nanosecond
+applied as a modify of that path, [docs/design/item-index.md](item-index.md)), nanosecond
 mtime and inode in every event, server-side coalescing and a fixed, short
 ignore list (our own `.sshdrive-upload-*` and editor scratch names:
 `.*.swp`, `*~`, `.#*`, `4913`; `.git` is deliberately not on it, because a
@@ -358,7 +362,7 @@ use. `add` says it **before** the upload and then waits, bounded, for that
 first deployment attempt to settle before it prints its capability report,
 so the one report `add` gives and the `status` a moment later cannot
 disagree; a deployment still in flight is reported as `deploying` rather
-than as a server that cannot run the helper (`docs/design/cli.md`).
+than as a server that cannot run the helper ([docs/design/cli.md](cli.md)).
 `helper off` stops it and removes the binary on the next connection;
 `helper on` re-enables it. Deployment failures are never fatal: the
 location silently continues at the next tier and the status report says
@@ -375,7 +379,7 @@ A poll that finds a directory empty is not always a directory that was
 emptied. A ZFS dataset not yet imported after the NAS rebooted, an external
 drive not yet mounted, an autofs share that timed out: all present an empty
 directory at the same path, and the `realpath` check
-(`docs/design/security.md`) is satisfied because the mount point itself is
+([docs/design/security.md](security.md)) is satisfied because the mount point itself is
 still there. Reporting that literally would delete every item beneath it
 from the replica: the cache is dropped, every local xattr and Finder tag
 with it, kept subtrees are re-downloaded when the data reappears, and every
@@ -389,7 +393,7 @@ with the time first seen missing, stay visible in Finder, and the directory
 is re-listed after 5 minutes and again after 30. If they are still missing
 after the second re-check, the deletions are applied. If they reappear, the
 hold is cleared and nothing was ever reported. A directory rename rewrites
-`held.dir` as well as `held.path` (`docs/design/item-index.md`), or those
+`held.dir` as well as `held.path` ([docs/design/item-index.md](item-index.md)), or those
 two re-checks re-list a name that no longer exists and the holds never
 resolve. While held, opening one of
 the items fetches from the server and fails. The failure is reported as
@@ -404,11 +408,10 @@ listed a minute later and after a working-set signal. So the difference is
 in what the user is told, not in whether the file survives the answer; the
 rule above stands on the honesty of the message rather than on a deletion
 that does not happen. (`item(for:)` is the call where `.noSuchItem`
-really does delete the user's file, `docs/design/extension.md`.)
+really does delete the user's file, [docs/design/extension.md](extension.md).)
 `sshdrive status` shows "14 deletions held in Photos, re-check at 14:32",
-`sshdrive accept-deletions <name> [path]` applies them now, and
-`sshdrive test` re-checks now. The guard applies to deletions **inferred
-from a listing**: a tier 0 poll, the re-`readdir` of a dirty directory at
+and `sshdrive accept-deletions <name> [path]` applies them now. The
+guard applies to deletions **inferred from a listing**: a tier 0 poll, the re-`readdir` of a dirty directory at
 any tier, the reconnect sweep, and the root's own listing. It does not
 apply to explicit delete events from the helper: an `rm -rf Photos`
 produces one event per item and is real, while a vanished mount produces
@@ -422,10 +425,10 @@ it, but as a **`createItem`** rather than the `modifyItem` it was. Because
 the path is still there on the server - the deletion was wrong, which is
 the case the guard exists for - that create is answered
 `.filenameCollision`, and the system retries a collided create for ever
-with no alert (`docs/design/writes.md`; measured on macOS 26.4,
+with no alert ([docs/design/writes.md](writes.md); measured on macOS 26.4,
 2026-09-04). The user's edit then sits in the mount, never reaches the
 server, and nothing ever resolves it. The item also comes back with a new
 identifier, since there are no tombstones
-(`docs/design/item-index.md`), so any pin or tag on it is lost even when
+([docs/design/item-index.md](item-index.md)), so any pin or tag on it is lost even when
 the create does succeed. Holding is therefore not an optimisation here; it
 is what keeps a wrongly-inferred deletion from stranding a save.

@@ -24,7 +24,7 @@ Shared Swift package: SSHDriveCore
 ├── Config         location model, JSON store in the app-group container
 ├── Secrets        keychain wrapper (shared access group, data-protection keychain)
 ├── SFTP           SFTP v3 wire-protocol client over a byte stream, plus OpenSSH extensions
-├── SSHProcess     spawns and supervises `ssh`, ControlMaster, exec channels
+├── SSHProcess     spawns and supervises ssh, ControlMaster, exec channels
 ├── Index          SQLite path <-> item identifier index, per domain
 ├── XPCProtocols   the agent's interfaces for the extension and the CLI
 ├── XPCInterfaces  the @objc NSXPC half of those interfaces (macOS only)
@@ -46,8 +46,10 @@ Why the agent owns everything:
   other system call (list, fetch, create, modify, delete) into one XPC
   call to the agent and the reply back. It holds no state of its own,
   opens no sockets and never writes the index. Its only other file I/O is
-  the index it reads and the temp file the system gives it for fetched
-  content, whose handle it passes to the agent to fill.
+  the index it reads, the temp file the system gives it for fetched
+  content, whose handle it passes to the agent to fill, and
+  `domains/<id>/reader-state.json`, where it records the state of its
+  own index reader for `sshdrive doctor` ([the index](item-index.md)).
 - **Agent**: a `SMAppService` login agent whose plist sets `RunAtLoad`
   and `KeepAlive` with `SuccessfulExit` false, so it runs from login
   rather than from the first mach lookup, comes back after a crash, and
@@ -95,6 +97,12 @@ domains/<location-id>/
     index.sqlite             path <-> identifier map, versions, last-fetch times, pins, xattrs
                              (written only by the agent; read by the agent and the extension,
                              extension.md)
+    index.sqlite.bak         the agent's periodic backup of the index, restored into the live
+                             database when the index is corrupt (item-index.md)
+    pins.json                write-only copy of the pin markers, read only to restore them
+                             after a rebuild (pinning.md, item-index.md)
+    reader-state.json        the extension's last word on its read-only reader; the one file
+                             the extension writes here (extension.md)
     capabilities.json        cached server probe (cli.md)
 ```
 

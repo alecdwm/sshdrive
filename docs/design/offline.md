@@ -14,8 +14,8 @@ are what the agent does to produce it.
 | Browse a never-listed folder, network down | `.serverUnreachable` at once; Finder shows the folder as unavailable. |
 | Save a file, network down | System stores it locally, marks it "waiting to upload", calls `modifyItem` again on retry. The agent fails fast until it can connect, then the flush goes through. |
 | Network returns | Agent's `NWPathMonitor` fires → connection attempt → on success `signalErrorResolved(.serverUnreachable)` on every domain, which is the system's cue to retry pending uploads and fetches, then `signalEnumerator` for the working set, and `reconnect()` if `disconnect(reason:)` had been used. **`signalErrorResolved` is the one that does it, and it is not optional:** measured on macOS 26.4, 2026-09-04, the queued `modifyItem` arrived 20 ms after the signal, and neither reconnecting on its own nor `signalEnumerator` for the working set wakes the flush at all. The working-set signal is still sent, for the working set. |
-| Laptop wakes from sleep | Same path as network returns; the masters were already dropped at the will-sleep message (`docs/design/ssh.md`). |
-| Agent not running | Domain shows a disconnect message (`docs/design/extension.md`); everything already cached keeps working. |
+| Laptop wakes from sleep | Same path as network returns; the masters were already dropped at the will-sleep message ([docs/design/ssh.md](ssh.md)). |
+| Agent not running | Domain shows a disconnect message ([docs/design/extension.md](extension.md)); everything already cached keeps working. |
 
 **What the system does while we are down decides how hard the agent has to
 try.** Both halves were measured on macOS 26.4, 2026-09-04. A queued
@@ -44,9 +44,9 @@ We deliberately do not use `disconnect(reason:)` for network outages;
 throwing `.serverUnreachable` is enough and keeps the domain writable. The
 agent calls `disconnect` with a human message only for refused prompts,
 host-key changes, a root that no longer canonicalises to what `add`
-recorded (`docs/design/security.md`) and the agent-missing case, where
+recorded ([docs/design/security.md](security.md)) and the agent-missing case, where
 retrying is pointless until the user acts. A stop caused by the
-authentication deadline (`docs/design/secrets.md`) does not disconnect the
+authentication deadline ([docs/design/secrets.md](secrets.md)) does not disconnect the
 domain: requests keep arriving, fail fast with `.serverUnreachable` while
 the location is stopped, and the first one that arrives while the user is
 present is what re-arms the attempt, so the domain has to stay connected for
@@ -62,11 +62,12 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
    down while the Mac is online.
 2. A per-location **circuit breaker** covers the rest: after a failed
    connection attempt the location is marked down for a backoff interval
-   (2 s, doubling to 60 s), during which every call fails fast without
-   touching the network. A path change, wake from sleep, or `sshdrive test`
-   resets the breaker. **While an attempt is in progress, calls wait for
+   (2 s, doubling to 60 s; 300 s while the failure is a key agent that
+   is not ready, [docs/design/ssh.md](ssh.md)), during which every call fails fast
+   without touching the network. A path change or wake from sleep resets
+   the breaker. **While an attempt is in progress, calls wait for
    it**, bounded by the attempt's own remaining deadline: at most the 60 s
-   authentication deadline (`docs/design/secrets.md`), measured from the
+   authentication deadline ([docs/design/secrets.md](secrets.md)), measured from the
    spawn of `ssh`, which already contains the 15 s `ConnectTimeout` of the
    TCP and banner phase (never the two added together). When the attempt
    succeeds the waiting calls run; when it fails they all get
@@ -80,11 +81,11 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
    that does go out. 15 rather than 5 because `ProxyCommand` tunnels such
    as `cloudflared access ssh` routinely take longer than 5 s to hand over
    a connection. The 60 s authentication deadline
-   (`docs/design/secrets.md`) runs from the same spawn and bounds the whole
+   ([docs/design/secrets.md](secrets.md)) runs from the same spawn and bounds the whole
    attempt.
 4. A connection that died silently is found by the per-request deadline
-   (`docs/design/sftp.md`) and, after sleep, by dropping the master
-   outright (`docs/design/ssh.md`), so the breaker opens within seconds
+   ([docs/design/sftp.md](sftp.md)) and, after sleep, by dropping the master
+   outright ([docs/design/ssh.md](ssh.md)), so the breaker opens within seconds
    rather than after the keepalive window. The request that finds it is
    **retried once**, through the breaker, if it is a read or a metadata
    call: by then the breaker is either connecting, in which case the retry
@@ -107,17 +108,21 @@ Waiting for a TCP timeout freezes Finder, so every remote call is gated:
    attempt is what produces the `signalErrorResolved` in the table above,
    which is what flushes the queue.
 6. Auth and host-key failures do not go through the breaker at all: they
-   stop reconnection until the user acts (`docs/design/ssh.md`), or, for a
-   deadline stop, until screen unlock, or a request arriving with the user
-   present, re-arms one attempt (`docs/design/secrets.md`). A stopped
-   location gets no reconnect schedule: rule 5 would be a stale password
-   retried every minute, which is a `fail2ban` ban within the hour.
+   stop reconnection until the user acts ([docs/design/ssh.md](ssh.md)) with any
+   `sshdrive set` change to the location, `sshdrive agent restart` (the
+   breaker lives in the agent's memory) or
+   `sshdrive debug breaker <name> --connect`, which clears the stop and
+   attempts once. A deadline stop is also re-armed for one attempt by a
+   screen unlock or a request arriving with the user present
+   ([docs/design/secrets.md](secrets.md)). A stopped location gets no reconnect
+   schedule: rule 5 would be a stale password retried every minute,
+   which is a `fail2ban` ban within the hour.
 
 Two measurements on macOS 26.4, 2026-09-04, are what the bounded wait of
 rule 2 rests on: the system does **not** time out an `enumerateItems` held
 for the full 60 s - it waited 60.19 s, took the answer and left the
 extension running - and requests keep arriving at the extension while the
 domain is connected and every call fails fast, which is what the
-present-user re-arm rides on (`docs/design/secrets.md`). What Finder draws
+present-user re-arm rides on ([docs/design/secrets.md](secrets.md)). What Finder draws
 during the wait is a circular progress indicator in place of the item's
 dataless badge, for the length of the connect, with no alert.

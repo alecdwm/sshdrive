@@ -25,7 +25,7 @@ final class CircuitBreakerTests: XCTestCase {
         XCTAssertEqual(breaker.admit(now: 1), .failFast(.backingOff(remaining: 1)))
         breaker.setNetworkPath(false)
         breaker.setNetworkPath(true)
-        // A path change, wake from sleep, or `sshdrive test` resets the breaker
+        // A path change or wake from sleep resets the breaker
         // (docs/design/offline.md), so the next call connects rather than waiting out
         // the 2 s.
         XCTAssertEqual(breaker.admit(now: 1), .connect)

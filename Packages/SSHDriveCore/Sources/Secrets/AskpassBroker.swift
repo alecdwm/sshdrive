@@ -3,7 +3,7 @@ import Logging
 import XPCProtocols
 
 /// What a token was minted for (docs/design/secrets.md). A `collect` token belongs to the
-/// verification connection `sshdrive add` and `sshdrive passwd` make; every prompt it has
+/// verification connection `sshdrive add` makes; every prompt it has
 /// no stored answer for is relayed to the CLI. A `master` token belongs to a `-N` master
 /// (and, through the environment it inherits, to that master's `ProxyJump` hops); nothing
 /// is relayed, and a prompt with no stored answer is skipped or refused.
@@ -137,7 +137,7 @@ public final class AskpassBroker: @unchecked Sendable {
     /// `ssh` that has raised this many prompts is not authenticating, it is grinding.
     public var maximumInvocations = 32
 
-    /// Installed by `sshdrive add` / `passwd` for the length of the collect connection.
+    /// Installed by `sshdrive add` and a re-keying `set` for the length of the collect connection.
     /// Returns the user's answer, or nil if the CLI could not be asked.
     public var collectResponder: ((AskpassCollectRequest) -> String?)?
 
@@ -240,7 +240,7 @@ public final class AskpassBroker: @unchecked Sendable {
 
     /// When the connection succeeds, every answer that was actually used is written to
     /// the keychain; a wrong password is never stored (docs/design/secrets.md). Called by
-    /// `add` and `passwd` only after the verification connection has authenticated.
+    /// `add` and `set` only after the verification connection has authenticated.
     @discardableResult
     public func commit(token: String) throws -> [SecretKey] {
         let answers = usedAnswers(token: token)

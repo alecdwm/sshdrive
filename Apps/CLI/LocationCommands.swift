@@ -252,7 +252,7 @@ struct Remove: ParsableCommand {
     var all = false
 
     @Flag(name: .customLong("keep-files"),
-          help: "Keep the downloaded files in the folder the system chooses.")
+          help: "Keep the downloaded files: the system moves them to a folder it chooses, and the path is printed.")
     var keepFiles = false
 
     @Flag(help: "Remove even while uploads are pending.")
@@ -290,6 +290,11 @@ struct Remove: ParsableCommand {
             return
         }
         global.detail("Removed \(removed.joined(separator: ", ")).")
+        // The only place the user learns where their files went, so it is printed
+        // whatever the flag says, on stderr beside the other lines that must be read.
+        for entry in report["preserved"] as? [[String: String]] ?? [] {
+            global.warn("Downloaded files of \(entry["name"] ?? "") kept in \(entry["path"] ?? "")")
+        }
         let secrets = report["secretsRemoved"] as? [String] ?? []
         if !secrets.isEmpty {
             global.detail("Keychain items removed: \(secrets.joined(separator: ", "))")
@@ -385,7 +390,8 @@ struct Unmount: ParsableCommand {
 
 struct Status: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Per-domain state, sync errors, hidden names, and the capability report.")
+        abstract:
+            "State, last error, change detection, cache, held deletions, and the capability report.")
 
     @Argument(help: "One location, or every location when omitted.")
     var name: String?

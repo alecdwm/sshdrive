@@ -540,7 +540,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         command: String, arguments: [String: String], reply: @escaping (Data?, Error?) -> Void
     ) {
         // The terminal, captured while the method is still on the connection: `add` and
-        // `passwd` relay the collect connection's prompts back along it.
+        // `set` relay the collect connection's prompts back along it.
         let relay = CLIRelay(connection: connection)
         let manager = self.manager
         Task {

@@ -86,7 +86,7 @@ public protocol AskpassTokenProviding: AnyObject, Sendable {
     /// built, which is how a `ProxyJump` hop's own argv is later told apart from it.
     func mintToken(locationID: String, argv: [String]) -> String
     /// The same, for a connection that is not a master: the collect connection of `sshdrive
-    /// add` and `sshdrive passwd`, whose token is marked `collect` so a prompt with no stored
+    /// add`, whose token is marked `collect` so a prompt with no stored
     /// answer is relayed to the CLI rather than skipped, and which may mask stored items so a
     /// stale password reaches the terminal (docs/design/secrets.md). Defaulted, so a test
     /// double only ever has to implement the three methods above.

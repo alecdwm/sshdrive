@@ -1,3 +1,7 @@
+---
+title: SSH Drive
+---
+
 # SSH Drive
 
 ![SSH Drive](assets/icon-256.png){ width="112" }
@@ -10,7 +14,11 @@ Everything is `sshdrive`, a command-line tool, and Finder. The background agent 
 own `/usr/bin/ssh`, so a server you can already `ssh` into is a server SSH Drive can
 mount, with `~/.ssh/config` aliases, `ProxyJump` chains, `ssh-agent`, 1Password,
 Secretive, FIDO keys and `Match exec` blocks all working, because none of it is
-reimplemented.
+reimplemented. The exception is anything that needs a person on every connection: a key
+that asks for a touch, a PIN, or a one-time code. The mount reconnects on its own, with
+nobody there to answer, so `add` refuses such a location and says what works unattended
+instead: a key held by a key agent, a FIDO key made with `no-touch-required`, or a
+password.
 
 ```sh
 brew tap alecdwm/tap
@@ -40,6 +48,8 @@ sshdrive add nas alec@nas.local
 ## Requirements
 
 macOS 14 or newer. SFTP only: this is not `sshfs`, and not a general SSH client.
+Authentication that `ssh` can complete without a person at the keyboard: `add` refuses a
+key that needs a touch, a PIN, or a one-time code on every connection.
 
 ## Next
 

@@ -1,6 +1,6 @@
 site_name: SSH Drive
 site_description: Mount SFTP locations in Finder on macOS, through Apple's File Provider framework.
-site_url: https://alecdwm.github.io/sshdrive/
+site_url: https://sshdrive.shirls.org/
 repo_url: https://github.com/alecdwm/sshdrive
 repo_name: alecdwm/sshdrive
 edit_uri: edit/main/docs/
@@ -19,6 +19,9 @@ theme:
     dark: github-dark
   # The icon's blue, #4F82BD, in oklch.
   accent: "oklch(59.7% 0.106 253.03)"
+
+extra_css:
+  - assets/extra.css
 
 markdown_extensions:
   - tables
@@ -41,7 +44,6 @@ nav:
   - Home: index.md
   - Install and use: install.md
   - Troubleshooting: troubleshooting.md
-  - Release: release.md
   - Design:
       - Goals and non-goals: design/goals.md
       - Platform facts: design/platform.md
@@ -69,3 +71,5 @@ nav:
       - The quirk catalog: quirks/README.md
       - macOS quirks: quirks/macos.md
       - Server quirks: quirks/servers.md
+  - Development:
+      - Cutting a release: release.md

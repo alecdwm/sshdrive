@@ -693,7 +693,7 @@ struct Breaker: ParsableCommand {
     @Flag(help: "Reset the breaker, as a path change or a wake does, and reconnect.")
     var reset = false
 
-    @Flag(help: "Clear a stop the way `sshdrive test` does, and attempt once.")
+    @Flag(help: "Clear a stop (an authentication or host-key failure) and attempt once.")
     var connect = false
 
     @Option(

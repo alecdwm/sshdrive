@@ -183,7 +183,7 @@ public final class ReconnectingTransport: SFTPTransport, @unchecked Sendable {
 /// The breaker, the live connection, and the one attempt everything waits on.
 ///
 /// One per location, owned by `DomainManager` and reachable from `ControlCommands` so
-/// `status`, `test` and the debug hooks can read and reset it.
+/// `status` and the debug hooks can read and reset it.
 public actor ConnectionGate {
 
     /// What the gate learned about a connection when it came up, which
@@ -610,8 +610,9 @@ public actor ConnectionGate {
         await connectInBackground(trigger: "a present-user request")
     }
 
-    /// `sshdrive test`, `passwd`, or a settings change: the only things that clear a
-    /// refusal. Also what the CLI's explicit reconnect uses.
+    /// Clears a refusal and attempts once: `sshdrive debug breaker <name> --connect`. A
+    /// gate built anew, by `sshdrive agent restart` or by a `set` that drops the runtime,
+    /// starts with no stop at all.
     public func clearStopAndConnect() async {
         breaker.clearStop()
         rearm.clear()

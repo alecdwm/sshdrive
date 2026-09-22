@@ -6,7 +6,7 @@ import SSHProcess
 import XPCProtocols
 import Logging
 
-/// The verification connection `sshdrive add` and `sshdrive passwd` make
+/// The verification connection `sshdrive add` makes
 /// (docs/design/secrets.md), and the `AddFlow.AttemptRunning` the state machine drives.
 ///
 /// The agent runs the exact command it will use later, in its own environment, with the

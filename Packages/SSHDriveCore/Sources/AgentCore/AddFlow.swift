@@ -3,7 +3,7 @@ import Config
 import Secrets
 import SSHProcess
 
-/// The state machine behind `sshdrive add` and `sshdrive passwd`
+/// The state machine behind `sshdrive add`
 /// (docs/design/secrets.md, docs/design/cli.md).
 ///
 /// It is here, in the package, rather than in `Apps/Agent` for the same reason

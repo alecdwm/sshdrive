@@ -121,7 +121,7 @@ public enum LocationSettingKey: String, CaseIterable, Sendable {
     public var renamesDomainInPlace: Bool { self == .nickname }
 
     /// host, user, port and identity change what the stored secrets are keyed on or which
-    /// key is offered, so they re-run the collect connection exactly as `passwd` does
+    /// key is offered, so they re-run the collect connection `add` makes
     /// (docs/design/cli.md, docs/design/secrets.md).
     public var requiresCollectConnection: Bool {
         switch self {

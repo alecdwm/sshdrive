@@ -15,9 +15,11 @@ A location is one entry in `config.json` and one File Provider domain.
                                      // consumed by the agent like one from the config (ssh.md)
   "remotePath": "/srv/media",        // optional; default is the SFTP realpath of "." (the user's home)
   "secrets": ["password:alec@nas.tail1234.ts.net:22"],
-                                     // which keychain items exist: password:<user>@<hostname>:<port>, passphrase:<keypath>;
-                                     // user, hostname and port as resolved by `ssh -G`, never the alias (secrets.md);
-                                     // an item is shared by every location naming it and deleted with the last one (cli.md)
+                                     // which keychain items exist:
+                                     // password:<user>@<hostname>:<port>, passphrase:<keypath>;
+                                     // user, hostname and port as resolved by ssh -G, never
+                                     // the alias (secrets.md); an item is shared by every
+                                     // location naming it and deleted with the last one (cli.md)
   "agentDependent": false,           // set by add when only the key agent could authenticate (secrets.md)
   "cacheTTL": "1h",                  // 15m | 1h | 12h | 1d | 1w | 1mo | never
   "permissions": "mode",             // mode | none: whether server mode bits become Finder capabilities

@@ -118,7 +118,7 @@ final class DeadlineRearmTests: XCTestCase {
 
     /// A stop, an unlock that re-arms, a second stop, and then a request that re-arms
     /// again: the morning-after sequence the re-arm rule (docs/design/secrets.md) covers.
-    /// The point is that the user gets a second chance without running `sshdrive test`,
+    /// The point is that the user gets a second chance without clearing the stop by hand,
     /// and that an unattended Mac between the two stops retries nothing.
     func testTheMorningSequence() {
         var state = DeadlineRearmState()

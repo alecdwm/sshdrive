@@ -1,0 +1,5 @@
+/* The theme prints the page title above the content, so the page's own Markdown H1 would
+   repeat it. The H1 stays in the source, where GitHub and editors show it. */
+.typography > h1:first-child {
+  display: none;
+}

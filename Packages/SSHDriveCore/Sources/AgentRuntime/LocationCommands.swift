@@ -13,7 +13,7 @@ import ProviderCore
 /// half of the CLI, with the capability report (docs/design/cli.md).
 ///
 /// Everything here runs in the agent, because the CLI is a pure XPC client and even `add`
-/// and `passwd` connect from the agent. The CLI's only jobs are to parse the flags and to
+/// connects from the agent. The CLI's only jobs are to parse the flags and to
 /// be the terminal the collect connection's prompts are relayed to.
 public enum LocationCommands {
 
@@ -241,7 +241,7 @@ public enum LocationCommands {
         } catch {
             // `add` must fail cleanly, without leaving a half-added location.
             await AgentCommandContext.manager.dropRuntime(locationID: created.id)
-            try? await AgentCommandContext.manager.removeDomain(for: created)
+            _ = try? await AgentCommandContext.manager.removeDomain(for: created)
             try? await AgentCommandContext.manager.mutateConfiguration { file in
                 file.locations.removeAll { $0.id == created.id }
             }
@@ -478,6 +478,10 @@ public enum LocationCommands {
         var removed: [String] = []
         var secretsRemoved: [String] = []
         var helperRemoved: [String] = []
+        // --keep-files: where the system put each location's downloaded files.
+        var preserved: [[String: String]] = []
+        let keepFiles = arguments["keepFiles"] == "true"
+        let removalMode: DomainRemovalMode = keepFiles ? .preserveDownloadedUserData : .removeAll
         for location in targets {
             // Refuses while uploads are pending unless --force.
             if arguments["force"] != "true",
@@ -503,12 +507,16 @@ public enum LocationCommands {
             {
                 helperRemoved += await detector.shutDownHelper(removeFromServer: true)
             }
-            try? await AgentCommandContext.manager.removeDomain(for: location)
+            if let path = try? await AgentCommandContext.manager.removeDomain(
+                for: location, mode: removalMode)
+            {
+                preserved.append(["name": location.displayName, "path": path])
+            }
             await AgentCommandContext.manager.dropRuntime(locationID: location.id)
             try await AgentCommandContext.manager.mutateConfiguration { config in
                 config.locations.removeAll { $0.id == location.id }
             }
-            if arguments["keepFiles"] != "true",
+            if !keepFiles,
                 let url = try? GroupContainer.domainURL(locationID: location.id)
             {
                 try? FileManager.default.removeItem(at: url)
@@ -535,7 +543,8 @@ public enum LocationCommands {
         return try ControlCommands.json([
             "removed": removed,
             "secretsRemoved": secretsRemoved,
-            "keepFiles": arguments["keepFiles"] == "true",
+            "keepFiles": keepFiles,
+            "preserved": preserved,
             "helperRemoved": helperRemoved,
         ])
     }
@@ -601,8 +610,8 @@ public enum LocationCommands {
 
         if key.requiresCollectConnection {
             // host, user, port and identity change what the stored secrets are keyed on
-            // or which key is offered, so they re-run the collect connection exactly as
-            // `passwd` does, before the change is saved.
+            // or which key is offered, so they re-run the collect connection `add` makes,
+            // before the change is saved.
             notes.append("\(key.rawValue) changes what the stored secrets are keyed on; "
                 + "checking the connection before saving.")
             CommandRelay(relay, arguments: arguments).narrate(notes.last!)
@@ -633,7 +642,7 @@ public enum LocationCommands {
             // Deliberately not `renamesDomainInPlace`: removing the domain first is exactly
             // what would throw the cache and the pending uploads away, and the system
             // does not need it.
-            try? await AgentCommandContext.manager.removeDomain(for: location)
+            _ = try? await AgentCommandContext.manager.removeDomain(for: location)
         }
         if key.dropsIndex, let url = try? GroupContainer.domainURL(locationID: location.id) {
             // A new root invalidates every path in the index.
@@ -691,8 +700,8 @@ public enum LocationCommands {
         ])
     }
 
-    /// The collect connection again, for `set host|user|port|identity` (and, when it
-    /// arrives, `passwd`). Same flow, same relay, same storage rules.
+    /// The collect connection again, for `set host|user|port|identity`. Same flow, same
+    /// relay, same storage rules as `add`.
     private static func recollect(for location: Location, relay: (any TerminalRelaying)?) async throws
         -> (authenticated: Bool, agentDependent: Bool, failure: AddFlow.Failure?, storedKeys: [String])
     {
@@ -1154,7 +1163,8 @@ public enum LocationCommands {
         else { return nil }
         var host = location.host
         if let port = location.port { host = "[\(host)]:\(port)" }
-        return "ssh-keygen -R \(host)    # then: sshdrive test \(location.displayName)"
+        return "ssh-keygen -R \(host)    # then accept the new key with ssh once, and run: "
+            + "sshdrive debug breaker \(location.displayName) --connect"
     }
 
     private static func resolve(_ arguments: [String: String]) async throws -> Location {

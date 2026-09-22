@@ -262,6 +262,42 @@ extension AgentScenarios {
             #expect(stopSummary.locations == 0, "and by then there is nothing left to shut down")
         }
 
+        /// `remove --keep-files` removes the domain in the system's preserve-downloaded-data
+        /// mode and reports the folder the system moved the files to; a plain `remove`
+        /// removes everything and reports no folder (docs/design/cli.md).
+        @Test func removeKeepFilesPreservesDownloadedDataAndReportsWhere() async throws {
+            let harness = try AgentHarness()
+            let kept = try await harness.addLocation(nickname: "photos")
+            let gone = try await harness.addLocation(nickname: "scratch", host: "other")
+            try await harness.manager.addDomain(for: kept)
+            try await harness.manager.addDomain(for: gone)
+            harness.replica.resetCalls()
+
+            let keptReport = try await harness.control(
+                "remove", ["name": "photos", "keepFiles": "true", "force": "true"])
+            #expect(keptReport["removed"] as? [String] == ["photos"])
+            #expect(
+                harness.replica.calls.contains(
+                    .removeDomain(identifier: kept.id, mode: .preserveDownloadedUserData)),
+                "--keep-files asks for the preserve-downloaded-data mode")
+            let preserved = keptReport["preserved"] as? [[String: String]] ?? []
+            let expected = harness.replica.preservedPath(
+                for: ReplicaDomain(identifier: kept.id, displayName: kept.displayName))
+            #expect(preserved == [["name": "photos", "path": expected]],
+                    "the folder the system chose is reported")
+
+            harness.replica.resetCalls()
+            let goneReport = try await harness.control(
+                "remove", ["name": "scratch", "force": "true"])
+            #expect(goneReport["removed"] as? [String] == ["scratch"])
+            #expect(
+                harness.replica.calls.contains(
+                    .removeDomain(identifier: gone.id, mode: .removeAll)),
+                "a plain remove throws the cache away")
+            #expect((goneReport["preserved"] as? [[String: String]])?.isEmpty == true)
+            #expect(harness.replica.domainList.isEmpty)
+        }
+
         /// **P9** - `add` waits for the first deployment.
         ///
         /// Quirks: `SQ-077` (the helper's stream does not survive its connection, and the

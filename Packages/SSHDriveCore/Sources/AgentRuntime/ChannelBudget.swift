@@ -36,8 +36,8 @@ public struct ChannelBudget: Sendable, Equatable {
     /// closes it, while the helper's stream lives as long as the location does. At a
     /// `MaxSessions` of 2 the one spare channel is shared by the probe and the sweep - and
     /// a sweep still runs every 30 minutes as insurance even at tier 2 - so a helper that
-    /// never gave it back would cost the location the insurance sweep, the re-probe and
-    /// `sshdrive test`. It is refused there and `status` says why.
+    /// never gave it back would cost the location the insurance sweep and the re-probe.
+    /// It is refused there and `status` says why.
     public var allowsPersistentExecChannel: Bool
     /// The sentence `sshdrive status` shows. Empty when nothing was forced.
     public var note: String
@@ -382,7 +382,7 @@ public enum CapabilityCache {
     }
 
     /// The server's identification string, captured once by the collect connection
-    /// (`add`, `passwd`, `set host|user|port|identity`), which is the only `ssh` the agent
+    /// (`add`, `set host|user|port|identity`), which is the only `ssh` the agent
     /// runs that ever sees one.
     public static func storeServerVersion(_ version: String?, locationID: String) {
         guard let version, !version.isEmpty else { return }

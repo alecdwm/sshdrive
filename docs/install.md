@@ -1,5 +1,16 @@
 # Install and use
 
+## Requirements
+
+- macOS 14 or newer.
+- A server you can reach with `sftp`: SSH Drive runs your own `/usr/bin/ssh`, so whatever
+  `ssh` does for that server (your `~/.ssh/config`, `ProxyJump`, a key agent, a password)
+  is what it does here.
+- Authentication that can complete with nobody at the keyboard. A key that asks for a
+  touch, a PIN, or a one-time code on every connection is refused at `add`. A key held by
+  a key agent, a FIDO key made with `no-touch-required`, a passphrase or a password all
+  work, the last two stored in your keychain.
+
 ## Installing
 
 ```sh
@@ -17,6 +28,29 @@ launching it registers the File Provider extension and a login item, and it exit
 quarantine step is what lets that registration happen. macOS registers no extension
 belonging to a bundle that is still marked as downloaded and has never been opened by a
 person, and the cask has already done the verification that marking exists for.
+
+### Without Homebrew
+
+Each release on <https://github.com/alecdwm/sshdrive/releases> carries
+`SSH-Drive-<version>.dmg`. Open it and drag `SSH Drive.app` to `/Applications`, then do
+by hand what the cask does:
+
+```sh
+spctl --assess --type execute --verbose=4 "/Applications/SSH Drive.app"   # accepted, Notarized Developer ID
+xattr -dr com.apple.quarantine "/Applications/SSH Drive.app"
+open -g -a "SSH Drive"
+sudo ln -sf "/Applications/SSH Drive.app/Contents/MacOS/sshdrive" /usr/local/bin/sshdrive
+```
+
+The symlink can go in any directory on your `PATH`. When you replace an installed copy
+with a newer one, run this before the `open -g`, or the login item keeps pointing at the
+bundle that was deleted:
+
+```sh
+SSHDRIVE_AGENT_ROLE=unregister "/Applications/SSH Drive.app/Contents/MacOS/SSH Drive"
+```
+
+### Version
 
 `sshdrive --version` prints one number. The agent, the extension, the CLI and the remote
 helper are built from the same version and always report the same string.
@@ -59,7 +93,10 @@ asked **now**, at your terminal, rather than silently later:
 If the connection works, the location is saved and its domain appears in Finder under
 Locations. If it does not, nothing is saved.
 
-The command is quiet: prompts, warnings and one line on success. Add `-v` to see what
+The command is quiet: prompts, warnings, and on success the one line
+`Added <name> (<user>@<host>:<port>) at <mount path>`, which is the exception to the rule
+that a command that changes something prints nothing. Add `-v` after the subcommand,
+`sshdrive add -v nas alec@nas.local`, to see what
 `ssh -G` resolved the destination to, which of those values came from `~/.ssh/config`,
 and the capability report for the server. `sshdrive status nas` prints that report at any
 time.
@@ -72,19 +109,22 @@ other ssh option.
 
 ```sh
 sshdrive list                     every location, its state and its TTL
-sshdrive status [nas]             sync errors, hidden names, what the server can do
+sshdrive status [nas]             state, last error, change detection, cache, what the server can do
 sshdrive show nas                 the whole resolution: ssh options, chain, mount path
 sshdrive pin nas /Projects        keep a folder offline-complete
 sshdrive unpin nas /Projects/tmp  exclude a subfolder from a pin above it
 sshdrive evict nas --all          drop the cache now
 sshdrive set nas cache-ttl 12h    15m | 1h | 12h | 1d | 1w | 1mo | never
+sshdrive set nas nickname media   rename the Finder entry in place, cache and uploads kept
+sshdrive set nas helper off       on | off: the change-detection helper on the server
 sshdrive logs -f nas              our log and the system's, live
 sshdrive doctor                   check the install and say what to fix
 ```
 
 `sshdrive --help` lists all of them. Everything takes a location by nickname, hostname, or
 the start of its id. A command that changes something prints nothing on success beyond
-prompts, warnings and errors; `-v` restores the full report. The commands whose job is to
+prompts, warnings and errors (`add` also prints its one line); `-v`, typed after the
+subcommand, restores the full report. The commands whose job is to
 report, `list`, `show`, `status`, `pins`, `logs` and `doctor`, print either way.
 
 ## When something is wrong
@@ -100,9 +140,14 @@ report, `list`, `show`, `status`, `pins`, `logs` and `doctor`, print either way.
 sshdrive remove --all
 ```
 
-That removes every location's Finder entry and its keychain items. Homebrew can do
-neither: by the time `brew zap` runs, the app that could has already been deleted, and no
-cask directive reaches the keychain at all.
+That removes every location's Finder entry, its index, its downloaded files and its
+keychain items. Homebrew can remove neither the Finder entries nor the keychain items: by the time `brew zap`
+runs, the app that could has already been deleted, and no cask directive reaches the
+keychain at all.
+
+It asks first unless you pass `-y`. It refuses while any location has uploads pending,
+because removing the domain throws them away: wait for them, or pass `--force` to discard
+them.
 
 Then:
 

@@ -74,11 +74,16 @@ struct FileProviderReplica: ReplicaControlling {
         return modes
     }
 
-    func removeDomain(_ domain: ReplicaDomain) async throws {
-        try await NSFileProviderManager.remove(
-            NSFileProviderDomain(
-                identifier: NSFileProviderDomainIdentifier(rawValue: domain.identifier),
-                displayName: domain.displayName))
+    func removeDomain(_ domain: ReplicaDomain, mode: DomainRemovalMode) async throws -> String? {
+        let system = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier(rawValue: domain.identifier),
+            displayName: domain.displayName)
+        let systemMode: NSFileProviderManager.DomainRemovalMode
+        switch mode {
+        case .removeAll: systemMode = .removeAll
+        case .preserveDownloadedUserData: systemMode = .preserveDownloadedUserData
+        }
+        return try await NSFileProviderManager.remove(system, mode: systemMode)?.path
     }
 
     // MARK: Signals

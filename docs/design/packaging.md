@@ -151,7 +151,7 @@ repo for Homebrew.
 |---|---|---|
 | Source, design docs, issues, CI | `github.com/alecdwm/sshdrive` | Design pages and user docs under `docs/`. |
 | Release binaries | GitHub Releases on the same repo | The workflow attaches the notarized, stapled `SSH-Drive-<version>.dmg` plus a `.sha256`. Tags `v1.2.3`. |
-| Website / user docs | GitHub Pages from `docs/` on `main` | MkDocs, built from `docs/`. Optional custom domain `sshdrive.shirls.org` via a `CNAME` file and a DNS CNAME to `alecdwm.github.io`. |
+| Website / user docs | GitHub Pages from `docs/` on `main` | MkDocs, built from `docs/` and deployed by `.github/workflows/pages.yml`. Served at `sshdrive.shirls.org`, the custom domain set in the repository's Pages settings; an Actions deployment needs no `CNAME` file. |
 | Homebrew tap | `github.com/alecdwm/homebrew-tap` | Must be a separate repo: `brew tap alecdwm/tap` resolves to `alecdwm/homebrew-tap` by naming convention, so the cask cannot sit inside the main repo without users typing a full URL. Contains `Casks/sshdrive.rb`. |
 | Support links baked into the app | `sshdrive --help`, `sshdrive doctor` | Point at the Pages site and the issues tracker. |
 

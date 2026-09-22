@@ -15,7 +15,7 @@ import SSHProcess
 ///    nothing else needs to be consulted; `setNetworkPath(false)` is that gate.
 /// 2. **A failed attempt marks the location down for a backoff interval** - 2 s, doubling
 ///    to 60 s - during which every call fails fast without touching the network. A path
-///    change, wake from sleep or `sshdrive test` resets it.
+///    change or wake from sleep resets it.
 /// 3. **While an attempt is in progress, calls wait for it,** bounded by the attempt's own
 ///    remaining deadline: at most the 60 s authentication deadline
 ///    (docs/design/secrets.md),
@@ -68,7 +68,7 @@ public struct CircuitBreaker: Sendable {
             case let .stopped(classification):
                 switch classification {
                 case .authenticationFailed:
-                    return "authentication failed; run `sshdrive test` after fixing it"
+                    return "authentication failed; fix it, then run `sshdrive debug breaker <name> --connect`"
                 case .hostKeyFailed:
                     return "the server's host key did not match `known_hosts`"
                 case .authenticationDeadline:
@@ -188,7 +188,7 @@ public struct CircuitBreaker: Sendable {
         state = .idle
     }
 
-    /// A path change, wake from sleep, or `sshdrive test` (docs/design/offline.md). Clears a
+    /// A path change or wake from sleep (docs/design/offline.md). Clears a
     /// backoff but never a stop: an auth failure is still an auth failure after a Wi-Fi hop.
     public mutating func reset() {
         consecutiveFailures = 0
@@ -214,8 +214,8 @@ public struct CircuitBreaker: Sendable {
         return true
     }
 
-    /// `sshdrive test`, `passwd`, or a change to the location's settings: the only things
-    /// that clear a refusal (docs/design/ssh.md).
+    /// The only thing that clears a refusal on a live gate (docs/design/ssh.md), called by
+    /// `sshdrive debug breaker <name> --connect`.
     public mutating func clearStop() {
         if case .stopped = state { state = .idle }
         consecutiveFailures = 0

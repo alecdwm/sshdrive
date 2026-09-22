@@ -272,15 +272,15 @@ reconnecting on the breaker's schedule and dials the next scenario's stub.
 
 ## The quirk catalogue
 
-`docs/quirks/` is the inventory of measured behaviour: `macos.md` (80 rows) and `servers.md`
-(82). `docs/quirks/README.md` has the format; one entry per behaviour:
+`docs/quirks/` is the inventory of measured behaviour: [macos.md](../quirks/macos.md) (80 rows) and [servers.md](../quirks/servers.md)
+(82). [docs/quirks/README.md](../quirks/README.md) has the format; one entry per behaviour:
 
 | Column | Meaning |
 |---|---|
 | id | `MQ-###` for macOS, `SQ-###` for a server. Stable for ever: never reused, never renumbered; a behaviour that stops being true keeps its id and gains a measurement saying so |
 | statement | one sentence, present tense, about what *the system* does. Never about what we do in response - that belongs to the design page |
 | measured on | every version or server it was observed on, each with its date. A version we support and have not measured is an empty cell, and that cell is a work item, not an assumption |
-| source | where the measurement is written down, and the `CLAUDE.md` gotcha number where there is one |
+| source | where the measurement is written down, and the gotcha number where there is one: item N of the numbered list in the repository's [`CLAUDE.md`](https://github.com/alecdwm/sshdrive/blob/main/CLAUDE.md) |
 | scenarios | the scenario ids that fail if the behaviour changes and we do not notice. A quirk with no scenario is a quirk nothing is defending |
 
 `MQ` rows are keyed to a macOS version. `SQ` rows are keyed to a testbed service or a real
@@ -289,9 +289,9 @@ and wants the same walk.
 
 The models name the ids they read: `SystemModel`'s `Quirks.swift` and `QuirkCatalogue.swift`,
 `ServerModel`'s `ServerQuirks.swift`. Two tests keep the two halves from drifting -
-`QuirkCatalogueTests` asserts that every id the macOS model resolves is a row of `macos.md`
+`QuirkCatalogueTests` asserts that every id the macOS model resolves is a row of [macos.md](../quirks/macos.md)
 and that every id resolves on both columns; `ServerProfileScenarios` asserts that every id
-`ServerModel` implements is a row of `servers.md` and that every profile cites only
+`ServerModel` implements is a row of [servers.md](../quirks/servers.md) and that every profile cites only
 implemented ids.
 
 ### How a measurement becomes a rule
@@ -315,16 +315,16 @@ rule and a green Linux suite has not finished.
 
 - Add the version to `MacOSVersion`.
 - Measure on a VM of that version against the testbed.
-- Walk **every** row of `macos.md` and record a value: confirmed, changed, or not measured.
+- Walk **every** row of [macos.md](../quirks/macos.md) and record a value: confirmed, changed, or not measured.
   Not-measured is a legitimate answer and shows as an empty cell.
-- Walk every row of `servers.md` too where the session touched a server.
+- Walk every row of [servers.md](../quirks/servers.md) too where the session touched a server.
 - For each changed value, add a measurement row and let the model branch on it.
 - Mark any value taken once, or bracketed, with a `confidence:` note in both the row and the
   rule that reads it.
 - `swift test --filter QuirkCatalogueTests` checks that no id is in the model and missing from
   the catalogue.
 - `swift test` on Linux, green.
-- Update `README.md`'s supported-versions line, and [the platform page](platform.md) if the
+- Update [README.md](../quirks/README.md)'s supported-versions line, and [the platform page](platform.md) if the
   minimum moved.
 
 ## Scenarios

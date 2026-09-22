@@ -19,7 +19,7 @@ struct SSHDrive: ParsableCommand {
             warnings and errors always appear, and `-v` after the subcommand prints the
             full report.
 
-            Docs: https://github.com/alecdwm/sshdrive
+            Docs: https://sshdrive.shirls.org/
             Run `sshdrive doctor` if a location does not appear in Finder.
             """,
         version: SSHDriveVersion.string,

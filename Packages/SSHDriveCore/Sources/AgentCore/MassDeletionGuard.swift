@@ -152,7 +152,7 @@ public struct MassDeletionGuard: Sendable {
         return out
     }
 
-    /// The size test on its own, so `sshdrive test` and the debug hook can ask it without
+    /// The size test on its own, so the debug hook can ask it without
     /// a whole diff.
     public static func holdsInBulk(missingCount: Int, knownNonHiddenCount: Int, isLocationRoot: Bool) -> Bool {
         if isLocationRoot, knownNonHiddenCount > 0, missingCount >= knownNonHiddenCount { return true }

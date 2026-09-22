@@ -43,12 +43,12 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   disconnect signal for the location. `-O check` asks that process, over
   the socket, whether it is alive; it says nothing about the server or
   the TCP connection, so it is the cheap "is our child sane" check and
-  the per-request deadline (`docs/design/sftp.md`) is the real liveness
+  the per-request deadline ([docs/design/sftp.md](sftp.md)) is the real liveness
   probe. `sshdrive status` does not use it either: the online/offline
   word comes from the connection gate, which knows without touching the
   wire. `-O exit` is the clean shutdown. The socket itself is created
   only once authentication has succeeded, so its appearance is the signal
-  the authentication deadline (`docs/design/secrets.md`) waits for.
+  the authentication deadline ([docs/design/secrets.md](secrets.md)) waits for.
 - **The connection is ours alone.** The user's `~/.ssh/config` may set
   `ControlMaster auto` with a `ControlPath` for the host, in which case a
   plain `ssh nas` would silently attach to a terminal session's socket, or
@@ -67,7 +67,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   the channel's stdin, `ForkAfterAuthentication` detaches the master
   exactly as `ControlPersist` would, `BatchMode` disables the prompts
   askpass answers, `UpdateHostKeys ask` raises a question nobody is
-  there to answer (`docs/design/secrets.md`), and `LocalCommand`,
+  there to answer ([docs/design/secrets.md](secrets.md)), and `LocalCommand`,
   `ForwardAgent` and the forwardings run or expose things the mount has
   no use for. So the master and every hop also carry `RemoteCommand=none`,
   `RequestTTY=no`, `StdinNull=no`, `ForkAfterAuthentication=no`,
@@ -98,13 +98,13 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   mux client that exits before its channel opened is always classified
   as **master lost**, never as an authentication failure: the agent runs
   `-O check`, a failing check drops the master and reconnects through
-  the breaker (`docs/design/offline.md`), and a passing one retries the
+  the breaker ([docs/design/offline.md](offline.md)), and a passing one retries the
   channel once. Dropping the config also stops `Match exec` scripts
   running once per channel and keeps the system file's `SendEnv` off our
   sessions.
 - **Key agents are consulted only by locations that need them.** A
   location that passed the collect connection's first pass
-  (`docs/design/secrets.md`) authenticates with key files, stored
+  ([docs/design/secrets.md](secrets.md)) authenticates with key files, stored
   passphrases and passwords, and its runtime spawns, master and hops
   alike, carry `IdentityAgent=none` exactly as that pass did. Without the
   override `ssh` would find the same key in the 1Password or Secretive
@@ -148,20 +148,20 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   session from a dead connection - the refusal `ssh` actually prints,
   against a master that is still running - and **records nothing at all**
   when the connection is what failed, failing the connect attempt instead
-  so the breaker (`docs/design/offline.md`) tries again; and an abrupt
+  so the breaker ([docs/design/offline.md](offline.md)) tries again; and an abrupt
   loss of a connection that was up marks the cached answer as no longer
   evidence, so the next connect probes again. The values stay in the file
   for an offline `status` to print. The one `ssh` the agent runs that *is*
   neither a master nor a mux client - the collect connection
-  (`docs/design/secrets.md`) - raises `LogLevel` to `DEBUG1` for that
+  ([docs/design/secrets.md](secrets.md)) - raises `LogLevel` to `DEBUG1` for that
   connection alone and reads the identification string once, which is
   where the capability report's "server software" line comes from
-  (`docs/design/cli.md`); its debug lines are stripped before the exit
+  ([docs/design/cli.md](cli.md)); its debug lines are stripped before the exit
   classifier below or `add`'s own message sees them, so nothing else
   changes. A cached budget that no longer holds is noticed anyway,
   because opening the bulk channel is what the cached answer is used for.
   At 2 the bulk SFTP channel is dropped, transfers share the metadata
-  channel under the scheduler (`docs/design/sftp.md`), and the helper gets
+  channel under the scheduler ([docs/design/sftp.md](sftp.md)), and the helper gets
   the one exec channel: the 30-minute insurance sweep at that tier stops
   it, sweeps on the same channel and restarts it, since the sweep already
   covers what the restart would miss; at 1 there is no exec channel at
@@ -170,7 +170,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   `status` shows the limit and the levels it forced.
 - `ControlPath` is `$TMPDIR/sshdrive-<id8>`, the first eight hex digits
   of the location id, and deliberately not `%C`. `%C` hashes user, host
-  and port, so two locations on one host (`docs/design/locations.md`)
+  and port, so two locations on one host ([docs/design/locations.md](locations.md))
   would compute the same socket path: the second master would find it,
   print "ControlSocket already exists, disabling multiplexing", and its
   mux clients would silently attach to the first location's connection.
@@ -206,7 +206,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   never `stat`ed, so a symlink planted at that name decides nothing. The
   complementary half is that `sshdrive agent stop` shuts every location's
   masters and mux clients down before the agent exits
-  (`docs/design/cli.md`), so the ordinary case never reaches the sweep.
+  ([docs/design/cli.md](cli.md)), so the ordinary case never reaches the sweep.
   The location's socket path is also unlinked before every spawn, not only
   at startup: a master that died without `-O exit` leaves its socket
   behind, and `ssh` moves a new socket into place with `link`, which fails
@@ -215,7 +215,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
 - **Dead connections are detected three ways**, because keepalive alone
   leaves a 30 s window (`15 s × 2`) in which every request stalls: the
   keepalive itself; a per-request deadline in the SFTP client
-  (`docs/design/sftp.md`), after which the request fails with
+  ([docs/design/sftp.md](sftp.md)), after which the request fails with
   `.serverUnreachable` and the channel is killed, and after a second
   consecutive timeout the master too; and sleep, at whose will-sleep
   message the agent does not wait to find out but runs `-O exit` on every
@@ -227,10 +227,11 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   from `NSWorkspace`, since the agent runs no `NSApplication`.
 - `ssh` exiting is classified: connection errors are `.serverUnreachable`
   and the agent reconnects with jittered backoff **on its own schedule,
-  not when something next asks** (`docs/design/offline.md`, rule 5); auth
-  and host-key banners are `.notAuthenticated` (`docs/design/secrets.md`)
-  and **reconnection stops** until `sshdrive test`, `sshdrive passwd`, or
-  a change to the location's settings. A stale password retried every
+  not when something next asks** ([docs/design/offline.md](offline.md), rule 5); auth
+  and host-key banners are `.notAuthenticated` ([docs/design/secrets.md](secrets.md))
+  and **reconnection stops** until a change to the location's settings
+  (`sshdrive set`), `sshdrive agent restart`, or
+  `sshdrive debug breaker <name> --connect`. A stale password retried every
   minute is a `fail2ban` ban within the hour, and a refused prompt is
   never going to succeed unattended. An authentication that has not
   completed by the 60 s deadline is classified the same way and stops, for
@@ -256,11 +257,10 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   locations `SSH_AUTH_SOCK` still names Apple's `ssh-agent`, which is
   always there and would make the check pass while the agent that
   actually holds the key was absent. Both are retried with the network
-  backoff (`docs/design/offline.md`), its cap raised from 60 s to 5
+  backoff ([docs/design/offline.md](offline.md)), its cap raised from 60 s to 5
   minutes for this one case, since a locked key agent stays locked for
   hours and a socket probe every minute buys nothing, and the mount comes
-  up once the key agent is unlocked without the user running
-  `sshdrive test`. The probe carries more weight than "the socket may not
+  up once the key agent is unlocked without the user doing anything. The probe carries more weight than "the socket may not
   exist yet" suggests: measured against OpenSSH's own `ssh-agent` on
   2026-09-04, a **locked** agent does not refuse a signature either, it
   answers that it holds no identities, and `ssh` then exits with the same
@@ -274,7 +274,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   stopped by the authentication deadline, as opposed to a refusal, is
   re-armed for one attempt on screen unlock and on the next File Provider
   request for its domain that arrives while the user is at the keyboard
-  (`docs/design/secrets.md`). stderr is kept for `sshdrive status` in
+  ([docs/design/secrets.md](secrets.md)). stderr is kept for `sshdrive status` in
   every case.
 - **The binary is always `/usr/bin/ssh`**, spawned by absolute path with
   `argv[0]` set to that same path (see `ProxyJump`, below). The
@@ -284,7 +284,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   of config keywords and without Apple's `UseKeychain` patch, and picking
   it silently would make "works in the terminal" and "works from the
   agent" two different questions. The cost, a config keyword Apple's
-  build rejects, is caught at `add` (`docs/design/locations.md`).
+  build rejects, is caught at `add` ([docs/design/locations.md](locations.md)).
   `sshdrive show` prints the binary and its version.
 - **`ProxyJump` chains are built by the agent, not by `ssh`.** When `ssh`
   sees a `ProxyJump`, it spawns the hop itself as
@@ -328,7 +328,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   it by printing the config's `controlpath` unchanged under
   `-o ControlMaster=no`; only `ControlPath=none` clears it. Every hop is
   a child of the master with the askpass environment
-  (`docs/design/secrets.md`), so a bastion password prompt is answered
+  ([docs/design/secrets.md](secrets.md)), so a bastion password prompt is answered
   like any other, and `sshdrive show` prints the chain it built.
   `argv[0]` is set to `/usr/bin/ssh` on every spawn regardless, because
   OpenSSH reuses `argv[0]` for any hop it does build and falls back to a
@@ -339,7 +339,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   option. The `ProxyCommand` string the agent builds is run by `ssh`
   through `/bin/sh -c`, so every value in it, identity paths, verbatim
   `sshOptions`, the jump host, is single-quoted by the rule that applies
-  to remote scripts (`docs/design/security.md`). What the agent cannot
+  to remote scripts ([docs/design/security.md](security.md)). What the agent cannot
   fix is a `ProxyCommand` the user wrote by hand that itself invokes
   `ssh` (`ProxyCommand ssh -W %h:%p bastion`, the pre-`ProxyJump`
   idiom): that inner `ssh` is found through `PATH`, reads the config
@@ -352,7 +352,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   correctly; the location is still created.
 - **Environment for every `ssh`:** launchd's, with `HOME` so
   `~/.ssh/config` is found, the askpass variables
-  (`docs/design/secrets.md`), and `PATH` and `SSH_AUTH_SOCK` replaced by
+  ([docs/design/secrets.md](secrets.md)), and `PATH` and `SSH_AUTH_SOCK` replaced by
   a **login shell snapshot**. A launchd agent's `PATH` is
   `/usr/bin:/bin:/usr/sbin:/sbin` and its `SSH_AUTH_SOCK` is the system
   `ssh-agent`'s; a 1Password or Secretive socket exported from `.zshrc`,
@@ -363,8 +363,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   `<shell> -ilc '/usr/bin/printf "\000"; /usr/bin/printf "%s" "<sentinel>"; /usr/bin/printf "\000"; /usr/bin/env -0; /usr/bin/printf "%s" "<sentinel>"; /usr/bin/printf "\000"'`
   with stdin from `/dev/null`, `TERM=dumb` and a 10 s timeout, and takes
   `PATH` and `SSH_AUTH_SOCK` from the NUL-separated records between the
-  two sentinels, at agent start and again on every `add`, `test` and
-  `passwd`. `env -0` rather than a `printf` of the two variables because
+  two sentinels, at agent start and again on every `add`. `env -0` rather than a `printf` of the two variables because
   the command has to be valid in every shell: in fish `"$PATH"` expands
   to the list joined by spaces, not colons. Each NUL is printed by a `printf` of
   its own rather than embedded in the sentinel's format string: `printf`
@@ -374,7 +373,7 @@ ssh $MUX -O check <host>                       # is the master process alive (lo
   (measured on macOS 26.4, 2026-09-04: `/usr/bin/printf
   "\0123456789abcdef"` writes a newline and `3456789abcdef`). Remote
   scripts print their opening sentinel the same way
-  (`docs/design/security.md`). The sentinel, a random 128-bit value
+  ([docs/design/security.md](security.md)). The sentinel, a random 128-bit value
   chosen per run exactly as for remote scripts, is
   there because rc files write to the same stdout: a "Welcome back" from
   `.zshrc` lands in front of `env`'s first record and glues onto it, and

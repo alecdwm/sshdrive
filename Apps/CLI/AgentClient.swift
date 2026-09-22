@@ -93,7 +93,7 @@ enum AgentClient {
         }
     }
 
-    /// `add`, `passwd` and a `set` that re-keys the secrets run a collect connection with
+    /// `add` and a `set` that re-keys the secrets run a collect connection with
     /// prompts relayed to this terminal (docs/design/secrets.md), so the reply can
     /// legitimately be minutes away: the agent is waiting on a person, and the person is
     /// waiting on the server. The broker's own collect deadline (300 s) is what actually

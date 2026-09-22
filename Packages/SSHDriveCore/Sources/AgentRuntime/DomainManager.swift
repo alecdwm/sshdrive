@@ -144,7 +144,7 @@ public actor DomainManager {
         for domain in domains where !known.contains(domain.identifier) {
             do {
                 try await Deadline.run("removing a stranded File Provider domain") {
-                    try await replica.removeDomain(domain)
+                    _ = try await replica.removeDomain(domain, mode: .removeAll)
                 }
                 Log.agent.notice(
                     "removed stranded domain \(domain.identifier, privacy: .public) (\(domain.displayName, privacy: .public)): no such location in config.json"
@@ -657,13 +657,25 @@ public actor DomainManager {
             "added domain \(location.id, privacy: .public) as \(location.displayName, privacy: .public)")
     }
 
-    public nonisolated func removeDomain(for location: Location) async throws {
+    /// Removes the location's domain. Under `.preserveDownloadedUserData` the answer is
+    /// the folder the system moved the downloaded files to, or nil if it kept none.
+    @discardableResult
+    public nonisolated func removeDomain(
+        for location: Location, mode: DomainRemovalMode = .removeAll
+    ) async throws -> String? {
         let domain = ReplicaDomain(identifier: location.id, displayName: location.displayName)
         let replica = environment.replica
-        try await Deadline.run("removing the File Provider domain") {
-            try await replica.removeDomain(domain)
+        let preserved = try await Deadline.run("removing the File Provider domain") {
+            try await replica.removeDomain(domain, mode: mode)
         }
-        Log.agent.notice("removed domain \(location.id, privacy: .public)")
+        if let preserved {
+            Log.agent.notice(
+                "removed domain \(location.id, privacy: .public); downloaded files kept at \(preserved, privacy: .public)"
+            )
+        } else {
+            Log.agent.notice("removed domain \(location.id, privacy: .public)")
+        }
+        return preserved
     }
 
     /// Tells the system to re-ask for the working set, which is how every change the
