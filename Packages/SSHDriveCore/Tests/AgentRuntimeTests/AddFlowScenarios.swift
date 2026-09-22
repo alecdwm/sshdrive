@@ -11,18 +11,18 @@ import Testing
 import XPCProtocols
 
 /// Suite Q - `add`, askpass and the collect connection
-/// (`docs/testing-architecture.md` section 5), harness **SV**.
+/// (docs/design/testing.md), harness **SV**.
 ///
 /// Every scenario here drives the shipping `sshdrive add` end to end: the real command
 /// handler in `AgentRuntime`, the real `AddFlow`, the real `CollectConnection`, the real
 /// `AskpassBroker` and the real `SSHMaster`, against `ServerModel.FakeSSH` installed as
 /// `SSHProcess.sshBinaryPath` and `ServerModel.FakeSFTPServer` on the other side of a real
-/// SFTP v3 wire. The only doubles are the ones section 2.3 already names: the terminal
+/// SFTP v3 wire. The only doubles are the ones this suite already names: the terminal
 /// (`ScriptedTerminal`), the askpass program (`AskpassBridge`, which is the shipping
 /// broker behind a file mailbox instead of an XPC connection) and the replica.
 ///
-/// What that buys is the thing milestone 3 could only prove on the VM against seven
-/// testbed servers (`docs/spikes/results.md`, 2026-09-04, "milestone 3, part 2"): key
+/// What that buys is what can otherwise only be proven on the VM against seven
+/// testbed servers: key
 /// auth, a relayed and stored password, a second location on the same host that does not
 /// prompt, one- and two-hop `ProxyJump` chains with a different password per hop,
 /// keyboard-interactive, a fresh host key answered no then yes, and a wrong password. All
@@ -53,7 +53,7 @@ extension AgentScenarios {
             /// One wire per location, from the same server.
             ///
             /// Not one shared wire: a location has its own master and its own SFTP
-            /// channels on it (section 6.1), so two locations on one host are two clients
+            /// channels on it (docs/design/ssh.md), so two locations on one host are two clients
             /// against one server, and a harness that pooled them would be modelling a
             /// connection nothing ever makes.
             let transports: [RealSFTPTransport]
@@ -93,7 +93,7 @@ extension AgentScenarios {
                 let store = InMemorySecretsStore()
                 self.store = store
                 // The broker resolves the destination of the `ssh` that is *asking* with
-                // `ssh -G` (section 4.2); it must be the same `ssh` that is connecting, or
+                // `ssh -G` (docs/design/secrets.md); it must be the same `ssh` that is connecting, or
                 // a `ProxyJump` hop would be resolved by a binary with no idea of it.
                 secrets = AgentSecrets(
                     store: store, askpassPath: bridge.executablePath,
@@ -106,7 +106,7 @@ extension AgentScenarios {
             }
 
             /// A **fresh** wire for every connect attempt, which is what a connect
-            /// attempt is (section 6.1): a location that reconnects opens a new master and
+            /// attempt is (docs/design/ssh.md): a location that reconnects opens a new master and
             /// new channels on it, and never re-uses the channels of the connection that
             /// went. Handing the same wire back per *location* modelled the opposite, so a
             /// wire that had died once was handed straight back to the reconnect and the
@@ -159,17 +159,19 @@ extension AgentScenarios {
                 stub.uninstall()
             }
 
-            /// `sshdrive add`, with a terminal attached.
+            /// `sshdrive add`, with a terminal attached. `verbose` is `sshdrive add -v`:
+            /// without it the agent relays warnings and prompts and none of the narration.
             @discardableResult
             func add(
                 _ destination: String, _ terminal: ScriptedTerminal,
                 nickname: String? = nil, remotePath: String? = nil,
-                jump: String? = nil, sshOptions: [String] = []
+                jump: String? = nil, sshOptions: [String] = [], verbose: Bool = false
             ) async throws -> [String: Any] {
                 var arguments = ["destination": destination]
                 if let nickname { arguments["nickname"] = nickname }
                 if let remotePath { arguments["remotePath"] = remotePath }
                 if let jump { arguments["jump"] = jump }
+                if verbose { arguments["verbose"] = "true" }
                 if !sshOptions.isEmpty {
                     arguments["sshOptions"] = sshOptions.joined(separator: "\u{1}")
                 }
@@ -182,7 +184,7 @@ extension AgentScenarios {
 
             /// Nothing of this location exists: no `config.json` entry, no domain, no
             /// domain directory. "`add` must fail cleanly … without leaving a half-added
-            /// location" (section 4.2, section 8).
+            /// location" (docs/design/secrets.md, docs/design/cli.md).
             func expectNothingHalfAdded(
                 _ scenario: String, sourceLocation: SourceLocation = #_sourceLocation
             ) async throws {
@@ -226,7 +228,7 @@ extension AgentScenarios {
         /// of the way of: a server that accepts a key (`SQ-061`'s family - a key, or
         /// Tailscale's `none` method, is the same "no prompt at all" from `ssh`'s side)
         /// needs no askpass invocation, stores no secret, and creates and mounts the
-        /// location. If anything here prompts, section 4.2's promise that "a location that
+        /// location. If anything here prompts, the promise (docs/design/secrets.md) that "a location that
         /// passes `add` works from the agent" is being bought with a secret the user typed
         /// and nobody needed.
         @Test func q1KeyAuthPromptsForNothingAndMounts() async throws {
@@ -271,10 +273,10 @@ extension AgentScenarios.AddFlowScenarios {
     /// - what is stored is keyed `password:<user>@<hostname>:<port>` off the `ssh -G`
     ///   resolution of the asking `ssh` - never the alias the user typed, and never
     ///   anything parsed out of the prompt text, which here deliberately names a
-    ///   `HostKeyAlias` instead (section 4.2);
+    ///   `HostKeyAlias` instead (docs/design/secrets.md);
     /// - a **second location on the same host prompts for nothing**, because that item is
     ///   what the broker finds. That is the whole point of keying by destination rather
-    ///   than by location, and it is what the testbed proved on 2026-09-04.
+    ///   than by location, and it is what makes it work against real password-authenticating hosts.
     ///
     /// The bite-proof is the last two together: the two keys a wrong implementation would
     /// have written are asserted absent, and the second `add` proves the key that *was*
@@ -302,7 +304,7 @@ extension AgentScenarios.AddFlowScenarios {
         #expect(shown.secret, "a password is read hidden")
         #expect(first.unscripted.isEmpty)
 
-        // Section 4.2's keying, off the `ssh -G` resolution.
+        // The keying rule (docs/design/secrets.md), off the `ssh -G` resolution.
         let expected = SecretKey.password(
             SSHDestination(user: "alec", hostname: "nas.example.internal", port: 2201))
         #expect(try bed.store.accounts() == [expected.account])
@@ -346,15 +348,15 @@ extension AgentScenarios.AddFlowScenarios {
     ///
     /// "Keying passwords by `<user>@<hostname>:<port>` rather than by location is what
     /// makes `ProxyJump` work with password auth on both hops: each hop's prompt names its
-    /// own host and gets its own item" (section 4.2). The agent never sees a hop start:
+    /// own host and gets its own item" (docs/design/secrets.md). The agent never sees a hop start:
     /// the hops inherit the master's token through the environment and are told apart by
     /// the argv the askpass sends, which is resolved with its own `ssh -G`.
     ///
     /// The **port** is what makes this a real test rather than a coincidence. `ssh` puts
     /// no port in any prompt, so a hop's `password:…:2301` can only have come from the
-    /// `-p` on that hop's own command line (section 4.2, section 6.1). Both hops carry a
-    /// deliberately different password, exactly as `bastion-a`/`bastion-b` did on
-    /// 2026-09-04.
+    /// `-p` on that hop's own command line (docs/design/secrets.md, docs/design/ssh.md). Both hops carry a
+    /// deliberately different password, exactly as `bastion-a` and `bastion-b` each need
+    /// their own item.
     @Test func q3EachProxyJumpHopIsKeyedFromItsOwnArgv() async throws {
         let bed = try await Bed(profile: Self.passwordProfile("destination-password")) {
             $0.put("notes.txt")
@@ -473,8 +475,8 @@ extension AgentScenarios.AddFlowScenarios {
     /// domain directory. Answered `yes`, `ssh` writes it to the user's own `known_hosts`
     /// and `add` carries on.
     ///
-    /// The bite-proof is the rule that was shipped before 2026-09-04, when both section 4.2
-    /// and section 4.3 said the question carried `confirm`: by the **hint alone** this
+    /// The bite-proof guards against classifying by the hint alone: read only by its hint
+    /// (which arrives unset, indistinguishable from a password prompt's own unset hint), this
     /// prompt is a secret, and the broker answers a secret prompt for this destination with
     /// the stored password. So the two calls are made side by side - the same broker, the
     /// same token, the same empty hint - and only the text tells them apart.
@@ -495,7 +497,7 @@ extension AgentScenarios.AddFlowScenarios {
 
         let question = try #require(no.prompts.first)
         #expect(question.kind == "hostkey")
-        #expect(!question.secret, "section 4.3: read visible, against the fingerprint shown")
+        #expect(!question.secret, "docs/design/secrets.md: read visible, against the fingerprint shown")
         #expect(
             question.prompt.hasSuffix(
                 "Are you sure you want to continue connecting (yes/no/[fingerprint])? "),
@@ -555,7 +557,7 @@ extension AgentScenarios.AddFlowScenarios {
     /// **Q6** (`SQ-052`, `SQ-053`) - a wrong password stores nothing, and adds nothing.
     ///
     /// "When the connection succeeds, every answer that was actually used is written to
-    /// the keychain; **a wrong password is never stored**" (section 4.2). The commit is on
+    /// the keychain; **a wrong password is never stored**" (docs/design/secrets.md). The commit is on
     /// the success path and nowhere else, so an attempt that ends in `Permission denied`
     /// leaves the keychain exactly as it found it - and `add` leaves no half-added
     /// location either, because the location is created only after authentication.
@@ -567,7 +569,7 @@ extension AgentScenarios.AddFlowScenarios {
         let bed = try await Bed(profile: Self.passwordProfile()) { $0.put("notes.txt") }
         defer { bed.tearDown() }
 
-        // Twice, because a failed first pass earns the key-agent pass of section 4.2 and
+        // Twice, because a failed first pass earns the key-agent pass of docs/design/secrets.md and
         // that one asks again.
         let terminal = ScriptedTerminal([
             .init(match: "password", answer: "not-the-password", uses: 2)
@@ -609,7 +611,8 @@ extension AgentScenarios.AddFlowScenarios {
         var message = ""
         do {
             _ = try await bed.add(
-                "alec@nas:2201", terminal, nickname: "nas", remotePath: "/srv/typo")
+                "alec@nas:2201", terminal, nickname: "nas", remotePath: "/srv/typo",
+                verbose: true)
             Issue.record("Q7: a root the server does not have must not add a location")
         } catch {
             message = error.localizedDescription
@@ -628,13 +631,13 @@ extension AgentScenarios.AddFlowScenarios {
     /// **Q8** (`SQ-047`, `SQ-048`, `SQ-060`, `SQ-062`) - the token's life, and the whole
     /// classification table.
     ///
-    /// Section 4.2's token is minted per `ssh`, put in that process's environment, attached
+    /// The token (docs/design/secrets.md) is minted per `ssh`, put in that process's environment, attached
     /// to its pid, used for as long as that process lives, committed on success and then
     /// retired and forgotten - "an askpass invocation with no token, a retired one, or one
     /// whose caller is not a descendant of the `ssh` it was issued to gets no answer". All
     /// four of those are asserted against the broker the `add` actually ran on.
     ///
-    /// The classification half is section 4.2's table, every row, including the host-key
+    /// The classification table (docs/design/secrets.md) covers every row, including the host-key
     /// question with **no** hint (`SQ-047`) - and the two rows no testbed service can
     /// raise, a PIN and a user-presence touch, which are run end to end against a stub that
     /// raises them and refuse the location rather than creating one that fails every
@@ -688,7 +691,7 @@ extension AgentScenarios.AddFlowScenarios {
         }
         broker.forget(token: stranger)
 
-        // Section 4.2's table, row by row.
+        // The classification table (docs/design/secrets.md), row by row.
         let hostKey = OpenSSHPrompts.hostKey(host: "nas")
         #expect(
             AskpassPromptClassifier.classify(
@@ -785,7 +788,7 @@ extension AgentScenarios.AddFlowScenarios {
     /// "The collect connection is made twice at most. The first attempt runs with
     /// `-o IdentityAgent=none`, so `ssh` can use only key files, passphrases … and
     /// passwords, and every passphrase it needs is seen and stored… If that attempt fails
-    /// to authenticate, the second runs with the agent socket" (section 4.2). The order is
+    /// to authenticate, the second runs with the agent socket" (docs/design/secrets.md). The order is
     /// asserted against the argv `FakeSSH` recorded, because that is the only place it is
     /// visible: a location that passed on the second attempt is `agentDependent` and keeps
     /// the config's `IdentityAgent` for ever.
@@ -809,7 +812,7 @@ extension AgentScenarios.AddFlowScenarios {
         ) { $0.put("notes.txt") }
         defer { bed.tearDown() }
 
-        // An empty answer is the deliberate refusal of section 4.2: "press Enter to skip
+        // An empty answer is the deliberate refusal of docs/design/secrets.md: "press Enter to skip
         // this and try your key agent instead".
         let terminal = ScriptedTerminal([.init(match: "password", answer: "")])
         let report = try await bed.add("alec@nas:2201", terminal, nickname: "nas")
@@ -840,7 +843,7 @@ extension AgentScenarios.AddFlowScenarios {
             "Q9: pass 2 is the only one that may consult it")
         #expect(
             masters.allSatisfy { $0.contains("StrictHostKeyChecking=ask") },
-            "section 4.3: the collect connection runs `ask` so the question can be relayed")
+            "docs/design/secrets.md: the collect connection runs `ask` so the question can be relayed")
 
         // K10: 300 s while a human is typing, and 60 s for the master that follows.
         let session = try #require(bed.bridge.records.first?.session)
@@ -856,5 +859,40 @@ extension AgentScenarios.AddFlowScenarios {
             configuration.authenticationDeadline == 60,
             "K10: the master `add` brings up afterwards is the unattended one, at 60 s")
         #expect(configuration.agentDependent, "and it is the location that waits for the agent")
+    }
+}
+
+// MARK: - The rule of silence
+
+extension AgentScenarios.AddFlowScenarios {
+
+    /// `sshdrive add` prints nothing about its own progress unless `-v` asked for it.
+    ///
+    /// The narration is written in the agent and relayed to the terminal, so the agent is
+    /// the only place that can hold it back; the CLI's `-v` reaches it as the `verbose`
+    /// argument. What the flag does **not** touch is anything the user has to read: the
+    /// prompts of docs/design/secrets.md, and the notes `AddFlow` makes when an attempt fails and
+    /// another is tried, which `q9` asserts arrive with no flag at all.
+    @Test func addNarratesOnlyUnderVerbose() async throws {
+        let bed = try await Bed(profile: .debian) { server in
+            server.put("notes.txt", contents: Data("hello".utf8))
+        }
+        defer { bed.tearDown() }
+
+        let quiet = ScriptedTerminal()
+        _ = try await bed.add("alec@nas:2201", quiet, nickname: "nas")
+        for narration in ["resolves to:", "Connecting once to check", "Connecting for real"] {
+            #expect(
+                !quiet.notes.contains { $0.contains(narration) },
+                "a plain `add` says nothing about \"\(narration)\"")
+        }
+
+        let loud = ScriptedTerminal()
+        _ = try await bed.add("alec@nas:2201", loud, nickname: "nas-again", verbose: true)
+        for narration in ["resolves to:", "Connecting once to check", "Connecting for real"] {
+            #expect(
+                loud.notes.contains { $0.contains(narration) },
+                "`add -v` says \"\(narration)\"")
+        }
     }
 }

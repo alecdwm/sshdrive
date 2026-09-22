@@ -10,13 +10,39 @@ import Logging
 import ProviderCore
 
 /// `add`, `list`, `show`, `remove`, `set`, `mount`, `unmount` and `status`: the user-facing
-/// half of DESIGN.md section 8, with section 8.1's capability report.
+/// half of the CLI, with the capability report (docs/design/cli.md).
 ///
-/// Everything here runs in the agent, because the CLI is a pure XPC client and "even `add`
-/// and `passwd` connect from the agent" (section 3, section 4.2). The CLI's only jobs are
-/// to parse the flags and to be the terminal the collect connection's prompts are relayed
-/// to.
+/// Everything here runs in the agent, because the CLI is a pure XPC client and even `add`
+/// and `passwd` connect from the agent. The CLI's only jobs are to parse the flags and to
+/// be the terminal the collect connection's prompts are relayed to.
 public enum LocationCommands {
+
+    /// The terminal, with the CLI's verbosity applied.
+    ///
+    /// The CLI prints nothing of its own when a command succeeds, and the narration a
+    /// command makes while it runs is written here and relayed there, so this is the only
+    /// place that can hold it back: `narrate` reaches the terminal only when the command
+    /// carried `verbose`. A warning, a refusal and a prompt are relayed either way, since
+    /// they are what the user has to read to answer or to act.
+    struct CommandRelay: Sendable {
+        let relay: (any TerminalRelaying)?
+        let verbose: Bool
+
+        init(_ relay: (any TerminalRelaying)?, arguments: [String: String]) {
+            self.relay = relay
+            self.verbose = arguments["verbose"] == "true"
+        }
+
+        /// The command talking about its own progress.
+        func narrate(_ text: String) {
+            if verbose { relay?.note(text) }
+        }
+
+        /// Something the user has to know whether they asked for detail or not.
+        func warn(_ text: String) {
+            relay?.note(text)
+        }
+    }
 
     public static func run(
         command: String, arguments: [String: String], relay: (any TerminalRelaying)?
@@ -37,9 +63,8 @@ public enum LocationCommands {
 
     // MARK: add
 
-    /// The section 8 `add`, in the order the section itself sets out: resolve and show,
-    /// warn about the environment, connect once with the command the location will use
-    /// later, record, probe, mount.
+    /// `add`, in the order it runs: resolve and show, warn about the environment, connect
+    /// once with the command the location will use later, record, probe, mount.
     private static func add(_ arguments: [String: String], relay: (any TerminalRelaying)?) async throws -> Data {
         guard let destinationText = arguments["destination"] else {
             throw SSHDriveAgentError.notImplemented.asNSError(
@@ -57,7 +82,7 @@ public enum LocationCommands {
         if let jump = arguments["jump"], !jump.isEmpty {
             // Stored the way a `~/.ssh/config` ProxyJump resolves: `ssh -G` reports it and
             // the agent rebuilds every hop as its own ProxyCommand. It is never handed to
-            // `ssh` as an option (section 6.1).
+            // `ssh` as an option.
             _ = try JumpHop.parseChain(jump)
             sshOptions += ["-o", "ProxyJump=\(jump)"]
         }
@@ -83,11 +108,11 @@ public enum LocationCommands {
                     + "Pick another --nickname, or remove it first.")
         }
 
-        // Section 6.1: the login shell snapshot is refreshed on every `add`.
+        // The login shell snapshot is refreshed on every `add`.
         let snapshot = await AgentSSHEnvironment.shared.refresh()
         let environment = await AgentSSHEnvironment.shared.environment()
 
-        // Section 4.1: `ssh -G` and the diff against `ssh -F /dev/null -G`. A config
+        // `ssh -G` and the diff against `ssh -F /dev/null -G`. A config
         // written for a newer Homebrew OpenSSH may use a keyword Apple's build rejects;
         // `add` reports that together with `/usr/bin/ssh -V`, so the mismatch is found
         // here rather than at the first reconnect.
@@ -106,14 +131,15 @@ public enum LocationCommands {
             attribution: attribution,
             overrideKeywords: SSHConfigDisplay.overrideKeywords(for: target))
 
-        relay?.note("\(location.host) resolves to:")
-        relay?.note(display.text)
+        let terminal = CommandRelay(relay, arguments: arguments)
+        terminal.narrate("\(location.host) resolves to:")
+        terminal.narrate(display.text)
 
-        // Section 4.2: the terminal can differ from the snapshot. Compare and say which
-        // the agent will use, because "works in a terminal" means "works in a fresh login
-        // shell" and this is where the user finds that out.
+        // The terminal can differ from the snapshot. Compare and say which the agent will
+        // use, because "works in a terminal" means "works in a fresh login shell" and this
+        // is where the user finds that out.
         for warning in environmentWarnings(arguments: arguments, snapshot: snapshot) {
-            relay?.note(warning)
+            terminal.warn(warning)
         }
 
         let identityFiles = attribution.resolved.identityFiles
@@ -127,7 +153,9 @@ public enum LocationCommands {
         let collector = CollectConnection(
             request: request, broker: AgentCommandContext.manager.secrets.broker, relay: relay)
 
-        relay?.note("Connecting once to check, with the command SSH Drive will use later.")
+        terminal.narrate("Connecting once to check, with the command SSH Drive will use later.")
+        // Every note `AddFlow` makes is about an attempt that did not work and what is
+        // being tried instead, so all of them are relayed.
         let outcome = await AddFlow.run(
             hostKeyChecking: arguments["trustFirst"] == "true" ? "accept-new" : "ask",
             allowKeyAgent: arguments["noPassword"] != "true",
@@ -159,31 +187,30 @@ public enum LocationCommands {
             file.locations.removeAll { $0.id == created.id }
             file.locations.append(created)
         }
-        // The one `ssh` that ever sees the server's identification string has just run
-        // (section 8.1; 2026-09-08). It is written after the location exists so an `add`
-        // that failed leaves no domain directory behind.
+        // The one `ssh` that ever sees the server's identification string has just run.
+        // It is written after the location exists, so an `add` that failed leaves no domain
+        // directory behind.
         CapabilityCache.storeServerVersion(
             collector.remoteSoftwareVersion, locationID: created.id)
 
         do {
-            relay?.note("Connecting for real, from the stored answers.")
+            terminal.narrate("Connecting for real, from the stored answers.")
             // The location's own master, with `StrictHostKeyChecking=yes`, no relay and no
             // terminal: exactly the connection every later reconnect makes. If this works,
-            // section 4.2's promise that "a location that passes `add` works from the
-            // agent" has been demonstrated rather than asserted.
+            // the promise that a location which passes `add` works from the agent has been
+            // demonstrated rather than asserted.
             let runtime = try await AgentCommandContext.manager.runtime(for: created)
             // `LocationRuntime.start()` deliberately swallows a failed `applyConnection`,
-            // because section 5.6 wants a location whose server is down to mount anyway.
+            // because a location whose server is down still has to mount.
             // `add` is the one moment where that is wrong: the user is at the terminal,
             // nothing is mounted yet, and a location added against a root the server does
             // not have would come back `.serverUnreachable` for ever. Re-running it here
             // is what puts the `NO_SUCH_FILE` of a mistyped `--remote-path` back in front
             // of the catch below, which is the only thing that can name the path.
             //
-            // Confidence: inferred, not measured. Milestone 5 made `start()` non-fatal and
-            // nothing noticed that it had taken this failure away from `add`; before this
-            // line, `add --remote-path /srv/typo` answered "No row for
-            // NSFileProviderRootContainerItemIdentifier." (Q7, 2026-09-08).
+            // Confidence: inferred, not measured. Without this line, `add --remote-path
+            // /srv/typo` answers "No row for NSFileProviderRootContainerItemIdentifier."
+            // (Q7).
             try await runtime.applyConnection()
             let root = try await runtime.rootDescription()
             let items = try await runtime.enumerateItems(
@@ -212,7 +239,7 @@ public enum LocationCommands {
             if let capability = first.capabilities { report["capabilities"] = capability }
             return try ControlCommands.json(report)
         } catch {
-            // "`add` must fail cleanly … without leaving a half-added location."
+            // `add` must fail cleanly, without leaving a half-added location.
             await AgentCommandContext.manager.dropRuntime(locationID: created.id)
             try? await AgentCommandContext.manager.removeDomain(for: created)
             try? await AgentCommandContext.manager.mutateConfiguration { file in
@@ -221,7 +248,7 @@ public enum LocationCommands {
             if let url = try? GroupContainer.domainURL(locationID: created.id) {
                 try? FileManager.default.removeItem(at: url)
             }
-            // The wire carries status classes, not errno (section 6.2), so the one thing
+            // The wire carries status classes, not errno, so the one thing
             // `add` can usefully say about a `NO_SUCH_FILE` here is which path it was: at
             // this point authentication has already succeeded, so a missing root is a
             // typo in `--remote-path` and nothing else.
@@ -234,8 +261,8 @@ public enum LocationCommands {
         }
     }
 
-    /// Section 4.2: "`add` compares the CLI's own two values with the snapshot before
-    /// connecting and, when they differ, prints both and says which the agent will use."
+    /// `add` compares the CLI's own two values with the snapshot before connecting and,
+    /// when they differ, prints both and says which the agent will use.
     static func environmentWarnings(
         arguments: [String: String], snapshot: LoginShellSnapshot
     ) -> [String] {
@@ -292,7 +319,7 @@ public enum LocationCommands {
     /// `list` that dialled every server would take a minute on a laptop in a train.
     ///
     /// **Answered from the gate, never from `ssh -O check`.** The gate is what holds a
-    /// location's connection (section 6.3), so it already knows: `connected` is the whole
+    /// location's connection, so it already knows: `connected` is the whole
     /// of "online", and the breaker's own sentence - backing off, no network path,
     /// stopped until the user acts - is the whole of the reason. The other route,
     /// `runtime.isConnected()` -> `SSHBackedTransport.isMasterAlive()` ->
@@ -308,14 +335,14 @@ public enum LocationCommands {
             return "online"
         }
         if await gate.isConnected { return "online" }
-        // Section 6.3: "offline" is not the whole answer. The breaker knows whether the
-        // location is backing off, has no path at all, or has stopped until the user acts,
-        // and section 4.2's stop is the one the user has to be told about.
+        // "offline" is not the whole answer. The breaker knows whether the location is
+        // backing off, has no path at all, or has stopped until the user acts, and a stop
+        // that waits for the user is the one they have to be told about.
         return "offline (\(await gate.stateSentence()))"
     }
 
-    /// Section 8.1's "Server free space" for a location with no runtime up: whatever the
-    /// last probe left in `capabilities.json`, with its age, or `unknown`.
+    /// The "Server free space" line for a location with no runtime up: whatever the last
+    /// probe left in `capabilities.json`, with its age, or `unknown`.
     static func cachedFreeSpace(locationID: String) async -> String {
         guard let space = CapabilityCache.freeSpace(locationID: locationID) else {
             return ServerFreeSpace.unknownSentence
@@ -344,13 +371,12 @@ public enum LocationCommands {
             "createCheck": location.createCheck.rawValue,
             "agentDependent": location.agentDependent,
             "sshOptions": location.sshOptions,
-            // Section 8: "secrets present by kind but never their values."
+            // Secrets present by kind, never their values.
             "secrets": location.secrets.compactMap { SecretKey(account: $0)?.report },
             "ssh": SSHProcess.sshVersion() ?? "cannot run \(SSHProcess.sshBinaryPath)",
             "sshBinary": SSHProcess.sshBinaryPath,
             "environment": snapshotReport(snapshot),
-            // Section 6.1: whether the location runs with IdentityAgent=none or through
-            // the key agent.
+            // Whether the location runs with IdentityAgent=none or through the key agent.
             "keyAgent": location.agentDependent
                 ? "authenticates through the key agent only; the mount waits for it after login"
                 : "IdentityAgent=none; no key agent is ever consulted for this location",
@@ -453,7 +479,7 @@ public enum LocationCommands {
         var secretsRemoved: [String] = []
         var helperRemoved: [String] = []
         for location in targets {
-            // Section 8: "refuses while uploads are pending unless --force".
+            // Refuses while uploads are pending unless --force.
             if arguments["force"] != "true",
                 let runtime = await AgentCommandContext.manager.startedRuntime(locationID: location.id),
                 await runtime.pendingUploadCount() > 0
@@ -461,10 +487,10 @@ public enum LocationCommands {
                 throw SSHDriveAgentError.notImplemented.asNSError(
                     "\(location.displayName) has uploads in flight. Wait, or pass --force.")
             }
-            // Section 8: "on its last connection removes the helper binary and its
-            // directory from the server when no other location of this Mac on the same
-            // user@hostname:port uses them". The stream has to stop before the file goes,
-            // and both need the connection that is about to be dropped.
+            // On its last connection the helper binary and its directory come off the
+            // server, when no other location of this Mac on the same user@hostname:port
+            // uses them. The stream has to stop before the file goes, and both need the
+            // connection that is about to be dropped.
             // Everything this command is about to remove counts as gone, or `remove --all`
             // over two locations on one host would leave the binary behind for a sibling
             // that is being removed in the same breath.
@@ -489,9 +515,9 @@ public enum LocationCommands {
             }
             removed.append(location.displayName)
 
-            // "each keychain item the location names that no remaining location also names
-            // (section 4.2 keys items by user@hostname:port, so two locations on one host
-            // share one)" (section 8).
+            // Each keychain item the location names that no remaining location also
+            // names. Items are keyed by user@hostname:port, so two locations on one host
+            // share one.
             let remaining = try await AgentCommandContext.manager.configuration().locations
             for account in location.secrets {
                 guard !remaining.contains(where: { $0.secrets.contains(account) }) else { continue }
@@ -523,7 +549,7 @@ public enum LocationCommands {
                 "set needs a key and a value: sshdrive set <name> <\(LocationSettingKey.allNames)> <value>")
         }
 
-        // `set <name> option add|remove <SSHOPTION>` is its own shape (section 8).
+        // `set <name> option add|remove <SSHOPTION>` is its own shape.
         if keyText == "option" {
             return try await setOption(location: location, arguments: arguments)
         }
@@ -539,9 +565,13 @@ public enum LocationCommands {
         }
 
         var notes: [String] = []
+        // The subset of `notes` that describes what the change does to the cache, the
+        // mount folder or the server: a consequence the user has to know about even when
+        // they asked for the change, so the CLI prints these with no `-v`.
+        var warnings: [String] = []
         if key.recreatesDomain {
-            // Section 8: a new root invalidates every path in the index, so the domain goes
-            // and comes back and the cache with it.
+            // A new root invalidates every path in the index, so the domain goes and comes
+            // back and the cache with it.
             if arguments["force"] != "true",
                 let runtime = await AgentCommandContext.manager.startedRuntime(locationID: location.id),
                 await runtime.pendingUploadCount() > 0
@@ -553,10 +583,11 @@ public enum LocationCommands {
             notes.append(
                 "\(key.rawValue) re-creates the File Provider domain, so the local cache is "
                     + "dropped and every file is downloaded again on demand.")
+            warnings.append(notes.last!)
         }
         if key.renamesDomainInPlace {
-            // S9 (2026-09-05): `add(domain)` with the identifier the system already holds
-            // and a new displayName renames the domain in place. The mount directory under
+            // `add(domain)` with the identifier the system already holds and a new
+            // displayName renames the domain in place. The mount directory under
             // ~/Library/CloudStorage is renamed, nothing is re-fetched, and an upload the
             // system was holding is still pending and still flushes afterwards. So this is
             // not refused while uploads are pending and drops no cache; the one thing it
@@ -564,15 +595,17 @@ public enum LocationCommands {
             notes.append(
                 "the Finder sidebar entry and the folder under ~/Library/CloudStorage are "
                     + "renamed in place; cached files and pending uploads are kept.")
+            // The folder moves, which anything holding a path to it will notice.
+            warnings.append(notes.last!)
         }
 
         if key.requiresCollectConnection {
-            // "host, user, port and identity change what the stored secrets are keyed on
+            // host, user, port and identity change what the stored secrets are keyed on
             // or which key is offered, so they re-run the collect connection exactly as
-            // passwd does before the change is saved" (section 8).
+            // `passwd` does, before the change is saved.
             notes.append("\(key.rawValue) changes what the stored secrets are keyed on; "
                 + "checking the connection before saving.")
-            relay?.note(notes.last!)
+            CommandRelay(relay, arguments: arguments).narrate(notes.last!)
             let outcome = try await recollect(for: updated, relay: relay)
             guard outcome.authenticated else {
                 throw SSHDriveAgentError.notAuthenticated.asNSError(
@@ -583,8 +616,8 @@ public enum LocationCommands {
             updated.secrets = Array(Set(updated.secrets + outcome.storedKeys)).sorted()
         }
 
-        // `helper off` "stops it and removes the binary on the next connection" (section
-        // 6.4). The connection is still up right now, so it happens now.
+        // `helper off` stops the stream and removes the binary on the next connection.
+        // The connection is still up right now, so it happens here.
         if key == .helper, !updated.helper,
             let detector = await AgentCommandContext.manager.detector(locationID: location.id)
         {
@@ -598,12 +631,12 @@ public enum LocationCommands {
         await AgentCommandContext.manager.dropRuntime(locationID: location.id)
         if key.recreatesDomain || key.requiresCollectConnection {
             // Deliberately not `renamesDomainInPlace`: removing the domain first is exactly
-            // what would throw the cache and the pending uploads away, and S9 says the
-            // system does not need it (2026-09-05).
+            // what would throw the cache and the pending uploads away, and the system
+            // does not need it.
             try? await AgentCommandContext.manager.removeDomain(for: location)
         }
         if key.dropsIndex, let url = try? GroupContainer.domainURL(locationID: location.id) {
-            // "a new root invalidates every path in the index" (section 8).
+            // A new root invalidates every path in the index.
             try? FileManager.default.removeItem(at: url)
         }
         let saved = updated
@@ -612,7 +645,7 @@ public enum LocationCommands {
                 file.locations[index] = saved
             }
         }
-        // Section 7: the eviction loop reads the TTL on every pass, and a mounted location
+        // The eviction loop reads the TTL on every pass, and a mounted location
         // gets a fresh evictor from `runtime(for:)` below; this covers the unmounted case
         // and makes the intent explicit rather than incidental.
         if key == .cacheTTL {
@@ -626,7 +659,7 @@ public enum LocationCommands {
         }
         return try ControlCommands.json([
             "name": saved.displayName, "key": key.rawValue, "value": value, "changed": true,
-            "notes": notes,
+            "notes": notes, "warnings": warnings,
         ])
     }
 
@@ -659,7 +692,7 @@ public enum LocationCommands {
     }
 
     /// The collect connection again, for `set host|user|port|identity` (and, when it
-    /// arrives, `passwd`). Same flow, same relay, same storage rules (section 4.2).
+    /// arrives, `passwd`). Same flow, same relay, same storage rules.
     private static func recollect(for location: Location, relay: (any TerminalRelaying)?) async throws
         -> (authenticated: Bool, agentDependent: Bool, failure: AddFlow.Failure?, storedKeys: [String])
     {
@@ -721,21 +754,22 @@ public enum LocationCommands {
 
     // MARK: status
 
-    /// `sshdrive status [<name>]` (sections 8, 8.1).
+    /// `sshdrive status [<name>]` (docs/design/cli.md).
     ///
     /// **Nothing here waits on the location's writer for anything it can read for
     /// itself.** A row is about eighteen facts - the hidden names, the held rows, the
     /// root set, one `item(identifier:)` per materialized file, the pin tree, the channel
     /// budget, the identity, the scheduler, the last error, the free space - and
     /// `LocationRuntime` is an actor whose index writes a directory listing in one
-    /// synchronous SQLite transaction (section 5.3), so a hop onto it for any of them
+    /// synchronous SQLite transaction, so a hop onto it for any of them
     /// waits for a listing of a large folder to finish. So:
     ///
     /// - everything that is in the index is read through `runtime.statusIndex`, the
-    ///   read-only WAL reader section 5.2 gives this database, off the writer entirely;
+    ///   read-only WAL reader this database is opened with, off the writer entirely;
     /// - everything else the runtime knows is taken in **one** entry, `statusFacts()`;
-    /// - the materialized set comes from the snapshot section 6.5's cycle and section 7's
-    ///   pass already publish, and is drained only when there is none that is fresh;
+    /// - the materialized set comes from the snapshot the change-detection cycle and the
+    ///   eviction pass already publish, and is drained only when there is none that is
+    ///   fresh;
     /// - with no `<name>` the locations run concurrently, printed back in the order
     ///   `config.json` holds them;
     /// - and each location's section is bounded by `Deadline.statusSeconds`, so one
@@ -763,7 +797,7 @@ public enum LocationCommands {
         } else {
             // The sections are independent - separate runtimes, separate indexes, separate
             // gates - and one location backing off should not add its wait to the next
-            // one's. The order is put back below, because section 8's output is the order
+            // one's. The order is put back below, because the output is the order
             // `config.json` holds.
             await withTaskGroup(of: (Int, StatusRow).self) { group in
                 for (index, location) in wanted.enumerated() {
@@ -816,7 +850,7 @@ public enum LocationCommands {
                 await fillStatusRow(row, location: location, mounted: mounted, forceProbe: forceProbe)
             }
         } catch let expired as Deadline.Expired {
-            // Section 8's row still prints. What it cannot say, it says it cannot say:
+            // The row still prints. What it cannot say, it says it cannot say:
             // a report about the other locations is worth having, and the CLI's own 120 s
             // timeout would otherwise take the whole command with this one location.
             row.fields["note"] = expired.shortDescription
@@ -873,8 +907,8 @@ public enum LocationCommands {
             row.fields["capabilities"] = capability.asJSON
         }
 
-        // Section 8.1's Cache and Pins lines need the system's own materialized set. It is
-        // published by section 6.4's cycle, section 7's pass and the extension's
+        // The Cache and Pins lines need the system's own materialized set. It is published
+        // by the change-detection cycle, the eviction pass and the extension's
         // `materializedItemsDidChange`, and every *change* to it arrives as the last of
         // those - so a fresh entry is the current set, and `status` walks the replica only
         // when there is none.
@@ -891,18 +925,18 @@ public enum LocationCommands {
             materialized = materialized ?? []
         }
 
-        // Everything the index can answer, from the read-only reader (section 5.2).
+        // Everything the index can answer, from the read-only reader.
         let index = await runtime.statusIndex.report(
             hiddenReasons: facts.hiddenReasons, materialized: materialized)
         row.fields["notShown"] = index.notShown
         row.fields["heldDeletions"] = index.held
         if let unavailable = index.unavailable {
-            // Section 5.3's rebuild, or a location that has never started. The row says so
+            // An index rebuild, or a location that has never started. The row says so
             // rather than printing zeroes that read as facts about the server.
             row.fields["indexUnavailable"] = unavailable
         }
 
-        // Section 6.4: the tier in use, the cadence, the last sweep and where the location
+        // The tier in use, the cadence, the last sweep and where the location
         // sits on the fallback ladder. The detector is the authority where there is one,
         // which is why it is merged over the index's stored answer and not under it.
         var watch = index.watch
@@ -932,16 +966,16 @@ public enum LocationCommands {
             row.fields["pins"] = index.pins
         }
 
-        // Section 4.3: a changed host key needs no command of ours; `status` prints the
+        // A changed host key needs no command of ours; `status` prints the
         // `ssh-keygen -R` line to run.
         if let text = hostKeyAdvice(location, lastError: facts.lastError) {
             row.fields["hostKeyAdvice"] = text
         }
     }
 
-    /// Section 6.4: "Since it does place our code on the remote machine, `sshdrive add`
-    /// states this plainly in its output, after the probe has chosen the directory so the
-    /// message names the real one."
+    /// Deploying the helper puts our code on the remote machine, so `sshdrive add` says so
+    /// plainly in its output, after the probe has chosen the directory so the message names
+    /// the real one.
     ///
     /// Nil where no helper will be deployed - no shell, no directory, an unsupported
     /// platform, a build with no binaries - because a promise about a binary that is never
@@ -962,12 +996,12 @@ public enum LocationCommands {
     /// and then the one capability report `add` prints (`P9`, `N1`).
     ///
     /// It is one function rather than three statements inside `add` because the **order**
-    /// is the rule and the wait is the bound. Section 6.4's notice is printed first - it
+    /// is the rule and the wait is the bound. The helper notice is printed first - it
     /// describes what is about to happen and names the directory the probe chose - and the
     /// report comes after `settleHelper`, which is bounded by `HelperSettle.addSeconds` so
     /// a server that never answers costs `add` a few seconds and nothing more. Without the
-    /// wait the report described a sweep and blamed the server for it, ten seconds before
-    /// `sshdrive status` said `helper 0.1.0` (2026-09-05; `SQ-077`).
+    /// wait the report describes a sweep and blames the server for it, ten seconds before
+    /// `sshdrive status` says `helper 0.1.0` (`SQ-077`).
     ///
     /// Confidence: the ordering and the bound are ours and are measured here. That a
     /// deployment can hang rather than refuse is inferred from `SQ-077` - the stream dies
@@ -977,25 +1011,25 @@ public enum LocationCommands {
         location: Location, runtime: LocationRuntime, detector: ChangeDetector?,
         relay: (any TerminalRelaying)?
     ) async -> (helperNotice: String?, capabilities: [String: Any]?) {
-        // Section 6.4: `add` "states this plainly in its output, after the probe has
-        // chosen the directory so the message names the real one". It is said before the
-        // upload happens, and before the report that describes its result.
+        // `add` says this plainly in its output, after the probe has chosen the directory
+        // so the message names the real one. It is said before the upload happens, and
+        // before the report that describes its result.
         let notice = await helperNotice(runtime: runtime, location: location)
         if let notice { relay?.note(notice) }
         // The helper is deployed by the first change-detection cycle, which starts with
         // the location. `add` prints one capability report and the user reads it as the
         // truth about this server, so it waits - bounded - for that first attempt to
-        // settle (2026-09-05, sections 8, 8.1 and 6.4).
+        // settle.
         if let detector { await detector.settleHelper() }
         // The report itself is not relayed: it goes back in the reply and the CLI renders
-        // it (section 8.1's `--json` is the same data). What the terminal is told here is
+        // it (the CLI's `--json` is the same data). What the terminal is told here is
         // only what it could not work out for itself, and it is told before the wait.
         let capabilities = try? await capabilityReport(
             location: location, runtime: runtime, forceProbe: false, detector: detector)
         return (notice, capabilities?.asJSON)
     }
 
-    /// Section 8.1's report for a live location, re-probing when asked.
+    /// The capability report for a live location, re-probing when asked.
     ///
     /// - Parameter detector: the location's change-detection ladder, which is the
     ///   authority on the running tier and on where tier 2 has got to. Passed in rather
@@ -1003,7 +1037,7 @@ public enum LocationCommands {
     ///   code from the same source, and so a scenario can hand it one (`N1`, `P9`).
     /// - Parameter facts: what `status` already took from the runtime in its one entry
     ///   (`statusFacts()`). Passing them is what keeps the report from making three more
-    ///   hops onto an actor a directory listing may be holding (section 8);
+    ///   hops onto an actor a directory listing may be holding;
     ///   `add` and `--probe` pass nil, because `--probe` has just moved all three.
     public static func capabilityReport(
         location: Location, runtime: LocationRuntime, forceProbe: Bool,
@@ -1042,10 +1076,9 @@ public enum LocationCommands {
         }
         // Read from `capabilities.json`, never from the wire: `--probe` has already
         // refreshed it above if that is what this call is, and `status` on its own may
-        // not dial (section 8.1).
+        // not dial.
         let freeSpace = freeSpaceSentence
-        // Section 8.1: the tier the ladder is actually running, and where tier 2 has got
-        // to (section 6.4).
+        // The tier the ladder is actually running, and where tier 2 has got to.
         let status = await detector?.status()
         return CapabilityReport.make(
             probe: live.probe, extensions: live.extensions, location: location,
@@ -1062,9 +1095,8 @@ public enum LocationCommands {
     ///
     /// Only a *running* stream describes the change-detection and rename lines as the
     /// helper's: the ladder offers the tier from the probe before anything is deployed,
-    /// and a report taken in that window used to print the sweep branch's "the server
-    /// cannot run the remote helper" - which was false for every server that could, and
-    /// was what `add` printed on the first real install (2026-09-05).
+    /// and a report taken in that window would otherwise print the sweep branch's "the
+    /// server cannot run the remote helper", which is false for every server that can.
     private static func liveHelperState(
         location: Location, runtime: LocationRuntime, status: [String: Any]?
     ) async -> HelperState {
@@ -1095,8 +1127,8 @@ public enum LocationCommands {
             capabilities.helperBlockReason ?? "the server cannot run the remote helper")
     }
 
-    /// The same for a location that is not up: what the cached probe of section 8.1 can
-    /// honestly say. A server that could run it is never reported as one that cannot.
+    /// The same for a location that is not up: what the cached probe can honestly say. A
+    /// server that could run it is never reported as one that cannot.
     private static func helperState(location: Location, cached: ServerProbe.Result) -> HelperState {
         guard location.helper else { return .off }
         guard cached.hasShellAccess else {
@@ -1109,8 +1141,8 @@ public enum LocationCommands {
         return .unavailable("not connected; the helper starts on the next connection")
     }
 
-    /// "A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`
-    /// line to run" (section 8, section 4.3).
+    /// A host-key change needs no command of ours: `status` prints the `ssh-keygen -R`
+    /// line to run.
     ///
     /// Takes the sentence `status` already read rather than going back to the runtime for
     /// it: `lastErrorText()` reaches `SSHMaster` for the master's own stderr, and one

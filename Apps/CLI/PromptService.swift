@@ -3,11 +3,11 @@ import Darwin
 import XPCInterfaces
 import XPCProtocols
 
-/// The terminal, exported to the agent for the length of one command (DESIGN.md
-/// section 4.2).
+/// The terminal, exported to the agent for the length of one command
+/// (docs/design/secrets.md).
 ///
-/// "The CLI shows the prompt on the terminal, reads the answer (hidden for secrets,
-/// visible for the host-key question), and returns it." That is the whole of it: the CLI
+/// The CLI shows the prompt on the terminal, reads the answer (hidden for secrets,
+/// visible for the host-key question), and returns it. That is the whole of it: the CLI
 /// runs no `ssh`, holds no secret beyond the prompt, and never sees the keychain. The
 /// answer goes straight back to the agent, which hands it to `ssh` and keeps it in memory
 /// until the connection succeeds.
@@ -26,8 +26,7 @@ final class PromptService: NSObject, SSHDriveCLIProtocol {
     /// Everything is written through the file handle rather than `print`, because `print`
     /// goes through stdio, which is fully buffered when stdout is a pipe: a `print` of the
     /// explanation followed by a handle write of the prompt puts them on the terminal in
-    /// the wrong order, which is exactly how a transcript stops matching what happened
-    /// (measured driving `add` over ssh, 2026-09-04).
+    /// the wrong order, which is exactly how a transcript stops matching what happened.
     static func write(_ text: String) {
         FileHandle.standardOutput.write(Data(text.utf8))
     }
@@ -52,7 +51,7 @@ final class PromptService: NSObject, SSHDriveCLIProtocol {
         reply(answer)
     }
 
-    /// A hidden tty read (section 8: "All prompts use a hidden tty read"). On a pipe -
+    /// A hidden tty read: every prompt uses one (docs/design/cli.md). On a pipe -
     /// `script -q`, an expect-style feed, a test harness - there is no terminal to turn
     /// echo off on, and the read is an ordinary line read, which is what makes the CLI
     /// scriptable at all.
@@ -75,8 +74,8 @@ final class PromptService: NSObject, SSHDriveCLIProtocol {
     }
 
     /// A visible confirmation the CLI asks on its own account, for `remove`'s
-    /// "are you sure" (section 8). Not a relayed prompt: nothing on the agent side is
-    /// waiting on it.
+    /// "are you sure" (docs/design/cli.md). Not a relayed prompt: nothing on the agent
+    /// side is waiting on it.
     static func confirm(_ question: String) -> Bool {
         write("\(question) [y/N] ")
         let answer = (readLine(strippingNewline: true) ?? "").trimmingCharacters(in: .whitespaces)

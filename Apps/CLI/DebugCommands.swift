@@ -1,12 +1,11 @@
 import ArgumentParser
 import Foundation
 
-/// The test hooks the milestone 1 spikes need (DESIGN.md section 12, spikes S3, S4, S6).
+/// Test hooks for the fake backend, the index and the system's own behaviour.
 ///
-/// These are deliberately a separate command group rather than flags on the real
-/// commands: they exist to drive the fake backend and to make the system's own behaviour
-/// visible, and they go on existing after milestone 1 because the fake backend stays as
-/// the test double for every later milestone.
+/// Deliberately a separate command group rather than flags on the real commands: they
+/// drive the fake backend and make what the system does visible from a headless Mac. The
+/// fake backend is the test double for every module, so these stay with it.
 struct Debug: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Test hooks for the fake backend and the index.",
@@ -78,11 +77,6 @@ struct FakeList: ParsableCommand {
     }
 }
 
-// `sshdrive debug ssh add` was milestone 2's stand-in for `sshdrive add`, and milestone 3
-// replaced it: the real command does the `ssh -G` display, the two-pass collect connection
-// and the relayed prompts it never had (sections 4.1, 4.2, 8). Nothing depended on it, so
-// it is gone rather than kept as a second, worse way to make a location.
-
 // MARK: the fake tree
 
 struct Tree: ParsableCommand {
@@ -109,7 +103,7 @@ struct Mutate: ParsableCommand {
               touch              advances mtime only
               rewrite-invisibly  same size and second-mtime, new ns-mtime and inode.
                                  This is the change SFTP cannot see, and the reason for
-                                 the generation column (section 5.3).
+                                 the generation column (docs/design/item-index.md).
               chmod              needs --mode
               rename             needs --to
               delete             optional --recursive
@@ -143,7 +137,7 @@ struct Mutate: ParsableCommand {
     }
 }
 
-// MARK: the domain itself (spike S9)
+// MARK: the domain itself
 
 struct DomainGroup: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -156,14 +150,13 @@ struct DomainRename: ParsableCommand {
         commandName: "rename",
         abstract: "Call add(domain) with the same identifier and a new display name.",
         discussion: """
-            Spike S9. There is no rename call on NSFileProviderManager, so the question is
-            whether `add` with an identifier the system already holds renames the domain in
-            place - keeping the mount, the cached content and the pending uploads - or
-            whether it fails, or replaces the domain and takes the replica with it.
+            There is no rename call on NSFileProviderManager. `add` with an identifier
+            the system already holds renames the domain in place, keeping the mount, the
+            cached content and the pending uploads.
 
             Nothing is removed first, and config.json is not written: this hook makes the
             call and reports what the system says. `sshdrive set <name> nickname` is the
-            product path, and what it does depends on this answer.
+            product path.
             """)
 
     @Argument var name: String
@@ -190,9 +183,9 @@ struct AnchorExpire: ParsableCommand {
         commandName: "expire",
         abstract: "Drop every anchor, so the next working-set read gets .syncAnchorExpired.",
         discussion: """
-            S3 watches what the system re-enumerates after this. Turn the agent's catch-up
-            sweep off first (`sshdrive debug sweep <name> off`) so the system's own
-            behaviour is visible rather than ours (section 5.3).
+            Turn the agent's catch-up sweep off first (`sshdrive debug sweep <name> off`)
+            so what the system re-enumerates afterwards is its own behaviour rather than
+            ours (docs/design/item-index.md).
             """)
 
     @Argument var name: String
@@ -208,8 +201,9 @@ struct Sweep: ParsableCommand {
         abstract: "Turn the agent's catch-up sweep on or off.",
         discussion: """
             The agent treats handing out a fresh working-set anchor exactly as it treats a
-            reconnect: it runs one full sweep of the root set at once (section 5.3). S3
-            needs that off to see what the system does on its own.
+            reconnect: it runs one full sweep of the root set at once
+            (docs/design/item-index.md). Turning it off is what leaves the system's own
+            behaviour visible.
             """)
 
     @Argument var name: String
@@ -227,12 +221,12 @@ struct Sweep: ParsableCommand {
 
 struct Policy: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Set a folder's content policy at runtime (spike S6).",
+        abstract: "Set a folder's content policy at runtime.",
         discussion: """
             eager-keep  the item is served with .downloadEagerlyAndKeepDownloaded and
-                        loses allowsEvicting, which is what pinning does (section 7.1.1)
-            lazy        an explicit .downloadLazily, which S6 checks overrides an eager
-                        ancestor
+                        loses allowsEvicting, which is what pinning does
+                        (docs/design/pinning.md)
+            lazy        an explicit .downloadLazily, which overrides an eager ancestor
             inherit     clears the marker
             """)
 
@@ -283,8 +277,8 @@ struct Signal: ParsableCommand {
         discussion: """
             With --container the folder's own enumerator is signalled instead. Reporting a
             row through the working set is not enough to make the system ingest an item
-            whose parent it has never enumerated (spike S6, s6-3); signalling the folder is
-            what asks for that listing.
+            whose parent it has never enumerated; signalling the folder is what asks for
+            that listing.
             """)
 
     @Argument var name: String
@@ -295,7 +289,7 @@ struct Signal: ParsableCommand {
     @Flag(
         name: .customLong("error-resolved"),
         help:
-            "Send signalErrorResolved(.serverUnreachable) alone - section 5.6's flush cue, without the working-set signal (S5).")
+            "Send signalErrorResolved(.serverUnreachable) alone - the flush cue, without the working-set signal.")
     var errorResolved = false
 
     func run() throws {
@@ -308,15 +302,15 @@ struct Signal: ParsableCommand {
 
 // MARK: keychain
 
-/// S1(d2): prove the agent, and only the agent, reaches the data-protection keychain
-/// under the shared access group. The real store is milestone 2 (DESIGN.md sections 3.1,
-/// 4.2); this writes one item, reads it back and deletes it again.
+/// Proof that the agent, and only the agent, reaches the data-protection keychain under
+/// the shared access group (docs/design/components.md, docs/design/secrets.md). The real
+/// store is `Secrets`; this writes one item, reads it back and deletes it again.
 struct Keychain: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Write, read back and delete one keychain item from the agent.")
 
     @Option(help: "Account name for the item.")
-    var key: String = "spike:s1d2"
+    var key: String = "debug:keychain"
 
     @Option(help: "Value to write and read back.")
     var value: String?
@@ -328,12 +322,12 @@ struct Keychain: ParsableCommand {
     }
 }
 
-// MARK: the keychain and the askpass path (milestone 2, spike S2)
+// MARK: the keychain and the askpass path
 
-/// The milestone 2 hook set. `debug keychain` above proves `SecItem` is reachable at all;
-/// this drives the real `Secrets` store and the whole askpass token protocol from the
-/// launchd-started agent, which is the only process that can run either (DESIGN.md
-/// sections 3.1, 4.2).
+/// `debug keychain` above proves `SecItem` is reachable at all; this drives the real
+/// `Secrets` store and the whole askpass token protocol from the launchd-started agent,
+/// which is the only process that can run either (docs/design/components.md,
+/// docs/design/secrets.md).
 ///
 /// A stored value never comes back out: `lookup` reports whether the item exists and,
 /// with `--value`, whether it matches.
@@ -408,17 +402,17 @@ struct Secrets: ParsableCommand {
     }
 }
 
-// MARK: eviction, the materialized set and the replica (spikes S4, S6)
+// MARK: eviction, the materialized set and the replica
 
-/// S4-1, S4-3, S6-5. `NSFileProviderManager.evictItem` from the agent, which is where the
-/// TTL loop of section 7 will call it from. The reply carries the error's domain and code
-/// rather than a sentence, because which error comes back is the answer: the header
+/// `NSFileProviderManager.evictItem` from the agent, which is where the TTL loop calls it
+/// from (docs/design/eviction.md). The reply carries the error's domain and code rather
+/// than a sentence, because which error comes back is the answer: the header
 /// promises `NSFileProviderErrorUnsyncedEdits` for an item with pending changes and
 /// `NSFileProviderErrorNonEvictable` for one the provider marked non-purgeable.
 struct DebugEvict: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "evict",
-        abstract: "Ask the system to evict one item (spike S4).")
+        abstract: "Ask the system to evict one item.")
 
     @Argument var name: String
     @Argument(help: "Path relative to the location root.")
@@ -431,12 +425,12 @@ struct DebugEvict: ParsableCommand {
 }
 
 /// `sshdrive debug ttl <name> --seconds N`: the cache TTL in seconds, for this agent
-/// process only, so a runbook can watch section 7's loop work without waiting fifteen
-/// minutes per assertion. The pass itself is the ordinary one.
+/// process only, so the eviction loop can be watched at work without waiting fifteen
+/// minutes per assertion (docs/design/eviction.md). The pass itself is the ordinary one.
 struct DebugTTL: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ttl",
-        abstract: "Override the cache TTL in seconds (spike/runbook hook).")
+        abstract: "Override the cache TTL in seconds.")
 
     @Argument var name: String
 
@@ -455,9 +449,9 @@ struct DebugTTL: ParsableCommand {
 }
 
 /// The two sets the system keeps for a domain. `--pending` proves an item really does have
-/// unsynced changes before S4 tries to evict it; the materialized set is the enumerator the
-/// TTL loop walks (section 7), and is how a headless run sees what an eager policy actually
-/// downloaded.
+/// unsynced changes before an eviction of it is tried; the materialized set is the
+/// enumerator the TTL loop walks (docs/design/eviction.md), and is how a headless run sees
+/// what an eager policy actually downloaded.
 struct Materialized: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "List the domain's materialized set, or its pending set.")
@@ -475,13 +469,14 @@ struct Materialized: ParsableCommand {
     }
 }
 
-/// S4-2 and S4-5. `lstat` of the user-visible file, made from the launchd-started agent
-/// with `AT_SYMLINK_NOFOLLOW`, exactly as the eviction loop will (sections 7, 9.1). The
-/// path comes from `getUserVisibleURL`, not from the display name. `--read` opens and reads
-/// one byte first, so the atime question can be asked without leaving the agent.
+/// `lstat` of the user-visible file, made from the launchd-started agent with
+/// `AT_SYMLINK_NOFOLLOW`, exactly as the eviction loop does (docs/design/eviction.md,
+/// docs/design/security.md). The path comes from `getUserVisibleURL`, not from the
+/// display name. `--read` opens and reads one byte first, so the atime question can be
+/// asked without leaving the agent.
 struct Stat: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "lstat an item's user-visible file from the agent (spike S4).")
+        abstract: "lstat an item's user-visible file from the agent.")
 
     @Argument var name: String
     @Argument var path: String
@@ -496,9 +491,9 @@ struct Stat: ParsableCommand {
     }
 }
 
-/// S4-4. What the index actually serves as `extendedAttributes` for a row (section 5.4),
-/// next to the metadata version the xattr hash feeds. Compare with `xattr -l` on the mount
-/// before and after an eviction.
+/// What the index actually serves as `extendedAttributes` for a row
+/// (docs/design/names-and-attributes.md), next to the metadata version the xattr hash
+/// feeds. Compare with `xattr -l` on the mount before and after an eviction.
 struct Xattr: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Print the extended attributes the index serves for an item.")
@@ -515,13 +510,13 @@ struct Xattr: ParsableCommand {
 /// Fault injection, for the two questions that need the agent to misbehave.
 ///
 /// `--writes on` makes every `createItem` and `modifyItem` fail `.serverUnreachable`, so an
-/// edit made in the mount stays in the system's pending set: that is the item S4-3 tries to
-/// evict. `--fetch-delay` holds each `fetchContents` open, because a fake-backed fetch is a
-/// memory copy and finishes before the next one starts, which would make the concurrency
-/// S6-11 counts always 1.
+/// edit made in the mount stays in the system's pending set, which is the item an
+/// eviction has to refuse. `--fetch-delay` holds each `fetchContents` open, because a
+/// fake-backed fetch is a memory copy and finishes before the next one starts, which would
+/// make the measured concurrency always 1.
 struct Fault: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Make the agent fail uploads, or hold fetches open (spikes S4, S6).")
+        abstract: "Make the agent fail uploads, or hold fetches open.")
 
     @Argument var name: String
 
@@ -543,17 +538,17 @@ struct Fault: ParsableCommand {
 
     @Option(
         name: .customLong("upload-delay"),
-        help: "Milliseconds to hold every upload open between the bytes landing in the temp file and the lstat of the destination - section 5.5's conflict window. Change the file on the server inside it to get a real conflict copy (milestone 4).")
+        help: "Milliseconds to hold every upload open between the bytes landing in the temp file and the lstat of the destination - the conflict window. Change the file on the server inside it to get a real conflict copy.")
     var uploadDelay: Int?
 
     @Option(
         name: .customLong("frozen-metadata"),
-        help: "on or off: modifyItem replies with the metadata version the item had before the change, which is S10's control case for the xattr hash.")
+        help: "on or off: modifyItem replies with the metadata version the item had before the change, the control case for the xattr hash.")
     var frozenMetadata: String?
 
     @Option(
         help:
-            "on or off: every transport call and every connect attempt fails as if the server had gone (section 6.3). What a VM guest uses in place of a link-down it cannot cause."
+            "on or off: every transport call and every connect attempt fails as if the server had gone. What a VM guest uses in place of a link-down it cannot cause."
     )
     var unreachable: String?
 
@@ -566,19 +561,19 @@ struct Fault: ParsableCommand {
     @Option(
         name: .customLong("connect-hang"),
         help:
-            "Milliseconds every connect attempt stalls, with calls left alone: section 6.3's bounded wait, on its own.")
+            "Milliseconds every connect attempt stalls, with calls left alone: the breaker's bounded wait, on its own.")
     var connectHang: Int?
 
     @Option(
         name: .customLong("connect-failure"),
         help:
-            "transient | authenticationDeadline | authenticationFailed | hostKeyFailed | keyAgentNotReady: what --unreachable reports the attempt failed as (section 6.1's classifier).")
+            "transient | authenticationDeadline | authenticationFailed | hostKeyFailed | keyAgentNotReady: what --unreachable reports the attempt failed as, through the exit classifier.")
     var connectFailure: String?
 
     @Option(
         name: .customLong("fetch-error"),
         help:
-            "noSuchItem | cannotSynchronize | none: what every fetchContents answers instead of reading bytes (S5).")
+            "noSuchItem | cannotSynchronize | none: what every fetchContents answers instead of reading bytes.")
     var fetchError: String?
 
     func run() throws {
@@ -598,9 +593,9 @@ struct Fault: ParsableCommand {
     }
 }
 
-/// S6-11. How many `fetchContents` calls the system keeps open at once, which bounds the
-/// transfer scheduler's backlog (section 6.2). The timeline is per fetch, so the overlap is
-/// visible rather than inferred from a peak.
+/// How many `fetchContents` calls the system keeps open at once, which bounds the
+/// transfer scheduler's backlog (docs/design/sftp.md). The timeline is per fetch, so the
+/// overlap is visible rather than inferred from a peak.
 struct Transfers: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Concurrent fetchContents: in flight, peak and a timeline.")
@@ -621,10 +616,10 @@ struct Transfers: ParsableCommand {
 /// The extension's read-only index reader, seen from the CLI: what it last wrote into the
 /// group container, and a switch that makes the agent answer `indexReady` no for a while.
 ///
-/// The switch is what reproduces 2026-09-08's stall: an extension instance told "not
-/// ready" used to hold that answer for its whole life and answer the working set
-/// `.serverUnreachable` for ever, which fileproviderd throttles into a mount that takes no
-/// server-side change at all.
+/// The switch reproduces the stall an unready reader can cause: an extension instance
+/// told "not ready" must not hold that answer for its whole life and answer the working
+/// set `.serverUnreachable` for ever, which fileproviderd throttles into a mount that
+/// takes no server-side change at all.
 struct Reader: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "The extension's index reader: its last reported state, and a not-ready switch.")
@@ -642,8 +637,8 @@ struct Reader: ParsableCommand {
 }
 
 /// `waitForStabilization`, then the sub-hierarchy barrier on the root. On an idle headless
-/// Mac fileproviderd throttles its schedulers, so without this a spike measures the
-/// throttle rather than the behaviour (results.md 2026-09-04, s3-1).
+/// Mac fileproviderd throttles its schedulers, so without this a measurement reads the
+/// throttle rather than the behaviour.
 struct Stabilize: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Wait until the system has caught up with both sides.")
@@ -678,17 +673,17 @@ struct Testing: ParsableCommand {
 }
 
 
-// MARK: milestone 5 - the breaker, sleep and wake, and the deadline re-arm
+// MARK: the breaker, sleep and wake, and the deadline re-arm
 
-/// Section 6.3's circuit breaker, as the agent holds it right now.
+/// The circuit breaker (docs/design/offline.md), as the agent holds it right now.
 ///
 /// The report is the state machine's own fields: the state sentence, the consecutive
 /// failure count, what the next backoff would be, whether the location is stopped, and
-/// section 4.2's two re-arm flags. The counters (`attempts`, `reconnects`, `failFastCalls`,
-/// `waitedCalls`) are what an S5 run reads to tell the three admission paths apart.
+/// the two re-arm flags (docs/design/secrets.md). The counters (`attempts`, `reconnects`,
+/// `failFastCalls`, `waitedCalls`) are what tells the three admission paths apart.
 struct Breaker: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Show or drive one location's circuit breaker (section 6.3).")
+        abstract: "Show or drive one location's circuit breaker.")
 
     @Argument var name: String
 
@@ -704,7 +699,7 @@ struct Breaker: ParsableCommand {
     @Option(
         name: .customLong("quiet-recovery"),
         help:
-            "on or off: a reconnect sends neither signalErrorResolved nor signalEnumerator, so S5 can send one by hand.")
+            "on or off: a reconnect sends neither signalErrorResolved nor signalEnumerator, so one can be sent by hand.")
     var quietRecovery: String?
 
     func run() throws {
@@ -717,12 +712,12 @@ struct Breaker: ParsableCommand {
     }
 }
 
-/// Section 6.1's will-sleep and did-wake handlers, and section 6.3's path gate, driven by
-/// hand. `pmset sleepnow` is the real path; a VM that does not honour it uses this, and the
-/// spike records which was used.
+/// The will-sleep and did-wake handlers, and the network path gate, driven by hand
+/// (docs/design/ssh.md, docs/design/offline.md). `pmset sleepnow` is the real path; a VM
+/// that does not honour it uses this.
 struct Power: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Drive the sleep, wake and network-path handlers (sections 6.1, 6.3).")
+        abstract: "Drive the sleep, wake and network-path handlers.")
 
     @Argument(
         help: "will-sleep | did-wake | path-down | path-up. Omit to just report the counters.")
@@ -735,23 +730,24 @@ struct Power: ParsableCommand {
     }
 }
 
-/// Section 4.2's presence test, read exactly as the re-arm reads it: seconds since the last
-/// input event from `CGEventSource`, and the screen-lock flag from
-/// `CGSessionCopyCurrentDictionary`.
+/// The presence test (docs/design/secrets.md), read exactly as the re-arm reads it:
+/// seconds since the last input event from `CGEventSource`, and the screen-lock flag
+/// from `CGSessionCopyCurrentDictionary`.
 struct Presence: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "What the agent thinks about whether a human is here (section 4.2).")
+        abstract: "What the agent thinks about whether a human is here.")
 
     func run() throws {
         AgentClient.prettyPrint(try AgentClient.send(command: "debug.presence", arguments: [:]))
     }
 }
 
-/// Section 4.2's two re-arm triggers after an authentication-deadline stop. A headless VM
-/// has no screen to unlock, so the distributed notification's own handler is called here.
+/// The two re-arm triggers after an authentication-deadline stop
+/// (docs/design/secrets.md). A headless VM has no screen to unlock, so the distributed
+/// notification's own handler is called here.
 struct Rearm: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Fire the screen-unlock or present-user re-arm trigger (section 4.2).")
+        abstract: "Fire the screen-unlock or present-user re-arm trigger.")
 
     @Argument var name: String
 
@@ -766,10 +762,9 @@ struct Rearm: ParsableCommand {
 }
 
 
-/// Spike S5's journal of the File Provider calls that reached the agent: when each
-/// arrived, what it answered, how long it took, and the gap since the previous call of the
-/// same method for the same item. Every "how long does the system wait before calling
-/// again" question in the S5 row of section 11 is read off this.
+/// A journal of the File Provider calls that reached the agent: when each arrived, what
+/// it answered, how long it took, and the gap since the previous call of the same method
+/// for the same item. How long the system waits before calling again is read off this.
 struct Calls: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "The File Provider calls the agent has seen, with the gaps between them.")
@@ -791,7 +786,7 @@ struct Calls: ParsableCommand {
     }
 }
 
-/// S5's working-set questions, driven against the index directly. `--forget` deletes the
+/// The working-set questions, driven against the index directly. `--forget` deletes the
 /// row and its subtree with a deletion anchor, which is what the extension reports through
 /// the working set when a listing says an item has gone; `--content-version` gives the row
 /// a version the system cannot match, which is what the reconcile walk produces for an item
@@ -818,19 +813,20 @@ struct Row: ParsableCommand {
 }
 
 
-// MARK: change detection (section 6.4)
+// MARK: change detection
 
 struct Watch: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Drive section 6.4's change detection by hand.",
+        abstract: "Drive change detection by hand.",
         discussion: """
             `--now` runs one cycle at the current tier; `--full` runs one full sweep, which
             is what a reconnect and a fresh working-set anchor both trigger. `--pause on`
-            stops the loop so a spike owns the timing. `--clock-skew` shifts the sweep's own
-            server-clock reference, which is the only way to exercise the window from a
-            container: containers share the host's clock and Docker has no time namespace,
-            so what is under test is the window the agent computes rather than the value
-            the server reports, and `status` says the reference is shifted.
+            stops the loop so the caller owns the timing. `--clock-skew` shifts the
+            sweep's own server-clock reference, which is the only way to exercise the
+            window from a container: containers share the host's clock and Docker has no
+            time namespace, so what is under test is the window the agent computes rather
+            than the value the server reports, and `status` says the reference is
+            shifted.
             """)
 
     @Argument var name: String
@@ -864,7 +860,7 @@ struct Watch: ParsableCommand {
 
 struct Roots: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "The section 6.5 root set, and the rotation the next tier 0 cycle takes.")
+        abstract: "The root set, and the rotation the next tier 0 cycle takes.")
 
     @Argument var name: String
 
@@ -898,7 +894,7 @@ struct Held: ParsableCommand {
 
 struct Reconcile: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Rebuild the index from the system's replica (section 5.3).")
+        abstract: "Rebuild the index from the system's replica.")
 
     @Argument var name: String
 

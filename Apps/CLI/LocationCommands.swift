@@ -1,10 +1,12 @@
 import ArgumentParser
 import Foundation
 import Darwin
+import Logging
 
-/// The section 8 commands a user actually types. Every one of them is a single XPC request
-/// to the agent; the CLI parses flags, prints what comes back, and - for `add` - is the
-/// terminal the collect connection's prompts are relayed to (DESIGN.md sections 3, 4.2, 8).
+/// The commands a user actually types (docs/design/cli.md). Every one of them is a single
+/// XPC request to the agent; the CLI parses flags, prints what comes back, and - for
+/// `add` - is the terminal the collect connection's prompts are relayed to
+/// (docs/design/secrets.md).
 
 // MARK: add
 
@@ -66,6 +68,8 @@ struct Add: ParsableCommand {
           help: "Answer every password prompt with the skip: key-only, or not created.")
     var noPassword = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         // `add <nickname> <destination>` and `add <destination> --nickname <nickname>` are
         // the same command; the two-argument form is what a script reads better as.
@@ -87,21 +91,36 @@ struct Add: ParsableCommand {
         if let permissions { arguments["permissions"] = permissions }
         if trustFirst { arguments["trustFirst"] = "true" }
         if noPassword { arguments["noPassword"] = "true" }
-        // The two values section 4.2 has `add` compare against the agent's snapshot.
+        // The two values `add` compares against the agent's snapshot
+        // (docs/design/secrets.md).
         arguments["terminalPATH"] = ProcessInfo.processInfo.environment["PATH"] ?? ""
         arguments["terminalSSHAuthSock"] =
             ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] ?? ""
         // The option list travels as one value; \u{1} cannot appear in an ssh option.
         if !sshOption.isEmpty { arguments["sshOptions"] = sshOption.joined(separator: "\u{1}") }
+        // The narration `add` makes while it runs is written by the agent and relayed
+        // here, so the agent is the only place that can hold it back. Warnings and
+        // prompts are relayed either way.
+        if global.verbose { arguments["verbose"] = "true" }
 
         let data = try AgentClient.send(
             command: "add", arguments: arguments,
             timeout: AgentClient.interactiveTimeoutSeconds)
         let report = AgentClient.object(data)
+
+        let destinationLine = "\(report["user"] as? String ?? "")@\(report["host"] as? String ?? "")"
+            + ":\(report["port"] as? Int ?? 22)"
+        guard global.verbose else {
+            // The two things the user cannot work out for themselves: the name every later
+            // command takes, and where Finder put it.
+            print("Added \(report["name"] as? String ?? "") (\(destinationLine)) "
+                + "at \(report["mount"] as? String ?? "")")
+            return
+        }
+
         print("")
         print("Added \(report["name"] as? String ?? "") (\(report["id"] as? String ?? ""))")
-        print("  server     \(report["user"] as? String ?? "")@\(report["host"] as? String ?? "")"
-            + ":\(report["port"] as? Int ?? 22)")
+        print("  server     \(destinationLine)")
         print("  root       \(report["remotePath"] as? String ?? "")"
             + "  (\(report["entries"] as? Int ?? 0) entries)")
         if let chain = report["jumpChain"] as? [String], !chain.isEmpty {
@@ -127,6 +146,8 @@ struct ListCommand: ParsableCommand {
 
     @Flag(help: "Print the raw report as JSON.")
     var json = false
+
+    @OptionGroup var global: GlobalOptions
 
     func run() throws {
         let data = try AgentClient.send(command: "list")
@@ -161,6 +182,8 @@ struct Show: ParsableCommand {
 
     @Flag(help: "Print the raw report as JSON.")
     var json = false
+
+    @OptionGroup var global: GlobalOptions
 
     func run() throws {
         let data = try AgentClient.send(command: "show", arguments: ["name": name])
@@ -238,6 +261,8 @@ struct Remove: ParsableCommand {
     @Flag(name: .shortAndLong, help: "Do not ask for confirmation.")
     var yes = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         guard all || name != nil else {
             throw ValidationError("Name a location, or pass --all.")
@@ -248,7 +273,7 @@ struct Remove: ParsableCommand {
                 ? "Remove \(what)? Downloaded files are kept."
                 : "Remove \(what)? The local cache and the keychain items only it names go too."
             guard PromptService.confirm(question) else {
-                print("Nothing was removed.")
+                global.warn("Nothing was removed.")
                 throw ExitCode.failure
             }
         }
@@ -260,10 +285,14 @@ struct Remove: ParsableCommand {
         let report = AgentClient.object(
             try AgentClient.send(command: "remove", arguments: arguments, timeout: 120))
         let removed = report["removed"] as? [String] ?? []
-        print(removed.isEmpty ? "Nothing to remove." : "Removed \(removed.joined(separator: ", ")).")
+        guard !removed.isEmpty else {
+            global.warn("Nothing to remove.")
+            return
+        }
+        global.detail("Removed \(removed.joined(separator: ", ")).")
         let secrets = report["secretsRemoved"] as? [String] ?? []
         if !secrets.isEmpty {
-            print("Keychain items removed: \(secrets.joined(separator: ", "))")
+            global.detail("Keychain items removed: \(secrets.joined(separator: ", "))")
         }
     }
 }
@@ -294,24 +323,34 @@ struct SetCommand: ParsableCommand {
     @Flag(help: "Change even while uploads are pending.")
     var force = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         var arguments = ["name": name, "key": key, "value": value]
         if let option { arguments["option"] = option }
         if force { arguments["force"] = "true" }
+        if global.verbose { arguments["verbose"] = "true" }
         let report = AgentClient.object(
             try AgentClient.send(
                 command: "set", arguments: arguments,
                 timeout: AgentClient.interactiveTimeoutSeconds))
         if let options = report["sshOptions"] as? [String] {
-            print("\(report["name"] as? String ?? name): ssh options are now \(options.joined(separator: " "))")
+            global.detail("\(report["name"] as? String ?? name): ssh options are now \(options.joined(separator: " "))")
             return
         }
         if report["changed"] as? Bool == true {
-            print("\(report["name"] as? String ?? name): \(key) is now \(value)")
+            global.detail("\(report["name"] as? String ?? name): \(key) is now \(value)")
         } else {
-            print("\(report["name"] as? String ?? name): \(key) was already \(value)")
+            // Nothing happened, which is the one thing silence would hide.
+            global.warn("\(report["name"] as? String ?? name): \(key) was already \(value)")
         }
-        for note in report["notes"] as? [String] ?? [] { print("  \(note)") }
+        if global.verbose {
+            for note in report["notes"] as? [String] ?? [] { print("  \(note)") }
+        } else {
+            // What the change did to the cache, the mount folder or the server: the
+            // consequences a user has to know about even when they asked for the change.
+            for warning in report["warnings"] as? [String] ?? [] { global.warn(warning) }
+        }
     }
 }
 
@@ -321,10 +360,12 @@ struct Mount: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Add the File Provider domain for a location without re-adding it.")
     @Argument var name: String
+    @OptionGroup var global: GlobalOptions
     func run() throws {
         let report = AgentClient.object(
             try AgentClient.send(command: "mount", arguments: ["name": name], timeout: 120))
-        print("Mounted \(report["mounted"] as? String ?? name) at \(report["mount"] as? String ?? "")")
+        global.detail(
+            "Mounted \(report["mounted"] as? String ?? name) at \(report["mount"] as? String ?? "")")
     }
 }
 
@@ -332,10 +373,11 @@ struct Unmount: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Remove the File Provider domain without forgetting the location.")
     @Argument var name: String
+    @OptionGroup var global: GlobalOptions
     func run() throws {
         let report = AgentClient.object(
             try AgentClient.send(command: "unmount", arguments: ["name": name], timeout: 120))
-        print("Unmounted \(report["unmounted"] as? String ?? name)")
+        global.detail("Unmounted \(report["unmounted"] as? String ?? name)")
     }
 }
 
@@ -354,6 +396,8 @@ struct Status: ParsableCommand {
     @Flag(help: "Re-run the server probe instead of using the cached result.")
     var probe = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         var arguments: [String: String] = [:]
         if let name { arguments["name"] = name }
@@ -370,8 +414,8 @@ struct Status: ParsableCommand {
                 + "   \(row["mounted"] as? Bool == true ? "mounted" : "not mounted")"
                 + "   \(row["state"] as? String ?? "")"
                 + "   TTL \(row["cacheTTL"] as? String ?? "")")
-            // Section 8: a location whose section ran out of its 20 s deadline, and an
-            // index that is being rebuilt (section 5.3). Both say so rather than printing
+            // A location whose section ran out of its 20 s deadline, and an index that is
+            // being rebuilt (docs/design/item-index.md). Both say so rather than printing
             // zeroes that read as facts about the server.
             if let note = row["note"] as? String { print("       \(note)") }
             if let unavailable = row["indexUnavailable"] as? String {
@@ -403,8 +447,8 @@ struct Status: ParsableCommand {
                 print("       not shown  \(entry["path"] as? String ?? "") "
                     + "(\(entry["reason"] as? String ?? ""))")
             }
-            // Section 6.4: the tier in use, the cadence, the last sweep and where the
-            // location sits on the fallback ladder.
+            // The tier in use, the cadence, the last sweep and where the location sits
+            // on the fallback ladder (docs/design/change-detection.md).
             if let watch = row["watch"] as? [String: Any] {
                 var line = "       watch \(watch["tier"] as? String ?? "?")"
                 if let interval = watch["intervalSeconds"] as? Double {
@@ -414,8 +458,8 @@ struct Status: ParsableCommand {
                 if let cycles = watch["cycles"] as? Int { line += "   \(cycles) cycle(s)" }
                 if let roots = watch["roots"] as? Int {
                     line += "   \(roots) root(s)"
-                    // "status shows the rotation period when it exceeds one cycle"
-                    // (section 6.5).
+                    // The rotation period is shown when it exceeds one cycle
+                    // (docs/design/root-set.md).
                     if let period = watch["rotationPeriod"] as? Int, period > 1 {
                         line += " rotating over \(period) cycles"
                     }
@@ -461,7 +505,7 @@ struct Status: ParsableCommand {
                         + String(format: "%.2fs", seconds))
                 }
             }
-            // Section 8.1's Cache line: "1.2 GB materialized (312 files), 480 MB kept
+            // The Cache line: "1.2 GB materialized (312 files), 480 MB kept
             // TTL 1d   next eviction sweep in 3m", and the Pins line under it.
             if let cache = row["cache"] as? [String: Any] {
                 var line = "       cache "
@@ -476,7 +520,8 @@ struct Status: ParsableCommand {
                     line += "   next eviction pass in \(SizeRendering.duration(next))"
                 }
                 print(line)
-                // Section 7.2's safety net, when it has had to do anything.
+                // The safety net for kept files evicted outside SSH Drive, when it has
+                // had to do anything (docs/design/pinning.md).
                 if let outside = cache["keptEvictedOutside"] as? Int, outside > 0 {
                     print("         note: \(outside) kept file(s) were evicted outside "
                         + "SSH Drive and re-downloaded")
@@ -493,8 +538,8 @@ struct Status: ParsableCommand {
                     + "   (a leading ! is an exclusion; sshdrive pins "
                     + "\(row["name"] as? String ?? "") shows the tree)")
             }
-            // Section 8: "0 held deletions" on the Sync line, and section 6.4's
-            // "14 deletions held in Photos, re-check at 14:32" when there are any.
+            // "0 held deletions" on the Sync line, and "14 deletions held in Photos,
+            // re-check at 14:32" when there are any (docs/design/change-detection.md).
             let held = row["heldDeletions"] as? [[String: Any]] ?? []
             if held.isEmpty {
                 print("       0 held deletions")
@@ -528,8 +573,9 @@ struct Status: ParsableCommand {
 
 // MARK: the capability report
 
-/// Section 8.1's fixed shape: a level glyph, the feature name, the level in use, and an
-/// indented `upgrade:` line whenever the level is not the best one. The agent computes
+/// The capability report's fixed shape (docs/design/cli.md): a level glyph, the feature
+/// name, the level in use, and an indented `upgrade:` line whenever the level is not the
+/// best one. The agent computes
 /// every one of these values; nothing here decides anything, so `--json` and the text can
 /// never disagree.
 enum CapabilityRendering {
@@ -541,8 +587,8 @@ enum CapabilityRendering {
         let probedAt = report["probedAt"] as? Double ?? 0
         Swift.print("\(indent)Capabilities  \(optimal)/\(total) optimal"
             + "   probed \(age(probedAt))\(cached ? " (cached)" : "")")
-        // Section 8.1: name the server software when it is known. Nothing is printed
-        // when it is not, rather than a line that says "unknown" (2026-09-08).
+        // The server software is named when it is known. Nothing is printed when it is
+        // not, rather than a line that says "unknown".
         if let software = report["software"] as? [String: Any] {
             var parts: [String] = []
             if let banner = software["banner"] as? String, !banner.isEmpty { parts.append(banner) }
@@ -571,7 +617,7 @@ enum CapabilityRendering {
         }
     }
 
-    /// A wall-clock time, which is how section 8 prints a guard re-check:
+    /// A wall-clock time, which is how a guard re-check is printed:
     /// "14 deletions held in Photos, re-check at 14:32".
     static func clock(_ timestamp: Double) -> String {
         guard timestamp > 0 else { return "the next cycle" }
@@ -593,9 +639,9 @@ enum CapabilityRendering {
 
 // MARK: accept-deletions
 
-/// `sshdrive accept-deletions <name> [path]` (DESIGN.md section 8): apply the deletions
-/// the mass-deletion guard of section 6.4 is holding, now, rather than waiting for its
-/// second re-check.
+/// `sshdrive accept-deletions <name> [path]` (docs/design/cli.md): apply the deletions
+/// the mass-deletion guard is holding, now, rather than waiting for its second re-check
+/// (docs/design/change-detection.md).
 struct AcceptDeletions: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "accept-deletions",
@@ -615,6 +661,8 @@ struct AcceptDeletions: ParsableCommand {
     @Argument(help: "Only this path and what is under it. Everything when omitted.")
     var path: String?
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         var arguments = ["name": name]
         if let path { arguments["path"] = path }
@@ -623,14 +671,18 @@ struct AcceptDeletions: ParsableCommand {
         let report = AgentClient.object(data)
         let applied = report["applied"] as? Int ?? 0
         let remaining = report["stillHeld"] as? Int ?? 0
-        print("Applied \(applied) held deletion(s) in \(report["location"] as? String ?? name).")
-        if remaining > 0 { print("\(remaining) still held.") }
+        let location = report["location"] as? String ?? name
+        let line = "Applied \(applied) held deletion(s) in \(location)."
+        if applied == 0 { global.warn(line) } else { global.detail(line) }
+        // A deletion still held after the command that exists to release them is the
+        // reason to run it again with a wider path.
+        if remaining > 0 { global.warn("\(remaining) still held.") }
     }
 }
 
 // MARK: evict, pin, unpin, pins
 
-/// Sizes the way section 8.1 writes them: "1.2 GB", "480 MB", "210 MB".
+/// Sizes the way `status` writes them: "1.2 GB", "480 MB", "210 MB".
 enum SizeRendering {
     static func bytes(_ value: Int64) -> String {
         let formatter = ByteCountFormatter()
@@ -648,12 +700,13 @@ enum SizeRendering {
     }
 }
 
-/// `sshdrive evict <name> [path] [--all] [--unpin-all]` (DESIGN.md sections 7, 8).
+/// `sshdrive evict <name> [path] [--all] [--unpin-all]` (docs/design/eviction.md,
+/// docs/design/cli.md).
 ///
-/// With no path this runs the TTL routine of section 7 on demand - the same pass the
-/// five-minute timer runs, so it evicts what the TTL says is stale and nothing else. With
-/// a path it evicts that item now. `--all` drops everything cached, which is one
-/// `evictItem` on the root container when nothing is pinned (S4, 2026-09-04).
+/// With no path this runs the TTL routine on demand - the same pass the five-minute timer
+/// runs, so it evicts what the TTL says is stale and nothing else. With a path it evicts
+/// that item now. `--all` drops everything cached, which is one `evictItem` on the root
+/// container when nothing is pinned.
 struct Evict: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Drop cached content: the TTL pass, one path, or everything.",
@@ -680,6 +733,8 @@ struct Evict: ParsableCommand {
     @Flag(help: "Print the raw report as JSON.")
     var json = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         var arguments = ["name": name]
         if let path { arguments["path"] = path }
@@ -691,21 +746,25 @@ struct Evict: ParsableCommand {
         let location = report["location"] as? String ?? name
 
         if let skipped = report["skipped"] as? String {
-            print("\(location): \(skipped).")
+            // The pass did not run: never a TTL, an index being rebuilt, no location.
+            global.warn("\(location): \(skipped).")
             return
         }
         if all {
             if let removed = report["pinsRemoved"] as? Int, removed > 0 {
-                print("Removed \(removed) pin(s) first.")
+                global.detail("Removed \(removed) pin(s) first.")
             }
             if report["mode"] as? String == "root container" {
                 let ok = report["evicted"] as? Bool == true
-                print(ok
-                    ? "\(location): everything cached was dropped."
-                    : "\(location): the system refused: "
+                if ok {
+                    global.detail("\(location): everything cached was dropped.")
+                } else {
+                    global.warn("\(location): the system refused: "
                         + "\(report["errorDescription"] as? String ?? "unknown error")")
+                }
                 if let left = report["stillMaterialized"] as? Int, left > 0 {
-                    print("  \(left) item(s) are still materialized.")
+                    if ok { global.detail("  \(left) item(s) are still materialized.") }
+                    else { global.warn("  \(left) item(s) are still materialized.") }
                 }
             } else {
                 var line = "\(location): dropped \(report["evicted"] as? Int ?? 0) file(s)"
@@ -714,13 +773,14 @@ struct Evict: ParsableCommand {
                     line += "; \(kept) kept file(s) were left alone "
                         + "(pass --unpin-all to drop those too)"
                 }
-                print(line + ".")
+                global.detail(line + ".")
                 if let refused = report["rootContainerError"] as? String {
-                    print("  the whole-location eviction was refused (\(refused)), so the "
+                    global.detail("  the whole-location eviction was refused (\(refused)), so the "
                         + "files were dropped one at a time.")
                 }
                 if let stillRefused = report["refusedCount"] as? Int, stillRefused > 0 {
-                    print("  \(stillRefused) file(s) the system would not drop; they have "
+                    // Files the user asked to drop and that are still on disk.
+                    global.warn("  \(stillRefused) file(s) the system would not drop; they have "
                         + "an edit still waiting to upload, or it is still applying a "
                         + "policy change. Try again in a moment.")
                 }
@@ -729,28 +789,30 @@ struct Evict: ParsableCommand {
         }
         if path != nil {
             let ok = report["evicted"] as? Bool == true
-            print(ok
-                ? "Dropped \(report["path"] as? String ?? "") from \(location)."
-                : "\(location): \(report["errorDescription"] as? String ?? "the system refused the eviction").")
-            if !ok { throw ExitCode.failure }
+            guard ok else {
+                global.warn("\(location): "
+                    + "\(report["errorDescription"] as? String ?? "the system refused the eviction").")
+                throw ExitCode.failure
+            }
+            global.detail("Dropped \(report["path"] as? String ?? "") from \(location).")
             return
         }
         // The TTL pass.
         let files = report["materializedFiles"] as? Int ?? 0
         let bytes = report["materializedBytes"] as? Int64 ?? 0
-        print("\(location): TTL \(report["ttl"] as? String ?? "")   "
+        global.detail("\(location): TTL \(report["ttl"] as? String ?? "")   "
             + "\(SizeRendering.bytes(bytes)) in \(files) file(s) cached")
-        print("  dropped \(report["evicted"] as? Int ?? 0), "
+        global.detail("  dropped \(report["evicted"] as? Int ?? 0), "
             + "kept \(report["skippedKept"] as? Int ?? 0) pinned, "
             + "in \(String(format: "%.2fs", report["seconds"] as? Double ?? 0))")
         for refusal in report["refused"] as? [[String: Any]] ?? [] {
-            print("  refused \(refusal["path"] as? String ?? ""): "
+            global.warn("  refused \(refusal["path"] as? String ?? ""): "
                 + "\(refusal["error"] as? String ?? "")")
         }
     }
 }
 
-/// `sshdrive pin <name> <remote-path>` (section 7.1), and its opposite.
+/// `sshdrive pin <name> <remote-path>` (docs/design/pinning.md), and its opposite.
 struct Pin: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Keep a folder or file downloaded, offline, for good.",
@@ -770,8 +832,10 @@ struct Pin: ParsableCommand {
     @Flag(help: "Print the raw report as JSON.")
     var json = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
-        try PinCommands.run(command: "pin", name: name, path: path, json: json)
+        try PinCommands.run(command: "pin", name: name, path: path, json: json, global: global)
     }
 }
 
@@ -794,13 +858,17 @@ struct Unpin: ParsableCommand {
     @Flag(help: "Print the raw report as JSON.")
     var json = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
-        try PinCommands.run(command: "unpin", name: name, path: path, json: json)
+        try PinCommands.run(command: "unpin", name: name, path: path, json: json, global: global)
     }
 }
 
 enum PinCommands {
-    static func run(command: String, name: String, path: String, json: Bool) throws {
+    static func run(
+        command: String, name: String, path: String, json: Bool, global: GlobalOptions
+    ) throws {
         let data = try AgentClient.send(
             command: command, arguments: ["name": name, "path": path], timeout: 300)
         if json { AgentClient.prettyPrint(data); return }
@@ -810,19 +878,19 @@ enum PinCommands {
         let location = report["location"] as? String ?? name
 
         guard report["changed"] as? Bool == true else {
-            // Section 7.1.1: the CLI says so, and names the covering ancestor when there
-            // is one. Finder simply hides the entry.
+            // Nothing changed: the CLI says so, and names the covering ancestor when
+            // there is one (docs/design/pinning.md). Finder simply hides the entry.
             var line = "\(shown) in \(location): \(note)"
             if let covering = report["coveredBy"] as? String {
                 line += " (\(covering.isEmpty ? "the location root" : covering))"
             }
-            print(line + ". Nothing changed.")
+            global.warn(line + ". Nothing changed.")
             return
         }
 
         var line = command == "pin" ? "Pinned \(shown)" : "Unpinned \(shown)"
-        // "Both `pin` and `unpin` print how many nested states they cleared, so a reset is
-        // visible" (section 7.1.1).
+        // Both `pin` and `unpin` print how many nested states they cleared, so a reset
+        // is visible.
         let pins = report["clearedPins"] as? Int ?? 0
         let exclusions = report["clearedExclusions"] as? Int ?? 0
         if pins + exclusions > 0 {
@@ -831,21 +899,21 @@ enum PinCommands {
             if pins > 0 { parts.append("\(pins) nested pin(s)") }
             line += " (cleared \(parts.joined(separator: " and ")))"
         }
-        print(line + ".")
-        print("  \(note); \(report["rowsRewritten"] as? Int ?? 0) item(s) updated.")
+        global.detail(line + ".")
+        global.detail("  \(note); \(report["rowsRewritten"] as? Int ?? 0) item(s) updated.")
         if let created = report["ancestorRowsCreated"] as? Int, created > 0 {
-            print("  \(created) folder(s) on the way to it were listed for the first time.")
+            global.detail("  \(created) folder(s) on the way to it were listed for the first time.")
         }
         if command == "pin" {
-            print("  The download starts within about a minute and runs in the background; "
+            global.detail("  The download starts within about a minute and runs in the background; "
                 + "watch it with: sshdrive pins \(name)")
         } else {
-            print("  The content stays on disk and now falls under the location's cache-ttl.")
+            global.detail("  The content stays on disk and now falls under the location's cache-ttl.")
         }
     }
 }
 
-/// `sshdrive pins [<name>] [--export | --import FILE]` (section 7.1).
+/// `sshdrive pins [<name>] [--export | --import FILE]` (docs/design/pinning.md).
 struct Pins: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "The pins and exclusions of a location, as a tree.")
@@ -861,6 +929,8 @@ struct Pins: ParsableCommand {
 
     @Flag(help: "Print the raw report as JSON.")
     var json = false
+
+    @OptionGroup var global: GlobalOptions
 
     func run() throws {
         var arguments = ["name": name]
@@ -878,8 +948,13 @@ struct Pins: ParsableCommand {
         let report = AgentClient.object(data)
 
         if let imported = report["imported"] as? [String] {
-            print("Imported \(imported.count) marker(s) into \(report["location"] as? String ?? name).")
-            for failure in report["failed"] as? [String] ?? [] { print("  failed: \(failure)") }
+            // `--import` changes the pins, so it says nothing about what worked and
+            // everything about what did not.
+            global.detail(
+                "Imported \(imported.count) marker(s) into \(report["location"] as? String ?? name).")
+            for failure in report["failed"] as? [String] ?? [] {
+                global.warn("  failed: \(failure)")
+            }
             return
         }
 

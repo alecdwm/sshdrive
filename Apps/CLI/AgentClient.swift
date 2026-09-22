@@ -6,11 +6,12 @@ import Logging
 
 /// The CLI's XPC client. Every command is a request to the agent, so the CLI never
 /// touches the network, the keychain or File Provider, and can therefore be invoked
-/// through any path, including the Homebrew symlink (DESIGN.md sections 3, 8).
+/// through any path, including the Homebrew symlink (docs/design/components.md,
+/// docs/design/cli.md).
 enum AgentClient {
 
     /// No answer on the mach service: launchd could not start the agent, or the listener
-    /// refused the connection (the peer code requirement, section 5.2).
+    /// refused the connection (the peer code requirement, docs/design/extension.md).
     struct AgentUnavailable: Error, LocalizedError {
         let underlying: Error?
         var errorDescription: String? {
@@ -32,8 +33,8 @@ enum AgentClient {
 
     /// The agent accepted the connection and then did not answer in time. A different
     /// thing entirely from being unreachable, and telling the two apart is the whole
-    /// point: during S1 a stalled File Provider call made every command report the agent
-    /// unreachable while it was in fact alive (docs/spikes/results.md, 2026-09-04).
+    /// point: a stalled File Provider call inside the agent would otherwise make every
+    /// command report the agent unreachable while it is in fact alive.
     struct CommandTimedOut: Error, LocalizedError {
         let command: String
         let seconds: Int
@@ -68,7 +69,7 @@ enum AgentClient {
     /// If the mach lookup fails because no login item is registered yet (a fresh install
     /// whose postflight did not run) the CLI launches the bundle it lives in with
     /// `open -g` once, as the postflight does, waits for the service, and retries
-    /// (section 8).
+    /// (docs/design/cli.md).
     /// stdout is *fully* buffered when it is a pipe, which is what a transcript, a
     /// `script -q` run and every CI invocation are. The agent writes the collect
     /// connection's prompts through the file handle so `ssh`'s question reaches the
@@ -93,9 +94,10 @@ enum AgentClient {
     }
 
     /// `add`, `passwd` and a `set` that re-keys the secrets run a collect connection with
-    /// prompts relayed to this terminal (section 4.2), so the reply can legitimately be
-    /// minutes away: the agent is waiting on a person, and the person is waiting on the
-    /// server. The broker's own collect deadline (300 s) is what actually bounds it.
+    /// prompts relayed to this terminal (docs/design/secrets.md), so the reply can
+    /// legitimately be minutes away: the agent is waiting on a person, and the person is
+    /// waiting on the server. The broker's own collect deadline (300 s) is what actually
+    /// bounds it.
     static let interactiveTimeoutSeconds: Double = 900
 
     private static func sendOnce(
@@ -105,7 +107,7 @@ enum AgentClient {
             machServiceName: SSHDriveIdentifiers.machServiceName, options: [])
         connection.remoteObjectInterface = SSHDriveXPCInterface.agent
         // The terminal, for the length of this command and no longer. The agent calls back
-        // on it only while a command of ours is in flight (section 4.2).
+        // on it only while a command of ours is in flight (docs/design/secrets.md).
         connection.exportedInterface = SSHDriveXPCInterface.cli
         connection.exportedObject = PromptService()
         connection.resume()
@@ -130,8 +132,8 @@ enum AgentClient {
                 result = .success(data)
             } else if let error {
                 // The agent flattens its errors before sending them, so the description
-                // is in the NSError's userInfo and survives the trip (section 5.2,
-                // sshDriveXPCError).
+                // is in the NSError's userInfo and survives the trip
+                // (docs/design/extension.md, sshDriveXPCError).
                 result = .failure(AgentRefused(message: error.localizedDescription))
             } else {
                 result = .failure(AgentUnavailable(underlying: nil))
@@ -151,7 +153,7 @@ enum AgentClient {
 
     /// Launching the app is what registers both the extension with PlugInKit and the
     /// login item through SMAppService, and both must be done from the app's own bundle,
-    /// which a symlinked CLI cannot do (section 10).
+    /// which a symlinked CLI cannot do (docs/design/packaging.md).
     private static func launchOwnBundle() -> Bool {
         // The CLI lives at <bundle>/Contents/MacOS/sshdrive, so the bundle is three
         // levels up from the executable, whatever symlink was used to reach it.

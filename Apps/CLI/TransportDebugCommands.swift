@@ -1,9 +1,9 @@
 import ArgumentParser
 import Foundation
 
-/// `sshdrive debug transport …`: the milestone 3 hooks for the transfer scheduler
-/// (DESIGN.md section 6.2), the channel budget (section 6.1) and the hidden-name rules
-/// (section 5.4).
+/// `sshdrive debug transport …`: hooks for the transfer scheduler
+/// (docs/design/sftp.md), the channel budget (docs/design/ssh.md) and the hidden-name
+/// rules (docs/design/names-and-attributes.md).
 ///
 /// Deliberately separate from the real commands. `sshdrive status` reports the same three
 /// things for a user; these drive them without Finder in the way, which is how the queue,
@@ -46,12 +46,13 @@ struct TransportReprobe: ParsableCommand {
     }
 }
 
-/// Section 5.5's one-off probe: does a plain SFTP `rename` refuse a name that is already
-/// taken? OpenSSH does; a server that does not makes every create and rename lstat first.
+/// A one-off probe (docs/design/writes.md): does a plain SFTP `rename` refuse a name that
+/// is already taken? OpenSSH does; a server that does not makes every create and rename
+/// lstat first.
 struct TransportRenameCheck: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "rename-check",
-        abstract: "Does this server's plain rename refuse an existing name (section 5.5)?")
+        abstract: "Does this server's plain rename refuse an existing name?")
 
     @Argument var name: String
 
@@ -65,7 +66,7 @@ struct TransportRenameCheck: ParsableCommand {
 struct TransportHidden: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "hidden",
-        abstract: "Names recorded but never shown, with the reason (section 5.4).")
+        abstract: "Names recorded but never shown, with the reason.")
 
     @Argument var name: String
 
@@ -81,8 +82,8 @@ struct TransportFetch: ParsableCommand {
         abstract: "Fetch one path through the scheduler, to a temp file that is discarded.",
         discussion: """
             Run several at once from a shell loop to see the four-at-a-time rule and the
-            queue in the log. `--background` puts the fetch in section 6.2's background
-            class, which starts only while no foreground transfer is waiting.
+            queue in the log. `--background` puts the fetch in the background class,
+            which starts only while no foreground transfer is waiting.
             """)
 
     @Argument var name: String
@@ -142,7 +143,7 @@ struct TransportEscape: ParsableCommand {
         commandName: "escape",
         abstract: "Hand createItem a filename, and a symlink target, of your choosing.",
         discussion: """
-            The section 9.1 chokepoint test: the filename goes straight to the same
+            The path-containment chokepoint test: the filename goes straight to the same
             `RelativePath` constructor a `createItem` from the extension uses, with no
             shell and no string path anywhere in between.
             """)

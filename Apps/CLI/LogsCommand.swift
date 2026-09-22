@@ -3,18 +3,18 @@ import Foundation
 import Logging
 import XPCProtocols
 
-/// `sshdrive logs [--follow] [<name>]` (DESIGN.md section 8).
+/// `sshdrive logs [--follow] [<name>]` (docs/design/cli.md).
 ///
-/// The one command in section 8 that is not "a request to the agent and the reply back":
-/// what it reads is the unified log, which is the system's, not the agent's, and
+/// The one command that is not "a request to the agent and the reply back": what it
+/// reads is the unified log, which is the system's, not the agent's, and
 /// `OSLogStore`'s local store is not open to a standard user. So the CLI runs
 /// `/usr/bin/log` and gets out of the way - `exec`, not a pipe, so `--follow` streams
 /// straight to the terminal, Ctrl-C reaches `log` itself, and a pager downstream sees a
 /// real pipe close.
 ///
 /// The agent is asked one thing only, and only when a `<name>` is given: which location
-/// that name means (section 8's "nickname, then host, then id prefix"). With the agent
-/// unreachable the name is still usable as a plain string filter, and `logs` says so
+/// that name means, by nickname, then host, then id prefix. With the agent unreachable
+/// the name is still usable as a plain string filter, and `logs` says so
 /// rather than failing - an agent that will not start is exactly when someone wants the
 /// log.
 struct Logs: ParsableCommand {
@@ -44,6 +44,8 @@ struct Logs: ParsableCommand {
 
     @Flag(help: "Print the log command and its predicate instead of running it.")
     var printCommand = false
+
+    @OptionGroup var global: GlobalOptions
 
     func run() throws {
         var domainIdentifier: String?

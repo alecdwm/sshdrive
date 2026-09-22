@@ -40,10 +40,12 @@ struct Doctor: ParsableCommand {
     @Flag(help: "Print the raw report as JSON.")
     var json = false
 
+    @OptionGroup var global: GlobalOptions
+
     func run() throws {
         // "agent reachable" and "CLI on PATH" are the CLI's own two checks: the first is
         // implied by the call arriving at all, the second only makes sense from a
-        // terminal (section 8).
+        // terminal (docs/design/cli.md).
         var reachable = true
         var unreachableDetail = "no answer on the mach service"
         var data: Data?
@@ -52,8 +54,8 @@ struct Doctor: ParsableCommand {
         } catch {
             reachable = false
             // "unreachable" and "did not answer in time" are different faults and get
-            // different lines: a stalled command used to be reported as the agent being
-            // gone (docs/spikes/results.md, 2026-09-04).
+            // different lines: reporting a stalled command as a missing agent sends the
+            // user after the wrong thing.
             if error is AgentClient.CommandTimedOut {
                 unreachableDetail = "the agent answered the connection but not the command in time"
             }
@@ -128,24 +130,30 @@ struct Agent: ParsableCommand {
 
 struct AgentStart: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "start")
+    @OptionGroup var global: GlobalOptions
     func run() throws {
         // The mach lookup itself starts the agent.
-        AgentClient.prettyPrint(try AgentClient.send(command: "version"))
+        let reply = try AgentClient.send(command: "version")
+        if global.verbose { AgentClient.prettyPrint(reply) }
     }
 }
 
 struct AgentStop: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "stop")
+    @OptionGroup var global: GlobalOptions
     func run() throws {
-        AgentClient.prettyPrint(try AgentClient.send(command: "agent.stop"))
+        let reply = try AgentClient.send(command: "agent.stop")
+        if global.verbose { AgentClient.prettyPrint(reply) }
     }
 }
 
 struct AgentRestart: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "restart")
+    @OptionGroup var global: GlobalOptions
     func run() throws {
         _ = try? AgentClient.send(command: "agent.stop")
         Thread.sleep(forTimeInterval: 1)
-        AgentClient.prettyPrint(try AgentClient.send(command: "version"))
+        let reply = try AgentClient.send(command: "version")
+        if global.verbose { AgentClient.prettyPrint(reply) }
     }
 }
