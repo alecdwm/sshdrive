@@ -2,20 +2,22 @@ import Foundation
 import Logging
 import SSHProcess
 
-/// One tier 1 sweep: the `find` pass of DESIGN.md section 6.4, run on one `sh -s` exec
-/// channel under the heartbeat wrapper of section 9.2.
+/// One tier 1 sweep: the `find` pass of docs/design/change-detection.md, run on one
+/// `sh -s` exec channel under the heartbeat wrapper (docs/design/security.md).
 ///
 /// The channel is the scarcest thing a location has - on a `MaxSessions 2` server there
 /// is exactly one, and it is shared with the probe - so a sweep opens one, uses it and
 /// closes it rather than holding it between cycles. Nothing is started bare: the wrapper
 /// backgrounds `find` with its stdin from `/dev/null` and kills it after 60 s of silence,
 /// so a sweep of a very large tree on a connection that dies leaves nothing behind
-/// (section 6.4, "Lifetime of anything we start on the server").
+/// (docs/design/change-detection.md, on the lifetime of anything we start on the
+/// server).
 public enum RemoteSweep {
 
     public struct Outcome: Sendable {
         /// The server's own `date +%s`, printed before the first `find` runs. Stored only
-        /// after the results have been applied, never before (section 6.4).
+        /// after the results have been applied, never before
+        /// (docs/design/change-detection.md).
         public var serverTime: Int64?
         public var hits: [SweepHit]
         public var duration: TimeInterval
@@ -48,7 +50,7 @@ public enum RemoteSweep {
 
     /// The whole sweep is one script. `find` never sees a root on a command line: the
     /// canonical root and every sweep root reach it through `set --` and are read as
-    /// `"$@"`, so a directory named `$(rm -rf ~)` is data (section 9.2).
+    /// `"$@"`, so a directory named `$(rm -rf ~)` is data (docs/design/security.md).
     ///
     /// The script `cd`s to the canonical root first and passes `find` relative roots, so
     /// nothing here has to reproduce the join the transport does, and the output comes
@@ -90,7 +92,8 @@ public enum RemoteSweep {
         defer { channel.close() }
 
         // The wrapper kills its child after 60 s of silence, so a sweep that outlives one
-        // heartbeat interval needs the agent to keep writing (section 6.4).
+        // heartbeat interval needs the agent to keep writing
+        // (docs/design/change-detection.md).
         let beater = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
@@ -127,7 +130,7 @@ public enum RemoteSweep {
     /// the server's stamp must not be stored, however plainly it arrived in the first
     /// record. Storing it would move the window forward over changes this sweep never got
     /// as far as reporting, and nothing would look at them again until the 30-minute
-    /// insurance pass (section 6.4).
+    /// insurance pass (docs/design/change-detection.md).
     public static func collect(
         stream: ByteStream,
         sentinel: Sentinel,
@@ -169,8 +172,9 @@ public enum RemoteSweep {
         return outcome
     }
 
-    /// Byte search; the output is parsed as bytes throughout because a filename may
-    /// contain a newline and need not be valid UTF-8 (sections 9.2, 5.4).
+    /// Byte search; the output is parsed as bytes throughout because a filename may contain a
+    /// newline and need not be valid UTF-8 (docs/design/security.md,
+    /// docs/design/names-and-attributes.md).
     public static func find(_ needle: Data, in haystack: Data, from: Int = 0) -> Int? {
         guard !needle.isEmpty, haystack.count >= needle.count else { return nil }
         let bytes = [UInt8](haystack)

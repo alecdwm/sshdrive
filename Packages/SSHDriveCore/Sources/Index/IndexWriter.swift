@@ -7,11 +7,11 @@ import Foundation
 import Logging
 
 /// The agent's connection to a domain's index. The agent is the only writer
-/// (DESIGN.md sections 3, 5.2), so this class holds no lock of its own beyond the one
-/// serial queue the agent runs it on.
+/// (docs/design/components.md, docs/design/extension.md), so this class holds no lock of
+/// its own beyond the one serial queue the agent runs it on.
 public final class IndexWriter {
     /// The permanent row for the location root: the empty path, and the identifier the
-    /// system knows as `NSFileProviderItemIdentifier.rootContainer` (section 5.3).
+    /// system knows as `NSFileProviderItemIdentifier.rootContainer`.
     public static let rootIdentifier = "NSFileProviderRootContainerItemIdentifier"
 
     private let connection: SQLiteConnection
@@ -36,18 +36,19 @@ public final class IndexWriter {
     /// nothing, and leaves a version 2 database on the version 2 shape while the create
     /// statements above describe version 3. So each added column is applied explicitly,
     /// guarded by `PRAGMA table_info`, and only then does `meta.schema_version` move. The
-    /// index is the only copy of the identifiers we hold (section 5.3), so an upgrade
-    /// that dropped and recreated a table would cost every item its identity, its cache
-    /// and its Finder tags for the sake of two columns.
+    /// index is the only copy of the identifiers we hold, so an upgrade that dropped and
+    /// recreated a table would cost every item its identity, its cache and its Finder tags
+    /// for the sake of two columns.
     private func migrate() throws {
         try connection.transaction {
-            // Version 3: the round-robin key of section 6.5's tier 0 rotation. `last_seen`
-            // keeps its own meaning - when the reason was last refreshed, which is the
-            // viewed set's LRU key - and the two move at different times.
+            // Version 3: the round-robin key of the tier 0 rotation
+            // (docs/design/root-set.md). `last_seen` keeps its own meaning - when the
+            // reason was last refreshed, which is the viewed set's LRU key - and the two
+            // move at different times.
             try addColumnIfAbsent(table: "roots", column: "last_listed", definition: "REAL NOT NULL DEFAULT 0")
             // Version 3: the guard re-checks at 5 and 30 minutes and applies the deletions
-            // after the second, so it has to count them (section 6.4), and `status` prints
-            // why a deletion is being held.
+            // after the second, so it has to count them (docs/design/change-detection.md),
+            // and `status` prints why a deletion is being held.
             try addColumnIfAbsent(table: "held", column: "checks", definition: "INTEGER NOT NULL DEFAULT 0")
             try addColumnIfAbsent(table: "held", column: "reason", definition: "TEXT NOT NULL DEFAULT ''")
 
@@ -101,9 +102,9 @@ public final class IndexWriter {
         return statement.string(0)
     }
 
-    /// Set for the whole reconcile walk, so the extension's own reads stall too
-    /// (section 5.3). It outlives a crash: an agent that starts and finds it set redoes
-    /// the walk before serving anything.
+    /// Set for the whole reconcile walk, so the extension's own reads stall too. It
+    /// outlives a crash: an agent that starts and finds it set redoes the walk before
+    /// serving anything.
     public var isReconciling: Bool {
         get { ((try? meta(IndexSchema.MetaKey.reconciling)).flatMap { $0 } ?? "0") != "0" }
     }
@@ -113,7 +114,7 @@ public final class IndexWriter {
     }
 
     /// Bumped whenever the contents have been replaced wholesale, which is what the
-    /// extension's state file reports and what `doctor` reads (section 5.2).
+    /// extension's state file reports and what `doctor` reads.
     public func bumpGeneration() throws {
         let current = Int64(try meta(IndexSchema.MetaKey.generation) ?? "0") ?? 0
         try setMeta(IndexSchema.MetaKey.generation, String(current + 1))
@@ -159,8 +160,8 @@ public final class IndexWriter {
             local_content = excluded.local_content
         """
 
-    /// Writes a finished row. Every derived field is already computed by the caller: a
-    /// row is a finished item (section 5.2).
+    /// Writes a finished row. Every derived field is already computed by the caller: a row
+    /// is a finished item.
     public func upsert(_ item: IndexItem) throws {
         let statement = try connection.prepare(Self.upsertStatement)
         IndexWriter.bind(item, into: statement)
@@ -168,7 +169,7 @@ public final class IndexWriter {
     }
 
     /// The two statements a listing's write pass binds, compiled once and held for the
-    /// length of the pass (section 5.3).
+    /// length of the pass.
     ///
     /// A directory of ten thousand entries writes ten thousand rows and up to ten thousand
     /// anchors, interleaved in listing order. Going back to the statement cache for each
@@ -261,15 +262,14 @@ public final class IndexWriter {
     /// The rows a listing's entries already have, by path, on one compiled statement.
     ///
     /// Exactly `item(path:)` per path and nothing else - the same question, the same
-    /// answer, and paths that have no row are simply absent - but the statement is
-    /// compiled and handed out once rather than ten thousand times. It is keyed by path
-    /// and not by parent on purpose: a helper rename into a directory the index has never
-    /// listed leaves a row whose `path` is under this directory and whose `parent` is not
-    /// this row (section 6.4), and `items.path` is UNIQUE, so a listing that failed to
-    /// find it would mint a second identifier for a path that already has one and the
-    /// insert would fail (section 5.3).
-    /// Answered in the order asked, one element per path, so the caller needs no
-    /// dictionary and no second hash of every path it already has.
+    /// answer, and paths that have no row are simply absent - but the statement is compiled
+    /// and handed out once rather than ten thousand times. It is keyed by path and not by
+    /// parent on purpose: a helper rename into a directory the index has never listed
+    /// leaves a row whose `path` is under this directory and whose `parent` is not this row
+    /// (docs/design/change-detection.md), and `items.path` is UNIQUE, so a listing that
+    /// failed to find it would mint a second identifier for a path that already has one and
+    /// the insert would fail. Answered in the order asked, one element per path, so the
+    /// caller needs no dictionary and no second hash of every path it already has.
     public func rows(atPaths paths: [Data]) throws -> [IndexItem?] {
         guard !paths.isEmpty else { return [] }
         var out: [IndexItem?] = []
@@ -302,9 +302,9 @@ public final class IndexWriter {
         connection.statementObserver = observer
     }
 
-    /// The other half of the seam: called only when a statement is actually compiled, so
-    /// a test can assert that a listing's compilations are a constant rather than a
-    /// multiple of its entries (section 5.3). Nil in the shipping agent.
+    /// The other half of the seam: called only when a statement is actually compiled, so a
+    /// test can assert that a listing's compilations are a constant rather than a multiple
+    /// of its entries. Nil in the shipping agent.
     public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
         connection.compileObserver = observer
     }
@@ -321,7 +321,8 @@ public final class IndexWriter {
 
     /// The three fields a listing's own bookkeeping needs from the children it already
     /// knows: which names are taken, which rows the listing did not mention, and whether
-    /// the user was ever shown them (sections 5.4, 6.4).
+    /// the user was ever shown them (docs/design/names-and-attributes.md,
+    /// docs/design/change-detection.md).
     public struct ChildKey: Equatable, Sendable {
         public var identifier: String
         public var path: Data
@@ -335,9 +336,9 @@ public final class IndexWriter {
     }
 
     /// `children(ofParent:)` without the twenty other columns. A listing asks for the
-    /// incumbents twice - once for section 5.4's name rules, once for the deletion pass -
-    /// and a whole `IndexItem` per row would be two blob copies and a `LocalAttributes`
-    /// worth of decoding per row per listing that nothing reads (section 5.3).
+    /// incumbents twice - once for the name rules, once for the deletion pass - and a whole
+    /// `IndexItem` per row would be two blob copies and a `LocalAttributes` worth of
+    /// decoding per row per listing that nothing reads.
     public func childKeys(ofParent identifier: String) throws -> [ChildKey] {
         let statement = try connection.prepare(
             "SELECT identifier, path, hidden FROM items WHERE parent = ?1 ORDER BY path")
@@ -362,9 +363,9 @@ public final class IndexWriter {
         return rows
     }
 
-    /// Every path carrying an explicit pin marker, which is the whole of section 7.1's
-    /// authority: `pin_state` in the index, and nothing else. `pins.json` beside it is a
-    /// write-only copy for recovery and is never read while the index is healthy.
+    /// Every path carrying an explicit pin marker. `pin_state` in the index is the sole
+    /// authority (docs/design/pinning.md); `pins.json` beside it is a write-only copy for
+    /// recovery and is never read while the index is healthy.
     public func pinMarkerRows() throws -> [(path: Data, marker: Int64)] {
         let statement = try connection.prepare(
             "SELECT path, pin_state FROM items WHERE pin_state != 0 ORDER BY path")
@@ -377,10 +378,10 @@ public final class IndexWriter {
         return rows
     }
 
-    /// Every row strictly under `path`, which is what a pin change rewrites: section 7.1
-    /// step 2 bumps "the affected row **and every known descendant row**", because
-    /// `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the
-    /// capabilities are per item and cached until that item's own metadata version moves.
+    /// Every row strictly under `path`, which is what a pin change rewrites: the affected
+    /// row **and every known descendant row**, because `contentPolicy` is inherited by the
+    /// system but `userInfo.kept`, the badge and the capabilities are per item and cached
+    /// until that item's own metadata version moves (docs/design/pinning.md).
     ///
     /// A byte range rather than a `LIKE`: paths are blobs (a server name need not be valid
     /// UTF-8) and SQLite compares blobs with `memcmp`, so everything under "a/b" is
@@ -406,9 +407,8 @@ public final class IndexWriter {
         return rows
     }
 
-    /// Deleted rows are deleted: no tombstones (section 5.3). The row goes in the same
-    /// transaction that writes the deletion anchor, and its pin marker and xattrs go
-    /// with it.
+    /// Deleted rows are deleted: no tombstones. The row goes in the same transaction that
+    /// writes the deletion anchor, and its pin marker and xattrs go with it.
     public func delete(identifier: String) throws {
         try connection.transaction {
             let statement = try connection.prepare("DELETE FROM items WHERE identifier = ?1")
@@ -418,9 +418,9 @@ public final class IndexWriter {
         }
     }
 
-    /// Moving a directory rewrites `path` on every descendant row, and on the matching
-    /// rows of `roots` and `held`, in one transaction (section 5.3). `parent` is kept
-    /// alongside `path` so the rewrite walks by identifier rather than by string prefix.
+    /// Moving a directory rewrites `path` on every descendant row, and on the matching rows
+    /// of `roots` and `held`, in one transaction. `parent` is kept alongside `path` so the
+    /// rewrite walks by identifier rather than by string prefix.
     public func rewritePaths(from oldPath: Data, to newPath: Data) throws {
         try connection.transaction {
             let prefix = oldPath.isEmpty ? Data() : oldPath + Data([0x2F])
@@ -469,9 +469,9 @@ public final class IndexWriter {
 
             // `held` also carries the directory the deletion was inferred from, and the
             // guard's 5- and 30-minute re-checks are driven by re-listing that directory
-            // (section 6.4). Left behind by a rename, every hold under the renamed
-            // directory would be re-checked for ever against a name that no longer exists
-            // and would never resolve.
+            // (docs/design/change-detection.md). Left behind by a rename, every hold under
+            // the renamed directory would be re-checked for ever against a name that no
+            // longer exists and would never resolve.
             let dirs = try connection.prepare("SELECT rowid, dir FROM held")
             var dirMoves: [(Int64, Data)] = []
             while try dirs.step() {
@@ -499,9 +499,9 @@ public final class IndexWriter {
     /// The transaction is taken only when there is not one already. Inside a listing's
     /// `batch`, a `SAVEPOINT` per anchor would be two `sqlite3_exec` calls around one
     /// `INSERT` that is atomic by itself - 4,000 of them in a 2,000-entry listing - and
-    /// would buy nothing: a savepoint's only effect is to let an error inside it be
-    /// caught and undone on its own, nothing catches one here, and a throw fails the
-    /// whole batch either way (section 5.3, gotcha 45).
+    /// would buy nothing: a savepoint's only effect is to let an error inside it be caught
+    /// and undone on its own, nothing catches one here, and a throw fails the whole batch
+    /// either way (gotcha 45).
     @discardableResult
     public func appendAnchor(identifier: String, kind: IndexAnchorEntry.Kind) throws -> Int64 {
         if connection.isInTransaction {
@@ -523,10 +523,10 @@ public final class IndexWriter {
         return connection.lastInsertRowID
     }
 
-    /// The same working-set change stream the extension's reader serves, answered from
-    /// the writer's connection. This is the XPC fallback of section 5.2: an extension
-    /// whose own reader is not usable asks the agent rather than answering
-    /// `.serverUnreachable`, and both sides run `IndexChangeStream` so they cannot drift.
+    /// The same working-set change stream the extension's reader serves, answered from the
+    /// writer's connection. This is the XPC fallback: an extension whose own reader is not
+    /// usable asks the agent rather than answering `.serverUnreachable`, and both sides run
+    /// `IndexChangeStream` so they cannot drift.
     public func changes(since anchor: Int64, limit: Int = 500) throws -> IndexChangeStream.Page {
         if isReconciling { throw IndexError.reconciling }
         return try IndexChangeStream.changes(connection, since: anchor, limit: limit)
@@ -539,9 +539,9 @@ public final class IndexWriter {
         return statement.int(0)
     }
 
-    /// Pruned to the newest 30 days and to the newest 1,000,000 rows, both limits
-    /// applying (section 5.3). The row cap is deliberately generous: a pin change writes
-    /// an anchor per known descendant.
+    /// Pruned to the newest 30 days and to the newest 1,000,000 rows, both limits applying.
+    /// The row cap is deliberately generous: a pin change writes an anchor per known
+    /// descendant.
     public func pruneAnchors(maximumRows: Int64 = 1_000_000, maximumAge: TimeInterval = 30 * 86400) throws {
         try connection.transaction {
             let byAge = try connection.prepare("DELETE FROM anchors WHERE at < ?1")
@@ -557,8 +557,8 @@ public final class IndexWriter {
         }
     }
 
-    /// Expires every anchor the system might still hold, which is what a rebuild does
-    /// (section 5.3) and what `sshdrive debug anchor expire` simulates.
+    /// Expires every anchor the system might still hold, which is what a rebuild does and
+    /// what `sshdrive debug anchor expire` simulates.
     public func expireAnchors() throws {
         try connection.transaction {
             try connection.execute("DELETE FROM anchors")
@@ -584,11 +584,11 @@ public final class IndexWriter {
         return out
     }
 
-    /// The change stream from `sequence` forward, in order. The reader has its own
-    /// version of this (`changes(since:)`, which also raises `.syncAnchorExpired`); the
-    /// agent needs the plain query when it builds the working set itself (section 5.3),
-    /// so this one reports what is there and leaves expiry to the reader, which is the
-    /// side the system presents anchors to.
+    /// The change stream from `sequence` forward, in order. The reader has its own version
+    /// of this (`changes(since:)`, which also raises `.syncAnchorExpired`); the agent needs
+    /// the plain query when it builds the working set itself, so this one reports what is
+    /// there and leaves expiry to the reader, which is the side the system presents anchors
+    /// to.
     public func anchorsSince(_ sequence: Int64, limit: Int) throws -> [IndexAnchorEntry] {
         let statement = try connection.prepare(
             "SELECT seq, changed_identifier, change_kind FROM anchors "
@@ -609,8 +609,8 @@ public final class IndexWriter {
 
     // MARK: roots
 
-    /// The change-detection root set (section 6.5). One directory may carry several
-    /// reasons and leaves the set only when the last one goes.
+    /// The change-detection root set (docs/design/root-set.md). One directory may carry
+    /// several reasons and leaves the set only when the last one goes.
     public func addRoot(path: Data, reason: String) throws {
         let statement = try connection.prepare("""
             INSERT INTO roots (path, reason, last_seen) VALUES (?1, ?2, ?3)
@@ -631,15 +631,15 @@ public final class IndexWriter {
     }
 
     /// Drops a directory from the root set whatever its reasons, which is what a deleted
-    /// directory needs: the reasons of section 6.5 are refreshed from live evidence and
-    /// there is nothing left to refresh them from.
+    /// directory needs: every root-set reason is refreshed from live evidence and there is
+    /// nothing left to refresh them from.
     public func removeRoot(path: Data) throws {
         let statement = try connection.prepare("DELETE FROM roots WHERE path = ?1")
         statement.bind(1, path)
         try statement.run()
     }
 
-    /// One row of `roots`: one directory under one reason (section 6.5).
+    /// One row of `roots`: one directory under one reason (docs/design/root-set.md).
     public struct RootRow: Equatable, Sendable {
         public var path: Data
         public var reason: String
@@ -660,7 +660,7 @@ public final class IndexWriter {
     }
 
     /// The whole root set, least recently listed first, which is the order tier 0's
-    /// rotation consumes it in (section 6.5).
+    /// rotation consumes it in (docs/design/root-set.md).
     public func rootRows() throws -> [RootRow] {
         let statement = try connection.prepare(
             "SELECT path, reason, last_seen, last_listed FROM roots ORDER BY last_listed, path")
@@ -701,7 +701,7 @@ public final class IndexWriter {
     }
 
     /// How many rows carry this reason. `status` reports the rotation period from the
-    /// `materialized` count, which is `ceil(M / 64)` cycles (section 6.5).
+    /// `materialized` count, which is `ceil(M / 64)` cycles (docs/design/root-set.md).
     public func rootCount(reason: String) throws -> Int {
         let statement = try connection.prepare("SELECT COUNT(*) FROM roots WHERE reason = ?1")
         statement.bind(1, reason)
@@ -712,8 +712,8 @@ public final class IndexWriter {
 
     // MARK: held
 
-    /// One held deletion: an item a listing said was gone, which the mass-deletion guard
-    /// is not reporting yet (section 6.4).
+    /// One held deletion: an item a listing said was gone, which the mass-deletion guard is
+    /// not reporting yet (docs/design/change-detection.md).
     public struct HeldRow: Equatable, Sendable {
         public var path: Data
         /// The directory whose listing the item went missing from. The re-check re-lists
@@ -722,7 +722,7 @@ public final class IndexWriter {
         public var firstMissing: Double
         public var recheckAt: Double
         /// How many re-checks have run. The deletions are applied after the second, at 5
-        /// and then 30 minutes (section 6.4).
+        /// and then 30 minutes (docs/design/change-detection.md).
         public var checks: Int64
         /// Why it is held, for `sshdrive status`.
         public var reason: String
@@ -790,9 +790,9 @@ public final class IndexWriter {
         return Self.decodeHeld(statement)
     }
 
-    /// Internal rather than private: the read-only `IndexReader` decodes the same
-    /// rows for the agent's own `status` path (section 8), and two copies of a column
-    /// order are one drift away from a wrong report.
+    /// Internal rather than private: the read-only `IndexReader` decodes the same rows for
+    /// the agent's own `status` path (docs/design/cli.md), and two copies of a column order
+    /// are one drift away from a wrong report.
     static func decodeHeld(_ statement: SQLiteStatement) -> HeldRow {
         HeldRow(
             path: statement.data(0) ?? Data(),
@@ -803,7 +803,7 @@ public final class IndexWriter {
             reason: statement.string(5) ?? "")
     }
 
-    /// The item came back, so nothing was ever reported (section 6.4).
+    /// The item came back, so nothing was ever reported (docs/design/change-detection.md).
     public func releaseHold(path: Data) throws {
         let statement = try connection.prepare("DELETE FROM held WHERE path = ?1")
         statement.bind(1, path)
@@ -814,8 +814,8 @@ public final class IndexWriter {
     /// itself comes back or is deleted outright.
     ///
     /// Containment is decided on bytes, never on a decoded `String`: server names need not
-    /// be UTF-8 (section 5.4), and a lossy decode would make two different remote paths
-    /// compare equal.
+    /// be UTF-8 (docs/design/names-and-attributes.md), and a lossy decode would make two
+    /// different remote paths compare equal.
     public func releaseHolds(under path: Data) throws {
         try connection.transaction {
             var doomed: [Data] = []
@@ -836,7 +836,7 @@ public final class IndexWriter {
 
     /// True when `root` is `candidate` itself or one of its ancestors. The separator is
     /// required, so "photos2" is not under "photos"; the empty root contains everything,
-    /// which is the location root's own path (section 5.3).
+    /// which is the location root's own path.
     static func isPath(_ candidate: Data, under root: Data) -> Bool {
         if root.isEmpty { return true }
         if candidate == root { return true }
@@ -844,7 +844,8 @@ public final class IndexWriter {
     }
 
     /// One re-check has run and the item is still missing: count it and schedule the next
-    /// (section 6.4). After the second the caller applies the deletions.
+    /// (docs/design/change-detection.md). After the second the caller applies the
+    /// deletions.
     public func noteHoldChecked(path: Data, nextRecheckAt: Double) throws {
         let statement = try connection.prepare(
             "UPDATE held SET checks = checks + 1, recheck_at = ?2 WHERE path = ?1")
@@ -864,29 +865,28 @@ public final class IndexWriter {
 
     // MARK: backup
 
-    /// `VACUUM INTO` once a day, after a reconcile, and after pin changes, debounced to
-    /// at most one per minute (section 5.3).
+    /// `VACUUM INTO` once a day, after a reconcile, and after pin changes, debounced to at
+    /// most one per minute.
     public func backup(to url: URL) throws {
         try? FileManager.default.removeItem(at: url)
         let escaped = url.path.replacingOccurrences(of: "'", with: "''")
         try connection.execute("VACUUM INTO '\(escaped)'")
     }
 
-    /// Restores a backup **into the live database, never over it** (section 5.3).
+    /// Restores a backup **into the live database, never over it**.
     ///
     /// The backup file is opened read-only and copied in with SQLite's online backup API,
     /// with this connection - the live one - as the destination, so the database keeps its
     /// inode and every handle already open on it keeps working. Replacing the file at the
-    /// path was rejected twice over: the `-wal` and `-shm` sidecars belong to the old
-    /// inode and a stale WAL would be replayed into the new file on first open, and the
-    /// extension's reader (section 5.2), which holds the database open across calls,
-    /// would go on reading the unlinked one and serve the corrupt index it was restored
-    /// from.
+    /// path was rejected twice over: the `-wal` and `-shm` sidecars belong to the old inode
+    /// and a stale WAL would be replayed into the new file on first open, and the
+    /// extension's reader, which holds the database open across calls, would go on reading
+    /// the unlinked one and serve the corrupt index it was restored from.
     ///
     /// `meta.generation` is bumped afterwards because the contents have been replaced
     /// wholesale: that is the signal the reader re-reads its cached statements on. The
-    /// anchors that came back are the backup's, so the caller expires them (section 5.3)
-    /// and the agent answers the resulting fresh anchor with one full sweep.
+    /// anchors that came back are the backup's, so the caller expires them and the agent
+    /// answers the resulting fresh anchor with one full sweep.
     public func restore(fromBackupAt url: URL) throws {
         // Nothing compiled against the contents that are about to be replaced is kept:
         // `sqlite3_prepare_v2` would re-prepare them, but an idle statement is one more
@@ -914,7 +914,7 @@ public final class IndexWriter {
 
     /// Truncates the database and its `-wal` and `-shm` sidecars to zero length **under
     /// their own inodes**, for the case where SQLite cannot open the file at all and there
-    /// is no live connection to restore into (section 5.3).
+    /// is no live connection to restore into.
     ///
     /// The extension is asked to close its reader before this runs, and that order is not
     /// negotiable: the reader holds the `-shm` mapped, and truncating a mapped file under
@@ -933,7 +933,7 @@ public final class IndexWriter {
     }
 
     /// `PRAGMA integrity_check`. False is the agent's cue to restore from the backup and,
-    /// failing that, to reconcile against the replica (section 5.3).
+    /// failing that, to reconcile against the replica.
     public func integrityCheck() throws -> Bool {
         let statement = try connection.prepare("PRAGMA integrity_check")
         defer { statement.reset() }

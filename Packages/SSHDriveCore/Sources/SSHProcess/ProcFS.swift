@@ -7,7 +7,7 @@
     ///
     /// macOS has no `/proc` and Linux has no `KERN_PROC`, so the two spellings of "what is
     /// this process called, who owns it, and what was its argv" sit side by side. Nothing
-    /// here is reachable on Darwin (docs/testing-architecture.md section 8, step 1.2).
+    /// here is reachable on Darwin (docs/design/testing.md).
     enum ProcFS {
         private static let root = "/proc"
 

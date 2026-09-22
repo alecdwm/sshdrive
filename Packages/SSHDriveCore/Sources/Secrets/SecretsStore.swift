@@ -24,7 +24,7 @@ extension SecretsStore {
         try setSecret(value, forKey: key.account)
     }
     public func removeSecret(for key: SecretKey) throws { try removeSecret(forKey: key.account) }
-    /// The accounts that parse as section 4.2 keys, in a stable order.
+    /// The accounts that parse as `SecretKey`s, in a stable order.
     public func keys() throws -> [SecretKey] {
         try accounts().compactMap(SecretKey.init(account:)).sorted { $0.account < $1.account }
     }
@@ -48,22 +48,21 @@ public struct SecretsError: Error, CustomStringConvertible {
         switch status {
         case errSecMissingEntitlement:
             return
-                "\(operation) failed: missing entitlement. Only the agent, as the app bundle's main executable with an embedded provisioning profile, carries keychain-access-groups (section 3.1)."
+                "\(operation) failed: missing entitlement. Only the agent, as the app bundle's main executable with an embedded provisioning profile, carries keychain-access-groups."
         default:
             return "\(operation) failed: \(detail) (\(status))"
         }
     }
 }
 
-/// The data-protection keychain, under the shared access group, exactly as the S1(d2)
-/// hook proved reachable from the launchd-started agent (docs/spikes/results.md,
-/// 2026-09-04 signed pass): `kSecUseDataProtectionKeychain = true` plus
+/// The data-protection keychain, under the shared access group, which is what a
+/// launchd-started agent can reach: `kSecUseDataProtectionKeychain = true` plus
 /// `kSecAttrAccessGroup = RWGDZAYBM8.org.shirls.sshdrive`.
 ///
 /// `kSecAttrAccessible` is `kSecAttrAccessibleAfterFirstUnlock`: the agent is a login
 /// agent and must read a passphrase to bring a mount up at login, before any keychain
-/// prompt could be answered, and section 4.2 requires passphrases to be stored even when
-/// a key agent also holds the key so exactly that works.
+/// prompt could be answered. A passphrase is stored even when a key agent also holds the
+/// key so that exactly this works (docs/design/secrets.md).
 public final class KeychainSecretsStore: SecretsStore, @unchecked Sendable {
     public let accessGroup: String
     /// The service every item is filed under.
@@ -161,9 +160,9 @@ public final class KeychainSecretsStore: SecretsStore, @unchecked Sendable {
 
 /// An in-memory store, for tests, for the fake backend, and for the collect connection's
 /// in-flight answers, which are only written to the keychain once the connection has
-/// succeeded (section 4.2). Off Darwin there is no keychain at all, so this is the only
-/// `SecretsStore` there is - which is exactly what the Linux suite wants
-/// (docs/testing-architecture.md section 2.3).
+/// succeeded (docs/design/secrets.md). Off Darwin there is no keychain at all, so this
+/// is the only `SecretsStore` there is, which is what the Linux suite runs against
+/// (docs/design/testing.md).
 public final class InMemorySecretsStore: SecretsStore, @unchecked Sendable {
     private var storage: [String: String] = [:]
     private let lock = NSLock()

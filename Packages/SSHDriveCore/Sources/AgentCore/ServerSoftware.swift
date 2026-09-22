@@ -1,22 +1,23 @@
 import Foundation
 
 /// Which SSH server the location is talking to, as far as the agent can honestly tell
-/// (DESIGN.md section 8.1).
+/// (docs/design/cli.md).
 ///
-/// This exists because half of section 8.1's catalogue is a claim about the *server*, and
-/// two of its lines were being printed as though every server were an OpenSSH that had
-/// not been upgraded yet. `fsync@openssh.com` and `limits@openssh.com` are OpenSSH's own
-/// extensions; a server whose SFTP service is not OpenSSH's `sftp-server` will never
-/// advertise them however new it is, and telling that user to want OpenSSH >= 8.5 is
-/// simply wrong. So the report says what the server *is* and phrases those two lines as
-/// facts rather than upgrades (2026-09-08).
+/// Half of the capability catalogue is a claim about the *server*, and two of its lines
+/// must not be printed as though every server were an OpenSSH that has not been upgraded
+/// yet. `fsync@openssh.com` and `limits@openssh.com` are OpenSSH's own extensions; a
+/// server whose SFTP service is not OpenSSH's `sftp-server` will never advertise them
+/// however new it is, and telling that user to want OpenSSH >= 8.5 is simply wrong. So the
+/// report says what the server *is* and phrases those two lines as facts rather than
+/// upgrades.
 ///
 /// Two independent pieces of evidence, because neither is available everywhere:
 ///
 /// - **The identification string.** `remote software version <x>`, which only a
 ///   `LogLevel` above `ERROR` prints and only a real connection sees - never a mux
-///   client, which talks to the master's socket (section 6.1). The collect connection of
-///   section 4.2 captures it once, at `add`, and `capabilities.json` keeps it.
+///   client, which talks to the master's socket (docs/design/ssh.md). The collect
+///   connection (docs/design/secrets.md) captures it once, at `add`, and
+///   `capabilities.json` keeps it.
 /// - **The SFTP extension fingerprint,** which every connection has for free. OpenSSH's
 ///   `sftp-server` advertises a long list including `fsync@openssh.com` and
 ///   `lsetstat@openssh.com`; Go's `pkg/sftp` advertises exactly `hardlink@openssh.com`,
@@ -73,8 +74,8 @@ public struct ServerSoftware: Equatable, Sendable {
     }
 
     /// Whether the server is OpenSSH. `nil` is "we do not know", which is not the same
-    /// answer and must not be printed as one: an unknown server keeps section 8.1's
-    /// original `upgrade:` wording, because for all we know it *is* an old OpenSSH.
+    /// answer and must not be printed as one: an unknown server keeps the plain
+    /// `upgrade:` wording, because for all we know it *is* an old OpenSSH.
     public var isOpenSSH: Bool? {
         switch flavour {
         case .openSSH: return true

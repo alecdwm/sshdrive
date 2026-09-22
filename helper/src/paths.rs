@@ -1,17 +1,17 @@
 //! Paths, the root set, and the ignore list.
 //!
 //! Every path this binary reports is **relative to the location root**, in the exact
-//! spelling the index stores (DESIGN.md section 5.3), so the agent can put it straight
-//! through the `RelativePath` constructor (section 9.1). Paths are bytes end to end: a
-//! server filename need not be valid UTF-8 (section 5.4).
+//! spelling the index stores (docs/design/item-index.md), so the agent can put it
+//! straight through the `RelativePath` constructor (docs/design/security.md). Paths are
+//! bytes end to end: a server filename need not be valid UTF-8.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-/// Section 6.4's "fixed, short ignore list": our own upload temp files and editor scratch
-/// names. `.git` is deliberately **not** on it - a repository browsed through the mount
-/// must show a current `.git` or `git status` inside it acts on stale objects.
+/// The fixed, short ignore list: our own upload temp files and editor scratch names.
+/// `.git` is deliberately **not** on it - a repository browsed through the mount must
+/// show a current `.git` or `git status` inside it acts on stale objects.
 pub const IGNORED: &[&str] = &[".sshdrive-upload-*", ".*.swp", "*~", ".#*", "4913"];
 
 /// True when the *basename* matches one of the patterns above. Only `*` is a wildcard;
@@ -46,14 +46,14 @@ fn glob(pattern: &[u8], name: &[u8]) -> bool {
     p == pattern.len()
 }
 
-/// The scope the helper watches, as the agent sends it (section 6.5's root set).
+/// The scope the helper watches, as the agent sends it (docs/design/root-set.md).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RootSet {
     /// Watched one level deep: the `materialized` and `viewed` reasons.
     pub shallow: Vec<Vec<u8>>,
     /// Watched recursively: pin roots.
     pub recursive: Vec<Vec<u8>>,
-    /// Subtrees pruned out of a recursive root (section 7.1.1).
+    /// Subtrees pruned out of a recursive root: excluded markers under a pin.
     pub excluded: Vec<Vec<u8>>,
 }
 
@@ -92,18 +92,18 @@ pub fn absolute(root: &Path, relative: &[u8]) -> PathBuf {
     PathBuf::from(OsString::from_vec(bytes))
 }
 
-/// The containment check of section 9.1 as a value. Not on the event path - every event
-/// is assembled from a watch descriptor whose relative path we already hold - but it is
-/// what the tests below pin the rule to, and what a future watcher that learns a path
-/// from the kernel rather than from us must go through.
+/// The containment check as a value (docs/design/security.md). Not on the event path -
+/// every event is assembled from a watch descriptor whose relative path we already hold -
+/// but it is what the tests below pin the rule to, and what a future watcher that learns
+/// a path from the kernel rather than from us must go through.
 #[allow(dead_code)]
 /// The other direction: an absolute path back to the index's spelling, or `None` when it
 /// is not under the root at all.
 ///
-/// This is the containment check of section 9.1 on this side of the wire. Nothing that
-/// fails it is ever reported, so a watch that somehow ended up outside the root - a
-/// directory replaced by a symlink between the `lstat` and the `inotify_add_watch` - can
-/// produce no event the agent would act on.
+/// This is the containment check on this side of the wire. Nothing that fails it is ever
+/// reported, so a watch that somehow ended up outside the root - a directory replaced by
+/// a symlink between the `lstat` and the `inotify_add_watch` - can produce no event the
+/// agent would act on.
 pub fn relative(root: &Path, absolute: &Path) -> Option<Vec<u8>> {
     let root_bytes = root.as_os_str().as_bytes();
     let path_bytes = absolute.as_os_str().as_bytes();

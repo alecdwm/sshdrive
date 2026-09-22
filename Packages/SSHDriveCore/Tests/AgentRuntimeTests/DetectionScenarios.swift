@@ -10,7 +10,7 @@ import XPCProtocols
 
 /// Suite H's agent-side half: the root set's rotation and caps, what counts as a touch,
 /// the cycle that eats its own interval, and the mass-deletion guard's thresholds
-/// (`docs/testing-architecture.md` section 5).
+/// (`docs/design/testing.md` section 5).
 ///
 /// H1-H3, H6 and the sweep's own dialect live in `Tests/ServerModelTests/SweepScenarios.swift`,
 /// against a real shell and a real `find`. Nothing here needs a server: these are the
@@ -23,14 +23,14 @@ extension AgentScenarios {
 
     @Suite struct DetectionScenarios {
 
-        // MARK: H8 - the rotation and the caps (section 6.5)
+        // MARK: H8 - the rotation and the caps (docs/design/root-set.md)
 
         /// **H8** - 5,000 `materialized` roots, one tier-0 cycle: 64 of them plus the root,
         /// a rotation period of `ceil(5000/64)`, a `viewed` set capped at 256 with LRU
         /// eviction, pin roots exempt from both, and a `find` argv that has to be batched
         /// to carry the set at all (`SQ-006`).
         ///
-        /// Section 6.5: "each tier 0 cycle lists every `viewed` and `pinned` root and at
+        /// docs/design/root-set.md: "each tier 0 cycle lists every `viewed` and `pinned` root and at
         /// most 64 `materialized`-only roots, taken round-robin in order of least recent
         /// listing, so a directory holding only cached files is refreshed every
         /// `ceil(M / 64)` cycles rather than every cycle, and the cost per cycle is bounded
@@ -41,7 +41,7 @@ extension AgentScenarios {
         /// and that an ordinary incremental sweep of a million-file tree is 876 ms. What is
         /// asserted here is the consequence the design draws from it - a cycle's cost has
         /// to be bounded by something, and at tier 1 that something is the 64 KB of argv
-        /// one `find` invocation may carry (section 6.4), which five thousand roots
+        /// one `find` invocation may carry (docs/design/change-detection.md), which five thousand roots
         /// exceed. No timing is asserted; this box is not that server.
         @Test func h8TheRotationAndTheCaps() throws {
             // The location root, enumerated once by the extension, plus five thousand
@@ -66,7 +66,7 @@ extension AgentScenarios {
             #expect(set.rotationPeriod() == 79, "H8: ceil(5000 / 64)")
             #expect(set.rotationPeriod() == (5000 + 63) / 64)
 
-            // A full sweep suspends the rotation for that one cycle (section 6.4).
+            // A full sweep suspends the rotation for that one cycle (docs/design/change-detection.md).
             #expect(set.tier0Cycle(fullSweep: true).count == 5001)
 
             // The rotation really rotates: over `rotationPeriod` cycles every one of the
@@ -84,7 +84,7 @@ extension AgentScenarios {
             #expect(covered.count == 5001, "H8: every root, inside one rotation period")
 
             // The `viewed` cap, and which entries it takes: "evicting the least recently
-            // enumerated" (section 6.5).
+            // enumerated" (docs/design/root-set.md).
             let viewed = RootSet(
                 entries: (0 ..< 300).map {
                     RootSet.Entry(
@@ -176,12 +176,12 @@ extension AgentScenarios {
             #expect(realCovered.count == 5000, "H8: the real one covers the set in one period")
         }
 
-        // MARK: H9 - a CLI command is a touch (section 6.4)
+        // MARK: H9 - a CLI command is a touch (docs/design/change-detection.md)
 
         /// **H9** - a location watched only from a terminal: `sshdrive status <name>`
         /// refreshes the touch and the cadence does not fall to ten minutes.
         ///
-        /// Section 6.4's schedule is "every 60 s while the user has touched the domain in
+        /// The change-detection schedule (docs/design/change-detection.md) is "every 60 s while the user has touched the domain in
         /// the last 10 minutes (a File Provider request for it that was not a system
         /// request, **or a CLI command naming it**), every 10 min otherwise". The CLI half
         /// is not a convenience: `MQ-001` measured that a folder is enumerated **once,
@@ -200,7 +200,7 @@ extension AgentScenarios {
         ///
         /// The suite table calls this "the location's `viewed` reason is refreshed". The
         /// reason itself is armed by our own `enumerateItems` and then kept for the rest of
-        /// the session (`MQ-001`, section 6.5), which is asserted here too; what a CLI
+        /// the session (`MQ-001`, docs/design/root-set.md), which is asserted here too; what a CLI
         /// command refreshes is the touch, which is the half that would otherwise decay.
         @Test func h9ACLICommandIsATouch() async throws {
             let harness = try AgentHarness()
@@ -223,7 +223,7 @@ extension AgentScenarios {
 
             // A system request is deliberately not a touch: a Spotlight pass or the eager
             // download of a pinned subtree would otherwise hold every location at the fast
-            // cadence (section 6.4).
+            // cadence (docs/design/change-detection.md).
             harness.manager.noteDomainTouched(location.id, isSystemRequest: true)
             await harness.settle()
             status = await detector.status(now: now)
@@ -259,11 +259,11 @@ extension AgentScenarios {
             await harness.manager.dropRuntime(locationID: location.id)
         }
 
-        // MARK: H10 - a cycle that eats its interval (section 6.4)
+        // MARK: H10 - a cycle that eats its interval (docs/design/change-detection.md)
 
         /// **H10** - a 56.8 s cycle against a 60 s interval.
         ///
-        /// Section 6.4: "**A cycle may take at most a third of its own interval**: where the
+        /// docs/design/change-detection.md: "**A cycle may take at most a third of its own interval**: where the
         /// last one took longer, the interval becomes three times that cycle's duration,
         /// capped at the 30-minute insurance interval, and `sshdrive status` prints the
         /// reason on the watch line. Measured on a real install (2026-09-05): a home
@@ -362,9 +362,9 @@ extension AgentScenarios {
             await detector.stop()
         }
 
-        // MARK: H11 - the mass-deletion guard's thresholds (section 6.4)
+        // MARK: H11 - the mass-deletion guard's thresholds (docs/design/change-detection.md)
 
-        /// **H11** - every threshold section 6.4's mass-deletion guard names, at its
+        /// **H11** - every threshold the mass-deletion guard (docs/design/change-detection.md) names, at its
         /// boundaries, and the schedule that releases what it held.
         ///
         /// "If one diff would remove at least half of a directory's known, non-hidden items
@@ -383,8 +383,8 @@ extension AgentScenarios {
         ///
         /// **D5 covers the pending-item half** (`Tests/AgentRuntimeTests/GuardScenarios.swift`):
         /// a pending local edit is held whatever the counts say, its ancestors with it, and
-        /// `accept-deletions` releases them. That is the half S5 measured and it is not
-        /// repeated here; this is the size half. D5 also owns the fetch of a *bulk*-held
+        /// `accept-deletions` releases them. That half is covered there and not repeated
+        /// here; this is the size half. D5 also owns the fetch of a *bulk*-held
         /// item, so the fetch asserted below is of a **root**-held one - the threshold D5
         /// never reaches. Either way the answer is `.cannotSynchronize` carrying the
         /// `ENOENT` and never `.noSuchItem`: `MQ-011` measured that `.noSuchItem` from
@@ -562,8 +562,9 @@ extension AgentScenarios {
         /// proportion alone still reads as "an implausibly large deletion" and still holds
         /// every case the guard was written for. What it also holds is every ordinary
         /// emptying of a small folder - a user who deletes both files in a two-file
-        /// directory waits 35 minutes to see it - which is the cost section 6.5's floor
-        /// exists to avoid. The bitten rule is run here against the same diffs.
+        /// directory waits 35 minutes to see it - which is the cost the floor in
+        /// docs/design/root-set.md exists to avoid. The bitten rule is run here against
+        /// the same diffs.
         @Test func h11BiteProofTheCountReadAsAProportion() throws {
             /// The guard with the count dropped: half of the directory and nothing else.
             func proportionOnly(missing: Int, known: Int) -> Bool {

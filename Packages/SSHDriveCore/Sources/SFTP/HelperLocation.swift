@@ -1,11 +1,12 @@
 import Foundation
 
-/// The one deliberate exception to the `RelativePath` chokepoint of DESIGN.md section 9.1.
+/// The one deliberate exception to the `RelativePath` chokepoint (docs/design/security.md).
 ///
 /// Everything the user's files travel through is a `RelativePath` joined to the location's
 /// canonical root, and `SFTPServerPath`'s initialiser is internal to this module precisely
-/// so that nothing outside can hand the client a string. The helper of section 6.4 tier 2
-/// does not fit that shape: it is deployed to `$XDG_CACHE_HOME/sshdrive`,
+/// so that nothing outside can hand the client a string. The tier 2 helper
+/// (docs/design/change-detection.md) does not fit that shape: it is deployed to
+/// `$XDG_CACHE_HOME/sshdrive`,
 /// `~/.cache/sshdrive` or `/tmp/sshdrive-<uid>`, which are outside every location root by
 /// design - the binary is shared by every location on that account and must not appear
 /// inside anybody's mount.
@@ -14,7 +15,7 @@ import Foundation
 /// *probe* chose (never a user string), and a single filename component under it. It has
 /// no `..`, no nesting, and no way to express a path anywhere else: a `HelperFile` is
 /// exactly `<directory>/<one component>`. Nothing in the File Provider path ever
-/// constructs one (2026-09-05, section 13).
+/// constructs one.
 public struct HelperDirectory: Sendable, Equatable, Hashable {
     /// Absolute, with no trailing slash.
     public let path: String
@@ -77,9 +78,8 @@ extension RealSFTPTransport {
         try await client.lstat(directory.serverPath)
     }
 
-    /// Section 6.4: "The directory is created with `mkdir -m 700`". SFTP has no `-p`, so a
-    /// missing parent is created first; an existing directory answers `FAILURE` and is not
-    /// an error here.
+    /// The directory is created with mode 0700. SFTP has no `-p`, so a missing parent is
+    /// created first; an existing directory answers `FAILURE` and is not an error here.
     public func helperMkdir(_ directory: HelperDirectory, mode: UInt32 = 0o700) async throws {
         if let parent = directory.parent, (try? await helperLstat(parent)) == nil {
             try? await client.mkdir(parent.serverPath, mode: 0o700)
@@ -87,16 +87,16 @@ extension RealSFTPTransport {
         try? await client.mkdir(directory.serverPath, mode: mode)
         // Whether it existed already or was just made, it has to be there now.
         let attributes = try await helperLstat(directory)
-        // `mkdir`'s attributes go through the server's umask, so a 0700 that was asked for
-        // can land as 0755. Assert it (2026-09-05).
+        // `mkdir`'s attributes go through the server's umask, so a 0700 that was asked
+        // for can land as 0755. Assert it.
         if attributes.mode & 0o777 != mode & 0o777 {
             try? await helperSetstat(directory, mode: mode)
         }
     }
 
-    /// `chmod` on the helper's own directory. Section 6.4 wants it at 0700 and a server's
-    /// umask applies to `mkdir`'s attributes, so the mode is asserted after the fact as
-    /// well as asked for (2026-09-05).
+    /// `chmod` on the helper's own directory. It has to be 0700 and a server's umask
+    /// applies to `mkdir`'s attributes, so the mode is asserted after the fact as well as
+    /// asked for.
     public func helperSetstat(_ directory: HelperDirectory, mode: UInt32) async throws {
         try await client.setstat(
             directory.serverPath, SFTPSettableAttributes(permissions: mode))
@@ -107,7 +107,8 @@ extension RealSFTPTransport {
     }
 
     /// Writes a whole file that must not already exist. The upload goes to a temp name and
-    /// is renamed into place by the caller, exactly like every other upload (section 5.5):
+    /// is renamed into place by the caller, exactly like every other upload
+    /// (docs/design/writes.md):
     /// writing over a running executable fails `ETXTBSY` on Linux, and the rename leaves
     /// the old inode to whatever process is using it.
     public func helperWriteExclusive(_ file: HelperFile, contents: Data, mode: UInt32) async throws {

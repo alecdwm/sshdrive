@@ -7,12 +7,12 @@ import SFTP
 import SSHProcess
 import XPCProtocols
 
-/// The half of a location that watches the server (DESIGN.md sections 6.4 and 6.5).
+/// The half of a location that watches the server (docs/design/change-detection.md,
+/// docs/design/root-set.md).
 ///
 /// `ChangeDetector` decides *when* a cycle runs and *which tier* runs it; everything here
 /// is what a cycle does to the index, and it lives on `LocationRuntime` because the agent
-/// is the index's only writer (section 3) and because a listing and its anchors are one
-/// transaction (section 5.3).
+/// is the index's only writer and because a listing and its anchors are one transaction.
 extension LocationRuntime {
 
     /// What one cycle, or one command, did.
@@ -39,23 +39,23 @@ extension LocationRuntime {
         }
     }
 
-    // MARK: The mass-deletion guard (section 6.4)
+    // MARK: The mass-deletion guard
 
     /// The paths the system currently lists in `enumeratorForPendingItems()`, refreshed at
     /// the start of every cycle. A deletion of one of these is held whatever the counts
     /// say: the system re-offers a pending edit on an item we report deleted as a
     /// `createItem`, that create collides with the path still on the server, and the
     /// system retries a collided create for ever with no alert - the save is stranded and
-    /// the identifier is lost (S5, 2026-09-04).
+    /// the identifier is lost (measured 2026-09-04).
     public func setPendingPaths(_ pending: Set<Data>) {
         pendingPaths = pending
     }
 
     public func pendingPathCount() -> Int { pendingPaths.count }
 
-    /// Section 6.4, applied to the deletions one listing inferred. Runs inside the
-    /// listing's own transaction (section 5.3), so a held path and its `held` row are
-    /// written with the same atomicity as a deletion and its anchor.
+    /// The guard, applied to the deletions one listing inferred. Runs inside the
+    /// listing's own transaction, so a held path and its `held` row are written with the
+    /// same atomicity as a deletion and its anchor.
     public func applyGuardedDeletions(
         directory: RelativePath,
         missing: [(path: Data, identifier: String)],
@@ -80,10 +80,10 @@ extension LocationRuntime {
         }
 
         // `environment.clock`, not `Date()`: the `held` row's `first_missing` is what the
-        // 5- and 30-minute re-checks are measured from (section 6.4), so a scenario that
-        // asserts the schedule has to be able to move both together (`H11`).
-        // `SystemAgentClock.now()` is `Date().timeIntervalSince1970`, so the agent that
-        // ships is unchanged.
+        // 5- and 30-minute re-checks are measured from, so a scenario that asserts the
+        // schedule has to be able to move both together (`H11`).
+        // `SystemAgentClock.now()` is `Date().timeIntervalSince1970`, so the shipping
+        // agent reads the same wall clock.
         let now = environment.clock.now()
         let decision = MassDeletionGuard.evaluate(
             MassDeletionGuard.Input(
@@ -100,7 +100,7 @@ extension LocationRuntime {
         for path in decision.apply {
             guard let identifier = identifiers[path] else { continue }
             // Everything beneath a deleted directory goes with it: those paths are gone
-            // whatever now sits at the name (section 5.3).
+            // whatever now sits at the name.
             let deleted = try RelativePath.fromIndexBytes(path)
             for descendant in try index.allItems()
             where descendant.path != path
@@ -135,7 +135,7 @@ extension LocationRuntime {
         }
     }
 
-    /// Section 6.4's re-check schedule: 5 minutes, then 30, then the deletions are
+    /// The re-check schedule: 5 minutes, then 30, then the deletions are
     /// applied. One re-`readdir` per directory that holds anything.
     public func recheckHeldDeletions(now: Double = Date().timeIntervalSince1970) async -> ChangeApplication {
         var application = ChangeApplication()
@@ -162,7 +162,7 @@ extension LocationRuntime {
         return application
     }
 
-    /// `sshdrive accept-deletions <name> [path]` (section 8): apply what the guard is
+    /// `sshdrive accept-deletions <name> [path]`: apply what the guard is
     /// holding, now. With no path, everything; with one, that path and its subtree.
     public func acceptDeletions(pathString: String?) async throws -> Int {
         let scope: Data?
@@ -199,7 +199,7 @@ extension LocationRuntime {
         return applied
     }
 
-    /// Section 8's `status` line: "14 deletions held in Photos, re-check at 14:32".
+    /// The `status` line: "14 deletions held in Photos, re-check at 14:32".
     public func heldReport() throws -> [[String: Any]] {
         try index.heldRows().map { row in
             [
@@ -213,7 +213,7 @@ extension LocationRuntime {
         }
     }
 
-    // MARK: The root set (section 6.5)
+    // MARK: The root set
 
     /// Rebuilds the `materialized` reason from the system's own
     /// `enumeratorForMaterializedItems()`, applies the 256-entry cap to `viewed`, and
@@ -285,9 +285,8 @@ extension LocationRuntime {
         LocationRuntime.rootSet(from: try index.rootRows())
     }
 
-    /// One `roots` row per (path, reason); the set groups them by path, which is what
-    /// "one directory may carry several reasons and leaves the set only when the last one
-    /// goes" means (section 6.5).
+    /// One `roots` row per (path, reason); the set groups them by path, so a directory
+    /// may carry several reasons and leaves the set only when the last one goes.
     public static func rootSet(from rows: [IndexWriter.RootRow]) -> RootSet {
         var byPath: [Data: RootSet.Entry] = [:]
         for row in rows {
@@ -306,12 +305,12 @@ extension LocationRuntime {
         return RootSet(entries: byPath.values.sorted { $0.path.lexicographicallyPrecedes($1.path) })
     }
 
-    // MARK: Tier 0 - the SFTP poll (section 6.4)
+    // MARK: Tier 0 - the SFTP poll
 
     /// One tier 0 cycle: `readdir` every `viewed` and `pinned` root and at most 64
     /// `materialized`-only roots, round-robin by least recent listing. `fullSweep`
     /// suspends the rotation for that one cycle, which is what a reconnect and a fresh
-    /// working-set anchor both ask for (sections 6.4, 5.3).
+    /// working-set anchor both ask for.
     public func runPollCycle(fullSweep: Bool, now: Double = Date().timeIntervalSince1970) async
         -> ChangeApplication
     {
@@ -319,12 +318,12 @@ extension LocationRuntime {
         var paths: [Data]
         do {
             paths = try currentRootSet().tier0Cycle(fullSweep: fullSweep)
-            // A pin root is watched *recursively* (section 6.5), and at tier 0 that means
-            // what section 7.1.2 says it means: "a `readdir` of every directory in the
-            // location per cycle", which `pin` warns about along with the size. The root
-            // set holds the pin root itself; the directories under it are expanded here,
-            // with excluded subtrees skipped (section 7.1.1). Tier 1 needs none of this -
-            // the pin roots go to `find` as recursive roots.
+            // A pin root is watched *recursively*, and at tier 0 that means a `readdir`
+            // of every directory beneath it per cycle - every directory in the location,
+            // for a pin on the root - which `pin` warns about along with the size. The
+            // root set holds the pin root itself; the directories under it are expanded
+            // here, with excluded subtrees skipped (docs/design/pinning.md). Tier 1 needs
+            // none of this - the pin roots go to `find` as recursive roots.
             let pinned = try pinnedSubtreeDirectories()
             if !pinned.isEmpty {
                 var seen = Set(paths)
@@ -356,14 +355,14 @@ extension LocationRuntime {
         }
     }
 
-    // MARK: Tier 1 - the remote sweep (section 6.4)
+    // MARK: Tier 1 - the remote sweep
 
     /// Turns the sweep's hits into index changes.
     ///
-    /// Section 6.4: "All tiers produce the same thing: a set of dirty remote paths that
-    /// the agent re-`stat`s over SFTP (re-`readdir`s, for a directory, since a deletion is
-    /// only visible as an absence in its parent's listing), diffs against the index, and
-    /// turns into working-set anchors."
+    /// All tiers produce the same thing: a set of dirty remote paths that the agent
+    /// re-`stat`s over SFTP (re-`readdir`s, for a directory, since a deletion is only
+    /// visible as an absence in its parent's listing), diffs against the index, and turns
+    /// into working-set anchors.
     ///
     /// A GNU sweep carries type, size, ns-mtime, inode, mode and owner with every hit, so
     /// a file that already has a row needs no follow-up `stat` at all; elsewhere the file
@@ -380,7 +379,7 @@ extension LocationRuntime {
             let trimmed = LocationRuntime.stripLeadingDot(hit.path)
             guard let path = try? RelativePath.fromIndexBytes(trimmed) else { continue }
             if path.isRoot { dirty.insert(Data()); continue }
-            // Our own uploads come back as remote changes without this (section 5.5).
+            // Our own uploads come back as remote changes without this.
             if inFlight.contains(path.bytes) { continue }
             let row = try? index.item(path: path.bytes)
             let isDirectory = hit.type == "d" || (hit.type == nil && row?.type == "directory")
@@ -425,17 +424,16 @@ extension LocationRuntime {
         return application
     }
 
-    // MARK: Tier 2 - the remote helper (section 6.4)
+    // MARK: Tier 2 - the remote helper
 
     /// Turns one batch of NDJSON events into index changes.
     ///
     /// The same job `applySweepHits` does, with three differences that are the whole of
     /// what tier 2 buys:
     ///
-    /// - a **delete** applies at once. Section 6.4's mass-deletion guard exists because "a
-    ///   poll that finds a directory empty is not always a directory that was emptied" -
-    ///   an absence in a listing is ambiguous. A delete event is not: the kernel watched it
-    ///   happen. "Helper delete events apply at once" is the design's own sentence.
+    /// - a **delete** applies at once. The mass-deletion guard exists because a poll that
+    ///   finds a directory empty is not always a directory that was emptied - an absence
+    ///   in a listing is ambiguous. A delete event is not: the kernel watched it happen.
     /// - a **rename** keeps the identifier. Every other tier sees a delete and a create and
     ///   mints a new item, losing the pin, the tags and the cached content with it.
     /// - a hit carries ns-mtime and inode on every platform, not only where `find` is GNU.
@@ -453,8 +451,8 @@ extension LocationRuntime {
             case .error:
                 if let message = event.message { application.errors.append(message) }
             case .overflow:
-                // "an `overflow` event that makes the agent run a sweep rather than
-                // silently missing changes" (section 6.4). The detector reads this back.
+                // An `overflow` event makes the agent run a sweep rather than silently
+                // miss changes. The detector reads this back.
                 application.errors.append(
                     "helper overflow: \(event.message ?? "the event queue overflowed")")
             case .rename:
@@ -471,7 +469,7 @@ extension LocationRuntime {
                     if event.path != nil { dirty.insert(Data()) }
                     continue
                 }
-                // Our own uploads come back as remote changes without this (section 5.5).
+                // Our own uploads come back as remote changes without this.
                 if inFlight.contains(path.bytes) { continue }
                 if event.kind == .delete {
                     applyHelperDeletion(path, into: &application)
@@ -547,8 +545,8 @@ extension LocationRuntime {
         }
     }
 
-    /// Section 5.3: "a rename onto an existing path is applied as a modify of that path".
-    /// Otherwise the row moves and keeps its identifier, which no other tier can do.
+    /// A rename onto an existing path is applied as a modify of that path. Otherwise the
+    /// row moves and keeps its identifier, which no other tier can do.
     private func applyRename(
         from source: RelativePath, to destination: RelativePath, event: HelperEvent,
         into application: inout ChangeApplication, dirty: inout Set<Data>
@@ -560,8 +558,8 @@ extension LocationRuntime {
         }
         if (try? index.item(path: destination.bytes)) != nil {
             // The destination already exists in the index: whatever was there is gone and
-            // the source is gone too. Both parents are listed and the identifiers fall
-            // where section 5.3 says they fall.
+            // the source is gone too. Both parents are listed, and the identifiers fall
+            // out of those listings.
             dirty.insert((source.parent ?? .root).bytes)
             dirty.insert((destination.parent ?? .root).bytes)
             return
@@ -621,10 +619,10 @@ extension LocationRuntime {
 
     // MARK: Bookkeeping the sweep and the tier need
 
-    /// Section 6.4: the server's own `date +%s`, "stored once the sweep's results have
-    /// been applied to the index, never before". Measured on the Mac's clock, a server
-    /// running a few minutes behind would silently miss every change until the 30-minute
-    /// insurance sweep.
+    /// The server's own `date +%s`, stored once the sweep's results have been applied to
+    /// the index, never before. Measured on the Mac's clock, a server running a few
+    /// minutes behind would silently miss every change until the 30-minute insurance
+    /// sweep.
     public func sweepServerTime() -> Int64? {
         (try? index.meta(IndexSchema.MetaKey.sweepServerTime)).flatMap { $0 }.flatMap(Int64.init)
     }
@@ -633,10 +631,10 @@ extension LocationRuntime {
         try? index.setMeta(IndexSchema.MetaKey.sweepServerTime, String(value))
         // Our own clock at the moment that server stamp was stored. The next window is
         // the *elapsed* time since then, measured here and applied to the server's value,
-        // which is what section 6.4's "the minutes between the stored value and the new
-        // one" means without either clock's absolute value entering into it. Subtracting a
-        // server timestamp from the Mac's wall clock instead would fold the whole skew
-        // into the window, which is precisely what the rule exists to avoid.
+        // which is the minutes between the stored value and the new one without either
+        // clock's absolute value entering into it. Subtracting a server timestamp from the
+        // Mac's wall clock instead would fold the whole skew into the window, which is
+        // precisely what the rule exists to avoid.
         try? index.setMeta(
             IndexSchema.MetaKey.sweepServerTime + "_local", String(localNow))
     }
@@ -670,17 +668,17 @@ extension LocationRuntime {
         await liveConnection()?.execMaster
     }
 
-    /// Whether the budget leaves a channel for the sweep at all (section 6.1). At a
+    /// Whether the budget leaves a channel for the sweep at all. At a
     /// `MaxSessions` of 2 the exec channel is the one that is kept, so this is normally
     /// true wherever there is a shell.
     public func allowsExecChannel() -> Bool { channelBudget.allowsExecChannel }
 
     /// Whether a channel can be *held* for the life of the connection, which is what tier
-    /// 2 needs and tier 1 does not (section 6.1's budget, section 6.4 tier 2).
+    /// 2 needs and tier 1 does not.
     public func allowsPersistentExecChannel() -> Bool { channelBudget.allowsPersistentExecChannel }
 
-    /// The canonical absolute root the sweep's `cd` uses (section 9.1). Resolved on the
-    /// live connection so a root that moved is caught by the same rule as everything else.
+    /// The canonical absolute root the sweep's `cd` uses. Resolved on the live connection
+    /// so a root that moved is caught by the same rule as everything else.
     public func canonicalRoot() async throws -> String { try await transport.realpath(.root) }
 
     /// Identifiers from the system's replica enumerators, mapped back to the paths the
@@ -695,9 +693,9 @@ extension LocationRuntime {
         return out
     }
 
-    /// A sweep root has to survive a trip through `set --`, which is a String pipeline
-    /// (section 9.2). Server names need not be valid UTF-8 (section 5.4), so the ones that
-    /// are not are excluded from the sweep and listed at tier 0 instead.
+    /// A sweep root has to survive a trip through `set --`, which is a String pipeline.
+    /// Server names need not be valid UTF-8, so the ones that are not are excluded from
+    /// the sweep and listed at tier 0 instead.
     /// Every root is spelled `./…` rather than bare. `find` has no portable `--`, so a
     /// top-level directory literally named `-name` would otherwise be read as an option
     /// and the whole sweep would fail; the `./` prefix is what makes a name a path. The
@@ -708,7 +706,7 @@ extension LocationRuntime {
     public static func utf8Root(_ path: Data) -> String? { SweepPlan.argvRoot(path) }
 
     /// `sshdrive debug roots <name> --seed N`: marks the first N directory rows as
-    /// `materialized` roots, so section 6.5's rotation can be measured at a scale that
+    /// `materialized` roots, so the rotation can be measured at a scale that
     /// would otherwise need N downloads. The directories are real and are really listed;
     /// only the reason is injected.
     public func seedMaterializedRoots(limit: Int) throws -> Int {

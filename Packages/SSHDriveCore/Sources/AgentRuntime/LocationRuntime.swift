@@ -8,34 +8,33 @@ import XPCProtocols
 import Logging
 
 /// Everything the agent holds for one location: the index it is the only writer of, and
-/// the transport it talks to. In milestone 1 the transport is always `FakeTransport`
-/// (DESIGN.md section 12); milestone 2 puts the real SFTP client behind the same
-/// protocol and nothing here changes.
+/// the transport it talks to. The transport is either the real SFTP client or
+/// `FakeTransport`, behind the same protocol, and nothing here knows which.
 ///
-/// An actor because the index has a single writer by design (section 3) and because the
-/// transport is one too.
+/// An actor because the index has a single writer by design and because the transport is
+/// one too.
 public actor LocationRuntime {
     public let location: Location
-    /// Every seam this location was made with (docs/testing-architecture.md section 2.3):
+    /// Every seam this location was made with (docs/design/testing.md):
     /// the replica, the transport launcher and the clock.
     public let environment: AgentEnvironment
     /// Internal rather than private: the change-detection half of this actor lives in
-    /// `LocationRuntime+ChangeDetection.swift` (section 6.4), and `private` in Swift is
-    /// file-scoped even for an extension of the same type in the same module.
+    /// `LocationRuntime+ChangeDetection.swift`, and `private` in Swift is file-scoped even
+    /// for an extension of the same type in the same module.
     public var index: IndexWriter
     public let transport: any SFTPTransport
     public let indexURL: URL
     public let backupURL: URL
 
     /// The read-only WAL reader `sshdrive status` reads this location's index through
-    /// (section 8, `StatusIndexReader`). `nonisolated`, and deliberately so: reaching it
+    /// (`StatusIndexReader`). `nonisolated`, and deliberately so: reaching it
     /// costs no hop onto this actor, which is the whole point - a report taken while a
     /// listing is writing its rows must neither wait for the listing nor delay it.
     public nonisolated let statusIndex: StatusIndexReader
 
     /// The last drained `enumeratorForMaterializedItems()` answer, published by whichever
-    /// of section 6.4's cycle, section 7's TTL pass or the extension's
-    /// `materializedItemsDidChange` took it (section 6.5).
+    /// of the change-detection cycle, the TTL eviction pass or the extension's
+    /// `materializedItemsDidChange` took it.
     ///
     /// `status` needs the same set for its Cache and Pins lines, and draining it a third
     /// time is a File Provider round trip for an answer one of those three has almost
@@ -44,60 +43,59 @@ public actor LocationRuntime {
     /// set and not merely a recent one; `status` drains for itself when there is none.
     public nonisolated let materialized = MaterializedSnapshot()
 
-    /// The identity the capability probe found. Milestone 3 runs the probe; the fake
-    /// backend reports its own uid and gid so the derivation in section 5.4 has
-    /// something real to work from from milestone 1 on.
+    /// The identity the capability probe found. The fake backend reports its own uid and
+    /// gid, so the mode-to-capabilities derivation has something real there too.
     private var identity: ServerIdentity
 
-    /// Every derived field of a row, in one place (sections 5.2, 5.4, 5.7). Rebuilt when
-    /// the identity or the root spellings change, since both feed the derivation.
+    /// Every derived field of a row, in one place. Rebuilt when the identity or the root
+    /// spellings change, since both feed the derivation.
     private var rows: RowBuilder
 
-    /// The server half of section 5.5: the temp-file-plus-rename upload protocol, the
+    /// The server half of a write: the temp-file-plus-rename upload protocol, the
     /// conflict check, the conflict copy, the stale-temp rule and the delete rules. It
     /// owns the transport and the in-flight set; this actor stays the only writer of the
     /// index.
     public var writer: RemoteWriter
 
     /// The two spellings of the location root a symlink target is measured against
-    /// (section 5.7): the canonical one `realpath` returned, and the one the user typed -
-    /// or `$HOME` for a default root.
+    /// (docs/design/symlinks.md): the canonical one `realpath` returned, and the one the
+    /// user typed - or `$HOME` for a default root.
     private var symlinkRoots: SymlinkPolicy.Roots
 
-    /// This install's `<mac8>` (section 5.5), for the upload temp names.
+    /// This install's `<mac8>`, for the upload temp names.
     private let macID: String
 
     /// The catch-up sweep the agent runs when the extension hands out a fresh working-set
-    /// anchor (section 5.3). S3 needs it off, so the system's own behaviour after
-    /// `.syncAnchorExpired` is visible; `sshdrive debug sweep off` is that switch.
+    /// anchor. `sshdrive debug sweep off` turns it off, which is how the system's own
+    /// behaviour after `.syncAnchorExpired` is made visible.
     public var catchUpSweepEnabled = true
 
-    /// Section 6.2's transfer scheduler: four transfers at once on the bulk channel,
-    /// foreground before background, the pipelined window split between them, and the
-    /// backlog bounded by the six-fetch ceiling S6 measured. It is also what a cancel
-    /// reaches: cancelling the extension's `Progress` cancels the transfer's Task and
-    /// every SFTP request it has not sent yet (section 5.2).
+    /// The transfer scheduler: four transfers at once on the bulk channel, foreground
+    /// before background, the pipelined window split between them, and the backlog bounded
+    /// by the six-fetch ceiling the system keeps open. It is also what a cancel reaches:
+    /// cancelling the extension's `Progress` cancels the transfer's Task and every SFTP
+    /// request it has not sent yet.
     public let scheduler: TransferScheduler
 
-    /// What the server let us hold at once (section 6.1), and the sentence `status`
-    /// shows for it. `.unrestricted` for a fake location, which has no channels at all.
+    /// What the server let us hold at once, and the sentence `status` shows for it.
+    /// `.unrestricted` for a fake location, which has no channels at all.
     public private(set) var channelBudget: ChannelBudget = .unrestricted
 
     /// Names in the tree that are recorded but never shown, with the reason, for
-    /// `status`'s "not shown" list (section 5.4). Keyed by the path bytes.
+    /// `status`'s "not shown" list. Keyed by the path bytes.
     public var hiddenReasons: [Data: String] = [:]
 
     /// The paths the system lists in `enumeratorForPendingItems()`, refreshed at the
     /// start of every change-detection cycle. The mass-deletion guard holds a deletion of
-    /// any of them whatever the counts say (section 6.4, S5).
+    /// any of them whatever the counts say.
     public var pendingPaths: Set<Data> = []
 
     /// `sshdrive debug roots <name> --seed N` sets this, and nothing else does: the
     /// system reports none of the seeded directories as materialized, so the ordinary
-    /// refresh would undo the seeding on the next cycle (section 6.5).
+    /// refresh would undo the seeding on the next cycle.
     public var suppressMaterializedRefresh = false
 
-    /// Section 7.2's safety net: the kept files the agent has *seen* materialized in an
+    /// The re-assert net for pins: the kept files the agent has *seen* materialized in an
     /// earlier `enumeratorForMaterializedItems` pass. A kept file that leaves this set has
     /// turned dataless without our handler having run, and the pin is re-asserted rather
     /// than read as an unpin. Kept files that are dataless because their eager download has
@@ -107,72 +105,71 @@ public actor LocationRuntime {
     /// SSH Drive and re-downloaded").
     public var keptEvictedOutside = 0
 
-    /// Section 6.4's tier ladder for this location, owned by `ChangeDetector` and kept
-    /// here so `status` can answer for a location whose detector is not running.
+    /// The change-detection tier ladder for this location, owned by `ChangeDetector` and
+    /// kept here so `status` can answer for a location whose detector is not running.
     public var watchState: ChangeDetectionLadder?
     /// The last cycle's outcome, for `status`: when, which tier, how long, what it found.
     public var lastWatchCycle: [String: Any] = [:]
 
-    // MARK: Spike faults and transfer accounting (S4, S6)
+    // MARK: Debug faults and transfer accounting
 
     /// `sshdrive debug fault <name> --writes on`: every create/modify fails
     /// `.serverUnreachable`, so an edit made in the mount stays in the system's pending
-    /// set. S4 needs an item with pending changes to try to evict.
+    /// set. That is how an item with pending changes is produced on purpose.
     private var writesFail = false
 
     /// `sshdrive debug fault <name> --fetch-delay MS`: hold each `fetchContents` open for
     /// this long. A fake-backed fetch is a memory copy and finishes before the next one
-    /// starts, so without a delay the concurrency S6 wants to count is always 1.
+    /// starts, so without a delay the measured concurrency is always 1.
     private var fetchDelayMilliseconds = 0
 
     /// `sshdrive debug fault <name> --version-mismatch on`: `modifyItem` returns an item
     /// whose content and metadata versions are not the ones just written, which is the
-    /// case section 5.5's conflict path rests on (s3-7). The index keeps the true
-    /// versions; only the reply to the system is wrong.
+    /// case the conflict path rests on. The index keeps the true versions; only the reply
+    /// to the system is wrong.
     private var versionMismatch = false
 
     /// `sshdrive debug fault <name> --collisions on`: every `createItem` fails
-    /// `.filenameCollision`, which is the error section 5.5's `lstat`-after-`FAILURE`
-    /// check will raise for real in milestone 4. s3-4 needs it to see what Finder draws.
+    /// `.filenameCollision`, which is the error the `lstat`-after-`FAILURE` check raises
+    /// for real, and this is how to see what Finder draws for it.
     private var createsCollide = false
 
     /// `sshdrive debug fault <name> --upload-delay MS`: holds every upload between the
-    /// bytes landing in the temp file and the destination `lstat`, which is section 5.5's
-    /// conflict window. A spike changes the file on the server inside that window and
-    /// gets a **real** conflict rather than a simulated one (S8/S10 runbook).
+    /// bytes landing in the temp file and the destination `lstat`, which is the conflict
+    /// window. Changing the file on the server inside that window produces a **real**
+    /// conflict rather than a simulated one.
     private var uploadDelayMilliseconds = 0
 
     /// `sshdrive debug fault <name> --frozen-metadata on`: `modifyItem` replies with the
-    /// metadata version the item had *before* the change. That is S10's second question -
-    /// what happens when the version is deliberately left unchanged - and it is the case
-    /// the xattr hash in the metadata version exists to prevent.
+    /// metadata version the item had *before* the change, which is what the xattr hash in
+    /// the metadata version exists to prevent. This is how to see what it costs.
     private var frozenMetadata = false
 
     /// `sshdrive debug fault <name> --fetch-error noSuchItem|cannotSynchronize|none`: what
-    /// every `fetchContents` answers instead of reading bytes. S5's eighth question is what
-    /// the system does with each, since the mass-deletion guard (section 6.4) needs
-    /// `.cannotSynchronize` to leave the item in place where `.noSuchItem` would delete it.
+    /// every `fetchContents` answers instead of reading bytes. The mass-deletion guard
+    /// needs `.cannotSynchronize` to leave the item in place where `.noSuchItem` would
+    /// delete it, and this is how each is exercised.
     private var fetchError: String?
 
-    /// Section 8.1's probe as the last connection found it. Kept on the runtime rather
-    /// than read off the transport, because since milestone 5 there may be no transport:
-    /// `status` on an offline location still has to print what the server was (section 6.3).
+    /// The capability probe as the last connection found it. Kept on the runtime rather
+    /// than read off the transport, because there may be no live connection at all:
+    /// `status` on an offline location still has to print what the server was.
     public var serverProbeResult: ServerProbe.Result?
 
-    /// The last transport error, for `show` and `status` (section 8).
+    /// The last transport error, for `show` and `status`.
     public var lastTransportError: String?
 
-    /// Section 5.3's recovery: what `IndexReconcile` found and did at start, and whether
-    /// the replica walk is still owed. The walk needs the File Provider domain to exist,
-    /// so it runs after `add(domain)` rather than inside `start()`.
+    /// Index recovery: what `IndexReconcile` found and did at start, and whether the
+    /// replica walk is still owed. The walk needs the File Provider domain to exist, so it
+    /// runs after `add(domain)` rather than inside `start()`.
     public private(set) var recoveryReport: [String: Any] = [:]
     private var reconcileOwed = false
 
     private var concurrentFetches = 0
     private var peakConcurrentFetches = 0
     private var totalFetches = 0
-    /// One entry per fetch: start, end (0 while running) and the path, as seconds since
-    /// the reference date, so S6 can see the overlap rather than infer it from a peak.
+    /// One entry per fetch: start, end (0 while running) and the path, as seconds since the
+    /// reference date, so the overlap can be seen rather than inferred from a peak.
     private var fetchTimeline: [(path: String, start: Double, end: Double)] = []
 
     public init(
@@ -203,8 +200,8 @@ public actor LocationRuntime {
                 createCheck: location.createCheck))
     }
 
-    /// This Mac's `LocalHostName`, which is what names a conflict copy (section 5.5): it
-    /// is the Mac's content that is being set aside, so it is the Mac that signs it.
+    /// This Mac's `LocalHostName`, which is what names a conflict copy: it is the Mac's
+    /// content that is being set aside, so it is the Mac that signs it.
     /// `ProcessInfo.hostName` is `<LocalHostName>.local` on a Mac with no domain, so the
     /// suffix comes off rather than pulling in SystemConfiguration for one string.
     public static var localHostName: String {
@@ -218,13 +215,13 @@ public actor LocationRuntime {
             identity = ServerIdentity(
                 uid: await fake.serverUID, gid: await fake.serverGID, supplementaryGroups: [])
         }
-        // Section 5.3's recovery, before anything is served: an index that fails its
-        // integrity check is restored from `index.sqlite.bak` **into** the live database
-        // through the online backup API, and one SQLite cannot open at all is truncated
-        // under its own inode after the extension's reader has been asked to close. Either
-        // way the flag is left set and the replica walk below is owed. The flag also
-        // outlives a crash: an agent that starts and finds it set redoes the walk, since
-        // the extension is stalled on that flag and nothing else will clear it.
+        // Index recovery, before anything is served: an index that fails its integrity
+        // check is restored from `index.sqlite.bak` **into** the live database through the
+        // online backup API, and one SQLite cannot open at all is truncated under its own
+        // inode after the extension's reader has been asked to close. Either way the flag
+        // is left set and the replica walk below is owed. The flag also outlives a crash:
+        // an agent that starts and finds it set redoes the walk, since the extension is
+        // stalled on that flag and nothing else will clear it.
         let wasReconciling = index.isReconciling
         let indexPath = indexURL.path
         let environment = self.environment
@@ -237,7 +234,7 @@ public actor LocationRuntime {
             wasReconciling: wasReconciling,
             // Our own status reader closes with the extension's and for the same reason:
             // it holds the `-shm` mapped, and truncating a mapped file under a live
-            // process faults it on its next access (section 5.3).
+            // process faults it on its next access.
             closeReader: {
                 await statusIndex.close()
                 await environment.readerPeers.closeReaders()
@@ -261,12 +258,12 @@ public actor LocationRuntime {
         do {
             try await applyConnection()
         } catch {
-            // Section 5.6: a location whose server is down still mounts. The domain is
-            // added, `item(for:)` and the replica keep working, a save is queued, and the
-            // breaker answers every remote call `.serverUnreachable` until it connects -
-            // at which point `applyConnection` runs again from the gate's hook. Failing
-            // `start()` here instead would leave the location with no domain at all, so a
-            // laptop booted on a train would come back with nothing in Finder.
+            // A location whose server is down still mounts. The domain is added,
+            // `item(for:)` and the replica keep working, a save is queued, and the breaker
+            // answers every remote call `.serverUnreachable` until it connects - at which
+            // point `applyConnection` runs again from the gate's hook. Failing `start()`
+            // here instead would leave the location with no domain at all, so a laptop
+            // booted on a train would come back with nothing in Finder.
             Log.agent.notice(
                 "\(self.location.id, privacy: .public): starting offline (\(error.localizedDescription, privacy: .public)); the domain is served from the replica until the breaker connects"
             )
@@ -274,21 +271,21 @@ public actor LocationRuntime {
     }
 
     /// Everything about a location that can only be known from a live connection: the
-    /// identity behind section 5.4's capability mapping, section 6.1's channel budget,
-    /// section 5.7's two spellings of the root, and the root row itself.
+    /// identity behind the capability mapping, the channel budget, the two spellings of
+    /// the root, and the root row itself.
     ///
     /// Called from `start()` and again from `ConnectionGate`'s connected hook on every
     /// reconnect, because a server can come back with a different `MaxSessions`, a
-    /// different `id`, or a root that has moved (section 9.1). Explicit values come from
-    /// the hook; without them it reads whatever the transport is holding now.
+    /// different `id`, or a root that has moved. Explicit values come from the hook;
+    /// without them it reads whatever the transport is holding now.
     public func applyConnection(
         budget: ChannelBudget? = nil, probe: ServerProbe.Result? = nil,
         sharesMetadataChannel: Bool? = nil
     ) async throws {
-        // Section 5.7: both spellings of the root, because on a host where `/home` is a
-        // symlink the canonical root is `/var/home/alec` while every absolute link the
-        // user ever made says `/home/alec/…`, and checked against the canonical spelling
-        // alone all of them would be hidden.
+        // Both spellings of the root, because on a host where `/home` is a symlink the
+        // canonical root is `/var/home/alec` while every absolute link the user ever made
+        // says `/home/alec/…`, and checked against the canonical spelling alone all of
+        // them would be hidden.
         //
         // This is also the first remote call of the location, so on the `start()` path it
         // is what makes the breaker open its first connection.
@@ -308,9 +305,9 @@ public actor LocationRuntime {
                 await scheduler.setSharesMetadataChannel(sharesMetadataChannel)
             }
         }
-        // Section 5.4: the identity comes from one `id` exec channel at connect, and an
-        // SFTP-only account - no shell, or no channel to spare for one - keeps `.unknown`,
-        // which is what gives every item full capabilities.
+        // The identity comes from one `id` exec channel at connect, and an SFTP-only
+        // account - no shell, or no channel to spare for one - keeps `.unknown`, which is
+        // what gives every item full capabilities.
         if let live {
             identity = live.identity
             serverProbeResult = live
@@ -339,14 +336,14 @@ public actor LocationRuntime {
         try refreshRootRow(rootAttributes)
         lastTransportError = nil
 
-        // Section 8.1's "Server free space", on the connection that is already here. One
-        // round trip beside the `realpath` and the `lstat` above, so that `status` never
-        // has to make one of its own.
+        // The "server free space" figure `status` prints, taken on the connection that is
+        // already here. One round trip beside the `realpath` and the `lstat` above, so
+        // that `status` never has to make one of its own.
         await refreshFreeSpace()
 
-        // Section 5.5: "the probe tests this once, in the location root". Off the start
-        // path, because it is five round trips and nothing before the first write needs
-        // its answer - `needsPreflight` assumes OpenSSH's refusal until it lands.
+        // The rename-semantics probe runs once, in the location root. Off the start path,
+        // because it is five round trips and nothing before the first write needs its
+        // answer - `needsPreflight` assumes OpenSSH's refusal until it lands.
         let writer = self.writer
         Task.detached { await writer.probeRenameSemantics() }
     }
@@ -355,20 +352,19 @@ public actor LocationRuntime {
     /// it, for `status` and the debug hooks. Nil until the probe has answered.
     public func renameRefusesExistingNames() async -> Bool? { await writer.renameSemantics() }
 
-    /// Runs section 5.5's rename-semantics probe now, or reports the answer it already
-    /// has. `sshdrive debug transport rename-check` is this.
+    /// Runs the rename-semantics probe now, or reports the answer it already has.
+    /// `sshdrive debug transport rename-check` is this.
     public func probeRenameSemantics() async -> Bool { await writer.probeRenameSemantics() }
 
-    /// The canonical root the transport resolved, for the debug hooks and, in
-    /// milestone 3, for `sshdrive show`.
+    /// The canonical root the transport resolved, for `sshdrive show` and the debug hooks.
     public func rootDescription() async throws -> String {
         try await transport.realpath(.root)
     }
 
-    /// The live `SSHBackedTransport`, when there is one. Since milestone 5 a location's
-    /// transport is a `ReconnectingTransport` and the connection behind it comes and goes
-    /// (section 6.3), so everything that used to cast the transport asks here instead and
-    /// answers for "offline" as well as for "fake".
+    /// The live `SSHBackedTransport`, when there is one. A location's transport is a
+    /// `ReconnectingTransport` and the connection behind it comes and goes, so everything
+    /// that wants the connection itself asks here rather than casting the transport, and
+    /// gets nil for "offline" as well as for "fake".
     public func liveConnection() async -> (any LiveConnection)? {
         if let ssh = transport as? any LiveConnection { return ssh }
         if let reconnecting = transport as? ReconnectingTransport {
@@ -406,10 +402,10 @@ public actor LocationRuntime {
         return LocationRuntime.snapshot(from: row)
     }
 
-    /// Section 5.2: "directory listings travel as XPC values, paged for directories with
-    /// tens of thousands of entries". One `readdir` and one reconcile produce the whole
-    /// listing; the pages are cut from it, so a page token is an offset into a listing the
-    /// agent already holds and a second page never re-lists the directory.
+    /// Directory listings travel as XPC values, paged for directories with tens of
+    /// thousands of entries. One `readdir` and one reconcile produce the whole listing;
+    /// the pages are cut from it, so a page token is an offset into a listing the agent
+    /// already holds and a second page never re-lists the directory.
     public static let enumerationPageSize = 2_000
 
     private struct PendingListing {
@@ -422,8 +418,8 @@ public actor LocationRuntime {
     /// after five minutes in case the system abandons an enumeration half way.
     private var pendingListings: [String: PendingListing] = [:]
 
-    /// readdir the mapped path, reconcile with the index, return items (section 5.1).
-    /// Records the folder as recently viewed (section 6.5).
+    /// readdir the mapped path, reconcile with the index, return items. Records the
+    /// folder as recently viewed, which puts it in the root set.
     public func enumerateItems(container identifier: String, pageToken: String?) async throws
         -> (items: [SSHDriveItemSnapshot], nextPageToken: String?)
     {
@@ -469,7 +465,7 @@ public actor LocationRuntime {
     }
 
     /// The same listing, diffed against the index, which is how a folder refreshes when
-    /// Finder shows it (section 5.1).
+    /// Finder shows it.
     public func enumerateChanges(container identifier: String) async throws
         -> (items: [SSHDriveItemSnapshot], deleted: [String])
     {
@@ -486,7 +482,7 @@ public actor LocationRuntime {
         public var items: [SSHDriveItemSnapshot] = []
         public var changed: [SSHDriveItemSnapshot] = []
         public var deleted: [String] = []
-        /// Deletions the mass-deletion guard held rather than reported (section 6.4).
+        /// Deletions the mass-deletion guard held rather than reported.
         public var held: [Data] = []
         /// Holds cleared because the items came back.
         public var released: [Data] = []
@@ -494,8 +490,8 @@ public actor LocationRuntime {
         public init() {}
     }
 
-    /// How many `readlink`s a listing keeps in the air at once: section 6.2's window, the
-    /// same sixteen a transfer and a `readdir` use. It is a window and not a fan-out -
+    /// How many `readlink`s a listing keeps in the air at once: the transport's window,
+    /// the same sixteen a transfer and a `readdir` use. It is a window and not a fan-out -
     /// one more goes out for each answer that lands - so a directory of ten thousand
     /// links costs sixteen requests of channel, not ten thousand.
     public static let readlinkWindow = 16
@@ -503,7 +499,7 @@ public actor LocationRuntime {
     /// The target of every link in one listing, keyed by the link's own path bytes.
     ///
     /// A link whose `readlink` failed is absent, and so is a name that cannot be joined
-    /// to the directory at all; both are what section 5.7 hides. Non-throwing by
+    /// to the directory at all; both are what the symlink policy hides. Non-throwing by
     /// construction: no single link may fail the listing it was found in.
     private func readlinks(
         in directory: RelativePath, entries: [SFTPDirectoryEntry]
@@ -536,18 +532,16 @@ public actor LocationRuntime {
     }
 
     /// One listing, diffed against the index. Every difference becomes a row change and
-    /// an anchor, so the working set carries it to the system whatever else happens
-    /// (section 5.3).
+    /// an anchor, so the working set carries it to the system whatever else happens.
     public func reconcile(directory: RelativePath, containerRow: IndexItem) async throws
         -> ReconcileResult
     {
-        // Section 9.1, "never descend through a link": the container is re-`lstat`ed
-        // before anything is done inside it, because SFTP `opendir` **follows** a symlink.
-        // Without this, a directory replaced on the server by a link to `/etc` after it
-        // was enumerated is read straight through and every name under it gets a row -
-        // measured against the testbed on 2026-09-04, which is what the deferred half of
-        // S3 was for. `lstat` semantics are what keep the index free of any path with a
-        // link as an intermediate component.
+        // Never descend through a link: the container is re-`lstat`ed before anything is
+        // done inside it, because SFTP `opendir` **follows** a symlink. Without this, a
+        // directory replaced on the server by a link to `/etc` after it was enumerated is
+        // read straight through and every name under it gets a row (measured against the
+        // testbed, 2026-09-04). `lstat` semantics are what keep the index free of any path
+        // with a link as an intermediate component.
         let entries: [SFTPDirectoryEntry]
         do {
             if !directory.isRoot {
@@ -566,44 +560,41 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
 
-        // Section 5.5's stale temp files: one carrying this Mac's `<mac8>` that is not
-        // in the in-flight set died with a connection or an agent and is removed as soon
-        // as the agent lists its directory, however new it is; another Mac's is left for
-        // 30 days. This runs before the rows are built, so a temp file never gets one.
+        // Stale temp files: one carrying this Mac's `<mac8>` that is not in the in-flight
+        // set died with a connection or an agent and is removed as soon as the agent lists
+        // its directory, however new it is; another Mac's is left for 30 days. This runs
+        // before the rows are built, so a temp file never gets one.
         await writer.sweepTemporaries(in: directory, entries: entries)
 
-        // Section 5.5's in-flight set: the differ skips paths with an upload in flight,
-        // or our own writes come back as remote changes and the system re-fetches the
-        // file it just wrote.
+        // The in-flight set: the differ skips paths with an upload in flight, or our own
+        // writes come back as remote changes and the system re-fetches what it just wrote.
         let dirty = await writer.inFlightPaths()
 
         // SFTP v3's `readdir` carries attributes but no link target (`SQ-031`), so every
-        // link in the listing costs one `readlink`. Section 5.7 wants the lexical check
-        // "done once per link at enumeration time", and this is that once: the answer is
-        // stored on the row and the extension never repeats it.
+        // link in the listing costs one `readlink`. The lexical containment check is done
+        // once per link at enumeration time, and this is that once: the answer is stored
+        // on the row and the extension never repeats it.
         //
         // They go out **through the transport's window rather than one at a time**: they
-        // are independent requests on one channel, which is the same thing section 6.2
-        // pipelines a transfer with. One at a time, a directory of a thousand links is a
-        // thousand serial round trips - a listing costing the link count times the link
-        // latency. Nothing about the result depends on the order they come back in: each
-        // answer is filed under its own path, and a link whose `readlink` failed is simply
-        // absent from the map, which is what section 5.7 turns into an omitted row. One
-        // failure cannot fail the listing.
+        // are independent requests on one channel, the same pipelining a transfer uses.
+        // One at a time, a directory of a thousand links is a thousand serial round trips
+        // - a listing costing the link count times the link latency. Nothing about the
+        // result depends on the order they come back in: each answer is filed under its
+        // own path, and a link whose `readlink` failed is simply absent from the map,
+        // which becomes an omitted row. One failure cannot fail the listing.
         let targets = await readlinks(in: directory, entries: entries)
 
         var result = ReconcileResult()
         var seenPaths: Set<Data> = []
 
-        // Section 5.4's name rules. "The one already visible in the index keeps its slot",
-        // so the incumbents go in first: without them the shown name would flip every time
-        // a hash-ordered readdir came back in a different order.
+        // The name rules give the slot to the name already visible in the index, so the
+        // incumbents go in first: without them the shown name would flip every time a
+        // hash-ordered readdir came back in a different order.
         var visibleNames: Set<Data> = []
         for child in try index.childKeys(ofParent: containerRow.identifier) where child.hidden == 0 {
             if let last = (try? RelativePath.fromIndexBytes(child.path))?.lastComponent {
@@ -626,10 +617,10 @@ public actor LocationRuntime {
         //
         // Reading the incumbents out here is safe for the same reason the listing is one
         // transaction at all: `LocationRuntime` is an actor, the agent is the index's only
-        // writer (section 3), and there is no `await` between these reads and the
-        // transaction that follows them, so nothing can write a row in between. (The one
-        // writer that is not on this actor is the reconcile walk of section 5.3, and a
-        // listing refuses to run at all while `meta.reconciling` is set.)
+        // writer, and there is no `await` between these reads and the transaction that
+        // follows them, so nothing can write a row in between. (The one writer that is not
+        // on this actor is the reconcile walk against the replica, and a listing refuses
+        // to run at all while `meta.reconciling` is set.)
         //
         // The paths are gathered first so that the incumbent rows can be read on one
         // compiled statement, bound once per path and answered in the order asked. The
@@ -643,7 +634,7 @@ public actor LocationRuntime {
             else { continue }
             seenPaths.insert(childPath.bytes)
             // A path the agent is uploading to right now is skipped whole: its row is
-            // written by the upload's own post-upload `lstat` (section 5.5).
+            // written by the upload's own post-upload `lstat`.
             if dirty.contains(childPath.bytes) { continue }
 
             if classifiedEntry.hidden == 0 {
@@ -695,9 +686,9 @@ public actor LocationRuntime {
 
         // One transaction for the whole listing: a directory with 10,000 entries is
         // 10,000 autocommits otherwise, and that, not the wire, is what a large
-        // enumeration spends its time on (section 5.3). Exactly one, and it holds the
-        // writes and the deletion pass alone: the rule is that a listing is written
-        // atomically, not that everything a listing works out happens under the lock.
+        // enumeration spends its time on. Exactly one, and it holds the writes and the
+        // deletion pass alone: the rule is that a listing is written atomically, not that
+        // everything a listing works out happens under the lock.
         try index.batch {
         // Both write statements are compiled once and held for the whole pass, so the
         // rows and their anchors land interleaved, in listing order, with nothing
@@ -714,7 +705,7 @@ public actor LocationRuntime {
             if !entry.unchanged { try writer.upsert(row) }
 
             // A hidden row holds its name and nothing else: it is never enumerated, and a
-            // create or rename onto it fails `.filenameCollision` (sections 5.4, 5.7).
+            // create or rename onto it fails `.filenameCollision`.
             // The row's own `hidden`, not the name rules': a link whose target leaves the
             // share is judged by `RowBuilder`, after the names have been sorted out.
             guard row.hidden == 0 else {
@@ -737,12 +728,12 @@ public actor LocationRuntime {
         }
         }
 
-        // Deleted rows are deleted: no tombstones (section 5.3) - but a deletion inferred
-        // from a **listing** goes through the mass-deletion guard of section 6.4 first,
-        // which holds a diff that is implausibly large and any deletion of an item the
-        // system lists as pending. A local-only row (`hidden = 3`, a `.DS_Store` Finder
-        // wrote) is outside both rules: it has no remote content by definition, so a
-        // listing that does not mention it is not evidence that it went (section 5.4).
+        // Deleted rows are deleted: no tombstones - but a deletion inferred from a
+        // **listing** goes through the mass-deletion guard first, which holds a diff that
+        // is implausibly large and any deletion of an item the system lists as pending. A
+        // local-only row (`hidden = 3`, a `.DS_Store` Finder wrote) is outside both rules:
+        // it has no remote content by definition, so a listing that does not mention it is
+        // not evidence that it went.
         var missing: [(path: Data, identifier: String)] = []
         var knownNonHidden = 0
         for child in try index.childKeys(ofParent: containerRow.identifier)
@@ -765,11 +756,11 @@ public actor LocationRuntime {
         return result
     }
 
-    /// A directory that is no longer a directory. Every row beneath it is deleted - those
-    /// paths are gone, whatever now sits at the name - and the row itself is rewritten
-    /// from the fresh `lstat`, so the item the system next asks about is the link (or the
-    /// file) that is really there. Section 5.7 decides whether that link is shown at all;
-    /// until milestone 4 it is recorded and the enumeration of it fails.
+    /// A directory that is not a directory any more. Every row beneath it is deleted -
+    /// those paths are gone, whatever now sits at the name - and the row itself is
+    /// rewritten from the fresh `lstat`, so the item the system next asks about is the
+    /// link (or the file) that is really there. The symlink policy decides whether that
+    /// link is shown; the enumeration that found it fails either way.
     private func replaceDirectoryRow(
         _ directory: RelativePath, attributes: SFTPFileAttributes, containerRow: IndexItem
     ) throws {
@@ -790,9 +781,9 @@ public actor LocationRuntime {
     }
 
     /// Builds a finished row. Every derived field - the version formula, the generation
-    /// bump, the two bitmasks, the section 5.7 symlink check - is `RowBuilder`'s, in the
-    /// package, so that none of it lives in the extension (section 5.2) and all of it is
-    /// unit-testable without an app bundle.
+    /// bump, the two bitmasks, the symlink containment check - is `RowBuilder`'s, in the
+    /// package, so that none of it lives in the extension and all of it is unit-testable
+    /// without an app bundle.
     public func makeRow(
         path: RelativePath,
         attributes: SFTPFileAttributes,
@@ -845,14 +836,14 @@ public actor LocationRuntime {
 
     // MARK: Transfers
 
-    /// Download through the file handle the extension opened on its temp file
-    /// (section 5.2), on the bulk channel, under the transfer scheduler of section 6.2.
+    /// Download through the file handle the extension opened on its temp file, on the
+    /// bulk channel, under the transfer scheduler.
     ///
     /// The agent `lstat`s before and after the download; if size or mtime moved in
     /// between, the file changed under the transfer and the download is made again, once,
     /// after which a still-moving file fails the fetch as `.serverUnreachable` so the
-    /// system retries later rather than keeping a torn copy (section 5.1). The item
-    /// returned carries the version the final `lstat` read.
+    /// system retries later rather than keeping a torn copy. The item returned carries the
+    /// version the final `lstat` read.
     public func fetchContents(
         identifier: String, into handle: FileHandle, transferID: String,
         kind: TransferScheduler.Kind = .foreground,
@@ -863,9 +854,9 @@ public actor LocationRuntime {
             range: nil, progress: progress)
     }
 
-    /// `fetchPartialContents`: a range request, for large media (section 5.1). Always a
-    /// foreground transfer (section 6.2), and never re-tried on a moving file: the caller
-    /// asked for a window of a file it is streaming, and a fresh window is one call away.
+    /// `fetchPartialContents`: a range request, for large media. Always a foreground
+    /// transfer, and never re-tried on a moving file: the caller asked for a window of a
+    /// file it is streaming, and a fresh window is one call away.
     public func fetchPartialContents(
         identifier: String, offset: Int64, length: Int64, into handle: FileHandle,
         transferID: String,
@@ -888,10 +879,9 @@ public actor LocationRuntime {
         }
         let path = try RelativePath.fromIndexBytes(row.path)
 
-        // S5's `.noSuchItem` versus `.cannotSynchronize` question, which decides whether
-        // the mass-deletion guard of section 6.4 also has to hold deletions of pending
-        // items. The refusal is raised before anything is read, exactly as the guard
-        // would raise it.
+        // `.noSuchItem` against `.cannotSynchronize`, which is what decides whether the
+        // mass-deletion guard also has to hold deletions of pending items. The refusal is
+        // raised before anything is read, exactly as the guard would raise it.
         switch fetchError {
         case "noSuchItem":
             throw SSHDriveAgentError.noSuchItem.asNSError(
@@ -903,21 +893,20 @@ public actor LocationRuntime {
             break
         }
 
-        // Section 6.4: "While held, opening one of the items fetches from the server and
+        // While a deletion is held, opening one of the items fetches from the server and
         // fails. The failure is reported as `.cannotSynchronize` carrying the ENOENT,
-        // never as `.noSuchItem`" - that error tells the system the item does not exist
-        // and it would remove the item locally while the row, the pin and the hold
-        // remain, which is the half-applied deletion the guard exists to avoid.
+        // never as `.noSuchItem`: that error tells the system the item does not exist and
+        // it would remove the item locally while the row, the pin and the hold remain,
+        // which is the half-applied deletion the guard exists to avoid.
         if (try? index.heldRow(path: row.path)) ?? nil != nil {
             throw SSHDriveAgentError.cannotSynchronize.asNSError(
                 "\"\(path.description)\" is missing on the server. SSH Drive is holding the deletion "
                     + "until it can confirm it; `sshdrive accept-deletions` applies it now.")
         }
 
-        // Section 5.4: a local-only item has no remote content, so a `fetchContents` for
-        // one - after Finder's "Remove Download", or a system-side eviction - returns the
-        // bytes the row kept rather than an empty file that would reset the folder's view
-        // settings.
+        // A local-only item has no remote content, so a `fetchContents` for one - after
+        // Finder's "Remove Download", or a system-side eviction - returns the bytes the
+        // row kept rather than an empty file that would reset the folder's view settings.
         if row.hidden == RowBuilder.hiddenLocalOnly {
             let sink = HandleSink(handle: handle)
             try sink.truncate()
@@ -941,8 +930,8 @@ public actor LocationRuntime {
         let transport = self.transport
         let delay = fetchDelayMilliseconds
         do {
-            // Section 6.2: the transfer waits here, with its XPC call open, until one of
-            // the four slots is free, and is handed its share of the pipelined window.
+            // The transfer waits here, with its XPC call open, until one of the four
+            // slots is free, and is handed its share of the pipelined window.
             let after = try await scheduler.run(transferID: transferID, kind: kind) { window in
                 var attempt = 0
                 while true {
@@ -963,7 +952,7 @@ public actor LocationRuntime {
                     if delay > 0 {
                         // The await is the point: the actor lets every other fetch in
                         // while this one waits, so the count is the system's concurrency
-                        // rather than ours (S6).
+                        // rather than ours.
                         try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
                     }
                     try sink.finish()
@@ -991,9 +980,8 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
     }
@@ -1011,20 +999,19 @@ public actor LocationRuntime {
 
     // MARK: Writing
 
-    /// What a mutation produced, and whether the agent still owes the system an
-    /// eviction. The system **believes whatever version a `modifyItem` reply carries** -
-    /// it records it, never re-fetches and never re-offers (S3, 2026-09-04) - so
-    /// returning the remote item after a conflict copy would leave the replica holding
-    /// the *local* bytes under the *remote* version for ever. The eviction is what makes
-    /// the next open download the remote content, and it has to happen after the reply
-    /// has gone, which is why it travels back to the caller rather than being done here
-    /// (section 5.5).
+    /// What a mutation produced, and whether the agent still owes the system an eviction.
+    /// The system **believes whatever version a `modifyItem` reply carries** - it records
+    /// it, never re-fetches and never re-offers (measured 2026-09-04) - so returning the
+    /// remote item after a conflict copy would leave the replica holding the *local* bytes
+    /// under the *remote* version for ever. The eviction is what makes the next open
+    /// download the remote content, and it has to happen after the reply has gone, which
+    /// is why it travels back to the caller rather than being done here.
     public struct MutationResult {
         public var snapshot: SSHDriveItemSnapshot
         public var evictAfterReply = false
     }
 
-    /// `mkdir`, `symlink`, `.DS_Store`, or the section 5.5 upload: bytes into
+    /// `mkdir`, `symlink`, `.DS_Store`, or an upload: bytes into
     /// `.sshdrive-upload-<mac8>-<uuid>` beside the destination and then a plain,
     /// non-overwriting `rename` into place, with the mode and the modification date set
     /// back afterwards and the row built from the `lstat` that follows.
@@ -1053,14 +1040,14 @@ public actor LocationRuntime {
         let parentRow = try index.item(identifier: parentIdentifier) ?? index.ensureRoot()
         let parentPath = try RelativePath.fromIndexBytes(parentRow.path)
         // Filenames arriving from the system pass through the RelativePath constructor
-        // before anything else sees them (section 9.1).
+        // before anything else sees them.
         let path = try parentPath.appending(component: filename)
         try refuseHiddenName(at: path)
 
         let local = LocalAttributes(xattrs: extendedAttributes ?? [:], tagData: tagData)
 
-        // Section 5.4: a `.DS_Store` succeeds locally and is never uploaded. Finder keeps
-        // working, the server stays clean.
+        // A `.DS_Store` succeeds locally and is never uploaded. Finder keeps working, the
+        // server stays clean.
         if NameVisibility.isDSStore(Data(filename.utf8)) {
             return try swallowLocalOnly(
                 at: path, parent: parentRow, contents: contents, localAttributes: local)
@@ -1072,16 +1059,15 @@ public actor LocationRuntime {
                 try await writer.makeDirectory(path, mode: 0o755)
                 attributes = try await writer.stat(path)
             } else if let symlinkTarget {
-                // Section 5.7: `ln -s` inside the mount arrives here, and an absolute or
-                // escaping target is refused, because the link would be hidden the moment
-                // it was created.
+                // `ln -s` inside the mount arrives here, and an absolute or escaping
+                // target is refused: the link would be hidden the moment it was created.
                 _ = try await writer.makeSymlink(
                     target: symlinkTarget, at: path, roots: symlinkRoots)
                 attributes = try await writer.stat(path)
             } else {
-                // Section 5.5: 0644 for an ordinary file, 0755 when the local one is
-                // executable, as `sftp put` does; the server's umask still applies, which
-                // is why the mode is set back after the rename.
+                // 0644 for an ordinary file, 0755 when the local one is executable, as
+                // `sftp put` does; the server's umask still applies, which is why the mode
+                // is set back after the rename.
                 let mode = LocationRuntime.uploadMode(fileSystemFlags: fileSystemFlags)
                 // A create with no contents is an empty file, which is what Finder's
                 // "New Document" and a shell `touch` both send.
@@ -1104,9 +1090,9 @@ public actor LocationRuntime {
             var row = try makeRow(
                 path: path, attributes: attributes, parent: parentRow, existing: nil,
                 localAttributes: local)
-            // Section 5.3: the inode and ns-mtime a rename gave the path cannot be read
-            // back over SFTP, so they are reset to null after every upload of ours and
-            // the next helper event or GNU sweep records whatever it finds.
+            // The inode and ns-mtime a rename gave the path cannot be read back over
+            // SFTP, so they are reset to null after every upload of ours and the next
+            // helper event or GNU sweep records whatever it finds.
             row.inode = nil
             row.mtimeNanoseconds = nil
             try index.upsert(row)
@@ -1117,24 +1103,23 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
     }
 
-    /// Section 5.5: "0644 for an ordinary file, 0755 when the local file is executable".
+    /// 0644 for an ordinary file, 0755 when the local file is executable.
     public static func uploadMode(fileSystemFlags: UInt64?) -> UInt32 {
         guard let fileSystemFlags else { return 0o644 }
         let flags = ProviderFileSystemFlags(rawValue: UInt(truncatingIfNeeded: fileSystemFlags))
         return flags.contains(.userExecutable) ? 0o755 : 0o644
     }
 
-    /// Section 5.4's `.DS_Store`: a row the agent records as local-only (`hidden = 3`)
-    /// and never uploads, with its bytes in `local_content` so that a `fetchContents` for
-    /// one - after Finder's "Remove Download", or a system-side eviction - returns what
-    /// Finder wrote rather than an empty file that would reset the folder's view settings.
+    /// A `.DS_Store`: a row the agent records as local-only (`hidden = 3`) and never
+    /// uploads, with its bytes in `local_content` so that a `fetchContents` for one -
+    /// after Finder's "Remove Download", or a system-side eviction - returns what Finder
+    /// wrote rather than an empty file that would reset the folder's view settings.
     private func swallowLocalOnly(
         at path: RelativePath, parent: IndexItem, contents: FileHandle?,
         localAttributes: LocalAttributes
@@ -1159,13 +1144,13 @@ public actor LocationRuntime {
         return LocationRuntime.snapshot(from: row)
     }
 
-    /// Rename/move, content, mode, extended attributes and Finder tags (section 5.1).
+    /// Rename/move, content, mode, extended attributes and Finder tags.
     ///
-    /// The content path is section 5.5 end to end: the bytes go to a temp file beside the
-    /// destination, the destination is `lstat`ed immediately before the rename, and a
-    /// size, mtime or generation that moved since the `baseVersion` the system passed us
-    /// makes the temp file - which already holds the local content - a conflict copy
-    /// instead.
+    /// The content path is the write protocol end to end: the bytes go to a temp file
+    /// beside the destination, the destination is `lstat`ed immediately before the rename,
+    /// and a size, mtime or generation that moved since the `baseVersion` the system
+    /// passed us makes the temp file - which already holds the local content - a conflict
+    /// copy instead.
     public func modifyItem(
         identifier: String,
         changedFields: ProviderItemFields,
@@ -1195,15 +1180,15 @@ public actor LocationRuntime {
             tagData=\(newTagData.map { "\($0.count) bytes" } ?? "-", privacy: .public)
             """)
 
-        // The local half first: it is the only half a local-only item has (section 5.4).
+        // The local half first: it is the only half a local-only item has.
         var local = LocalAttributes.decode(row.xattrs)
         if changedFields.contains(.extendedAttributes), let newExtendedAttributes {
             local.xattrs = newExtendedAttributes
         }
         if changedFields.contains(.tagData) {
-            // Section 5.4: tags reach a provider as `tagData`, not as an xattr, and the
-            // system rebuilds the tags xattr from it on every update. Storing nil when the
-            // user clears every tag is the difference between "no tags" and "we forgot".
+            // Tags reach a provider as `tagData`, not as an xattr, and the system rebuilds
+            // the tags xattr from it on every update. Storing nil when the user clears
+            // every tag is the difference between "no tags" and "we forgot".
             local.tagData = newTagData
         }
 
@@ -1224,9 +1209,9 @@ public actor LocationRuntime {
                 let name = newFilename ?? row.filename
                 let destination = try parentPath.appending(component: name)
                 try refuseHiddenName(at: destination)
-                // Section 5.7: a link's target is re-checked from the destination
-                // directory before the move. Allowing the move and then hiding the result
-                // would be a way to plant an escaping link on the server through the mount.
+                // A link's target is re-checked from the destination directory before the
+                // move. Allowing the move and then hiding the result would be a way to
+                // plant an escaping link on the server through the mount.
                 if row.type == "symlink" {
                     let target = try await writer.stat(path).symlinkTarget ?? ""
                     do {
@@ -1236,8 +1221,8 @@ public actor LocationRuntime {
                         throw RemoteWriteError.escapingSymlinkTarget
                     }
                 }
-                // A plain, non-overwriting rename, with the case-only exception of
-                // section 5.5 (section 5.5's `move`).
+                // A plain, non-overwriting rename, with the case-only exception
+                // `RemoteWriter.move` makes.
                 try await writer.move(path, to: destination)
                 try index.rewritePaths(from: path.bytes, to: destination.bytes)
                 row.parent = parentRow.identifier
@@ -1260,8 +1245,8 @@ public actor LocationRuntime {
                     ) { written in progress(written, max(written, 1)) }
                 }
                 if case let .conflicted(copy, copyAttributes, _) = outcome {
-                    // Section 5.5: the conflict copy is a sibling, and it gets a
-                    // working-set anchor of its own so Finder shows it at once.
+                    // The conflict copy is a sibling, and it gets a working-set anchor of
+                    // its own so Finder shows it at once.
                     let parentRow =
                         try index.item(identifier: row.parent ?? IndexWriter.rootIdentifier)
                         ?? index.ensureRoot()
@@ -1277,9 +1262,9 @@ public actor LocationRuntime {
                 }
             }
 
-            // Section 5.4: a `modifyItem` whose changedFields carries `.fileSystemFlags`
-            // - a `chmod +x` inside the mount - sets or clears the execute bits and
-            // re-records the mode. The read and write bits are never changed that way.
+            // A `modifyItem` whose changedFields carries `.fileSystemFlags` - a
+            // `chmod +x` inside the mount - sets or clears the execute bits and re-records
+            // the mode. The read and write bits are never changed that way.
             if changedFields.contains(.fileSystemFlags), let newFileSystemFlags,
                 row.type != "symlink"
             {
@@ -1301,17 +1286,17 @@ public actor LocationRuntime {
                 path: path, attributes: attributes, parent: parentRow, existing: row,
                 localAttributes: local)
             if changedFields.contains(.contents) {
-                // Section 5.3: reset after every upload of ours, conflict or not - the
-                // rename gave the path a new inode either way.
+                // Reset after every upload of ours, conflict or not: the rename gave the
+                // path a new inode either way.
                 updated.inode = nil
                 updated.mtimeNanoseconds = nil
             }
             try index.upsert(updated)
             try index.appendAnchor(identifier: updated.identifier, kind: .modified)
             if frozenMetadata {
-                // S10's control case: reply with the metadata version the item had before
-                // the change. Section 5.3's xattr hash exists so this never happens by
-                // accident, and this fault is how the runbook sees what it costs.
+                // Reply with the metadata version the item had before the change. The
+                // xattr hash in the metadata version exists so this never happens by
+                // accident; the fault is how to see what it costs.
                 var frozen = updated
                 frozen.metadataVersion = row.metadataVersion
                 Log.agent.notice(
@@ -1336,15 +1321,14 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
     }
 
     /// A `.DS_Store` that Finder rewrote. Nothing reaches the server; only the row's
-    /// bytes and its versions move (section 5.4).
+    /// bytes and its versions move.
     private func modifyLocalOnly(
         row: IndexItem, path: RelativePath, contents: FileHandle?,
         localAttributes: LocalAttributes
@@ -1364,10 +1348,10 @@ public actor LocationRuntime {
         return LocationRuntime.snapshot(from: updated)
     }
 
-    /// "Hidden names hold their slot: a create or rename to one of them fails with
-    /// `.filenameCollision`" (section 5.4). Without this the create would succeed on the
-    /// server and the next listing would hide one of the two names again, which reads to
-    /// the user as a file that saved and then vanished.
+    /// Hidden names hold their slot: a create or rename to one of them fails with
+    /// `.filenameCollision`. Without this the create would succeed on the server and the
+    /// next listing would hide one of the two names again, which reads to the user as a
+    /// file that saved and then vanished.
     private func refuseHiddenName(at path: RelativePath) throws {
         guard let existing = try index.item(path: path.bytes), existing.hidden != 0 else { return }
         throw SSHDriveAgentError.filenameCollision.asNSError(
@@ -1375,13 +1359,12 @@ public actor LocationRuntime {
                 ?? "That name already exists on the server under a spelling macOS cannot tell apart.")
     }
 
-    /// Section 5.4: "`sshdrive status` lists hidden names under \"not shown\" with the
-    /// reason, so the user can rename them server-side."
+    /// The hidden names `sshdrive status` lists under "not shown", with the reason, so
+    /// the user can rename them server-side.
     ///
-    /// `status` does not call this any more - it reads the same rows through
-    /// `statusIndex`, off this actor (section 8) - but `debug` and any caller that already
-    /// holds the runtime still can, and the sentence is the same one either way because
-    /// both derive it with `StatusIndexReader.derivedHiddenReason`.
+    /// `status` itself reads the same rows through `statusIndex`, off this actor; this is
+    /// for `debug` and any caller that already holds the runtime. The sentence is the same
+    /// either way, because both derive it with `StatusIndexReader.derivedHiddenReason`.
     public func notShown() throws -> [(path: String, reason: String)] {
         try index.allItems().filter { $0.hidden != 0 }.map { row in
             (
@@ -1397,13 +1380,12 @@ public actor LocationRuntime {
     /// The rest of the row comes from `statusIndex`, which is off this actor entirely. This
     /// is what is left: the channel budget, the probe's identity, the transfer scheduler's
     /// counters, the last error, the hidden-name sentences the row builder recorded, the
-    /// last change-detection cycle, and section 7.2's re-assert counter. None of it touches
-    /// the index and none of it touches the wire.
+    /// last change-detection cycle, and the pin re-assert counter. None of it touches the
+    /// index and none of it touches the wire.
     ///
     /// One call rather than eight because each is a hop onto this actor, and this actor is
     /// where a directory listing's synchronous write transaction runs: eighteen hops per
-    /// location would be eighteen chances to queue behind a listing of a large folder
-    /// (section 8).
+    /// location would be eighteen chances to queue behind a listing of a large folder.
     public struct StatusFacts {
         public var channels: [String: Any] = [:]
         public var identity: [String: Any]?
@@ -1412,7 +1394,7 @@ public actor LocationRuntime {
         public var hiddenReasons: [Data: String] = [:]
         public var lastWatchCycle: [String: Any] = [:]
         public var keptEvictedOutside = 0
-        /// What section 8.1's report would otherwise come back for: the probe the live
+        /// What the capability report would otherwise come back for: the probe the live
         /// connection made, the free-space sentence out of `capabilities.json`, and what
         /// the server let us hold at once.
         public var probe: (probe: ServerProbe.Result, extensions: SFTPServerExtensions)?
@@ -1442,30 +1424,29 @@ public actor LocationRuntime {
         return facts
     }
 
-    /// What the server let us hold at once, and what it cost (section 6.1). `status`
-    /// shows the note.
+    /// What the server let us hold at once, and what it cost. `status` shows the note.
     public func channelReport() -> [String: Any] { channelBudget.asJSON }
 
     public func channelBudgetValue() -> ChannelBudget { channelBudget }
 
-    /// Section 8.1's probe as the live connection found it, plus the SFTP `extensions`
+    /// The capability probe as the live connection found it, plus the SFTP `extensions`
     /// list from the init reply. Nil for a fake location, which has no server to probe.
     public func serverProbe() async -> (probe: ServerProbe.Result, extensions: SFTPServerExtensions)? {
         if let ssh = await liveConnection() { return (ssh.probe, await ssh.extensions) }
         guard isRemoteBacked, let cached = serverProbeResult else { return nil }
         // The recorded set from the last connection, never an empty default: an empty one
         // reads as "this server advertises nothing" and takes four lines of the report
-        // down with it (2026-09-05).
+        // down with it.
         return (cached, CapabilityCache.probe(locationID: location.id)?.extensions ?? [])
     }
 
-    /// `status --probe`: "re-runs the server probe instead of using the cached result"
-    /// (section 8). The channel budget's own cache is left alone - that is what
-    /// `debug transport reprobe` invalidates, and section 6.1 gives it different rules.
+    /// `status --probe` re-runs the server probe instead of using the cached result. The
+    /// channel budget's own cache is left alone - that is what `debug transport reprobe`
+    /// invalidates, and it has rules of its own.
     public func reprobeServer() async {
         guard let ssh = await liveConnection() else { return }
-        // `--probe` is the one command section 8 lets ask the server for something, so it
-        // is also what refreshes the free-space figure the report prints (section 8.1).
+        // `--probe` is the one command allowed to ask the server for something, so it is
+        // also what refreshes the free-space figure the report prints.
         // It is SFTP, not a shell, so it is asked before the exec channel is: an
         // SFTP-only account has no `id` to re-read and still has a disk.
         await refreshFreeSpace()
@@ -1487,11 +1468,11 @@ public actor LocationRuntime {
     }
 
     /// The last error this location saw, for `show` and `status`'s "last error" line, and
-    /// the input to section 4.3's `ssh-keygen -R` advice.
+    /// the input to the `ssh-keygen -R` advice a changed host key earns.
     ///
     /// `ssh`'s own stderr comes first when there is any: a changed host key, a refused
     /// password and a dead key agent are all reported there and nowhere else, and the
-    /// classifier has already read it (section 6.1).
+    /// exit classifier has already read it.
     public func lastErrorText() async -> String? {
         if let master = await liveConnection()?.execMaster {
             let stderr = await master.lastStderr
@@ -1505,17 +1486,17 @@ public actor LocationRuntime {
     public func recordTransportError(_ text: String) { lastTransportError = text }
 
     /// Uploads the agent has in flight. `remove` and a domain-recreating `set` refuse
-    /// while this is non-zero unless `--force` (section 8).
+    /// while this is non-zero unless `--force`.
     public func pendingUploadCount() async -> Int {
         await scheduler.stats().running
     }
 
-    /// `statvfs@openssh.com`, shown in `status` as "server free space" (section 8.1). Not
-    /// a capability level: Finder has no way to display it for a third-party domain.
+    /// `statvfs@openssh.com`, shown in `status` as "server free space". Not a capability
+    /// level: Finder has no way to display it for a third-party domain.
     ///
     /// **Taken at probe time, never by `status`.** A `transport.statvfs` per report would
     /// go through the `ReconnectingTransport`: on a location whose connection is in
-    /// progress the call waits behind section 6.3's attempt for up to the 60 s
+    /// progress the call waits behind the breaker's attempt for up to the 60 s
     /// authentication deadline, and on a location with no attempt at all it *starts* one,
     /// dialling a server the user has not touched. The round trip is spent here instead,
     /// on the connection the probe already has, and `status` reads the cache.
@@ -1541,7 +1522,7 @@ public actor LocationRuntime {
         return space.sentence(now: environment.clock.now())
     }
 
-    /// The identity section 5.4 maps modes against, and how it was found. Nil for a fake
+    /// The identity modes are mapped against, and how it was found. Nil for a fake
     /// location, which has no server to ask.
     public func identityReport() -> [String: Any]? {
         guard isRemoteBacked, let probe = serverProbeResult else { return nil }
@@ -1554,17 +1535,17 @@ public actor LocationRuntime {
         ]
     }
 
-    /// Section 5.5's deletes. A non-empty directory is refused with `.deletionRejected`
-    /// unless the system passed the recursive option; a delete of something already gone
-    /// succeeds; and the recursive walk comes from the server rather than the index,
-    /// because folders Finder never opened have no rows.
+    /// Deletes. A non-empty directory is refused with `.deletionRejected` unless the
+    /// system passed the recursive option; a delete of something already gone succeeds;
+    /// and the recursive walk comes from the server rather than the index, because folders
+    /// Finder never opened have no rows.
     public func deleteItem(identifier: String, recursive: Bool) async throws {
         try refuseWhileReconciling()
         guard let row = try index.item(identifier: identifier) else { return }
         let path = try RelativePath.fromIndexBytes(row.path)
 
         // A local-only item (`hidden = 3`) has no remote content: the row and its bytes
-        // are the whole item (section 5.4).
+        // are the whole item.
         if row.hidden == RowBuilder.hiddenLocalOnly {
             try index.delete(identifier: identifier)
             return
@@ -1578,15 +1559,14 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
 
-        // Deleted rows are deleted, and so is everything beneath them: no tombstones
-        // (section 5.3). Each `delete` writes its own deletion anchor in the same
-        // transaction as the row, and the whole subtree is one outer transaction.
+        // Deleted rows are deleted, and so is everything beneath them: no tombstones.
+        // Each `delete` writes its own deletion anchor in the same transaction as the row,
+        // and the whole subtree is one outer transaction.
         try index.batch {
             for descendant in try index.allItems()
             where descendant.path != path.bytes
@@ -1602,12 +1582,12 @@ public actor LocationRuntime {
 
     public func currentSequence() throws -> Int64 { try index.currentSequence() }
 
-    /// Section 5.3's working-set change stream, answered from the agent's own connection.
+    /// The working-set change stream, answered from the agent's own connection.
     ///
-    /// This is the extension's fallback when its read-only reader cannot answer
-    /// (section 5.2), and it runs the same `IndexChangeStream` query the reader does, so
-    /// the two can never disagree about what changed since an anchor. A reconcile refuses
-    /// it, exactly as it refuses every other enumeration.
+    /// This is the extension's fallback when its read-only reader cannot answer, and it
+    /// runs the same `IndexChangeStream` query the reader does, so the two can never
+    /// disagree about what changed since an anchor. A reconcile refuses it, exactly as it
+    /// refuses every other enumeration.
     public func workingSetChanges(since anchor: Int64, limit: Int = 500) throws
         -> (items: [SSHDriveItemSnapshot], deleted: [String], newAnchor: Int64, hasMore: Bool)
     {
@@ -1621,7 +1601,7 @@ public actor LocationRuntime {
                 deleted.append(entry.identifier)
             case .modified:
                 // An anchor whose identifier no longer has a row is reported as a
-                // deletion: only a deletion removes a row (section 5.3).
+                // deletion: only a deletion removes a row.
                 if let row = try index.item(identifier: entry.identifier) {
                     items.append(row.snapshot)
                 } else {
@@ -1632,8 +1612,8 @@ public actor LocationRuntime {
         return (items, deleted, page.newAnchor, page.hasMore)
     }
 
-    /// Section 5.3's reconcile against the system's replica, run after the domain exists
-    /// so `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can answer. It
+    /// The reconcile against the system's replica, run after the domain exists so
+    /// `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can answer. It
     /// clears `meta.reconciling`, which is what lifts the extension's stall.
     @discardableResult
     public func finishReconcileIfOwed() async -> [String: Any]? {
@@ -1647,17 +1627,17 @@ public actor LocationRuntime {
         return report.asJSON
     }
 
-    /// `sshdrive debug reconcile --force`: sets the flag so the whole of section 5.3's
-    /// recovery path can be exercised on a healthy index.
+    /// `sshdrive debug reconcile --force`: sets the flag so the whole recovery path can
+    /// be exercised on a healthy index.
     public func markReconciling() throws {
         try index.setReconciling(true)
         reconcileOwed = true
     }
 
-    /// "While a reconcile runs, every enumeration and fetch for that domain is answered
-    /// with `.serverUnreachable` by the agent" (section 5.3). Reading a directory the
-    /// system considers stale triggers `enumerateItems`, and an agent with a half-built
-    /// index would mint fresh identifiers for everything in it before the walk arrived.
+    /// While a reconcile runs, every enumeration and fetch for that domain is answered
+    /// with `.serverUnreachable` by the agent. Reading a directory the system considers
+    /// stale triggers `enumerateItems`, and an agent with a half-built index would mint
+    /// fresh identifiers for everything in it before the walk arrived.
     public func refuseWhileReconciling() throws {
         guard index.isReconciling else { return }
         throw SSHDriveAgentError.serverUnreachable.asNSError(
@@ -1666,7 +1646,7 @@ public actor LocationRuntime {
 
     /// The agent treats handing out a fresh working-set anchor exactly as it treats a
     /// reconnect: one full sweep of the root set at once, every difference becoming an
-    /// anchor after the fresh one (section 5.3).
+    /// anchor after the fresh one.
     public func runCatchUpSweep() async throws -> Int {
         guard catchUpSweepEnabled else {
             Log.agent.notice("catch-up sweep is disabled by a debug hook; skipping")
@@ -1694,8 +1674,8 @@ public actor LocationRuntime {
     }
 
     /// Walks the chain to `path`, listing each directory whose child is missing, so every
-    /// ancestor has a row before the pinned one is signalled (section 7.1 step 1). Returns
-    /// the paths of the rows this call created.
+    /// ancestor has a row before the pinned one is signalled (docs/design/pinning.md).
+    /// Returns the paths of the rows this call created.
     @discardableResult
     public func materializeAncestors(of path: RelativePath) async throws -> [String] {
         var created: [String] = []
@@ -1720,10 +1700,10 @@ public actor LocationRuntime {
         return created
     }
 
-    // MARK: Spike hooks (S4, S6)
+    // MARK: Debug hooks
 
     /// The identifier the system knows an item by, given its path. Every File Provider
-    /// call the spikes make (`evictItem`, `getUserVisibleURL`) needs one.
+    /// call a debug hook makes (`evictItem`, `getUserVisibleURL`) needs one.
     public func identifier(forPath pathString: String) throws -> (identifier: String, row: IndexItem) {
         let path = try RelativePath(string: pathString)
         guard let row = try index.item(path: path.bytes) else {
@@ -1734,8 +1714,8 @@ public actor LocationRuntime {
 
     public func row(identifier: String) throws -> IndexItem? { try index.item(identifier: identifier) }
 
-    /// The xattrs the index serves for a row (section 5.4). S4 compares these with what
-    /// `xattr -l` shows in the mount before and after an eviction.
+    /// The xattrs the index serves for a row, for comparing against what `xattr -l` shows
+    /// in the mount before and after an eviction.
     public func servedExtendedAttributes(pathString: String) throws -> [String: String] {
         let (_, row) = try identifier(forPath: pathString)
         var out: [String: String] = [:]
@@ -1790,8 +1770,8 @@ public actor LocationRuntime {
         }
     }
 
-    /// What S6 counts: how many `fetchContents` calls the system keeps open at once,
-    /// which bounds the transfer scheduler's backlog (section 6.2).
+    /// How many `fetchContents` calls the system keeps open at once, which bounds the
+    /// transfer scheduler's backlog.
     public func transferStats(reset: Bool) -> [String: Any] {
         let origin = fetchTimeline.first?.start ?? 0
         let report: [String: Any] = [
@@ -1820,13 +1800,13 @@ public actor LocationRuntime {
         return report
     }
 
-    /// S5's seventh question, in two halves. `forget` deletes the row with its deletion
+    /// Two ways to lie to the system about a row. `forget` deletes it with its deletion
     /// anchor, which is exactly what the extension reports through the working set when a
-    /// listing says an item has gone (section 5.3, no tombstones); `contentVersion` gives
-    /// the row a version the system cannot match, which is what the reconcile walk produces
-    /// for an item with a pending local edit. Neither touches the server: the point is what
-    /// the **system** does with a pending edit when the index says one of those two things.
-    public func rewriteRowForSpike(pathString: String, forget: Bool, contentVersion: String?) async throws
+    /// listing says an item has gone (no tombstones); `contentVersion` gives the row a
+    /// version the system cannot match, which is what the reconcile walk produces for an
+    /// item with a pending local edit. Neither touches the server: the point is what the
+    /// **system** does with a pending edit when the index says one of those two things.
+    public func rewriteRowForDebug(pathString: String, forget: Bool, contentVersion: String?) async throws
         -> [String: Any]
     {
         let path = try RelativePath(string: pathString)
@@ -1847,7 +1827,7 @@ public actor LocationRuntime {
             report["forgotten"] = true
         } else if let contentVersion {
             row.contentVersion = contentVersion
-            row.metadataVersion = contentVersion + "-spike"
+            row.metadataVersion = contentVersion + "-debug"
             try index.upsert(row)
             _ = try index.appendAnchor(identifier: row.identifier, kind: .modified)
             report["contentVersion"] = contentVersion
@@ -1864,8 +1844,7 @@ public actor LocationRuntime {
     }
 
     /// `IndexWriter.observeCompilations`, reachable from a scenario: how `E2`'s cost half
-    /// asserts that a listing compiles a constant number of statements whatever its size
-    /// (section 5.3).
+    /// asserts that a listing compiles a constant number of statements whatever its size.
     public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
         index.observeCompilations(observer)
     }
@@ -1880,7 +1859,7 @@ public actor LocationRuntime {
 
     /// Applies a change to the fake tree as if it had happened on the server, then runs
     /// the sweep so the change reaches the system through the working set, exactly as a
-    /// real remote change would (section 12).
+    /// real remote change would.
     public func applyFakeMutation(_ mutation: FakeMutation) async throws -> Int {
         guard let fake = transport as? FakeTransport else {
             throw SSHDriveAgentError.notImplemented.asNSError(
@@ -1891,9 +1870,8 @@ public actor LocationRuntime {
         } catch let error as SFTPError {
             throw LocationRuntime.mapped(error)
         } catch is CancellationError {
-            // The transfer's own Task was cancelled (section 5.2). Reported as the
-            // transport's `.cancelled` rather than Swift's error, so the extension maps
-            // it like any other.
+            // The transfer's own Task was cancelled. Reported as the transport's
+            // `.cancelled` rather than Swift's error, so the extension maps it like any other.
             throw LocationRuntime.mapped(.cancelled)
         }
         return try await runCatchUpSweep()
@@ -1918,7 +1896,7 @@ public actor LocationRuntime {
     // MARK: Mapping
 
     /// Every SFTP failure classified as network-related becomes serverUnreachable so the
-    /// system queues and retries (section 5.1).
+    /// system queues and retries.
     public static func mapped(_ error: SFTPError) -> NSError {
         switch error {
         case .noSuchFile:
@@ -1938,13 +1916,13 @@ public actor LocationRuntime {
             return SSHDriveAgentError.cannotSynchronize.asNSError("Bad message.")
         case let .failure(message):
             // The wire carries no errno: a collision is confirmed with an lstat and a
-            // full disk with statvfs, both by the caller (section 6.2).
+            // full disk with statvfs, both by the caller.
             return SSHDriveAgentError.cannotSynchronize.asNSError(message)
         }
     }
 
-    /// The writer's own refusals (section 5.5, section 5.7). None of these came off the
-    /// wire: each is the answer to a second question the writer asked.
+    /// The writer's own refusals. None of these came off the wire: each is the answer to
+    /// a second question the writer asked.
     public static func mapped(_ error: RemoteWriteError) -> NSError {
         switch error {
         case let .filenameCollision(name):
@@ -1961,7 +1939,7 @@ public actor LocationRuntime {
 
     public static func snapshot(from row: IndexItem) -> SSHDriveItemSnapshot {
         // The conversion lives on IndexItem so the agent and the extension's own reader
-        // cannot drift apart (section 5.2).
+        // cannot drift apart.
         row.snapshot
     }
 }

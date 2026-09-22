@@ -2,7 +2,7 @@ import Foundation
 import ProviderCore
 import XPCProtocols
 
-/// The user (`docs/testing-architecture.md` section 3.1).
+/// The user (docs/design/testing.md).
 ///
 /// Everything a person does to a mount, expressed as the calls the *system* makes because
 /// of it. Nothing here is our code; it is Finder and the kernel, and every method cites
@@ -45,7 +45,8 @@ public final class Finder {
     // MARK: Writing
 
     /// A new file in the mount. It exists in the replica at once and is offered to the
-    /// provider afterwards, which is why an offline write "just queues" (section 5.6).
+    /// provider afterwards, which is why an offline write just queues
+    /// (docs/design/offline.md).
     ///
     /// `MQ-046`: a `.DS_Store` is kept by the system and **never reaches the extension** -
     /// no `createItem`, no row, and nobody is ever asked to upload it.
@@ -74,7 +75,7 @@ public final class Finder {
         return identifier
     }
 
-    /// `ln -s`. S8: it reaches `createItem` with the target **intact**, the system makes a
+    /// `ln -s`. It reaches `createItem` with the target **intact**, the system makes a
     /// real symlink under CloudStorage (`MQ-076`), and a refusal comes back as the item's
     /// `uploadingError` and nowhere else (`MQ-078`) - `ln -s` itself exits 0.
     @discardableResult
@@ -124,9 +125,9 @@ public final class Finder {
     /// An atomic save - TextEdit's, and the shell's write-a-temp-and-`mv`.
     ///
     /// `MQ-049`: both arrive as **one `modifyItem` on the original item** (`0x289` and
-    /// `0xc1`), with no `createItem` and no `deleteItem`. Without tombstones (section 5.3)
-    /// the other shape would lose a pin or a tag placed on that one file, which is why
-    /// this is a measurement and not a detail.
+    /// `0xc1`), with no `createItem` and no `deleteItem`. With no tombstones in the index
+    /// (docs/design/item-index.md) the other shape would lose a pin or a tag placed on
+    /// that one file, which is why this is a measurement and not a detail.
     @discardableResult
     public func save(_ identifier: ProviderItemIdentifier, size: Int64 = 24) -> Int {
         domain.replica.mutate(identifier) { item in
@@ -251,9 +252,9 @@ public final class Finder {
 
     /// The menu, as `fileproviderctl evaluate` would print it.
     ///
-    /// Two independent halves, which is the whole of section 7.2's division of labour:
-    /// Finder's own two entries follow `isDownloaded` and nothing else (`MQ-053`), and
-    /// ours are decided by the activation rules of the declaration (`MQ-055`).
+    /// Two independent halves (docs/design/pinning.md): Finder's own two entries follow
+    /// `isDownloaded` and nothing else (`MQ-053`), and ours are decided by the activation
+    /// rules of the declaration (`MQ-055`).
     public func contextMenu(
         _ target: Target, actions: [ActionDeclaration] = ActionDeclaration.shipped
     ) -> [MenuEntry] {

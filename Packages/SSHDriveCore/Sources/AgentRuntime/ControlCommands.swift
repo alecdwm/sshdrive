@@ -11,10 +11,10 @@ import ProviderCore
 
 /// Everything the CLI asks the agent to do. The CLI is a pure XPC client: every command
 /// is a request to the agent, so the CLI never touches the network, the keychain or File
-/// Provider (DESIGN.md section 3).
+/// Provider (docs/design/components.md).
 ///
-/// Milestone 1 implements `doctor` and the `debug` group the spikes need. Everything else
-/// in section 8 arrives with the milestone that gives it something to do.
+/// The commands that name a location are forwarded to `LocationCommands`; `doctor`, the
+/// cache and pin commands, the agent's lifecycle and the whole `debug` group are here.
 public enum ControlCommands {
 
     public static func run(
@@ -24,8 +24,8 @@ public enum ControlCommands {
         let environment = manager.environment
         switch command {
         case "add", "show", "remove", "set", "mount", "unmount", "status":
-            // Section 8's user-facing half. `add` and a `set` that re-keys the secrets are
-            // the two that need a terminal, which is what `relay` is (section 4.2).
+            // The user-facing half. `add` and a `set` that re-keys the secrets are the two
+            // that need a terminal, which is what `relay` is.
             return try await LocationCommands.run(
                 command: command, arguments: arguments, relay: relay)
 
@@ -40,16 +40,14 @@ public enum ControlCommands {
 
         case "agent.stop":
             // launchd leaves the agent down until the next mach lookup, which any CLI
-            // command or extension call causes, so stop is a pause, not a disable
-            // (section 8, section 10).
+            // command or extension call causes, so stop is a pause, not a disable.
             //
             // Every location's master and its mux clients go first. Exiting without that
-            // leaves an `ssh -N` per location holding a connection to a server with a
-            // control socket the next start will unlink out from under it
-            // (docs/spikes/results.md, 2026-09-05). The reply is sent before the shutdown
-            // runs - the CLI is waiting on it, and `-O exit` against an unreachable server
-            // can take seconds per location - so `stopping` means "accepted", as it always
-            // did, and the exit still follows.
+            // leaves an `ssh -N` per location holding a connection to a server, with a
+            // control socket the next start will unlink out from under it. The reply is
+            // sent before the shutdown runs - the CLI is waiting on it, and `-O exit`
+            // against an unreachable server can take seconds per location - so `stopping`
+            // means "accepted" and the exit still follows.
             //
             // It is `AgentLifecycle.shutdownAndExit` and not an `exit(0)` of its own: the
             // cask's TERM takes the same path, and one shutdown with one exit status is
@@ -198,23 +196,22 @@ public enum ControlCommands {
                 "identifier": identifier,
                 "contentVersion": row.contentVersion,
                 "metadataVersion": row.metadataVersion,
-                // Section 5.3 hashes exactly the stored blob into the metadata version;
-                // S10's question is whether that is enough to stop the system re-offering
-                // a tag change, so the hash is printed beside the version it feeds.
+                // Exactly the stored blob is hashed into the metadata version, so the
+                // hash is printed beside the version it feeds.
                 "xattrHash": String(ItemDerivation.fnv1a(row.xattrs ?? Data()), radix: 16),
                 "storedBlobBytes": row.xattrs?.count ?? 0,
                 "hidden": row.hidden,
                 "servedExtendedAttributes": try await runtime.servedExtendedAttributes(
                     pathString: path),
                 // Tags never arrive as an xattr: they are the item's own `tagData`
-                // (section 5.4). Printed base64 because the blob is a binary plist.
+                // Printed base64 because the blob is a binary plist.
                 "tagDataBase64": local.tagData?.base64EncodedString() ?? "",
                 "tagDataBytes": local.tagData?.count ?? 0,
             ])
 
         case "debug.fault":
             let runtime = try await resolveRuntime(arguments)
-            // Section 6.3's outage simulation. A VM guest cannot take its host's link
+            // Outage simulation. A VM guest cannot take its host's link
             // down or stop the host's containers, so `--unreachable` and
             // `--transport-hang` are what stand in for those: the first fails every
             // transport call and every connect attempt the way a dead server does, the
@@ -240,9 +237,8 @@ public enum ControlCommands {
             return try json(await runtime.transferStats(reset: false))
 
         case "accept-deletions":
-            // Section 8: "apply deletions the mass-deletion guard is holding". With no
-            // path, everything the location is holding; with one, that path and its
-            // subtree.
+            // Applies deletions the mass-deletion guard is holding. With no path,
+            // everything the location is holding; with one, that path and its subtree.
             let location = try await resolveLocation(arguments)
             let runtime = try await resolveRuntime(arguments)
             let applied = try await runtime.acceptDeletions(pathString: arguments["path"])
@@ -256,9 +252,9 @@ public enum ControlCommands {
             ])
 
         case "evict":
-            // Section 7 step 4: "`sshdrive evict <location> [path]` triggers the same
-            // routine on demand, with `--all` to drop everything cached, which is one
-            // `evictItem` on the root container rather than a walk" (S4, 2026-09-04).
+            // `sshdrive evict <location> [path]` triggers the TTL routine on demand, with
+            // `--all` to drop everything cached, which is one `evictItem` on the root
+            // container rather than a walk.
             let location = try await resolveLocation(arguments)
             _ = try await resolveRuntime(arguments)
             guard let evictor = await AgentCommandContext.manager.evictor(locationID: location.id) else {
@@ -277,7 +273,7 @@ public enum ControlCommands {
             return try json(report)
 
         case "debug.ttl":
-            // Section 7's shortest real TTL is 15 minutes; this is what makes the loop
+            // The shortest real TTL is 15 minutes; this is what makes the loop
             // testable in a runbook. Nothing else about the pass changes.
             let location = try await resolveLocation(arguments)
             _ = try await resolveRuntime(arguments)
@@ -294,8 +290,8 @@ public enum ControlCommands {
             ])
 
         case "pin", "unpin":
-            // Sections 7.1 and 7.1.1. `pin` and `unpin` are statements about the effective
-            // state, never about a marker; which marker that becomes is `PinPolicy`'s.
+            // `pin` and `unpin` are statements about the effective state, never about a
+            // marker; which marker that becomes is `PinPolicy`'s.
             let location = try await resolveLocation(arguments)
             let runtime = try await resolveRuntime(arguments)
             let path = arguments["path"] ?? ""
@@ -305,9 +301,9 @@ public enum ControlCommands {
                 // The anchors are written; this is what makes the system read them.
                 await AgentCommandContext.manager.signalWorkingSet(locationID: location.id)
                 if request == .keep, let identifier = report["identifier"] as? String {
-                    // Section 7.1 step 1's last step, and the one S6 found is not
-                    // optional: without a lookup of the path in the replica the system
-                    // ingests nothing and the eager download never starts.
+                    // The last step of a pin, and not an optional one: without a lookup
+                    // of the path in the replica the system ingests nothing and the eager
+                    // download never starts.
                     report["replicaLookup"] = await environment.replica.lookUpInReplica(
                         locationID: location.id, identifier: identifier)
                 }
@@ -337,9 +333,9 @@ public enum ControlCommands {
             ])
 
         case "debug.watch":
-            // Section 6.4's change detection, driven by hand: one cycle now, a full sweep
-            // now, the loop paused so a spike owns the timing, and the server-clock skew a
-            // container cannot provide (testbed/README.md: containers share the host's
+            // Change detection driven by hand: one cycle now, a full sweep now, the loop
+            // paused so the caller owns the timing, and the server-clock skew a container
+            // cannot provide (testbed/README.md: containers share the host's
             // clock and Docker has no time namespace, so the sweep's own reference is
             // shifted instead and `status` says so).
             let location = try await resolveLocation(arguments)
@@ -371,8 +367,8 @@ public enum ControlCommands {
             return try json(report)
 
         case "debug.roots":
-            // Section 6.5's root set as the index holds it, with the rotation the next
-            // tier 0 cycle would take.
+            // The root set as the index holds it, with the rotation the next tier 0
+            // cycle would take.
             let runtime = try await resolveRuntime(arguments)
             if arguments["refresh"] == "true" {
                 let location = try await resolveLocation(arguments)
@@ -384,7 +380,7 @@ public enum ControlCommands {
             // roots. Only the reason is injected: every one of them is a directory that
             // exists and is really `readdir`ed by the cycle. Materializing a file in each
             // of five thousand directories to get the reason honestly is five thousand
-            // fetches, and what section 6.5's rotation is measured on is the cost of a
+            // fetches, and what the rotation is measured on is the cost of a
             // cycle at that scale, not how the roots got there.
             if let seed = arguments["seed"].flatMap({ Int($0) }) {
                 let added = try await runtime.seedMaterializedRoots(limit: seed)
@@ -412,7 +408,7 @@ public enum ControlCommands {
             ])
 
         case "debug.reconcile":
-            // Section 5.3's walk on demand: `--force` sets `meta.reconciling` first, so
+            // The reconcile walk on demand: `--force` sets `meta.reconciling` first, so
             // the whole recovery path can be exercised without corrupting an index.
             let location = try await resolveLocation(arguments)
             let runtime = try await resolveRuntime(arguments)
@@ -430,9 +426,9 @@ public enum ControlCommands {
             return try json(["held": try await runtime.heldReport()])
 
         case "debug.calls":
-            // Spike S5's journal of the File Provider calls that reached the agent, with
-            // the gap since the previous call of the same kind. Every "how long does the
-            // system wait before calling again" question is read off this.
+            // A journal of the File Provider calls that reached the agent, with the gap
+            // since the previous call of the same kind. Every "how long does the system
+            // wait before calling again" question is read off this.
             let location = try? await resolveLocation(arguments)
             if arguments["reset"] == "true" { CallJournal.shared.reset() }
             return try json(
@@ -440,14 +436,14 @@ public enum ControlCommands {
                     domain: location?.id, limit: Int(arguments["limit"] ?? "") ?? 200))
 
         case "debug.row":
-            // S5's working-set questions: forget a row (an item reported deleted) or give
+            // The working-set edge cases: forget a row (an item reported deleted) or give
             // it a content version the system cannot match (what the reconcile walk
             // produces for a pending item).
             let runtime = try await resolveRuntime(arguments)
             guard let path = arguments["path"] else {
                 throw SSHDriveAgentError.notImplemented.asNSError("debug.row needs a path.")
             }
-            let report = try await runtime.rewriteRowForSpike(
+            let report = try await runtime.rewriteRowForDebug(
                 pathString: path, forget: arguments["forget"] == "true",
                 contentVersion: arguments["contentVersion"])
             let location = try await resolveLocation(arguments)
@@ -455,8 +451,8 @@ public enum ControlCommands {
             return try json(report)
 
         case "debug.breaker":
-            // Section 6.3's breaker, as the agent holds it: state, backoff, the counters,
-            // and section 4.2's re-arm flags. `--drop` runs `-O exit` on the master
+            // The breaker, as the agent holds it: state, backoff, the counters, and the
+            // authentication-deadline re-arm flags. `--drop` runs `-O exit` on the master
             // without touching config, which is "the connection died" without a `kill`;
             // `--reset` is the `sshdrive test` reset; `--connect` clears a stop the way
             // `test` does and attempts once.
@@ -475,7 +471,7 @@ public enum ControlCommands {
 
         case "debug.power":
             // `pmset sleepnow` is the real path; this is what a machine that will not
-            // honour it uses instead, and it drives the same two handlers (section 6.1).
+            // honour it uses instead, and it drives the same two handlers.
             switch arguments["event"] ?? "" {
             case "will-sleep":
                 await AgentCommandContext.manager.willSleep()
@@ -498,15 +494,15 @@ public enum ControlCommands {
             }
 
         case "debug.presence":
-            // Section 4.2's presence test, exactly as the re-arm reads it.
+            // The presence test, exactly as the re-arm reads it.
             return try json([
                 "presence": PresenceOverride.report(environment.presence),
                 "screen": environment.screenLock.report,
             ])
 
         case "debug.rearm":
-            // The screen-unlock trigger of section 4.2, driven by hand because a headless
-            // VM has no screen to unlock. `--request` drives the other trigger.
+            // The screen-unlock trigger, driven by hand because a headless VM has no
+            // screen to unlock. `--request` drives the other trigger.
             let location = try await resolveLocation(arguments)
             if arguments["request"] == "true" {
                 guard let gate = await AgentCommandContext.manager.gate(locationID: location.id) else {
@@ -531,7 +527,7 @@ public enum ControlCommands {
         case "debug.reader":
             // The extension's read-only reader, from the outside: what it last told us in
             // its state file, and a switch that makes the agent answer `indexReady` no for
-            // a while so the readiness race of section 5.2 can be reproduced on purpose.
+            // a while so the reader's readiness race can be reproduced on purpose.
             let location = try await resolveLocation(arguments)
             if let seconds = arguments["notReady"].flatMap(Double.init) {
                 ForcedNotReady.shared.set(domainIdentifier: location.id, seconds: seconds)
@@ -571,12 +567,11 @@ public enum ControlCommands {
             return try await AgentSecretsDebug.run(arguments, manager: manager)
 
         case "debug.domain.rename":
-            // Spike S9 (section 11): does `NSFileProviderManager.add(domain)` with an
-            // existing identifier and a new displayName rename the domain in place,
-            // keeping the cache and the pending uploads? `add` is the only call there is -
-            // there is no `rename` on NSFileProviderManager - so the experiment is to make
-            // it with the same identifier and see what the system does. Nothing is removed
-            // first, deliberately: that is the whole question.
+            // `NSFileProviderManager.add(domain)` with an existing identifier and a new
+            // displayName renames the domain in place, keeping the cache and the pending
+            // uploads. `add` is the only call there is - there is no `rename` on
+            // NSFileProviderManager. Nothing is removed first, deliberately: removing the
+            // domain is what would throw the cache away.
             let location = try await resolveLocation(arguments)
             guard let display = arguments["displayName"], !display.isEmpty else {
                 throw SSHDriveAgentError.notImplemented.asNSError(
@@ -601,8 +596,8 @@ public enum ControlCommands {
         case "debug.signal":
             let location = try await resolveLocation(arguments)
             if arguments["errorResolved"] == "true" {
-                // Section 5.6's first half on its own, so S5 can say whether it is what
-                // wakes the flush or whether the working-set signal is doing the work.
+                // The error-resolved signal on its own. It is what wakes a queued write;
+                // the working-set signal does not.
                 await AgentCommandContext.manager.signalErrorResolved(locationID: location.id)
                 return try json(["signalled": location.id, "container": "errorResolved"])
             }
@@ -611,7 +606,7 @@ public enum ControlCommands {
                 return try json(["signalled": location.id, "container": "workingSet"])
             }
             // A container's own enumerator, which is what makes the system list a folder
-            // it has never listed (S6, s6-3).
+            // it has never listed.
             let runtime = try await resolveRuntime(arguments)
             let (identifier, _) = try await runtime.identifier(forPath: container)
             let itemIdentifier =
@@ -664,7 +659,7 @@ public enum ControlCommands {
             remedy: inApplications
                 ? nil : "Move SSH Drive.app to /Applications, or install it with the Homebrew cask.")
 
-        // macOS version. Minimum is 14 (section 2).
+        // macOS version. Minimum is 14.
         let version = environment.bundle.operatingSystemVersion
         check(
             "macOS version", version.major >= 14,
@@ -697,7 +692,7 @@ public enum ControlCommands {
         // cause of that check failing. LaunchServices will not register the plugins of a
         // quarantined bundle that has never been assessed through a user-visible launch:
         // the agent runs (launchd starts it directly) while the appex does not exist as
-        // far as the system is concerned (section 10; measured 2026-09-05).
+        // far as the system is concerned (measured 2026-09-05).
         let quarantineValue = environment.bundle.quarantineValue(atPath: bundleURL.path)
         check(
             "quarantine", quarantineValue == nil,
@@ -717,22 +712,22 @@ public enum ControlCommands {
                     + "does not survive the next launch. See the \"quarantine\" check above."
                 : nil)
 
-        // What the extension's own read-only index reader last said about itself
-        // (section 5.2). The extension is sandboxed, short-lived and not running most of
-        // the time, so it writes its state into the group container and this is where it
-        // is read back. A reader that is not `ready` is not on its own a fault - every
-        // read falls back to the agent - but it is the difference between a mount that is
-        // slow and a mount that is silent, and it was invisible before 2026-09-08.
+        // What the extension's own read-only index reader last said about itself. The
+        // extension is sandboxed, short-lived and not running most of the time, so it
+        // writes its state into the group container and this is where it is read back. A
+        // reader that is not `ready` is not on its own a fault - every read falls back to
+        // the agent - but it is the difference between a mount that is slow and a mount
+        // that is silent.
         for line in await readerStates() {
             check(
                 "index reader (\(line.name))", line.ok, line.detail, remedy: line.remedy)
         }
 
-        // The ssh binary, always /usr/bin/ssh by absolute path (section 6.1).
+        // The ssh binary, always /usr/bin/ssh by absolute path.
         let sshVersion = SSHProcess.sshVersion()
         check("ssh", sshVersion != nil, sshVersion ?? "cannot run \(SSHProcess.sshBinaryPath)")
 
-        // Section 4.1: a config written for a newer Homebrew OpenSSH may use a keyword
+        // A config written for a newer Homebrew OpenSSH may use a keyword
         // Apple's build rejects, and `ssh -G` then fails with `Bad configuration option`.
         // Resolving a name nothing can match exercises every `Host *` and `Include` block
         // without naming anybody's server.
@@ -744,7 +739,7 @@ public enum ControlCommands {
                 : "/usr/bin/ssh is Apple's build; a keyword only a newer OpenSSH understands "
                     + "will do this. Guard it with `Match exec` or remove it.")
 
-        // Section 6.1's orphan sweep, reported rather than run: `doctor` is a diagnosis,
+        // The orphan socket sweep, reported rather than run: `doctor` is a diagnosis,
         // and adopting or killing a master while a location is mounted would be a repair
         // nobody asked for.
         let sockets = ControlSocket.existingSockets()
@@ -761,10 +756,10 @@ public enum ControlCommands {
             remedy: orphans.isEmpty
                 ? nil
                 : "A crashed agent leaves its `ssh -N` children behind. "
-                    + "`sshdrive agent restart` sweeps them (section 6.1).")
+                    + "`sshdrive agent restart` sweeps them.")
 
-        // The keychain, from the only process that has `keychain-access-groups`
-        // (section 3.1). Reachability, not contents: nothing here reads a secret.
+        // The keychain, from the only process that has `keychain-access-groups`.
+        // Reachability, not contents: nothing here reads a secret.
         let keychain = environment.keychain.reachability()
         check(
             "keychain", keychain.ok, keychain.detail,
@@ -777,7 +772,7 @@ public enum ControlCommands {
                     + "for a different Developer ID certificate does not count. Passwords "
                     + "and key passphrases are all that stop working. See docs/release.md.")
 
-        // The login shell snapshot (section 6.1): `PATH` and `SSH_AUTH_SOCK` as a fresh
+        // The login shell snapshot: `PATH` and `SSH_AUTH_SOCK` as a fresh
         // login shell has them, which is what makes a key agent socket exported from
         // `.zshrc` and a `ProxyCommand` in /opt/homebrew/bin work from launchd.
         let snapshot = await AgentSSHEnvironment.shared.current()
@@ -814,7 +809,7 @@ public enum ControlCommands {
     }
 
     /// `ssh -G` against a name no config can match, so every `Host *` block and every
-    /// `Include` is parsed but nothing is resolved to a real server (section 4.1).
+    /// `Include` is parsed but nothing is resolved to a real server.
     private static func sshConfigParse() -> (ok: Bool, detail: String) {
         let probe = "sshdrive-doctor-nonexistent.invalid"
         guard let result = try? Spawn.capture(
@@ -824,7 +819,7 @@ public enum ControlCommands {
         else { return (false, "could not run \(SSHProcess.sshBinaryPath) -G") }
         // `ssh -G` also prints notes about the session shape it would have used, which
         // say nothing about the config parsing and which the agent overrides anyway
-        // (section 6.1). Only the parse diagnostics are a `doctor` finding.
+        // Only the parse diagnostics are a `doctor` finding.
         let stderr = String(decoding: result.stderr, as: UTF8.self)
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -836,9 +831,8 @@ public enum ControlCommands {
         return (false, stderr.isEmpty ? "ssh -G exited \(result.exit.status)" : stderr)
     }
 
-    /// The control sockets of locations that are actually up, so the orphan count in
     /// One line per location, from the `reader-state.json` the File Provider extension
-    /// writes into the group container (section 5.2).
+    /// writes into the group container.
     private struct ReaderStateLine {
         var name: String
         var ok: Bool?
@@ -949,7 +943,7 @@ public enum ControlCommands {
     }
 
     /// Creates a location backed by the in-memory tree and adds its domain, so the File
-    /// Provider half can be exercised before a byte of SSH exists (section 12).
+    /// Provider half can be exercised with no server and no SSH.
     private static func addFakeLocation(_ arguments: [String: String]) async throws -> Data {
         guard let name = arguments["name"] else {
             throw SSHDriveAgentError.unknownDomain.asNSError("debug.fake.add needs a name.")
@@ -981,7 +975,7 @@ public enum ControlCommands {
         return try json([
             "id": created.id, "name": created.displayName, "files": fileCount,
             "testingModes": arguments["testingModes"] ?? "",
-            "mountHint": "~/Library/CloudStorage (the exact name is what spike S3 records)",
+            "mountHint": "~/Library/CloudStorage",
         ])
     }
 
@@ -1092,7 +1086,7 @@ public enum ControlCommands {
                         "capabilities": row.capabilities,
                         "fsFlags": row.fileSystemFlags,
                         "hidden": row.hidden,
-                        // Section 5.7: the Mac-side target after the relative rewrite, as
+                        // The Mac-side target after the relative rewrite, as
                         // the extension will serve it. Empty for anything but a link that
                         // passed the lexical check.
                         "linkTarget": row.linkTarget.map {
@@ -1104,15 +1098,15 @@ public enum ControlCommands {
         }
     }
 
-    /// S1(d2): one `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete` round trip in
-    /// the data-protection keychain under the shared access group, from the
-    /// launchd-started agent. This is the only process that has `keychain-access-groups`
-    /// (section 3.1), and the entitlement is restricted, so it only works from a bundle
-    /// that embeds a provisioning profile. The real store arrives in milestone 2; this
-    /// hook exists so the spike can prove the entitlement is live before then.
+    /// One `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete` round trip in the
+    /// data-protection keychain under the shared access group, from the launchd-started
+    /// agent. This is the only process that has `keychain-access-groups`, and the
+    /// entitlement is restricted, so it only works from a bundle that embeds a
+    /// provisioning profile. The hook proves the entitlement is live without touching a
+    /// real secret.
     private static func keychainRoundTrip(_ arguments: [String: String]) throws -> Data {
-        let account = arguments["key"] ?? "spike:s1d2"
-        let value = arguments["value"] ?? "spike-\(UUID().uuidString)"
+        let account = arguments["key"] ?? "debug:keychain"
+        let value = arguments["value"] ?? "debug-\(UUID().uuidString)"
         return try json(
             AgentCommandContext.manager.environment.keychain.roundTrip(
                 account: account, value: value))

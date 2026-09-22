@@ -7,7 +7,7 @@ import ProviderCore
 import SFTP
 @testable import ServerModel
 
-/// Suite L over the SFTP **wire** (`docs/testing-architecture.md` section 5): the two name
+/// Suite L over the SFTP **wire** (`docs/design/testing.md`): the two name
 /// and attribute rules whose ground truth is what the server really has in a directory and
 /// what its `lstat` really says.
 ///
@@ -33,9 +33,10 @@ final class NamesAndAttributesScenarios: XCTestCase {
     /// The server is byte-exact and case-sensitive; the replica is neither. A collision
     /// arriving from the server is renamed by the system **on its replica only**, silently,
     /// with no `modifyItem` back to us (`MQ-016`), so the user would see a name the server
-    /// does not have and a write to it would land somewhere else. Section 5.4's rule is
-    /// therefore that one name is shown and the other is recorded `hidden = 2` with a
-    /// reason: the one already visible in the index keeps its slot, and among newcomers the
+    /// does not have and a write to it would land somewhere else. The rule
+    /// (docs/design/names-and-attributes.md) is therefore that one name is shown and the
+    /// other is recorded `hidden = 2` with a reason: the one already visible in the index
+    /// keeps its slot, and among newcomers the
     /// byte-wise lowest wins, because `readdir` order is not stable across polls and the
     /// visible name must not flip from one cycle to the next.
     ///
@@ -60,7 +61,8 @@ final class NamesAndAttributesScenarios: XCTestCase {
         XCTAssertEqual(hidden.hidden, NameVisibility.hiddenCollision)
         XCTAssertTrue(
             hidden.reason.contains("cannot tell it from \"Makefile\""),
-            "section 5.4: `status` prints the reason so the user can rename one server-side: \(hidden.reason)")
+            "docs/design/names-and-attributes.md: `status` prints the reason so the "
+                + "user can rename one server-side: \(hidden.reason)")
 
         // And once a name is visible it keeps its slot, whatever byte order says. Without
         // this the shown name would flip every time a hash-ordered readdir came back in a
@@ -132,9 +134,10 @@ final class NamesAndAttributesScenarios: XCTestCase {
     /// **L8** (`MQ-047`) - a `0666` file inside a `0555` directory derives `caps 65` and
     /// `fsFlags 2`, and the write never leaves the Mac.
     ///
-    /// Section 5.5: replacing a file's content goes through a temp file **in its
-    /// directory**, so a file the account can write inside a directory it cannot is not
-    /// saveable through SSH Drive at all. Section 5.4 therefore takes `allowsWriting` off
+    /// docs/design/writes.md: replacing a file's content goes through a temp file **in
+    /// its directory**, so a file the account can write inside a directory it cannot is
+    /// not saveable through SSH Drive at all. docs/design/names-and-attributes.md
+    /// therefore takes `allowsWriting` off
     /// such a file rather than letting the save fail at upload time: `capabilities` becomes
     /// `allowsReading | allowsEvicting` = 65, and `fileSystemFlags` becomes `userReadable`
     /// = 2 - no `userWritable`, and no `userExecutable`, since a mode of 0666 carries no
@@ -166,7 +169,7 @@ final class NamesAndAttributesScenarios: XCTestCase {
             "L8: allowsReading | allowsEvicting - no writing, renaming, deleting or reparenting")
         XCTAssertEqual(
             locked.capabilities, [.allowsReading, .allowsEvicting],
-            "section 5.5: a temp file in the directory is what a save needs")
+            "docs/design/writes.md: a temp file in the directory is what a save needs")
         XCTAssertEqual(locked.flags.rawValue, 2, "L8: userReadable and nothing else")
         XCTAssertFalse(locked.flags.contains(.userWritable))
         XCTAssertFalse(

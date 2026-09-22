@@ -1,6 +1,6 @@
 import Foundation
 
-/// A script for an exec channel (DESIGN.md section 9.2).
+/// A script for an exec channel (docs/design/security.md).
 ///
 /// The command line is constant: every exec channel runs exactly `sh -s`, so nothing from
 /// the user, the config or the server ever reaches the account's login shell, which may be
@@ -15,18 +15,19 @@ public struct RemoteScript: Sendable, Equatable {
     /// POSIX `sh`, and only what a `dash` or busybox `sh` also parses.
     public let body: String
     /// When set, the body is started in the background with `</dev/null` under the
-    /// heartbeat wrapper of section 6.4, so nothing we start outlives the connection.
+    /// heartbeat wrapper (docs/design/change-detection.md), so nothing we start outlives
+    /// the connection.
     public let heartbeat: HeartbeatSettings?
     /// An absolute FIFO path, for the one child that has to be *fed* as well as watched.
     ///
-    /// Section 9.2 says background children never share the script's stdin - `find` and
-    /// the helper are started `</dev/null` so they cannot swallow the heartbeat lines -
-    /// and section 6.4 tier 2 says the helper is "fed the root set" on its stdin and
-    /// "exits after 60 s without" a ping. Both cannot be the channel's stdin, and only one
-    /// process may read a pipe. So the wrapper stays the only reader and relays every line
-    /// it reads into this FIFO, which the child is given as its stdin. Nothing else uses
-    /// it, and a server where `mkfifo` fails runs the child `</dev/null` exactly as before
-    /// (2026-09-05, section 13).
+    /// Background children never share the script's stdin (docs/design/security.md):
+    /// `find` and the helper are started `</dev/null` so they cannot swallow the
+    /// heartbeat lines. The helper is also fed its root set on stdin and exits after 60 s
+    /// without a ping (docs/design/change-detection.md). Both cannot be the channel's
+    /// stdin, and only one process may read a pipe. So the wrapper stays the only reader
+    /// and relays every line it reads into this FIFO, which the child is given as its
+    /// stdin. Nothing else uses it, and a server where `mkfifo` fails runs the child
+    /// `</dev/null` instead.
     public let stdinRelay: String?
 
     public struct HeartbeatSettings: Sendable, Equatable {
@@ -64,7 +65,7 @@ public struct RemoteScript: Sendable, Equatable {
     ///
     /// The whole script is one brace group ending in an `exit`. That is not decoration:
     /// `sh -s` reads its script from the same stdin the heartbeat lines arrive on, and
-    /// dash reads that stdin in blocks (§9.2). Left as a flat sequence of commands, a
+    /// dash reads that stdin in blocks. Left as a flat sequence of commands, a
     /// script longer than dash's read block has its tail still sitting in the pipe when
     /// the wrapper's reader starts consuming stdin - the reader eats the rest of the
     /// script, and dash then reads a heartbeat line as a command. `.` is a POSIX *special*
@@ -72,7 +73,7 @@ public struct RemoteScript: Sendable, Equatable {
     /// channel dies about ten seconds in. A compound command must be parsed in full before
     /// any of it runs, so the group forces dash to read the script to its end first, and
     /// the `exit` inside it stops the shell ever reading stdin as script again. Measured
-    /// against `deb` on 2026-09-04.
+    /// against `deb`, 2026-09-04.
     public var text: String {
         var lines: [String] = []
         // The sentinel first, in its own printf so the NUL cannot swallow a leading hex
@@ -92,8 +93,9 @@ public struct RemoteScript: Sendable, Equatable {
 
     public var data: Data { Data(text.utf8) }
 
-    /// The section 6.4 wrapper: start the child in the background with its stdin from
-    /// `/dev/null`, so it cannot swallow the heartbeat lines, then read stdin; when no
+    /// The heartbeat wrapper (docs/design/change-detection.md): start the child in the
+    /// background with its stdin from `/dev/null`, so it cannot swallow the heartbeat
+    /// lines, then read stdin; when no
     /// line has arrived for the timeout, or stdin hits EOF, kill the child and exit.
     ///
     /// Two branches because `read -t` exists in bash, zsh, ksh and busybox and not in
@@ -111,10 +113,10 @@ public struct RemoteScript: Sendable, Equatable {
     /// **The group is named `-$$`, never `0`.** `kill … 0` means "whatever process group
     /// I happen to be in", and not every SSH server gives a session one of its own:
     /// Tailscale SSH runs every session in `tailscaled`'s process group, shared with
-    /// every other session of every other client. There `kill -TERM 0` killed the
-    /// account's other sessions and the connection carrying them, which is what the
-    /// helper's exec channel exiting 255 fifteen seconds after `ready` actually was
-    /// (2026-09-08). `-$$` names *the group this shell leads*: identical to `0` where
+    /// every other session of every other client. There `kill -TERM 0` kills the
+    /// account's other sessions and the connection carrying them, and the helper's exec
+    /// channel exits 255 fifteen seconds after `ready` (measured on `ts-ssh`,
+    /// 2026-09-08). `-$$` names *the group this shell leads*: identical to `0` where
     /// sshd gave us one, and `ESRCH` where it did not, because a process group's id is
     /// the pid of its leader and our own pid leads no group then. The child and its
     /// direct children are signalled by pid either way, so the tier 2 guarantee - the
@@ -125,7 +127,7 @@ public struct RemoteScript: Sendable, Equatable {
         // only other part is our own hex. Quoting it turned the path into a literal
         // `${TMPDIR:-/tmp}/…`, and a redirection failure on `:` - a POSIX *special*
         // builtin - makes a non-interactive `dash` exit on the spot, which took the
-        // whole wrapper down and left the child running (measured 2026-09-04).
+        // whole wrapper down and leaves the child running (measured 2026-09-04).
         let stamp = "${TMPDIR:-/tmp}/sshdrive-hb-\(sentinel.short).$$"
         let fallback = "/tmp/sshdrive-hb-\(sentinel.short).$$"
         var lines: [String] = [
@@ -145,7 +147,7 @@ public struct RemoteScript: Sendable, Equatable {
             // the moment it finishes, the watchdog sees it gone on its first tick and
             // kills the child about five seconds in - the wrapper killing its own healthy
             // child, which looks exactly like the failure it exists to prevent. Measured
-            // against `deb` on 2026-09-04.
+            // against `deb`, 2026-09-04.
             "trap - EXIT",
             body,
             stdinRelay == nil
@@ -171,7 +173,7 @@ public struct RemoteScript: Sendable, Equatable {
             // /dev/null. The reader then sees EOF at once, deletes the stamp, and the
             // watchdog kills a perfectly healthy child on its first tick - the wrapper
             // killing the thing it exists to protect. Duplicating stdin in the *parent*
-            // is what survives the fork. Measured against `deb` on 2026-09-04.
+            // is what survives the fork. Measured against `deb`, 2026-09-04.
             "  exec 7<&0",
             "  ( trap - EXIT; while IFS= read -r __sd_line; do touch \"$__sd_stamp\" 2>/dev/null; \(relayWrite) done <&7; rm -f \"$__sd_stamp\" ) &",
             "  __sd_misses=0",
@@ -219,7 +221,7 @@ public struct RemoteScript: Sendable, Equatable {
             // A server whose helper directory cannot hold a FIFO - some NAS filesystems,
             // and any of them mounted oddly - is not a failure: the child then runs with
             // no stdin at all and the wrapper is its only kill switch, which is what
-            // section 9.2 gives every other remote command.
+            // every other remote command gets (docs/design/security.md).
             "if mkfifo \"$__sd_relay\" 2>/dev/null; then",
             "  \(RemoteScript.relayFlagVariable)=1",
             "  __sd_stdin=\"$__sd_relay\"",

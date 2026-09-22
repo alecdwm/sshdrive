@@ -1,12 +1,13 @@
 import Foundation
 
-/// The `[user@]host[:port]` sugar `sshdrive add` accepts (DESIGN.md sections 4, 8).
+/// The `[user@]host[:port]` sugar `sshdrive add` accepts (docs/design/locations.md,
+/// docs/design/cli.md).
 ///
 /// `ssh` itself does not parse this form - `ssh -G alec@10.0.0.1:2222` resolves the host
 /// to the literal `10.0.0.1:2222` - so the parts are split here and stored as the
-/// location's own overrides, which reach `ssh` as `-o User=` and `-o Port=` (section 6.1).
-/// The host may equally be a `~/.ssh/config` alias, which is the whole point of section
-/// 4.1: an alias is passed through untouched so its host block still applies.
+/// location's own overrides, which reach `ssh` as `-o User=` and `-o Port=`
+/// (docs/design/ssh.md). The host may equally be a `~/.ssh/config` alias, which is passed
+/// through untouched so its host block still applies (docs/design/locations.md).
 public struct LocationDestination: Equatable, Sendable {
     public var user: String?
     public var host: String
@@ -89,11 +90,7 @@ public struct LocationDestination: Equatable, Sendable {
     }
 }
 
-/// The keys `sshdrive set <name> <key> <value>` takes (DESIGN.md section 8).
-///
-/// Milestone 3 implements every one of them except the two whose machinery arrives later
-/// (`watch-mode` and `helper` are section 6.4's, milestones 6 and 9), which are still
-/// stored so the value survives to the milestone that reads it.
+/// The keys `sshdrive set <name> <key> <value>` takes (docs/design/cli.md).
 public enum LocationSettingKey: String, CaseIterable, Sendable {
     case nickname
     case cacheTTL = "cache-ttl"
@@ -107,25 +104,25 @@ public enum LocationSettingKey: String, CaseIterable, Sendable {
     case permissions
     case createCheck = "create-check"
 
-    /// "remote-path re-creates the domain … so it is refused while uploads are pending and
-    /// warns that the cache is dropped otherwise" (section 8). A new root invalidates every
-    /// path in the index, so there is nothing to keep.
+    /// `remote-path` re-creates the domain, so it is refused while uploads are pending
+    /// and warns that the cache is dropped otherwise (docs/design/cli.md). A new root
+    /// invalidates every path in the index, so there is nothing to keep.
     ///
-    /// **Nickname no longer does.** S9 asked whether `NSFileProviderManager.add(domain)`
-    /// with an identifier the system already holds and a new `displayName` renames the
-    /// domain in place, and it does (2026-09-05): the mount directory is renamed under
-    /// `~/Library/CloudStorage`, the materialized set is untouched, no file is re-fetched,
-    /// and an upload the system was holding is still pending afterwards and still flushes.
-    /// So a nickname change is `renamesDomainInPlace`, costs nothing, and is not refused.
+    /// A nickname does not: `NSFileProviderManager.add(domain)` with an identifier the
+    /// system already holds and a new `displayName` renames the domain in place. The mount
+    /// directory is renamed under `~/Library/CloudStorage`, the materialized set is
+    /// untouched, no file is re-fetched, and an upload the system was holding is still
+    /// pending afterwards and still flushes (measured on macOS 26.4, 2026-09-05). So a
+    /// nickname change is `renamesDomainInPlace`, costs nothing, and is not refused.
     public var recreatesDomain: Bool { self == .remotePath }
 
-    /// The nickname is the domain's `displayName` (section 4), and changing it is one
-    /// `add(domain)` on the same identifier (S9, 2026-09-05).
+    /// The nickname is the domain's `displayName` (docs/design/locations.md), and
+    /// changing it is one `add(domain)` on the same identifier.
     public var renamesDomainInPlace: Bool { self == .nickname }
 
-    /// "host, user, port and identity change what the stored secrets are keyed on or which
-    /// key is offered, so they re-run the collect connection exactly as passwd does"
-    /// (section 8, section 4.2).
+    /// host, user, port and identity change what the stored secrets are keyed on or which
+    /// key is offered, so they re-run the collect connection exactly as `passwd` does
+    /// (docs/design/cli.md, docs/design/secrets.md).
     public var requiresCollectConnection: Bool {
         switch self {
         case .host, .user, .port, .identity: return true
@@ -133,7 +130,7 @@ public enum LocationSettingKey: String, CaseIterable, Sendable {
         }
     }
 
-    /// A new root invalidates every path in the index (section 8).
+    /// A new root invalidates every path in the index (docs/design/cli.md).
     public var dropsIndex: Bool { self == .remotePath }
 
     public static var allNames: String {
@@ -215,9 +212,9 @@ extension LocationSettingKey {
                     key: rawValue, value: value, expected: "a path to a key file")
             }
             location.identityFile = path
-            // Section 4: `--identity` means the override plus `IdentitiesOnly=yes`, so the
-            // named key is the only one offered and a touch key in `~/.ssh` never gets its
-            // turn ahead of it (section 4.2).
+            // `--identity` means the override plus `IdentitiesOnly=yes`, so the named
+            // key is the only one offered and a touch key in `~/.ssh` never gets its turn
+            // ahead of it (docs/design/locations.md, docs/design/secrets.md).
             if !location.sshOptions.contains("IdentitiesOnly=yes") {
                 location.sshOptions += ["-o", "IdentitiesOnly=yes"]
             }

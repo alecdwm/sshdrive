@@ -4,15 +4,14 @@ import Foundation
 ///
 /// This is what an exec channel is, once the sentinel has been stripped: the child `ssh`
 /// process's stdin and stdout, and it is also exactly what an SFTP channel is
-/// (`ssh $MUX -s <host> sftp`), so the SFTP wire client of DESIGN.md section 6.2 sits on
+/// (`ssh $MUX -s <host> sftp`), so the SFTP wire client (docs/design/sftp.md) sits on
 /// this same protocol rather than a second one of its own: `SFTP` depends on
-/// `SSHProcess`, which is the side that produces a channel. `SFTP`'s own
-/// `SFTPByteStream` was merged into this on 2026-09-04.
+/// `SSHProcess`, which is the side that produces a channel.
 ///
 /// `read` returning an empty `Data` means end of stream. Every read takes a deadline,
 /// without exception: the `deb-shells` `bashbg` account leaves a background child holding
 /// stdout, so EOF simply never arrives, and a read that waits for it hangs for ever
-/// (testbed README, section 9.2).
+/// (testbed/README.md, docs/design/security.md).
 public protocol ByteStream: AnyObject, Sendable {
     /// Up to `count` bytes, or fewer. Empty means EOF. Throws `.readTimedOut` at `deadline`.
     func read(upTo count: Int, deadline: Date) async throws -> Data
@@ -50,7 +49,7 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
     private var writeFD: Int32
     /// A condition rather than a plain lock, because the reader thread has to be able to
     /// wait: the buffer is bounded, and the bound is the backpressure that stops a 1 GB
-    /// SFTP transfer outrunning the parser into memory (section 6.2).
+    /// SFTP transfer outrunning the parser into memory (docs/design/sftp.md).
     private let lock = NSCondition()
     private let bufferLimit: Int
     private var buffer: [UInt8] = []
@@ -259,10 +258,10 @@ public final class PipeByteStream: ByteStream, @unchecked Sendable {
 
 public extension ByteStream {
     /// The deadline-free spelling the SFTP client uses. It applies a deadline per
-    /// *request* and not per read (section 6.2): one dead read would otherwise have to
-    /// stand in for every request waiting behind it, and the client's own sweeper is what
-    /// decides which request missed. Every other caller passes a real deadline, because
-    /// EOF is not a reliable end (`bashbg`, testbed README).
+    /// *request* and not per read (docs/design/sftp.md): one dead read would otherwise
+    /// have to stand in for every request waiting behind it, and the client's own sweeper
+    /// is what decides which request missed. Every other caller passes a real deadline,
+    /// because EOF is not a reliable end (`bashbg`, testbed/README.md).
     func read(upTo count: Int) async throws -> Data {
         try await read(upTo: count, deadline: .distantFuture)
     }

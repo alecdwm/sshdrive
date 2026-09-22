@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.4's tier 1 invocations and section 9.2's rule that nothing from the
-/// user is ever in the script text.
+/// The tier 1 sweep invocations (docs/design/change-detection.md) and the rule that
+/// nothing from the user is ever in the script text (docs/design/security.md).
 final class SweepPlanTests: XCTestCase {
 
     private func plan(shallow: [String] = ["a"], recursive: [String] = [], excluded: [String] = [],
@@ -17,9 +17,9 @@ final class SweepPlanTests: XCTestCase {
     // MARK: Batching
 
     func testRootsAreBatchedAtTheSixtyFourKilobyteArgvBudget() {
-        // Section 6.4: "each is run in batches of at most 64 KB of root arguments, since
-        // the roots reach find as its argv and a few thousand materialized roots would
-        // otherwise brush a kernel's argument limit."
+        // docs/design/change-detection.md: "each is run in batches of at most 64 KB of
+        // root arguments, since the roots reach find as its argv and a few thousand
+        // materialized roots would otherwise brush a kernel's argument limit."
         let roots = (0..<2000).map { String(repeating: "d", count: 99) + "\($0)" }
         let batches = plan(shallow: roots).batches
         XCTAssertGreaterThan(batches.count, 1)
@@ -61,7 +61,7 @@ final class SweepPlanTests: XCTestCase {
         XCTAssertFalse(body.contains("-xdev"))
     }
 
-    func testTheGnuPrintfStringIsByteForByteWhatSectionSixFourStates() {
+    func testTheGnuPrintfStringIsByteForByteWhatTheDesignSpecifies() {
         XCTAssertEqual(SweepPlan.gnuPrintfFormat, #"%p\0%y\0%s\0%T@\0%i\0%m\0%U\0%G\0"#)
         let plan = self.plan(flavour: .gnu, takesCmin: true, takesPrintf: true)
         XCTAssertTrue(plan.usesPrintf)
@@ -79,8 +79,8 @@ final class SweepPlanTests: XCTestCase {
     }
 
     func testBusyboxTakesMminAndPrintZero() {
-        // Section 6.4: "busybox has no -cmin at all ... BusyBox v1.36.1 as shipped by
-        // current Alpine answers `find: unrecognized: -cmin`".
+        // docs/design/change-detection.md: "busybox has no -cmin at all ... BusyBox
+        // v1.36.1 as shipped by current Alpine answers `find: unrecognized: -cmin`".
         let plan = self.plan(flavour: .busybox, takesCmin: false, takesPrintf: false, windowMinutes: 7)
         XCTAssertFalse(plan.usesCmin)
         let body = plan.script().body
@@ -104,8 +104,8 @@ final class SweepPlanTests: XCTestCase {
     }
 
     func testAnUnboundedWindowDropsTheTimeTestEntirely() {
-        // Section 6.4's full sweep with no stored server timestamp: every file under the
-        // roots is reported.
+        // A full sweep with no stored server timestamp (docs/design/change-detection.md):
+        // every file under the roots is reported.
         let body = plan(windowMinutes: nil).script().body
         XCTAssertFalse(body.contains("-cmin"))
         XCTAssertFalse(body.contains("-mmin"))
@@ -115,9 +115,9 @@ final class SweepPlanTests: XCTestCase {
     // MARK: Exclusions
 
     func testGlobEscapingOfTheFourCharactersPathTreatsSpecially() {
-        // Section 6.4: "-path takes a glob, so *, ?, [ and \ in an excluded path are
-        // backslash-escaped before the pattern is embedded: `-path 't/[x]'` does not match
-        // a directory named `[x]`".
+        // docs/design/change-detection.md: "-path takes a glob, so *, ?, [ and \ in an
+        // excluded path are backslash-escaped before the pattern is embedded:
+        // `-path 't/[x]'` does not match a directory named `[x]`".
         XCTAssertEqual(SweepPlan.escapeGlob("t/[x]"), #"t/\[x]"#)
         XCTAssertEqual(SweepPlan.escapeGlob("a*b"), #"a\*b"#)
         XCTAssertEqual(SweepPlan.escapeGlob("a?b"), #"a\?b"#)
@@ -151,11 +151,11 @@ final class SweepPlanTests: XCTestCase {
         XCTAssertFalse(body.contains("__sd_x"))
     }
 
-    // MARK: Section 9.2 - nothing from the user is in the body
+    // MARK: docs/design/security.md - nothing from the user is in the body
 
     func testARootIsNeverEmbeddedInTheBodyHoweverItIsSpelled() {
-        // Section 9.2: "a directory on a shared NAS named `$(rm -rf ~)` must never reach
-        // that shell". It reaches find through `set --` as "$@" and nowhere else.
+        // docs/design/security.md: "a directory on a shared NAS named `$(rm -rf ~)` must
+        // never reach that shell". It reaches find through `set --` as "$@" and nowhere else.
         let nasty = "$(rm -rf ~)"
         let newline = "two\nlines"
         let quote = "it's"
@@ -179,14 +179,14 @@ final class SweepPlanTests: XCTestCase {
     // MARK: The server's clock, and surviving one bad root
 
     func testTheServersOwnClockIsPrintedBeforeAnyFindRuns() {
-        // Section 6.4: "N is computed from the server's clock, never the Mac's: every
-        // sweep script prints `date +%s` first."
+        // docs/design/change-detection.md: "N is computed from the server's clock, never
+        // the Mac's: every sweep script prints `date +%s` first."
         let body = plan().script().body
         guard let date = body.range(of: "date +%s"), let find = body.range(of: "find \"$@\"") else {
             return XCTFail("expected both a date and a find")
         }
         XCTAssertLessThan(date.lowerBound, find.lowerBound)
-        // NUL-delimited, never newline-delimited (section 9.2).
+        // NUL-delimited, never newline-delimited (docs/design/security.md).
         XCTAssertTrue(body.contains(#"printf '\000'"#))
     }
 
@@ -198,8 +198,9 @@ final class SweepPlanTests: XCTestCase {
     }
 }
 
-/// DESIGN.md section 6.4's window arithmetic. It lives here rather than in a file of its
-/// own because the window is one field of the plan and the two are always read together.
+/// The sweep window arithmetic (docs/design/change-detection.md). It lives here rather
+/// than in a file of its own because the window is one field of the plan and the two are
+/// always read together.
 final class SweepWindowTests: XCTestCase {
 
     func testNoStoredStampIsUnbounded() {

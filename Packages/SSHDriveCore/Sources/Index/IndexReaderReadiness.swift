@@ -1,22 +1,22 @@
 import Foundation
 
 /// Whether the File Provider extension's read-only index reader may be used, as a value
-/// (DESIGN.md section 5.2).
+/// (docs/design/extension.md).
 ///
-/// It is a type of its own, and clock-injected, because the rule it encodes is the one
-/// that failed on 2026-09-08: readiness used to be a `Bool` set once, in the extension
-/// instance's `init`, from one `indexReady` round trip. The agent answers no for any
-/// location whose runtime is not up yet - a domain restart, an upgrade handover, an index
-/// mid-restore - and a `false` then held for the whole life of that instance, with nothing
-/// anywhere that would ask again. The working set is the one enumeration the extension
-/// answers from the reader, so that instance answered every working-set change enumeration
-/// `.serverUnreachable`; fileproviderd throttles a change enumeration that keeps failing,
-/// and a run of them takes the domain's event stream out to tens of minutes. The mount
-/// then takes no server-side change at all while every other path - listings, `item(for:)`,
-/// uploads - keeps working, which is exactly what makes it hard to see.
+/// It is a type of its own, and clock-injected, because "not ready" is a window and not a
+/// verdict. The agent answers no for any location whose runtime is not up yet - a domain
+/// restart, an upgrade handover, an index mid-restore. A `Bool` set once in the extension
+/// instance's `init`, from a single `indexReady` round trip, would hold that `false` for
+/// the whole life of the instance with nothing anywhere to ask again. The working set is
+/// the one enumeration the extension answers from the reader, so the instance would answer
+/// every working-set change enumeration `.serverUnreachable`; fileproviderd throttles a
+/// change enumeration that keeps failing, and a run of them takes the domain's event stream
+/// out to tens of minutes. The mount then takes no server-side change at all while every
+/// other path - listings, `item(for:)`, uploads - keeps working, which is what makes it
+/// hard to see.
 ///
-/// So: "not ready" is a window, not a verdict. Every read that meets one asks again, no
-/// more often than `retryInterval`, and the caller has somewhere else to go meanwhile.
+/// So every read that meets a "not ready" asks again, no more often than `retryInterval`,
+/// and the caller has somewhere else to go meanwhile.
 public struct IndexReaderReadiness: Equatable, Sendable {
     public enum State: String, Equatable, Sendable {
         /// No answer yet. Reads go to the agent and one is asked for.

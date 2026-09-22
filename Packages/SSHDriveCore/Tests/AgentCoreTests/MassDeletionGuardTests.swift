@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.4's mass-deletion guard, both halves of it.
+/// The mass-deletion guard (docs/design/change-detection.md), both halves of it.
 final class MassDeletionGuardTests: XCTestCase {
 
     private func path(_ text: String) -> Data { Data(text.utf8) }
@@ -86,7 +86,7 @@ final class MassDeletionGuardTests: XCTestCase {
     // MARK: Pending items
 
     func testASinglePendingItemIsHeldOnItsOwn() {
-        // S5, 2026-09-04: a pending edit on an item reported deleted comes back as a
+        // A pending edit on an item reported deleted comes back as a
         // createItem, is answered .filenameCollision because the path is still there, and
         // the system retries a collided create for ever with no alert. So the size test is
         // not consulted at all for a pending item.
@@ -174,12 +174,12 @@ final class MassDeletionGuardTests: XCTestCase {
         let decision = MassDeletionGuard.evaluate(
             input(directory: "Pictures/2024/Photos", known: 200, missing: missing,
                   pending: Set(missing)))
-        // Section 8: "14 deletions held in Photos".
+        // The status line's wording (docs/design/cli.md): "14 deletions held in Photos".
         XCTAssertEqual(decision.reason, "14 deletions held in Photos")
         XCTAssertEqual(decision.hold.count, 14)
     }
 
-    func testTheConstantsAreTheOnesSectionSixFourStates() {
+    func testTheConstantsAreTheDocumentedThresholds() {
         XCTAssertEqual(MassDeletionGuard.minimumCount, 20)
         XCTAssertEqual(MassDeletionGuard.fractionNumerator, 1)
         XCTAssertEqual(MassDeletionGuard.fractionDenominator, 2)
@@ -190,7 +190,7 @@ final class MassDeletionGuardTests: XCTestCase {
     /// A listing infers the deletion of a directory, not of the file inside it. An
     /// `rm -rf Photos` on the server is one missing path, `Photos`, while the pending edit
     /// is on `Photos/2026/note.txt`; matching exactly would let the directory through and
-    /// strand the save inside it, which is the case S5 measured (2026-09-04).
+    /// strand the save inside it.
     func testADirectoryWhoseDescendantIsPendingIsHeld() {
         let decision = MassDeletionGuard.evaluate(
             MassDeletionGuard.Input(

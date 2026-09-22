@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-/// `PATH` and `SSH_AUTH_SOCK` as the user's login shell has them (DESIGN.md section 6.1).
+/// `PATH` and `SSH_AUTH_SOCK` as the user's login shell has them (docs/design/ssh.md).
 ///
 /// A launchd agent's `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin` and its `SSH_AUTH_SOCK` is
 /// the system `ssh-agent`'s, so a 1Password or Secretive socket exported from `.zshrc`,
@@ -70,8 +70,8 @@ public enum LoginShellSnapshotReader {
     ///
     /// The NULs are printed by their own `printf` rather than embedded in the sentinel's
     /// format string. `printf "\0<sentinel>"` reads `\0` plus the following octal digits
-    /// as one character, so a sentinel beginning with a digit loses its first bytes —
-    /// measured on macOS 26.4, see section 13.
+    /// as one character, so a sentinel beginning with a digit loses its first bytes.
+    /// Measured on macOS 26.4, 2026-09-04.
     public static func snapshotCommand(sentinel: Sentinel) -> String {
         let printf = "/usr/bin/printf"
         let nul = "\(printf) '\\000'"

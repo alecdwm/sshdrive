@@ -3,7 +3,7 @@ import XCTest
 
 @testable import Logging
 
-/// The logging facade (docs/testing-architecture.md section 8, step 1).
+/// The logging facade (docs/design/testing.md).
 ///
 /// These tests run on Darwin and on Linux. Anything asserted about *content* goes through an
 /// `SSHDriveLogger` the test constructs, because that is the one backend both platforms have:
@@ -121,7 +121,7 @@ final class LogFacadeTests: XCTestCase {
 
     /// The Darwin defaults, reproduced: a string is `.auto` and redacts, a number and a `Bool`
     /// are public. Every call site in this repo says `privacy: .public` for exactly that
-    /// reason (DESIGN.md section 9).
+    /// reason (docs/design/security.md).
     func testPrivacyRedactsTheWayTheUnifiedLogDoes() {
         LogCapture.capturing { capture in
             let log = logger()
@@ -258,11 +258,11 @@ final class LogFacadeTests: XCTestCase {
 
     // MARK: - The identifiers `sshdrive logs` matches on
 
-    /// DESIGN.md section 3.1's subsystem and categories, which the `logs` predicates and every
-    /// spike runbook are written against. `os.Logger` will not give a category back, so the
-    /// constants are asserted instead - and, where the loggers are ours, that they were built
-    /// from them.
-    func testTheSubsystemAndCategoriesAreTheOnesSectionThreeOneFixes() {
+    /// The subsystem and categories (docs/design/components.md), which the `logs`
+    /// predicates are written against. `os.Logger` will not give a category back, so the
+    /// constants are asserted instead - and, where the loggers are ours, that they were
+    /// built from them.
+    func testSubsystemAndCategoryConstantsMatchTheLogsPredicates() {
         XCTAssertEqual(Log.subsystem, "org.shirls.sshdrive")
         XCTAssertEqual(Log.Category.all, ["extension", "agent", "cli", "sftp", "ssh"])
         XCTAssertEqual(Log.Category.extensionLog, "extension")

@@ -1,13 +1,15 @@
 import Foundation
 
-/// One hit from a tier 1 sweep (DESIGN.md section 6.4).
+/// One hit from a tier 1 sweep (docs/design/change-detection.md).
 ///
 /// Everything but `path` is nil on a `-print0` sweep, which is BSD and busybox: there the
 /// agent `stat`s each path over SFTP, one round trip each. On GNU the `-printf` record
-/// carries the whole of section 5.3's version inputs and no round trip is needed.
+/// carries every version input the index needs (docs/design/item-index.md) and no round
+/// trip is needed.
 public struct SweepHit: Equatable, Sendable {
-    /// Raw server bytes, exactly as `find` printed them. Never a `String`: a name need not
-    /// be valid UTF-8 (section 5.4) and may contain a newline (section 9.2).
+    /// Raw server bytes, exactly as `find` printed them. Never a `String`: a name need not be
+    /// valid UTF-8 (docs/design/names-and-attributes.md) and may contain a newline
+    /// (docs/design/security.md).
     public var path: Data
     /// `%y`: "d" or "f". Nil on a `-print0` sweep.
     public var type: String?
@@ -43,7 +45,8 @@ public struct SweepHit: Equatable, Sendable {
     }
 }
 
-/// Reads what `SweepPlan`'s script printed (DESIGN.md sections 6.4 and 9.2).
+/// Reads what `SweepPlan`'s script printed (docs/design/change-detection.md,
+/// docs/design/security.md).
 ///
 /// The stream is NUL-delimited and is parsed as bytes from end to end. It is never split
 /// on newlines: a filename may contain one, and a parser that split on them would turn one
@@ -55,9 +58,9 @@ public enum SweepParser {
 
     /// Parses one sweep's output.
     ///
-    /// The first NUL-delimited record is the server's `date +%s`, which the agent stores
-    /// only once the results have been applied to the index (section 6.4). Everything
-    /// after it is either bare paths or eight-field records.
+    /// The first NUL-delimited record is the server's `date +%s`, which the agent stores only
+    /// once the results have been applied to the index (docs/design/change-detection.md).
+    /// Everything after it is either bare paths or eight-field records.
     ///
     /// A trailing partial record - the stream was cut, the channel died, the wrapper's
     /// heartbeat ran out mid-walk - is dropped rather than guessed. Half a record would

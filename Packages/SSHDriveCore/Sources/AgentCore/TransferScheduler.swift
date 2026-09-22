@@ -2,9 +2,9 @@ import Foundation
 import SFTP
 import Logging
 
-/// DESIGN.md section 6.2's transfer scheduler.
+/// The transfer scheduler (docs/design/sftp.md).
 ///
-/// "Transfers are scheduled, not queued." Every transfer of a location runs on the bulk
+/// Transfers are scheduled, not queued. Every transfer of a location runs on the bulk
 /// channel, and SFTP requests are independent per handle, so transfers interleave: the
 /// agent runs at most **four** at once per location, splits the pipelined window between
 /// them, and holds the rest with their XPC calls open.
@@ -16,7 +16,7 @@ import Logging
 /// and anything else the system issues on its own - starts only while no foreground
 /// transfer is waiting, and a running one is never pre-empted.
 ///
-/// The queue is bounded by the six-fetch ceiling S6 measured (2026-09-04, macOS 26.4: 38
+/// The queue is bounded by a six-fetch ceiling (measured on macOS 26.4, 2026-09-04: 38
 /// transfers ran in strict batches of six): four running plus at most two waiting is
 /// everything the agent ever holds. A seventh arrival is not refused - refusing a request
 /// the system did make would fail a user's open for a ceiling that is an observation, not
@@ -24,7 +24,7 @@ import Logging
 /// shows if the observation ever stops holding.
 public actor TransferScheduler {
 
-    /// Which of section 6.2's two classes a transfer belongs to, plus the metadata class
+    /// Which of the two classes a transfer belongs to, plus the metadata class
     /// that only exists on a `MaxSessions 2` location, where the same scheduler runs on
     /// the metadata channel and metadata requests are served ahead of both.
     public enum Kind: Sendable {
@@ -47,12 +47,12 @@ public actor TransferScheduler {
         public var windowShare = 0
     }
 
-    /// Section 6.2: at most four at once per location.
+    /// At most four at once per location.
     public static let maximumRunning = 4
-    /// S6's ceiling: four running plus at most two waiting.
+    /// The ceiling: four running plus at most two waiting.
     public static let ceiling = 6
-    /// The client's own pipeline depth (section 6.2). The share is this divided between
-    /// the running transfers, never below two, so a fourth transfer still pipelines.
+    /// The client's own pipeline depth (docs/design/sftp.md). The share is this divided
+    /// between the running transfers, never below two, so a fourth transfer still pipelines.
     public static let pipelineDepth = 16
 
     private struct Waiter {
@@ -64,7 +64,7 @@ public actor TransferScheduler {
     private let locationID: String
     /// Set on a `MaxSessions 2` location: transfers share the metadata channel, so their
     /// share of the pipeline is halved to leave the channel's request slots free for the
-    /// metadata calls that are served ahead of them (section 6.2).
+    /// metadata calls that are served ahead of them (docs/design/sftp.md).
     private var sharesMetadataChannel: Bool
 
     private var waiting: [Waiter] = []
@@ -123,8 +123,9 @@ public actor TransferScheduler {
         let share = windowShare
         let box = ResultBox<T>()
         // The Task is what `cancel(transferID:)` reaches: cancelling it makes every
-        // SFTP request the transfer has not yet sent throw `.cancelled` (section 5.2,
-        // section 6.2), and the transport removes any temp file it had started.
+        // SFTP request the transfer has not yet sent throw `.cancelled`
+        // (docs/design/extension.md, docs/design/sftp.md), and the transport removes any
+        // temp file it had started.
         // Detached on purpose: a plain `Task {}` inside an actor inherits that actor's
         // executor, and four transfers would then run one after another on the
         // scheduler itself rather than interleaving on the bulk channel.
@@ -132,10 +133,10 @@ public actor TransferScheduler {
             do {
                 box.set(.success(try await body(share)))
             } catch is CancellationError {
-                // Whatever inside the transfer noticed the cancel first - the wire
-                // client, or a `Task.sleep` in a deadline race - the caller is owed the
-                // transport's own error, not Swift's, because that is what the extension
-                // maps to an `NSFileProviderError` (sections 5.2, 6.2).
+                // Whatever inside the transfer noticed the cancel first - the wire client, or
+                // a `Task.sleep` in a deadline race - the caller is owed the transport's own
+                // error, not Swift's, because that is what the extension maps to an
+                // `NSFileProviderError` (docs/design/extension.md, docs/design/sftp.md).
                 box.set(.failure(SFTPError.cancelled))
             } catch {
                 box.set(.failure(error))
@@ -148,9 +149,9 @@ public actor TransferScheduler {
         return try result.get()
     }
 
-    /// Cancelling the extension's `Progress`, or its connection going away (section 5.2).
-    /// A transfer still waiting is dropped from the queue; a running one has its Task
-    /// cancelled and abandons its SFTP requests.
+    /// Cancelling the extension's `Progress`, or its connection going away
+    /// (docs/design/extension.md). A transfer still waiting is dropped from the queue; a
+    /// running one has its Task cancelled and abandons its SFTP requests.
     public func cancel(transferID: String) {
         statistics.cancelled += 1
         if let index = waiting.firstIndex(where: { $0.transferID == transferID }) {
@@ -220,7 +221,7 @@ public actor TransferScheduler {
     private func pump() {
         while running.count < TransferScheduler.maximumRunning, !waiting.isEmpty {
             // Foreground first; a background waiter is only reached when there is no
-            // foreground waiter at all, which is exactly section 6.2's rule.
+            // foreground waiter at all, which is exactly the rule.
             let index = waiting.firstIndex(where: { $0.kind == .foreground })
                 ?? waiting.firstIndex(where: { $0.kind == .background })
             guard let index else { return }

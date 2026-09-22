@@ -1,7 +1,8 @@
 import Foundation
 
 /// The item types File Provider has a place for. Sockets, FIFOs and device nodes that a
-/// readdir reports are never enumerated and never get a row (DESIGN.md section 5.4).
+/// readdir reports are never enumerated and never get a row
+/// (docs/design/names-and-attributes.md).
 public enum SFTPFileType: String, Sendable, Codable {
     case file
     case directory
@@ -11,7 +12,7 @@ public enum SFTPFileType: String, Sendable, Codable {
 }
 
 /// What an SFTP v3 lstat gives us, plus the two fields only the helper or a GNU sweep
-/// can report (DESIGN.md section 5.3). `mtimeNanoseconds` and `inode` are nil when
+/// can report (docs/design/item-index.md). `mtimeNanoseconds` and `inode` are nil when
 /// unknown, and nil means "record whatever comes next without comparing".
 public struct SFTPFileAttributes: Sendable, Equatable {
     public var type: SFTPFileType
@@ -24,7 +25,7 @@ public struct SFTPFileAttributes: Sendable, Equatable {
     public var mtimeNanoseconds: Int64?
     public var inode: UInt64?
     /// The raw target string of a symlink, exactly as the server gave it. Never joined
-    /// to a remote path or resolved on the server (section 9.1).
+    /// to a remote path or resolved on the server (docs/design/security.md).
     public var symlinkTarget: String?
 
     public init(
@@ -62,7 +63,8 @@ public struct SFTPDirectoryEntry: Sendable, Equatable {
 }
 
 /// The reply to statvfs@openssh.com, which is how a full or over-quota filesystem is
-/// told apart from any other bare FAILURE (DESIGN.md sections 5.1, 6.2).
+/// told apart from any other bare FAILURE (docs/design/extension.md,
+/// docs/design/sftp.md).
 public struct SFTPFilesystemStats: Sendable, Equatable {
     public var blockSize: UInt64
     public var totalBlocks: UInt64
@@ -85,7 +87,8 @@ public struct SFTPFilesystemStats: Sendable, Equatable {
 }
 
 /// Which OpenSSH extensions the server offered. Every server-dependent feature has a
-/// fallback, and `sshdrive status` shows the tier each feature runs at (section 8.1).
+/// fallback, and `sshdrive status` shows the tier each feature runs at
+/// (docs/design/cli.md).
 public struct SFTPServerExtensions: OptionSet, Sendable {
     public let rawValue: UInt32
     public init(rawValue: UInt32) { self.rawValue = rawValue }
@@ -97,9 +100,9 @@ public struct SFTPServerExtensions: OptionSet, Sendable {
     public static let lsetstat = SFTPServerExtensions(rawValue: 1 << 4)
 }
 
-/// The `extensions` list from the SFTP init reply, as section 8.1 shows it and as
-/// `capabilities.json` stores it. One place, so the wire, the report and the cache agree -
-/// a name that round-trips wrongly here silently costs a feature a level (2026-09-05).
+/// The `extensions` list from the SFTP init reply, as `sshdrive status` shows it and as
+/// `capabilities.json` stores it. One place, so the wire, the report and the cache agree:
+/// a name that round-trips wrongly here silently costs a feature a level.
 public enum SFTPExtensionNames {
     public static let table: [(SFTPServerExtensions, String)] = [
         (.posixRename, "posix-rename@openssh.com"),
@@ -120,7 +123,7 @@ public enum SFTPExtensionNames {
     }
 }
 
-/// The error classes the wire can actually carry (DESIGN.md section 6.2). OpenSSH's
+/// The error classes the wire can actually carry (docs/design/sftp.md). OpenSSH's
 /// `errno_to_portable` folds ENOENT, ENOTDIR and ELOOP into NO_SUCH_FILE, EPERM and
 /// EACCES into PERMISSION_DENIED, EINVAL and ENAMETOOLONG into BAD_MESSAGE, ENOSYS into
 /// OP_UNSUPPORTED, and everything else, ENOSPC, EDQUOT, EEXIST, ENOTEMPTY and EXDEV

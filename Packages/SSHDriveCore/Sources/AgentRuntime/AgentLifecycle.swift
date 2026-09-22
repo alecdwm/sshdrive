@@ -4,8 +4,8 @@ import XPCProtocols
 
 /// The two ways the launchd-started agent is asked to go away that are not
 /// `sshdrive agent stop`, as decisions rather than as sources: a TERM from the Homebrew
-/// cask, and the bundle underneath it being replaced by an upgrade (DESIGN.md sections 10,
-/// 10.1).
+/// cask, and the bundle underneath it being replaced by an upgrade
+/// (docs/design/packaging.md).
 ///
 /// The dispatch sources themselves - `DispatchSource.makeSignalSource(signal: SIGTERM)`
 /// and the `O_EVTONLY` vnode watch - are Darwin plumbing and stay in `Apps/Agent`. What is
@@ -13,8 +13,8 @@ import XPCProtocols
 /// long to wait for one.
 public enum AgentLifecycle {
 
-    /// How long the shutdown may take before the agent exits anyway. Section 10: the plist
-    /// sets `KeepAlive` with `SuccessfulExit` false, and the default disposition for
+    /// How long the shutdown may take before the agent exits anyway. The plist sets
+    /// `KeepAlive` with `SuccessfulExit` false, and the default disposition for
     /// SIGTERM is death by signal, which launchd reads as an unsuccessful exit and
     /// restarts at once - from whatever bundle sits at the path at that moment, which
     /// mid-upgrade is the old one about to be deleted. So TERM is handled, not defaulted:
@@ -23,7 +23,7 @@ public enum AgentLifecycle {
 
     /// The status the agent exits with when it is asked to go away: **0**, always.
     ///
-    /// Section 10: the plist sets `KeepAlive` with `SuccessfulExit` false, so any other
+    /// The plist sets `KeepAlive` with `SuccessfulExit` false, so any other
     /// status - including death by an undefaulted SIGTERM - is read as a crash and
     /// launchd restarts at once, from whatever bundle sits at the path in that moment,
     /// which mid-upgrade is the old one about to be deleted (`MQ-062` is what that leaves
@@ -35,10 +35,9 @@ public enum AgentLifecycle {
     /// `sshdrive agent stop`, the cask's TERM and the upgrade handover are three ways of
     /// asking the same question and must not be three answers. Exiting without the
     /// shutdown leaves an `ssh -N` per location holding a connection to a server, with a
-    /// control socket the next start unlinks out from under it (section 8, section 6.1;
-    /// docs/spikes/results.md 2026-09-05) - and the master a restarted location holds
-    /// without a socket at all (`SQ-043`) is then reachable by nothing, since `-O exit`
-    /// needs the socket (`SQ-044`).
+    /// control socket the next start unlinks out from under it - and the master a
+    /// restarted location holds without a socket at all (`SQ-043`) is then reachable by
+    /// nothing, since `-O exit` needs the socket (`SQ-044`).
     ///
     /// Confidence: the ordering and the status are ours and are measured by `P4`. That
     /// launchd restarts on a non-zero exit is documented `KeepAlive`/`SuccessfulExit`
@@ -60,10 +59,10 @@ public enum AgentLifecycle {
     public static let replacementPollSeconds: Double = 1
     public static let replacementAttempts = 300
 
-    /// Section 10.1: "the agent waits until the bundle at its path is readable, its
-    /// `Info.plist` parses, and its main executable is a different inode from the one the
-    /// agent is running, so it never hands over to a half-copied bundle and never waits
-    /// forever on a `brew reinstall` of the same version".
+    /// The agent waits until the bundle at its path is readable, its `Info.plist` parses,
+    /// and its main executable is a different inode from the one the agent is running, so
+    /// it never hands over to a half-copied bundle and never waits forever on a
+    /// `brew reinstall` of the same version.
     ///
     /// The "different inode" test is what makes a `brew reinstall` of the same version
     /// terminate: `ditto` of an identical tree still produces a new file, so the inode
@@ -107,7 +106,7 @@ public enum AgentLifecycle {
         return false
     }
 
-    /// The `SSHDRIVE_AGENT_ROLE=unregister` role of section 10, as a decision.
+    /// The `SSHDRIVE_AGENT_ROLE=unregister` role, as a decision.
     ///
     /// `unregister()` returns, and `SMAppService.status` reports `notRegistered`, before
     /// launchd has finished tearing the job down - and the difference is the whole reason
@@ -145,9 +144,9 @@ public enum AgentLifecycle {
     }
 
     /// Registration is idempotent and is done on every launch rather than checking
-    /// `status` first (section 10). It is **not** self-repairing: once the bundle has been
-    /// deleted and put back, launchd's background-task record still names the old bundle
-    /// and every spawn fails, while `register()` keeps returning success (`MQ-062`).
+    /// `status` first. It is **not** self-repairing: once the bundle has been deleted and
+    /// put back, launchd's background-task record still names the old bundle and every
+    /// spawn fails, while `register()` keeps returning success (`MQ-062`).
     public static func register(loginItem: any LoginItemControlling) {
         do {
             try loginItem.register()

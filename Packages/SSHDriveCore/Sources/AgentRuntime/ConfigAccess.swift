@@ -6,12 +6,11 @@ import Logging
 ///
 /// `Data.write(to:options: .atomic)` inside the app-group container is not a quick call.
 /// With a File Provider domain present, fileproviderd coordinates on that container, and
-/// during S1 one such write blocked for about three minutes
-/// (`docs/spikes/results.md`, 2026-09-04). A blocking call made from inside an actor holds
-/// that actor's executor for its whole duration, so every other call to `DomainManager`
-/// queued behind it and the CLI reported the agent unreachable for commands the agent had
-/// never begun. The blocking half therefore runs on a serial queue of its own, and the
-/// actor only ever suspends on it.
+/// one such write was measured blocking for about three minutes (2026-09-04). A blocking
+/// call made from inside an actor holds that actor's executor for its whole duration, so
+/// every other call to `DomainManager` queues behind it and the CLI reports the agent
+/// unreachable for commands the agent has never begun. The blocking half therefore runs on
+/// a serial queue of its own, and the actor only ever suspends on it.
 ///
 /// The queue is serial, which is the serialisation `ConfigStore` documents it needs.
 public final class ConfigAccess: @unchecked Sendable {

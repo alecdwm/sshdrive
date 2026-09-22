@@ -2,8 +2,8 @@ import XCTest
 import SSHProcess
 @testable import AgentCore
 
-/// DESIGN.md section 6.3's breaker, rule by rule. The clock is an argument and the jitter
-/// is injected, so every number here is exact and nothing sleeps.
+/// The breaker (docs/design/offline.md), rule by rule. The clock is an argument and the
+/// jitter is injected, so every number here is exact and nothing sleeps.
 final class CircuitBreakerTests: XCTestCase {
 
     private func breaker() -> CircuitBreaker { CircuitBreaker(jitter: { $0 }) }
@@ -25,8 +25,9 @@ final class CircuitBreakerTests: XCTestCase {
         XCTAssertEqual(breaker.admit(now: 1), .failFast(.backingOff(remaining: 1)))
         breaker.setNetworkPath(false)
         breaker.setNetworkPath(true)
-        // Section 6.3: "a path change, wake from sleep, or `sshdrive test` resets the
-        // breaker", so the next call connects rather than waiting out the 2 s.
+        // A path change, wake from sleep, or `sshdrive test` resets the breaker
+        // (docs/design/offline.md), so the next call connects rather than waiting out
+        // the 2 s.
         XCTAssertEqual(breaker.admit(now: 1), .connect)
         XCTAssertEqual(breaker.consecutiveFailures, 0)
     }
@@ -55,8 +56,8 @@ final class CircuitBreakerTests: XCTestCase {
         var last: TimeInterval = 0
         for _ in 0..<12 {
             XCTAssertEqual(breaker.admit(now: now), .connect)
-            // Section 6.1: a locked key agent stays locked for hours, so the cap is
-            // raised from 60 s to 5 minutes for this one classification.
+            // A locked key agent stays locked for hours, so the cap is raised from 60 s
+            // to 5 minutes for this one classification (docs/design/ssh.md).
             breaker.attemptFailed(.keyAgentNotReady, now: now)
             guard case let .backingOff(until) = breaker.state else {
                 return XCTFail("expected a backoff")
@@ -193,8 +194,8 @@ final class CircuitBreakerTests: XCTestCase {
     }
 
     func testAChannelLimitIsTransientRatherThanAStop() {
-        // Section 6.1: a running location drops a channel rather than reconnecting, so
-        // `MaxSessions` must never stop the location.
+        // A running location drops a channel rather than reconnecting
+        // (docs/design/ssh.md), so `MaxSessions` must never stop the location.
         var breaker = self.breaker()
         _ = breaker.admit(now: 0)
         breaker.attemptFailed(.channelLimitReached, now: 0)

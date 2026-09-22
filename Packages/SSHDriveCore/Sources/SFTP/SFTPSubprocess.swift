@@ -5,16 +5,16 @@ import SSHProcess
 /// One `ssh -s <destination> sftp` subprocess and the byte stream over its pipes.
 ///
 /// **A test path, not a production one.** Production opens the SFTP subsystem on a mux
-/// client of the `-N` master (`SSHMaster.openSFTPChannel`, DESIGN.md section 6.1) and
-/// hands the wire client that channel's `ByteStream`; this spawns an `ssh` of its own,
-/// which the agent must never do, because such a connection carries none of section 6.1's
-/// overrides and nothing supervises it. It survives because it is what let the codec be
-/// written and tested against a real `sftp-server` before `SSHProcess` existed, and
-/// `SFTPIntegrationTests` still drives it that way. Nothing here knows about masters,
-/// `ProxyJump` or askpass; the argument list is handed in whole.
+/// client of the `-N` master (`SSHMaster.openSFTPChannel`, docs/design/ssh.md) and hands
+/// the wire client that channel's `ByteStream`; this spawns an `ssh` of its own, which
+/// the agent must never do, because such a connection carries none of the overrides in
+/// docs/design/ssh.md and nothing supervises it. It exists so the codec can be driven
+/// against a real `sftp-server` with no master in the way, which is how
+/// `SFTPIntegrationTests` uses it. Nothing here knows about masters, `ProxyJump` or
+/// askpass; the argument list is handed in whole.
 ///
 /// `ssh` is named by absolute path with `argv[0]` set to it, never through `PATH`
-/// (section 6.1).
+/// (docs/design/ssh.md).
 public final class SFTPSubprocess: @unchecked Sendable {
 
     public enum SpawnError: Error, LocalizedError {
@@ -40,7 +40,7 @@ public final class SFTPSubprocess: @unchecked Sendable {
     /// Spawns `<sshPath> <options> -s <destination> sftp`.
     ///
     /// `options` is everything the agent wants in front of the destination; it is passed
-    /// through untouched so section 6.1 owns the command line and this file owns none of
+    /// through untouched so the caller owns the command line and this file owns none of
     /// it.
     public static func sshSubsystem(
         destination: String,
@@ -92,7 +92,8 @@ public final class SFTPSubprocess: @unchecked Sendable {
     public var terminationStatus: Int32? { process.isRunning ? nil : process.terminationStatus }
 
     /// Whatever `ssh` wrote to stderr so far, trimmed. This is what turns "the channel
-    /// died" into a sentence a user can act on (section 6.1's exit classification).
+    /// died" into a sentence a user can act on (the exit classification in
+    /// docs/design/ssh.md).
     public var diagnostics: String {
         stderrLock.lock()
         defer { stderrLock.unlock() }
@@ -102,7 +103,7 @@ public final class SFTPSubprocess: @unchecked Sendable {
 
     /// Closes the stream and kills `ssh`. Killing it is not optional: an `ssh` that used
     /// `-J` leaves its `-W` children holding the pipe open otherwise (testbed/README.md,
-    /// and the same orphan problem section 6.1 describes for our own masters).
+    /// and the same orphan problem docs/design/ssh.md describes for our own masters).
     public func terminate() async {
         stream.close()
         if process.isRunning { process.terminate() }

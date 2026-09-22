@@ -1,10 +1,10 @@
 import Foundation
 
-/// What `ssh` is asking for, as the agent classifies it (DESIGN.md section 4.2's table).
+/// What `ssh` is asking for, as the agent classifies it (docs/design/secrets.md).
 ///
 /// The strings are OpenSSH's own format strings, verified against `OpenSSH_10.2p1` on the
 /// build VM (`strings /usr/bin/ssh`) and captured live from the testbed with an
-/// `SSH_ASKPASS` that logs its argument (docs/spikes/results.md, "S2 askpass"):
+/// `SSH_ASKPASS` that logs its argument:
 ///
 ///     "%s@%s's password: "                        sshconnect2.c, password auth
 ///     "(%s@%s) %s"                                keyboard-interactive, server text last
@@ -22,23 +22,23 @@ public enum AskpassPrompt: Equatable, Sendable {
     /// `<user>@<hostname>'s password: `. The identity in the prompt is `ssh`'s own view
     /// of the destination, with `HostKeyAlias` substituted for the hostname when the
     /// config sets one - which is why the keychain key is built from the `ssh -G`
-    /// resolution and not from this text (section 4.2).
+    /// resolution and not from this text.
     case password(promptUser: String, promptHost: String)
 
     /// A keyboard-interactive prompt whose server-supplied text is a password question.
-    /// Nothing is parsed out of it for keying (section 4.2).
+    /// Nothing is parsed out of it for keying.
     case keyboardInteractivePassword(promptUser: String, promptHost: String, question: String)
 
     /// A keyboard-interactive prompt that is *not* a password: a one-time code, a
-    /// challenge. Refused, and refused at `add` too (section 4.2).
+    /// challenge. Refused, and refused at `add` too.
     case keyboardInteractiveChallenge(question: String)
 
-    /// The host-key question of section 4.3, and any other yes/no confirmation.
+    /// The host-key question, and any other yes/no confirmation.
     /// `isHostKey` is true when the text is `ssh`'s own host-key question.
     case confirmation(question: String, isHostKey: Bool)
 
     /// `SSH_ASKPASS_PROMPT=none`: a notification, not a question. The FIDO
-    /// user-presence notice is the one that matters (section 4.2).
+    /// user-presence notice is the one that matters.
     case userPresence(keyDescription: String)
 
     /// Any other notification with `SSH_ASKPASS_PROMPT=none`.
@@ -61,14 +61,13 @@ public enum AskpassPromptClassifier {
     ///
     /// `promptKind` is `SSH_ASKPASS_PROMPT` exactly as `ssh` set it, or "" when unset.
     ///
-    /// **The host-key question does not carry a hint.** Section 4.2 and section 4.3 both
-    /// say it arrives with `SSH_ASKPASS_PROMPT=confirm`; on OpenSSH 10.2p1 it does not -
-    /// `ssh` only sets the hint for `RP_ASK_PERMISSION` ("confirm") and `notify_start`
-    /// ("none"), and the host-key question goes through `read_passphrase(..., RP_ECHO)`
-    /// with no hint at all. It therefore looks exactly like a secret prompt, and if it
-    /// were classified as one the agent would answer a stored password to
-    /// "Are you sure you want to continue connecting". So the text is what decides, and
-    /// the hint only confirms (docs/spikes/results.md, "S2 askpass", 2026-09-04).
+    /// **The host-key question carries no hint.** `ssh` sets the hint only for
+    /// `RP_ASK_PERMISSION` ("confirm") and `notify_start` ("none"); the host-key question
+    /// goes through `read_passphrase(..., RP_ECHO)` with no hint at all (OpenSSH 10.2p1,
+    /// measured 2026-09-04). It therefore looks exactly like a secret prompt, and
+    /// classified as one the agent would answer a stored password to "Are you sure you
+    /// want to continue connecting". So the text is what decides, and the hint only
+    /// corroborates.
     public static func classify(prompt: String, promptKind: String) -> AskpassPrompt {
         let kind = promptKind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let text = prompt
@@ -184,7 +183,7 @@ public enum AskpassPromptClassifier {
     }
 
     /// Is this server-supplied keyboard-interactive text a password question, or a
-    /// one-time code? Section 4.2 refuses the second, attended or not.
+    /// one-time code? The second is refused, attended or not.
     static func isPasswordQuestion(_ text: String) -> Bool {
         let lower = text.lowercased()
         let refusals = [

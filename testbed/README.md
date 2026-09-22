@@ -1,10 +1,11 @@
-# SSH Drive spike testbed
+# SSH Drive testbed
 
-Real SSH servers for the **milestone 2 (transport, spike S2)** and **milestone 6
-(change detection, spike S7)** work. Run it with Docker Compose (OrbStack is
-fine) **on the Mac that hosts the build VM**: the VM reaches every published
-service at `192.168.64.1:<port>` and nothing else reaches them at all, which is
-what [Reachability](#reachability) below is about.
+Twelve real SSH servers for the transport and change-detection work: Debian and Alpine
+targets, every login-shell shape, an external `sftp-server`, keyboard-interactive,
+`MaxSessions 2`, a busybox `find` without `-cmin`, a two-hop `ProxyJump` chain and a real
+Tailscale SSH node. Run it with Docker Compose (OrbStack is fine) **on the Mac that hosts
+the build VM**: the VM reaches every published service at `192.168.64.1:<port>` and nothing
+else reaches them at all, which is what [Reachability](#reachability) below is about.
 
 ```sh
 cd testbed
@@ -27,7 +28,7 @@ and tcsh; `deb` seeds 15,000 files). Later starts are seconds.
 
 Host keys are generated on first start into the `hostkeys` volume and reused
 afterwards, so `known_hosts` on the VM stays stable across `up`/`down`/`restart`.
-**`docker compose down -v` destroys them** — every host key then changes and the
+**`docker compose down -v` destroys them** - every host key then changes and the
 VM's `known_hosts` entries for `[<ip>]:22xx` must be removed.
 
 Files: `compose.yaml`, `entrypoint.sh` (shared by every service, driven entirely
@@ -79,59 +80,44 @@ Order matters (`quick` takes the first match) and the source is that DHCP lease,
 so re-check it if the VM's address moves. macOS also rewrites `/etc/pf.conf` on
 system updates.
 
-## Verified from the VM (2026-09-04)
+## First contact
 
-Run from `ios-app-builder-vm` against `192.168.64.1`, with `~/.ssh/sshdrive-spike`. Ten of the
-eleven services answered exactly as this file says they should.
+**An open port is not a running server.** Docker's proxy completes the TCP handshake before
+sshd is listening, so `nc -z` says "open" for a container that is still installing packages.
+Readiness is the banner:
 
-| Port | Service | Result |
-|---|---|---|
-| 2201 | `deb` | key auth, `sftp ls data`, the `pw` password account and `nopw` over the `none` method all work; the sweep's `find -cmin -printf` returned its NUL-delimited record set |
-| 2202 | `deb-shells` | `bashnoisy`, `zshuser`, `fishuser`, `tcshuser` and `dashuser` all print rc noise before `SENTINEL`; `bashbg` prints it too and then never closes the channel; `forcesftp` serves SFTP and answers `sh -s` with `This service allows sftp` |
-| 2203 | `deb-extsftp` | `extnoisy` shell works, its `sftp` fails `Received message too long 1952805748`; `extquiet` works |
-| 2204 | `deb-kbdint` | keyboard-interactive password accepted |
-| 2205 | `deb-maxsess` | key auth and `sftp` work |
-| 2206 | `alp` | **was not forwarded, now fixed.** TCP connected and hung: `docker logs sshdrive-alp` showed sshd listening and *no* `Connection from` line ever, while `alp-ext` logged the same probe - the container was healthy and OrbStack's forward for 2206 was dead. `docker compose up -d --force-recreate alp` rebuilt it (volumes keep the tree and the host keys, so no re-seed and no `known_hosts` churn), and key auth, `sftp`, the `pw` account and the weird names all work |
-| 2207 | `alp-ext` | external `sftp-server` works |
-| 2208 | `alp-nocmin` | `find -cmin` exits 1, `-mmin` returns 574 paths - but so does stock `alp`, see below |
-| 2210 | `bastion-a` | password auth works, and from it `bastion-b` and `inner` both answer on 22 |
-| — | chain | `ssh -J hop@192.168.64.1:2210,hop@bastion-b alec@inner` and `sftp` over it both work, after the note below |
+```sh
+nc -G 3 -w 4 192.168.64.1 2201 </dev/null | head -1     # SSH-2.0-OpenSSH_9.2p1 ...
+```
 
-`known_hosts` on the VM now carries `[192.168.64.1]:2201`-`2208`, `:2210`, `bastion-b` and `inner`.
+The VM's `known_hosts` needs one entry per service - `[192.168.64.1]:2201`-`2208` and
+`:2210` - plus `bastion-b` and `inner`, which are reachable only through the chain.
 
 ### Five things that will waste an hour if you do not know them
 
-1. **An open port is not a running server.** docker's proxy completes the handshake before sshd is
-   listening, so `nc -z` says "open" for a container that is still installing packages. Readiness is
-   the banner: `nc -G 3 -w 4 192.168.64.1 2201 </dev/null | head -1`.
-2. **`bashbg` hangs anything that reads to EOF.** Its rc leaves `( sleep 300 & )` holding stdout, so
-   `ssh … sh -s | cat` never returns - which is the whole point (§9.2: only the closing sentinel ends
-   the read). Put a deadline on every exec-channel read, harnesses included. macOS has no `timeout`;
-   `perl -e 'alarm(shift); exec @ARGV' 15 ssh …` is the shortest substitute.
+1. **A published port can be dead while the container is healthy.** The shape is a port
+   that accepts TCP and answers nothing while sshd inside is listening and has logged no
+   `Connection from` line at all: that is OrbStack's forward, not the server.
+   `docker compose up -d --force-recreate <service>` rebuilds it, and the volumes keep the
+   tree and the host keys, so there is no re-seed and no `known_hosts` churn.
+2. **`bashbg` hangs anything that reads to EOF.** Its rc leaves `( sleep 300 & )` holding
+   stdout, so `ssh ... sh -s | cat` never returns - which is the whole point: only the
+   closing sentinel ends the read (`docs/design/security.md`). Put a deadline on every
+   exec-channel read, harnesses included. macOS has no `timeout`;
+   `perl -e 'alarm(shift); exec @ARGV' 15 ssh ...` is the shortest substitute.
 3. **`-J` does not pass your `-o` flags to the jump hops.** A first connection over the chain stops
-   at `The authenticity of host 'bastion-b' … can't be established` no matter what
+   at `The authenticity of host 'bastion-b' ... can't be established` no matter what
    `StrictHostKeyChecking=accept-new` you put on the command line, because the `-W` child gets a
    fresh option set - and if an askpass is armed it will be asked that question thousands of times.
    Record the key by reaching the hop as a destination once:
    `ssh -o StrictHostKeyChecking=accept-new -J hop@192.168.64.1:2210 hop@bastion-b true`.
    With the `~/.ssh/config` below installed, the `spike-*` block covers the hops instead.
 4. **Killing an `ssh` or `sftp` that used `-J` leaves the `-W` children running**, holding the pipe
-   open behind it - the same orphan the agent must clean up after (§6.1). `pkill -f 'ssh .*-W'`.
+   open behind it - the same orphan the agent must clean up after
+   (`docs/design/ssh.md`). `pkill -f 'ssh .*-W'`.
 5. **Every connection reaches a container from the docker bridge gateway**, `192.168.117.1` under
    OrbStack, never from the VM's own address. That is what `sshd -e` logs and what any `Match
    Address` would see, so nothing here can distinguish clients by IP.
-
-### One finding that is about the design, not the testbed
-
-**Current busybox has no `-cmin`.** BusyBox v1.36.1, as shipped by Alpine 3.20, answers
-`find: unrecognized: -cmin` on `alp`, `alp-ext` and `alp-nocmin` alike; its `find` offers
-`-mmin` and `-newer FILE` and nothing else of use here. §6.4 treats `-cmin` as the normal
-tier-1 invocation with `-mmin` as a fallback "for old busybox" - on the evidence the
-fallback is what every busybox server will take, and the ctime-vs-mtime consequence
-(a rename or a chmod moves ctime but not mtime, so `-mmin` misses changes `-cmin` would
-catch) applies to all of them, not to a legacy fringe. `-newer <stamp>` is the one
-mtime-precise alternative busybox does offer, and it needs a writable stamp file on the
-server. Worth a §6.4 revision and a §13 entry; not changed here.
 
 For the password accounts without a tty, arm an askpass rather than typing:
 
@@ -148,6 +134,16 @@ EOF
 chmod +x /tmp/spike-askpass.sh
 export SSH_ASKPASS=/tmp/spike-askpass.sh SSH_ASKPASS_REQUIRE=force
 ```
+
+### busybox `find` has no `-cmin`
+
+BusyBox v1.36.1, as shipped by Alpine 3.20, answers `find: unrecognized: -cmin` on `alp`,
+`alp-ext` and `alp-nocmin` alike; its `find` offers `-mmin` and `-newer FILE` and nothing
+else of use here. The `-mmin` fallback is therefore what every busybox server takes, and
+the ctime-versus-mtime consequence comes with it: a rename or a chmod moves ctime but not
+mtime, so `-mmin` misses changes `-cmin` would catch. `-newer <stamp>` is the one
+mtime-precise alternative busybox does offer, and it needs a writable stamp file on the
+server. Recorded as `SQ-001` and `SQ-005` in `docs/quirks/servers.md`.
 
 ## Services and ports
 
@@ -172,21 +168,20 @@ sshd listens on port 22 and is addressed by its service name (`bastion-b`,
 `inner`).
 
 **`ClientAliveInterval` is set only on `deb`** (15 s / 3). Everywhere else it is
-unset — the OpenSSH default, and the S7 case: kill the client abruptly and see
-whether a bare background process survives, and whether the §6.4 heartbeat
-wrapper kills it within a minute under bash, dash and busybox.
+unset, the OpenSSH default. The two settings exist side by side so that an abrupt
+client kill can be tried against both, and against busybox.
 
-**Measured 2026-09-04, and the answer is the same everywhere:** a bare `sleep &`
-started by a session whose client was then `SIGKILL`ed was still running three
-minutes later on `deb-shells` (unset), on `deb` (15/3) **and** on `alp` (busybox,
-unset). sshd reaping the session does not reach a child that has left the
-foreground job, so setting `ClientAliveInterval` buys nothing here and this
-testbed has no server that would clean up after us. The heartbeat wrapper is the
-whole mechanism, and `TestbedHeartbeatTests` is where it is proven.
+Measured 2026-09-04: a bare `sleep &` started by a session whose client was then
+`SIGKILL`ed was still running three minutes later on `deb-shells` (unset), on `deb`
+(15/3) **and** on `alp` (busybox, unset). sshd reaping the session does not reach a
+child that has left the foreground job, so `ClientAliveInterval` buys nothing here and
+no server in this testbed will clean up after us. The heartbeat wrapper of
+`docs/design/change-detection.md` is the whole mechanism, and `TestbedHeartbeatTests`
+is where it is proven.
 
 ## Accounts
 
-Every key account authorises **both** spike keys
+Every key account authorises **both** testbed keys
 (`~/.ssh/sshdrive-spike` and `~/.ssh/sshdrive-spike-enc`, passphrase
 `spike-passphrase`). Key-only accounts have `*` in the shadow field, so password
 auth genuinely cannot succeed for them.
@@ -195,18 +190,18 @@ auth genuinely cannot succeed for them.
 |---|---|---|---|---|---|
 | `deb` | `alec` | key | — | bash | main target; `data/` tree for sweep timing and throughput |
 | `deb` | `pw` | password | `spike-password` | bash | password prompt → keychain item `password:pw@<host>:2201` |
-| `deb` | `keypass` | key **or** password | `spike-password` | bash | server accepts both: the two-pass collect connection, the "key did not authenticate and the server accepts passwords" branch (§4.2) |
+| `deb` | `keypass` | key **or** password | `spike-password` | bash | server accepts both: the two-pass collect connection, the "key did not authenticate and the server accepts passwords" branch (`docs/design/secrets.md`) |
 | `deb` | `nopw` | **none** (empty password, `PermitEmptyPasswords`) | — | bash | the closest Docker gets to Tailscale SSH's `none` method: sshd's `none` userauth succeeds outright |
-| `deb-shells` | `bashnoisy` | key | — | bash | `.bashrc` prints on every non-interactive exec → sentinel must discard it (§9.2) |
+| `deb-shells` | `bashnoisy` | key | — | bash | `.bashrc` prints on every non-interactive exec, so the sentinel must discard it (`docs/design/security.md`) |
 | `deb-shells` | `bashbg` | key | — | bash | `.bashrc` prints **and** leaves `( sleep 300 & )` holding stdout → EOF never arrives, only the closing sentinel ends the read |
 | `deb-shells` | `zshuser` | key | — | zsh | `.zshenv` prints (zsh reads it for every invocation) |
 | `deb-shells` | `fishuser` | key | — | fish | `config.fish` prints (fish runs it for `fish -c`) |
 | `deb-shells` | `tcshuser` | key | — | tcsh | `.cshrc` prints |
 | `deb-shells` | `dashuser` | key | — | dash | no `read -t`: the sleep-and-mtime watchdog branch of the heartbeat wrapper |
-| `deb-shells` | `forcesftp` | key **or** password | `spike-password` | bash + `ForceCommand internal-sftp` | the exec channel answers with SFTP framing; the probe must report "no shell access (ForceCommand)", not "shell output unusable" (§9.2) |
+| `deb-shells` | `forcesftp` | key **or** password | `spike-password` | bash + `ForceCommand internal-sftp` | the exec channel answers with SFTP framing; the probe must report "no shell access (ForceCommand)", not "shell output unusable" (`docs/design/security.md`) |
 | `deb-extsftp` | `extnoisy` | key | — | bash (noisy `.bashrc`) | rc output lands in front of the SFTP `VERSION` reply → `sftp(1)` fails with "Received message too long"; our client must fall back to `sftp-server` on an exec channel |
 | `deb-extsftp` | `extquiet` | key | — | bash (quiet) | external `sftp-server` with a clean stream: the control case |
-| `deb-kbdint` | `kbd` | keyboard-interactive password | `spike-password` | bash | the `(kbd@host) Password:` prompt shape in §4.2's classification table |
+| `deb-kbdint` | `kbd` | keyboard-interactive password | `spike-password` | bash | the `(kbd@host) Password:` prompt shape in the prompt classification table of `docs/design/secrets.md` |
 | `deb-maxsess` | `alec` | key or password | `spike-password` | bash | `MaxSessions 2`: channel-limit probe, bulk SFTP channel dropped, sweep-stops-the-helper |
 | `alp` | `alec` | key | — | busybox ash | busybox `find` (**no `-cmin`**, no `-printf`; `-mmin` and `-newer` only), small tree |
 | `alp` | `pw` | password | `spike-password` | busybox ash | password auth against musl/busybox |
@@ -226,45 +221,42 @@ auth genuinely cannot succeed for them.
 - `weird/` — one directory each named `space in name`, `quote'name`,
   `$(echo pwned)`, `[bracket]`, `back\slash`, `*star*`, a name containing a
   **newline**, `utf8-café`, a **non-UTF-8** name (`latin1-caf\xff`), and
-  `.hidden`; each holds `inside.txt`. These exercise the §9.2 quoting rule, the
-  `-path … -prune` glob escaping, NUL-delimited parsing, and §5.4's name
-  handling.
+  `.hidden`; each holds `inside.txt`. These exercise the `set --` quoting rule of
+  `docs/design/security.md`, the `-path ... -prune` glob escaping, NUL-delimited
+  parsing, and the name handling of `docs/design/names-and-attributes.md`.
 - `big/1g.bin` — **not created by default**. Set `BIG_FILE: "1"` on the `deb`
   service and `docker compose up -d --force-recreate deb` for the 1 GB
   throughput comparison against `sftp(1)` and `rsync`.
 
-Scaling for S7's "1M-file tree with 200 roots": set
-`SEED_TREE_DIRS: "2000"`, `SEED_TREE_FILES: "500"`, `SEED_BYTES: "0"` on `deb`,
-then `docker compose down -v deb`-style recreation (or delete
-`~alec/.testbed-seeded` inside the container and restart it). Seeding a million
-files takes a few minutes and roughly 4 GB of inodes.
+Scaling to a million files in 200 roots: set `SEED_TREE_DIRS: "2000"`,
+`SEED_TREE_FILES: "500"`, `SEED_BYTES: "0"` on `deb`, then `docker compose down -v
+deb`-style recreation (or delete `~alec/.testbed-seeded` inside the container and
+restart it). Seeding a million files takes a few minutes and roughly 4 GB of inodes.
 
-**A session with no `docker compose` to hand can seed it beside the existing tree
-instead**, over ssh, which is what S7 did on 2026-09-04: a nine-line perl script
-writing `~alec/bigtree` made 2,000 directories of 500 empty files — 1,000,000
-files — **in 11 seconds**, and left 13 GB free on `/home`. That leaves `data/`
-untouched for every other spike. Delete it afterwards: `rm -rf ~/bigtree
-~/seedbig.*`. Timings taken against a container on the same Mac are a floor, not
-a NAS: the page cache cannot be dropped from inside.
+**With no `docker compose` to hand, seed it beside the existing tree instead**, over
+ssh: a nine-line perl script writing `~alec/bigtree` makes 2,000 directories of 500
+empty files - 1,000,000 files - in 11 seconds and leaves 13 GB free on `/home`, with
+`data/` untouched for everything else. Delete it afterwards: `rm -rf ~/bigtree
+~/seedbig.*`. Timings taken against a container on the same Mac are a floor, not a
+NAS: the page cache cannot be dropped from inside.
 
 `alp` and `alp-nocmin` get the same layout at 2,000 / 500 files. `inner` gets 200.
 
-**The Alpine trees need a re-seed to match the Debian ones.** Seeding uses perl where it
-exists and a shell loop where it does not, and the stock Alpine image has no perl. That
-fallback used to diverge: `tree/d0` and `f0.bin` instead of `tree/d0000` and `f000.bin`,
-29-byte files whatever `SEED_BYTES` said, and no `weird/utf8-café` at all - nine weird
-names on Alpine against ten on Debian. `entrypoint.sh` was fixed on 2026-09-04 (verified
-under busybox ash: padded names, `SEED_BYTES`-sized files, all ten names), but a tree
-already seeded is not re-seeded, so the Alpine boxes keep the old shape until you ask
-for a new one:
+**Seeding uses perl where it exists and a shell loop where it does not**, and the stock
+Alpine image has no perl. Both branches produce the same tree: padded names
+(`tree/d0000`, `f000.bin`), `SEED_BYTES`-sized files, and all ten `weird/` names
+including `utf8-café`.
+
+A tree that is already seeded is never re-seeded, so an Alpine volume seeded by an
+older `entrypoint.sh` keeps whatever shape it was given. Ask for a new one by deleting
+the marker:
 
 ```sh
 docker compose exec alp rm -f /home/alec/.testbed-seeded   # also alp-nocmin
 docker compose restart alp alp-nocmin
 ```
 
-`alp-ext` seeds nothing, so it needs no re-seed. The Debian targets were always seeded by
-perl and are unaffected.
+`alp-ext` seeds nothing, so it needs no re-seed.
 
 ## Tailscale SSH (`ts-ssh`)
 
@@ -272,28 +264,23 @@ The twelfth service is not an sshd at all. `tailscaled` serves SSH itself, so a
 client sees `remote software version Tailscale`, authenticates with the **`none`**
 method, and gets an SFTP subsystem written in Go with `pkg/sftp` - which
 advertises `hardlink@openssh.com`, `posix-rename@openssh.com` and
-`statvfs@openssh.com` and nothing else. That is the exact shape of the owner's
-Tailscale SSH server, and reproducing one thing it does is why this
-service exists: there the tier-2 helper's exec channel **exits 255 about 15 s
-after it prints `ready`**, while the tier-1 sweep and a plain long exec session
-with streamed stdin both survive.
+`statvfs@openssh.com` and nothing else. That is the shape of a real Tailscale SSH
+server, which is why this service exists.
 
-**It reproduced here on 2026-09-08 and the cause is ours.** `tailscaled` runs
-every session in **its own process group** - `cat /proc/$$/stat` on this node
-gives pgid `2260`, which is `tailscaled` - so the heartbeat wrapper's
-`kill -TERM 0`, which every sweep and every helper channel ends with, killed the
-account's other sessions and the connection under them. The wrapper now names
-`-$$`, the group it leads, which is the same group under sshd and an `ESRCH`
-here. Details in `docs/spikes/results.md` (2026-09-08). One side effect of the
-old behaviour survives in this container: `containerboot` is PID 1 and does not
-reap, so every session killed that way left a zombie, which `ps` shows as a
-bracketed name. They are inert; `docker compose restart ts-ssh` clears them.
+**`tailscaled` puts every session of every client in one shared process group, its
+own** - `cat /proc/$$/stat` on this node gives the pgid, and it is `tailscaled`'s pid
+- so `kill -TERM 0` from any one session signals all of them and the connections
+under them. The heartbeat wrapper names `-$$`, the group it leads, which is the same group
+under sshd and a harmless `ESRCH` here (`SQ-010` in `docs/quirks/servers.md`). A
+session killed by an ambient group kill leaves a zombie behind, because
+`containerboot` is PID 1 and does not reap; `ps` shows them as bracketed names, they
+are inert, and `docker compose restart ts-ssh` clears them.
 
 It is reached **over the tailnet, not over `192.168.64.1`**. There is no
 published port and in userspace mode there cannot be one; the build VM
 (`100.114.204.5`) is on the same tailnet and that is the whole route.
 
-### What the owner must do, in order
+### Setting it up, in order
 
 **1. Tailnet policy file** (Admin console -> Access controls). Two additions -
 `tag:testbed` needs an owner before any key may apply it, and Tailscale SSH is
@@ -365,9 +352,9 @@ sftp -v alec@sshdrive-testbed </dev/null 2>&1 | grep -i 'server supports extensi
 #   hardlink@openssh.com, posix-rename@openssh.com, statvfs@openssh.com - and
 #   nothing else, which is how a real Tailscale SSH node answers too
 
-# a long exec channel that says `ready` and then only reads.  This one always survived,
-# on the owner's server too: the death needed a *second* wrapper-run command to end
-# beside it and call `kill -TERM 0` (2026-09-08).  Time it anyway; it is the control.
+# a long exec channel that says `ready` and then only reads.  It is the control case:
+# a session on its own survives here, and only a second wrapper-run command ending
+# beside it can take it down.  Time it anyway.
 start=$(date +%s); ssh alec@sshdrive-testbed 'echo ready; exec sleep 600' </dev/null; \
   echo "exit=$? after $(( $(date +%s) - start ))s"
 ```
@@ -387,9 +374,9 @@ packages, accounts, rc files, data tree; no openssh packages, no host keys, no
 is still PID 1 and still gets the signals. To bump the pin, look at
 `docker run --rm --entrypoint tailscale tailscale/tailscale:stable version`.
 
-`PKGS: bash zsh coreutils findutils` buys the two things the sweep and §6.1 care
-about: **GNU `find`** (so `-cmin` and `-printf` work, as on `deb` and on the owner's
-Tailscale SSH server) and a **bash** login shell for `alec`, plus GNU `stat`/`date`/`ls`.
+`PKGS: bash zsh coreutils findutils` buys the two things the sweep and the login-shell
+snapshot care about: **GNU `find`** (so `-cmin` and `-printf` work, as on `deb`) and a
+**bash** login shell for `alec`, plus GNU `stat`/`date`/`ls`.
 **What stays busybox:** `/bin/sh` (ash - and so `sh -s` scripts run under ash),
 `awk`, `sed`, `grep`, `tar`, `ps`, `wget`, `adduser`. And the base is
 Alpine/musl, not Debian: no PAM, no `sudo`, no systemd, and **no perl**, so the
@@ -439,19 +426,19 @@ stops the *container* from taking tailnet DNS. MagicDNS still resolves
 ## `~/.ssh/config` for the Mac VM
 
 `192.168.64.1` is the Mac's vmnet address; change it only if you changed
-`TESTBED_BIND`. **This file is installed on the build VM as of 2026-09-04**, along
-with `~/.ssh/spike key's copy`; `known_hosts` there already has every port plus
-`bastion-b` and `inner`, so every alias below connects without a prompt. Written as the spikes
-need it: an unencrypted key by default, `ControlMaster auto` **set for the
-bastion** so §6.1's "our hop must not attach to the user's socket" claim can be
-falsified, and a separate alias for the session-shape overrides.
+`TESTBED_BIND`. Install this on the build VM along with `~/.ssh/spike key's copy`, and
+give `known_hosts` every port plus `bastion-b` and `inner`, after which every alias
+below connects without a prompt. It is shaped to be awkward on purpose: an unencrypted
+key by default, `ControlMaster auto` **set for the bastion** so that "our hop must not
+attach to the user's socket" (`docs/design/ssh.md`) can be falsified, and a separate
+alias for the session-shape overrides.
 
 ```sshconfig
 Host spike-deb
     HostName 192.168.64.1
     Port 2201
 
-# Same server, but with the host-block shapes §6.1 says must be overridden.
+# Same server, with the host-block shapes docs/design/ssh.md says must be overridden.
 # `ssh spike-deb-shapes` works; the agent must still get a foreground -N master.
 Host spike-deb-shapes
     HostName 192.168.64.1
@@ -520,7 +507,7 @@ Host spike-inner
     User alec
     ProxyJump spike-bastion-a,spike-bastion-b
 
-# The identity-path-with-a-space-and-a-quote case (§6.1 quoting). The key file is
+# The identity-path-with-a-space-and-a-quote case. The key file is
 # ~/.ssh/spike key's copy, a copy of sshdrive-spike; ssh_config takes it in double
 # quotes, and the agent must pass it to `ssh -i` without a shell in the way.
 Host spike-deb-spacekey
@@ -550,14 +537,15 @@ Host spike-*
     UserKnownHostsFile ~/.ssh/known_hosts
 ```
 
-Notes for the spike:
+Notes:
 
 - `ssh -G spike-inner` prints `proxyjump spike-bastion-a,spike-bastion-b`; that
-  is the input to the agent's own `ProxyCommand` chain builder (§6.1). Nothing
-  in this file may be handed to `ssh` as `-o ProxyJump=…`.
+  is the input to the agent's own `ProxyCommand` chain builder
+  (`docs/design/ssh.md`). Nothing in this file may be handed to `ssh` as
+  `-o ProxyJump=...`.
 - The "identity path with a space and a quote" case is the `spike-deb-spacekey`
   block above; its key file, `~/.ssh/spike key's copy`, is a copy of
-  `sshdrive-spike` and is already on the VM. Note that the `spike-*` catch-all
+  `sshdrive-spike`. Note that the `spike-*` catch-all
   still appends `sshdrive-spike` as a second identity, so `ssh -G` shows two -
   which is itself the realistic case.
 - For the encrypted-key/askpass path use
@@ -571,51 +559,51 @@ Notes for the spike:
 One `ssh` and one `sftp` per service, without needing the config file above.
 Set `IP=192.168.64.1` and `K="-i ~/.ssh/sshdrive-spike -o IdentitiesOnly=yes"`.
 Password accounts prompt; the passwords are in the account table, or arm the
-askpass from [Verified from the VM](#verified-from-the-vm-2026-09-04) - which is
-also where the reasons live for the two of these that will otherwise hang on you
-(`bashbg` in test 2, and the chain in test 9 before `bastion-b`'s key is known).
+askpass from [First contact](#first-contact) - which is also where the reasons live
+for the two of these that will otherwise hang on you (`bashbg` in test 2, and the
+chain in test 9 before `bastion-b`'s key is known).
 
 ```sh
 IP=192.168.64.1; K="-i $HOME/.ssh/sshdrive-spike -o IdentitiesOnly=yes"
 
-# 1. deb — GNU find, data tree, and the sweep's exact two invocations
+# 1. deb - GNU find, data tree, and the sweep's exact two invocations
 ssh $K -p 2201 alec@$IP 'uname -sm; find data/tree -maxdepth 1 \( -type d -o -type f \) -cmin -60 -printf "%p\0%y\0%s\0%T@\0%i\0%m\0%U\0%G\0" | wc -c'
 echo "ls data" | sftp -b - $K -P 2201 alec@$IP
 ssh -p 2201 pw@$IP true                                  # password: spike-password
 ssh -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=0 -p 2201 nopw@$IP id  # succeeds via the `none` method
 
-# 2. deb-shells — every login shell, sentinel test (rc noise before our output)
+# 2. deb-shells - every login shell, sentinel test (rc noise before our output)
 for u in bashnoisy bashbg zshuser fishuser tcshuser dashuser; do
   printf 'printf "SENTINEL\\n"; id -un; echo done\n' | ssh $K -p 2202 $u@$IP sh -s; done
 echo "ls" | sftp -b - $K -P 2202 forcesftp@$IP           # works; `ssh … sh -s` must not
 ssh $K -p 2202 forcesftp@$IP sh -s </dev/null | head -c 32 | xxd | head -2   # SSH_FXP_VERSION framing
 
-# 3. deb-extsftp — external sftp-server behind rc noise
+# 3. deb-extsftp - external sftp-server behind rc noise
 ssh $K -p 2203 extnoisy@$IP 'echo shell-ok'
 echo "ls" | sftp -b - $K -P 2203 extnoisy@$IP            # EXPECTED to fail: "Received message too long"
 echo "ls" | sftp -b - $K -P 2203 extquiet@$IP            # succeeds
 
-# 4. deb-kbdint — the "(kbd@host) Password:" prompt
+# 4. deb-kbdint - the "(kbd@host) Password:" prompt
 ssh -o PreferredAuthentications=keyboard-interactive -p 2204 kbd@$IP 'echo kbdint-ok'
 echo "ls" | sftp -o PreferredAuthentications=keyboard-interactive -P 2204 kbd@$IP
 
-# 5. deb-maxsess — third concurrent channel must be refused
+# 5. deb-maxsess - third concurrent channel must be refused
 ssh $K -p 2205 -M -S /tmp/cm-maxsess -o ControlPersist=no -N alec@$IP &
 ssh -S /tmp/cm-maxsess -o BatchMode=yes -F /dev/null -o ProxyCommand=/usr/bin/false $IP sleep 60 &
 ssh -S /tmp/cm-maxsess -o BatchMode=yes -F /dev/null -o ProxyCommand=/usr/bin/false $IP sleep 60 &
 ssh -S /tmp/cm-maxsess -o BatchMode=yes -F /dev/null -o ProxyCommand=/usr/bin/false $IP true   # expect: session request failed
 echo "ls" | sftp -b - $K -P 2205 alec@$IP
 
-# 6. alp — busybox find
+# 6. alp - busybox find
 # NB: -cmin is rejected here too; busybox 1.36.1 has only -mmin and -newer.
 ssh $K -p 2206 alec@$IP 'busybox | head -1; find data/tree -maxdepth 1 -mmin -60 -print0 | tr "\0" "\n" | wc -l'
 echo "ls data" | sftp -b - $K -P 2206 alec@$IP
 
-# 7. alp-ext — external sftp-server, quiet shell
+# 7. alp-ext - external sftp-server, quiet shell
 ssh $K -p 2207 alec@$IP 'echo shell-ok'
 echo "ls" | sftp -b - $K -P 2207 alec@$IP
 
-# 8. alp-nocmin — -cmin must be rejected, -mmin must work
+# 8. alp-nocmin - -cmin must be rejected, -mmin must work
 ssh $K -p 2208 alec@$IP 'find data -cmin -60 -print0; echo "rc=$?"; find data -mmin -60 -print0 | tr "\0" "\n" | wc -l'
 echo "ls data" | sftp -b - $K -P 2208 alec@$IP
 
@@ -640,11 +628,11 @@ and data.
 ## What this testbed cannot provide
 
 - **BSD `find` and FreeBSD.** Docker shares the Linux kernel, so there is no
-  FreeBSD, macOS or true BSD `find` here. S7's `-cmin`/`-printf` check across
-  **BSD** find, its kqueue measurement of the tier-2 helper on a 100,000-file
-  tree, and the `darwin/arm64` helper target all need a real FreeBSD/TrueNAS box
-  or VM and a real Mac. `alp-nocmin` covers the *old-busybox* half of that
-  matrix; nothing here covers the BSD half.
+  FreeBSD, macOS or true BSD `find` here. A `-cmin`/`-printf` check against **BSD**
+  find, a kqueue measurement of the tier-2 helper on a 100,000-file tree, and the
+  `darwin/arm64` helper target all need a real FreeBSD/TrueNAS box or VM and a real
+  Mac. `alp-nocmin` covers the *old-busybox* half of that matrix; nothing here
+  covers the BSD half.
 - **A real Synology DSM box.** `alp-nocmin` emulates its `find` (no `-cmin`, no
   `-printf`) with a shim, not its kernel, its `sh`, or its `max_user_watches`. And as
   of busybox 1.36.1 the shim is indistinguishable from stock busybox, so it is not
@@ -653,23 +641,22 @@ and data.
 - **A server whose clock is five minutes behind.** Containers share the host's
   clock and Docker has no time namespace, so the server-clock sweep window must
   be tested by shifting the **Mac VM's** clock instead (or the compose host's).
-- ~~**Tailscale SSH `none` auth.**~~ Provided since 2026-09-07 by the `ts-ssh`
-  service - a real `tailscale/tailscale` node with `--ssh`, so a real
-  `tailscaled` SSH server, a real `none` userauth and a real Go `pkg/sftp`
-  subsystem. `deb`'s `nopw` account (sshd's own `none` method) stays as the
-  OpenSSH-side control case. What is still *not* covered: the owner's actual
-  server - its kernel, its filesystem and whatever local policy shortens an
-  exec channel there - so a behaviour that reproduces on `ts-ssh` is evidence
-  about Tailscale SSH, and one that does not is not evidence about that server.
-- **Anything Mac-side**, which is most of S2: 1Password/Secretive/`ssh-agent`
-  key agents, `IdentityAgent`, FIDO/`sk` keys and user-presence prompts, Apple's
-  `UseKeychain`, the login-shell `env -0` snapshot under fish/tcsh, the 60 s
-  authentication deadline and its screen-unlock re-arm, `ControlPath` length
-  limits under `$TMPDIR`, and the mux-client-without-a-socket behaviour. Those
-  run against these servers but are tested on the VM.
-- **Scale, out of the box.** The default trees are thousands of files, not the
-  1M-file tree of S7 or 5,000 roots of §6.5; see the scaling knobs above. Sweep
-  timings measured on a container on the same Mac are a floor, not a NAS.
-- **The tier-2 helper itself** is not exercised until milestone 9 builds it;
-  these servers only provide what it needs (writable exec-capable `~/.cache`,
-  `sha256sum` on Debian, and on Alpine busybox's `sha256sum`).
+- **Any particular Tailscale SSH server.** `ts-ssh` is a real
+  `tailscale/tailscale` node with `--ssh`, so a real `tailscaled` SSH server, a real
+  `none` userauth and a real Go `pkg/sftp` subsystem, and `deb`'s `nopw` account
+  (sshd's own `none` method) is the OpenSSH-side control case. What it cannot stand
+  in for is another node's kernel, filesystem or local policy: a behaviour that
+  reproduces on `ts-ssh` is evidence about Tailscale SSH, and one that does not
+  reproduce is no evidence about a specific server.
+- **Anything Mac-side**: 1Password/Secretive/`ssh-agent` key agents,
+  `IdentityAgent`, FIDO/`sk` keys and user-presence prompts, Apple's `UseKeychain`,
+  the login-shell `env -0` snapshot under fish/tcsh, the 60 s authentication
+  deadline and its screen-unlock re-arm, `ControlPath` length limits under
+  `$TMPDIR`, and the mux-client-without-a-socket behaviour. Those run against these
+  servers but are tested on the VM.
+- **Scale, out of the box.** The default trees are thousands of files, not a
+  million-file tree or 5,000 roots; see the scaling knobs above. Sweep timings
+  measured on a container on the same Mac are a floor, not a NAS.
+- **A helper build.** These servers provide what the tier-2 helper needs - a
+  writable, exec-capable `~/.cache`, `sha256sum` on Debian and busybox's
+  `sha256sum` on Alpine - and nothing about the binary itself.

@@ -1,7 +1,8 @@
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md sections 5.6 and 6.4: what a reconnect does, in what order.
+/// The reconnect sequence (docs/design/offline.md, docs/design/change-detection.md):
+/// what a reconnect does, in what order.
 final class ReconnectSequenceTests: XCTestCase {
 
     /// The helper's exec channel is opened against the master the SFTP channels sit on, so
@@ -19,8 +20,8 @@ final class ReconnectSequenceTests: XCTestCase {
         XCTAssertEqual(steps.first, .applyConnection)
     }
 
-    /// Section 5.6: `signalErrorResolved` is what flushes a queued write, and it is sent
-    /// after the location is actually able to serve one.
+    /// `signalErrorResolved` is what flushes a queued write (docs/design/offline.md), and
+    /// it is sent after the location is actually able to serve one.
     func testTheSignalsComeLast() {
         XCTAssertEqual(
             ReconnectSequence.steps.suffix(2), [.signalErrorResolved, .signalWorkingSet])

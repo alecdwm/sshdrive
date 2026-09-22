@@ -2,7 +2,7 @@ import XCTest
 
 @testable import Logging
 
-/// `sshdrive logs` (DESIGN.md section 8). The predicate is the whole command: everything
+/// `sshdrive logs` (docs/design/cli.md). The predicate is the whole command: everything
 /// else is `execv`.
 final class LogQueryTests: XCTestCase {
 
@@ -95,8 +95,8 @@ final class LogQueryTests: XCTestCase {
         XCTAssertTrue(argv.contains("--debug"))
     }
 
-    /// zsh has a `log` builtin that shadows /usr/bin/log (docs/spikes/results.md,
-    /// 2026-09-04), so the executable is always the absolute path.
+    /// zsh has a `log` builtin that shadows /usr/bin/log (gotcha 96), so the executable
+    /// is always the absolute path.
     func testTheExecutableIsAlwaysAbsolute() {
         XCTAssertEqual(LogQuery.executable, "/usr/bin/log")
         XCTAssertEqual(LogQuery.showArguments().first, "/usr/bin/log")

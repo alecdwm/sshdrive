@@ -3,8 +3,8 @@ import ProviderCore
 
 /// What the system is holding for us, and how it re-offers it.
 ///
-/// The whole of DESIGN.md section 5.6's "offline writes just queue" is this queue: the
-/// user's write lands in the replica at once, the provider is asked afterwards, and a
+/// Offline writes just queue (docs/design/offline.md), and this is the queue: the user's
+/// write lands in the replica at once, the provider is asked afterwards, and a
 /// failure is re-offered **for ever** on the measured backoff (`MQ-035`), each retry on a
 /// freshly launched instance (`MQ-003`).
 public struct PendingWrite: Equatable, Sendable {
@@ -196,7 +196,7 @@ extension ModelDomain {
             queued[index] = write
             reschedule(write, schedule: quirks.durations(.filenameCollisionRetrySchedule))
         case .noSuchItem where write.kind == .modify:
-            // `MQ-080` (s5-7): the system does not lose a pending edit on an item we
+            // `MQ-080`: the system does not lose a pending edit on an item we
             // report deleted - it re-offers it as a **createItem** of the same name,
             // which then collides with the path that is still there, for ever. `D5`'s
             // mass-deletion guard exists because of this.
@@ -221,7 +221,7 @@ extension ModelDomain {
             // in the mount, and only `sshdrive status` can say why it is not on the
             // server. confidence: the retry schedule above was measured against
             // `.serverUnreachable`; that a `.cannotSynchronize` is *not* re-offered is
-            // what S8 saw for a refused link and is modelled as terminal here.
+            // what a refused link showed, and is modelled as terminal here.
             replica.mutate(write.identifier) { $0.uploadingErrorCode = failure.appleErrorCode }
             queued.remove(at: index)
         }

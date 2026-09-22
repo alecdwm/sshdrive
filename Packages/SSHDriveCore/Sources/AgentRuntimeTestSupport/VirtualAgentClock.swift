@@ -1,8 +1,8 @@
 import AgentRuntime
 import Foundation
 
-/// A driven clock for the agent's seams (docs/testing-architecture.md section 3.1:
-/// "there is no real sleeping anywhere in the suite").
+/// A driven clock for the agent's seams: there is no real sleeping anywhere in the suite
+/// (docs/design/testing.md).
 ///
 /// `now()` is wall clock, `uptime()` is monotonic, and both move only when a test calls
 /// `advance`. A `sleep` parks until the clock has passed its deadline, so the eviction

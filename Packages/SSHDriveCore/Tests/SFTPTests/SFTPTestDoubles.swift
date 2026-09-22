@@ -27,7 +27,7 @@ struct WirePacket {
     }
 }
 
-/// A byte stream with a programmable other end (DESIGN.md section 6.2's "tested against
+/// A byte stream with a programmable other end (docs/design/sftp.md's "tested against
 /// `sftp-server` directly on stdio without any network", minus even the stdio).
 ///
 /// Everything the client writes is split into packets and handed to `responder`, which
@@ -104,9 +104,9 @@ final class ScriptedByteStream: ByteStream, @unchecked Sendable {
 
     // MARK: ByteStream
 
-    /// The deadline is the client's own business (section 6.2), and this double never
-    /// answers late by accident: a test that wants a request to miss its deadline simply
-    /// does not answer it at all.
+    /// The deadline is the client's own business (docs/design/sftp.md), and this double
+    /// never answers late by accident: a test that wants a request to miss its deadline
+    /// simply does not answer it at all.
     func read(upTo maxLength: Int, deadline: Date) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             self.takeOrPark(maxLength: maxLength, continuation: continuation)
@@ -182,10 +182,10 @@ final class ScriptedByteStream: ByteStream, @unchecked Sendable {
 
 /// A small `sftp-server` in memory, speaking the wire.
 ///
-/// It is not the fake backend of milestone 1 - that is `FakeTransport`, which sits above
-/// the protocol. This one sits below it, so `RealSFTPTransport` and every byte of the
-/// codec are exercised end to end without a network, which is what section 6.2 claims is
-/// the easy part of this project to test exhaustively.
+/// It is not the fake backend used elsewhere in the suite - that is `FakeTransport`,
+/// which sits above the protocol. This one sits below it, so `RealSFTPTransport` and
+/// every byte of the codec are exercised end to end without a network, which is the easy
+/// part of this project to test exhaustively (docs/design/sftp.md).
 final class InMemorySFTPServer: @unchecked Sendable {
 
     struct Node {
@@ -493,7 +493,7 @@ final class InMemorySFTPServer: @unchecked Sendable {
             let source = try reader.readString()
             let destination = try reader.readString()
             guard let node = nodes[source] else { throw ServerStatus(code: .noSuchFile) }
-            // The plain rename never overwrites (section 5.5).
+            // The plain rename never overwrites (docs/design/writes.md).
             guard nodes[destination] == nil else { throw ServerStatus(code: .failure) }
             nodes.removeValue(forKey: source)
             nodes[destination] = node
@@ -512,7 +512,7 @@ final class InMemorySFTPServer: @unchecked Sendable {
             stream.push(writer.finish())
 
         case .symlink:
-            // OpenSSH's order: target first, then the link path (section 6.2).
+            // OpenSSH's order: target first, then the link path (docs/design/sftp.md).
             let target = try reader.readString()
             let linkPath = try reader.readString()
             guard nodes[linkPath] == nil else { throw ServerStatus(code: .failure) }

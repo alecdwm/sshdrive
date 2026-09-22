@@ -8,7 +8,7 @@ import SSHProcess
 @testable import ServerModel
 
 /// Suite K: the `ssh` command lines, the master, the mux clients and the auth prompts,
-/// run against `FakeSSH` (`docs/testing-architecture.md` sections 4.2 and 5).
+/// run against `FakeSSH` (`docs/design/testing.md` sections 4.2 and 5).
 ///
 /// `SSHMaster` spawns the stub by the same `posix_spawn` and the same argv it spawns
 /// `/usr/bin/ssh` with, so `SSHInvocation`'s assembly, `ControlSocket`, `Spawn` and
@@ -97,7 +97,7 @@ final class TransportScenarios: XCTestCase {
                        "SQ-038: with the right order the ProxyCommand is honoured")
         await live.shutdown()
 
-        // The order that used to ship: readconf keeps `none` and the ProxyCommand is gone.
+        // The wrong order: readconf keeps `none` and discards the ProxyCommand outright.
         var reversed = ["-N"]
         reversed += ["-o", "ControlMaster=yes", "-o", "ControlPath=\(controlPath(stub))-2",
                      "-o", "ControlPersist=no"]
@@ -390,10 +390,10 @@ final class TransportScenarios: XCTestCase {
         XCTAssertTrue(stderr.contains(OpenSSHPrompts.permissionDenied), "SQ-052: the bare sentence")
         let classification = await master.lastClassification
         XCTAssertEqual(classification?.stopsReconnection, true,
-                       "section 6.1: a stale password retried every minute is a ban within the hour")
+                       "docs/design/ssh.md: a stale password retried every minute is a ban within the hour")
     }
 
-    /// **K10** (`SQ-041`, section 4.2): the authentication deadline is signalled by the
+    /// **K10** (`SQ-041`, docs/design/secrets.md): the authentication deadline is signalled by the
     /// control socket appearing, and it is the *whole* budget - the 15 s `ConnectTimeout`
     /// is contained in it, never added. A master that never authenticates inside it is
     /// stopped, and for a first-pass location that stop is transient, not an auth refusal.
@@ -414,7 +414,7 @@ final class TransportScenarios: XCTestCase {
             XCTFail("the socket never appeared inside the deadline")
         } catch let error as SSHProcessError {
             XCTAssertEqual(error.classification, .transient,
-                           "section 6.1: only an agentDependent location's deadline is an auth stop")
+                           "docs/design/ssh.md: only an agentDependent location's deadline is an auth stop")
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 10,
                           "the deadline is the budget, not a floor")

@@ -8,7 +8,7 @@ import SFTP
 import Testing
 import XPCProtocols
 
-/// Suite D's guard half on the agent's side (`docs/testing-architecture.md` section 5).
+/// Suite D's guard half on the agent's side (`docs/design/testing.md` section 5).
 extension AgentScenarios {
 
     @Suite struct GuardScenarios {
@@ -16,11 +16,11 @@ extension AgentScenarios {
         /// **D5** - the guard holds pending items and their ancestors.
         ///
         /// 40 files, 30 deleted, and a pending edit inside a *different* directory that the
-        /// same listing says has gone. Both halves of section 6.4's guard fire: the 30 are held
-        /// in bulk, and the directory holding the pending edit is held **as an ancestor**,
-        /// because a listing infers the deletion of the directory and not of the file inside
-        /// it. Matching pending paths exactly would let the directory through and strand the
-        /// save (S5, 2026-09-04).
+        /// same listing says has gone. Both halves of the mass-deletion guard
+        /// (docs/design/change-detection.md) fire: the 30 are held in bulk, and the directory
+        /// holding the pending edit is held **as an ancestor**, because a listing infers the
+        /// deletion of the directory and not of the file inside it. Matching pending paths
+        /// exactly would let the directory through and strand the save (measured 2026-09-04).
         @Test func d5TheGuardHoldsPendingItemsAndTheirAncestors() async throws {
             let harness = try AgentHarness()
             let (location, fake, runtime) = try await Self.tree(harness)
@@ -46,9 +46,9 @@ extension AgentScenarios {
             #expect(heldPaths.contains(Self.photo(0)))
             #expect(!heldPaths.contains(Self.photo(35)), "the ten that are still there are not held")
 
-            // A fetch of a held item is `.cannotSynchronize`, never `.noSuchItem`: S5 measured
-            // that `.noSuchItem` from `item(for:)` deletes the user's file, which is the whole
-            // thing the hold exists to prevent (`MQ-011`, `MQ-012`).
+            // A fetch of a held item is `.cannotSynchronize`, never `.noSuchItem`: `.noSuchItem`
+            // from `item(for:)` deletes the user's file, which is the whole thing the hold
+            // exists to prevent (`MQ-011`, `MQ-012`).
             let destination = harness.container.appendingPathComponent("fetch.tmp")
             FileManager.default.createFile(atPath: destination.path, contents: nil)
             let handle = try FileHandle(forWritingTo: destination)
@@ -68,7 +68,7 @@ extension AgentScenarios {
 
         /// **D5**, second half - `accept-deletions` applies what the guard is holding, now.
         ///
-        /// Section 8: with no path, everything; with one, that path and its subtree. Everything
+        /// docs/design/cli.md: with no path, everything; with one, that path and its subtree. Everything
         /// beneath a held directory goes with it, and the `held` rows are released either way.
         @Test func d5AcceptDeletionsAppliesTheHolds() async throws {
             let harness = try AgentHarness()
@@ -89,7 +89,7 @@ extension AgentScenarios {
             #expect(scoped == 1, "the held directory itself")
             #expect(try await runtime.heldReport().count == 30)
             // And its child went with it, because those paths are gone whatever now sits at
-            // the name (section 5.3, no tombstones).
+            // the name (docs/design/item-index.md, no tombstones).
             await #expect(throws: (any Error).self) {
                 _ = try await runtime.identifier(forPath: "Work/note.txt")
             }

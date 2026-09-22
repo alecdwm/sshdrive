@@ -1,6 +1,6 @@
 // The same C library Darwin exposes as the `SQLite3` module. `Sources/Index` imports
 // `SQLite3` on Darwin and this target elsewhere, so there is one SQLite and one set of
-// call sites (docs/testing-architecture.md section 8, step 1.2).
+// call sites (docs/design/testing.md).
 module CSQLite [system] {
     header "shim.h"
     link "sqlite3"

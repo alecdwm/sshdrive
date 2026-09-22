@@ -4,7 +4,7 @@ import XPCInterfaces
 import XPCProtocols
 import Logging
 
-/// The agent's XPC listener (DESIGN.md section 5.2).
+/// The agent's XPC listener (`docs/design/extension.md`).
 ///
 /// The listener accepts a connection only from a peer that satisfies our code
 /// requirement, set with `setCodeSigningRequirement` on the connection before it is
@@ -26,7 +26,7 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         do {
             if SSHDriveCodeRequirement.isOverridden {
                 Log.agent.error(
-                    "a spike override is in force: the peer requirement is SSHDRIVE_PEER_REQUIREMENT or ~/.sshdrive-spike-peer-requirement, not the build's. Debug builds only.")
+                    "a peer-requirement override is in force: the requirement comes from SSHDRIVE_PEER_REQUIREMENT or ~/.sshdrive-peer-requirement-override, not from the build. Debug builds only.")
             }
             try connection.setCodeSigningRequirement(SSHDriveCodeRequirement.current)
         } catch {
@@ -37,7 +37,7 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 
         // sshdrive-askpass gets the one-method askpass interface and nothing else: the
         // path that hands out secrets must not also be able to remove a location
-        // (DESIGN.md sections 4.2, 5.2).
+        // (`docs/design/secrets.md`).
         if AskpassService.register(peer: connection, environment: environment) {
             return true
         }
@@ -46,15 +46,15 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
         connection.exportedObject = AgentService(connection: connection, manager: manager)
         // Both remaining peers export a callback object of their own, and which one they
         // export follows from which of our executables they are - the same rule that gives
-        // askpass its one-method interface (section 5.2). The extension takes progress and
-        // reopen callbacks; the CLI takes the collect connection's relayed prompts
-        // (section 4.2), which is the only thing the agent ever asks a terminal.
+        // askpass its one-method interface. The extension takes progress and reopen
+        // callbacks; the CLI takes the collect connection's relayed prompts, which is the
+        // only thing the agent ever asks a terminal.
         connection.remoteObjectInterface =
             environment.peers.isCLI(pid: connection.processIdentifier)
             ? SSHDriveXPCInterface.cli
             : SSHDriveXPCInterface.fileProviderExtension
 
-        // Section 5.3's restore has to reach every live reader, not only the one that
+        // The index restore has to reach every live reader, not only the one that
         // happens to be making the current call, so an extension peer goes in the table
         // the moment it is accepted.
         let isExtension = !environment.peers.isCLI(pid: connection.processIdentifier)
@@ -62,7 +62,7 @@ final class ListenerDelegate: NSObject, NSXPCListenerDelegate {
 
         connection.invalidationHandler = { [weak connection] in
             // A transfer whose extension process disappears mid-way is cancelled the same
-            // way as one the user cancelled (section 5.2).
+            // way as one the user cancelled.
             if let connection, isExtension { ExtensionPeers.shared.remove(connection) }
             Log.agent.debug("peer connection invalidated")
         }

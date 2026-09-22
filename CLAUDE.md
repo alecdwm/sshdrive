@@ -3,8 +3,8 @@
 A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's File Provider
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
-the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The whole plan lives in
-`DESIGN.md` (4761 lines) - this file is the map to it, not a replacement.
+the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The design lives in
+`docs/design/` (22 pages); this file is the map to it, not a replacement.
 
 ## Hard facts (do not get these wrong)
 
@@ -20,146 +20,135 @@ the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. T
 | `os.Logger` subsystem | `org.shirls.sshdrive`; categories `extension` `agent` `cli` `sftp` `ssh` |
 | Group container | `~/Library/Group Containers/RWGDZAYBM8.org.shirls.sshdrive/` -> `config.json`, `domains/<location-id>/index.sqlite`, `capabilities.json`, `pins.json` |
 | Repo / cask | `github.com/alecdwm/sshdrive`; cask `sshdrive` in tap `alecdwm/tap` (`alecdwm/homebrew-tap`). The cask **file** must be `Casks/sshdrive.rb`: Homebrew resolves the token to the basename |
+| Version | one number for the whole product in `VERSION` at the repo root, stamped everywhere else by `scripts/set-version.sh` |
 | Release signing | Developer ID Application `6C055553C6A361398A3CC48654E1FADC14660D05` (cert `T9DF89U2YU`), profile `~/Developer/SSH_Drive_Developer_ID.provisionprofile` on the VM, notarization by App Store Connect API key `~/Developer/AuthKey_*.p8` |
+| `keychain-access-groups` | only satisfied when the embedded profile was issued for the signing certificate (gotcha 91). `release.sh` compares the two and, if they disagree, drops the entitlement with a loud warning so the build still runs - without stored passwords or key passphrases, and `doctor` says so |
 | Domain identifier | the location's UUID |
 
-Platform facts a coder must respect (§2): minimum macOS **14** (develop/test on 14/15). The appex is
-sandboxed, ephemeral, has **no network entitlement** and cannot reach `~/.ssh`, `SSH_AUTH_SOCK` or
-spawn processes. `NSFileProviderReplicatedExtension`; one `NSFileProviderDomain` per location, mounted
-under `~/Library/CloudStorage/`. `item(for:)` is called constantly and must be answered from local
-state. `keychain-access-groups` is a restricted entitlement needing a provisioning profile, which only
-a bundle can embed - so the agent (the bundle's main executable) is the only process with keychain
-access. `evictItem` evicts a directory recursively and works on the root container too
-(S4, 2026-09-04); the TTL loop still goes file by file because a TTL is per file. SFTP v3
-carries nine status codes and no errno.
+Platform facts a coder must respect (`docs/design/platform.md`): minimum macOS **14** (develop/test on
+14/15). The appex is sandboxed, ephemeral, has **no network entitlement** and cannot reach `~/.ssh`,
+`SSH_AUTH_SOCK` or spawn processes. `NSFileProviderReplicatedExtension`; one `NSFileProviderDomain`
+per location, mounted under `~/Library/CloudStorage/`. `item(for:)` is called constantly and must be
+answered from local state. `keychain-access-groups` is a restricted entitlement needing a
+provisioning profile, which only a bundle can embed - so the agent (the bundle's main executable) is
+the only process with keychain access. `evictItem` evicts a directory recursively and works on the
+root container too (measured on macOS 26.4, 2026-09-04); the TTL loop still goes file by file because
+a TTL is per file. SFTP v3 carries nine status codes and no errno.
 
-Processes and modules (§3):
+## Processes and modules
+
 - **Agent** (`Contents/MacOS/SSH Drive`, the host executable): `SMAppService` login agent, not
   sandboxed. Owns `ssh`, SFTP, the index (sole writer), change detection, eviction, domain lifecycle,
   keychain, and the XPC server. Everything of consequence lives here.
 - **Extension** (`Contents/PlugIns/SSHDriveFileProvider.appex`): thin XPC client, no state, no
-  sockets; reads `index.sqlite` read-only for `item(for:)` and the working set only. Since
-  2026-09-08 it is **five adapter files and no decision**: everything it decides is
-  `ProviderCore` in the package, and `Apps/FileProvider` only translates to and from Apple's
-  types. **The agent went the same way later the same day**: `Apps/Agent` is ten adapter
-  files and 2,009 lines, down from 13,300, and everything it decided is `AgentRuntime`.
+  sockets; reads `index.sqlite` read-only for `item(for:)` and the working set only.
 - **CLI** (`Contents/MacOS/sshdrive`): pure XPC client; even `add` and `passwd` connect from the agent.
 - **askpass** (`Contents/MacOS/sshdrive-askpass`): pure XPC client, holds nothing, relays `ssh` prompts.
-- **helper**: static Rust binary shipped in `Contents/Resources/helper/`, uploaded to the server (§6.4 tier 2).
-- `Packages/SSHDriveCore` modules: `Config`, `Secrets`, `SFTP`, `SSHProcess`, `Index`, `XPCProtocols`,
-  `XPCInterfaces` (macOS-only: the `@objc` NSXPC half), `AgentCore`, `ProviderCore` (everything
-  the extension decides, behind platform-free protocols and mirrors of Apple's identifiers,
-  capabilities, flags, fields and error codes), **`AgentRuntime`** (everything the *agent*
-  decides - `LocationRuntime` and its extensions, `DomainManager`, `ChangeDetector`,
-  `CacheEvictor`, `IndexReconcile`, `ReconnectingTransport`/`ConnectionGate`,
-  `SSHBackedTransport`, the channel budget and its cache, the helper's deployment and
-  stream, the collect connection and the CLI command handlers - behind `ReplicaControlling`,
-  `LoginItemControlling`, `LaunchdControlling`, `PowerObserving`, `NetworkPathObserving`,
-  `PresenceReporting`, `ScreenLockObserving`, `PeerIdentifying`, `IndexReaderPeering`,
-  `BundleInspecting`, `KeychainDiagnosing`, `TransportLauncher`, `TerminalRelaying`,
-  `AgentEndpoint` and `AgentClock`, all carried in one `AgentEnvironment`),
-  **`AgentRuntimeTestSupport`** (an in-memory implementation of every one of those, plus
-  `AgentHarness` and a driven clock), `SystemModel` (the simulated fileproviderd,
-  quirk-driven, with a virtual clock), **`ServerModel`** (the simulated server: a
-  `ServerProfile` per testbed service and per real server of the owner's, `FakeSFTPServer`
-  speaking SFTP v3 on the wire over a `ByteStream`, `FakeExecChannel` running a **real**
-  local shell under the profile's rc noise and process-group policy, and `FakeSSH`, the
-  stub that stands in for `/usr/bin/ssh`; every rule keyed on a row of
-  `docs/quirks/servers.md` - added 2026-09-08), `Logging`.
+- **helper**: static Rust binary shipped in `Contents/Resources/helper/`, uploaded to the server
+  (tier 2 of `docs/design/change-detection.md`).
 
-## Repo layout (intended)
+`Apps/FileProvider` is six adapter files (979 lines) and `Apps/Agent` eleven (2,012 lines): they
+translate to and from Apple's types and decide nothing. **No branch worth testing may live under
+`Apps/`** - a new rule belongs in `ProviderCore` or `AgentRuntime` with a scenario beside it.
 
-`project.yml` (xcodegen spec at root; `xcodegen generate`, then `xcodebuild`) ·
-`Packages/SSHDriveCore/` · `Apps/Agent/` (host exe `SSH Drive`) · `Apps/FileProvider/` (appex) ·
-`Apps/CLI/` (`sshdrive`) · `Apps/Askpass/` (`sshdrive-askpass`) ·
-`Resources/LaunchAgents/org.shirls.sshdrive.agent.plist` (must land at
-`Contents/Library/LaunchAgents/` in the bundle) · `helper/` (the `sshdrive-helper` Rust crate, §6.4
-tier 2; `cargo test` runs on this Linux box, `scripts/build-helper.sh` emits
-`Resources/helper/` which `mac-build.sh` copies into the bundle, and neither is in git) ·
-`.github/workflows/helper.yml` (the cross-compile job of §10.1) · `docs/` (spike runbooks and
-results, `troubleshooting.md`, `release.md`; also the Pages site) · `scripts/`
-(`mac-build.sh`, `build-helper.sh`, `release.sh`) · `packaging/homebrew-tap/`
-(the cask, staged: the tap is the separate repo `alecdwm/homebrew-tap`, which does not
-exist yet) · `README.md` (the user-facing one) · `dist/` on the Mac only, never in git:
-`release.sh` writes `SSH-Drive-<version>.dmg` there and `mac-build.sh`'s `--delete` rsync
-wipes it.
+`Packages/SSHDriveCore/Sources`:
+
+| Module | What is in it |
+|---|---|
+| `Config` | `config.json`, the location model, `GroupContainerLocating`, `SSHDriveVersion` |
+| `Secrets` | keychain store (behind `#if canImport(Security)`), askpass token protocol |
+| `SSHProcess` | the `ssh` command lines, master/mux management, exec channels, `ByteStream` |
+| `SFTP` | the SFTP v3 wire client, `RelativePath`, `HelperDirectory`/`HelperFile` |
+| `Index` | the SQLite index over `CSQLite`, writer and read-only reader |
+| `XPCProtocols` | the platform-free half of the protocols, `AskpassEnvironment` |
+| `XPCInterfaces` | macOS-only: the `@objc` NSXPC half the Apps link |
+| `AgentCore` | the pure decision types: breaker, root set, sweep plan and parser, ladder, guard, poll schedule, eviction plan, pin policy, helper manifest/deployment/protocol, capability report, reconnect sequence |
+| `ProviderCore` | everything the extension decides - enumerators, the working-set change path and its fallback, the reader store and its readiness window, item construction, the trash contract, decorations, the two Finder actions - behind `ProviderFailure`, `EnumerationObserving`, `ChangeObserving`, `AgentChannel`, `ReaderStoring`, `ProviderClock`, `ProviderDomainSignalling`, and mirrors of Apple's identifiers, capabilities, flags, fields and error codes |
+| `AgentRuntime` | everything the agent decides - `LocationRuntime` and its extensions, `DomainManager`, `ChangeDetector`, `CacheEvictor`, `IndexReconcile`, `ReconnectingTransport`/`ConnectionGate`, `SSHBackedTransport`, the channel budget and its cache, the helper's deployment and stream, the collect connection, the CLI command handlers - behind `ReplicaControlling`, `LoginItemControlling`, `LaunchdControlling`, `PowerObserving`, `NetworkPathObserving`, `PresenceReporting`, `ScreenLockObserving`, `PeerIdentifying`, `IndexReaderPeering`, `BundleInspecting`, `KeychainDiagnosing`, `TransportLauncher`, `TerminalRelaying`, `AgentEndpoint`, `AgentClock`, all carried in one `AgentEnvironment` |
+| `AgentRuntimeTestSupport` | an in-memory implementation of every one of those seams, plus `AgentHarness` and a driven clock |
+| `SystemModel` | the simulated fileproviderd: quirk-driven, virtual clock, a replica the scenarios drive |
+| `ServerModel` | the simulated server: a `ServerProfile` per testbed service and per real server of the owner's, `FakeSFTPServer` speaking SFTP v3 on the wire over a `ByteStream`, `FakeExecChannel` running a **real** local shell under the profile's rc noise and process-group policy, and `FakeSSH`, the stub that stands in for `/usr/bin/ssh`; every rule keyed on a row of `docs/quirks/servers.md` |
+| `Logging` | the logging facade; `os.Logger` on Darwin |
+
+## Repo layout
+
+`VERSION` · `project.yml` (xcodegen spec at root; `xcodegen generate`, then `xcodebuild`) ·
+`Packages/SSHDriveCore/` · `Apps/Agent/` (host exe `SSH Drive`, plus `Assets.xcassets` with the app
+icon) · `Apps/FileProvider/` (appex) · `Apps/CLI/` (`sshdrive`) · `Apps/Askpass/`
+(`sshdrive-askpass`) · `Resources/LaunchAgents/org.shirls.sshdrive.agent.plist` (must land at
+`Contents/Library/LaunchAgents/` in the bundle) · `Resources/icon/sshdrive.svg` (the source the icon
+set is rendered from) · `helper/` (the `sshdrive-helper` Rust crate; `cargo test` runs on this Linux
+box, `scripts/build-helper.sh` emits `Resources/helper/` which `mac-build.sh` copies into the bundle,
+and neither is in git) · `scripts/` (`set-version.sh`, `render-icon.sh`, `build-helper.sh`,
+`mac-build.sh`, `release.sh`) · `.github/workflows/` (`helper.yml` cross-compiles the helper,
+`release.yml` builds and publishes a tag, `pages.yml` deploys the docs site) · `mkdocs.yml` and
+`docs/` (`design/`, `quirks/`, `troubleshooting.md`, `release.md`, `assets/`; also the Pages site) ·
+`packaging/cask/sshdrive.rb` (the tracked cask template; the release workflow stamps its version
+and sha256 into the separate tap repo `alecdwm/homebrew-tap`, of which `packaging/homebrew-tap/` is
+a git-ignored checkout) · `README.md` (the user-facing one) · `testbed/` · `dist/` (git-ignored:
+`release.sh` writes `SSH-Drive-<version>.dmg` there and `mac-build.sh`'s `--delete` rsync wipes it
+on the VM).
 
 ## Working rules
 
-- **This Linux box has Swift 6.3.3** (`. ~/.local/share/swiftly/env.sh`, installed 2026-09-08).
-  `swift build` and `swift test` in `Packages/SSHDriveCore` are the ordinary loop, and since
-  2026-09-08 **the whole package builds and tests here**: 663 tests green (41 testbed-gated ones
-  skipped), against 667 on the Mac. Steps 1.1 and 1.2 of `docs/testing-architecture.md` §8 did
-  it - `Logging` behind a facade, the `@objc` NSXPC half of `XPCProtocols` moved to a macOS-only
-  `XPCInterfaces` target the Apps link, `GroupContainerLocating` in `Config`
-  (`SSHDRIVE_GROUP_CONTAINER` off Darwin), a `CSQLite` system-library target for `Index`,
-  `Security` and the keychain store behind `#if canImport(Security)` in `Secrets`, `sysctl` and
-  `posix_spawn` branched (with `/proc` standing in) in `SSHProcess`, and `AgentCore`'s
-  `import FileProvider` replaced by the mirrored `ProviderCapabilities`/`ProviderFileSystemFlags`.
-  **Step 1.3 followed on the same day: `ProviderCore` and `SystemModel`.** The extension's
-  decisions - the enumerators, the working-set change path and its fallback, the reader store
-  and its readiness window, item construction, the trash contract, the decorations and the two
-  Finder actions - are in the package behind `ProviderFailure`, `EnumerationObserving`,
-  `ChangeObserving`, `AgentChannel`, `ReaderStoring`, `ProviderClock` and
-  `ProviderDomainSignalling`, and `SystemModel`'s fileproviderd drives them against the quirk
-  table on Linux (scenarios A1-A9). **697 tests here, 706 on the Mac** - the extra nine are the
-  macOS-only assertions of every mirrored constant and error code against Apple's, which is the
-  only thing that can drift silently, and which caught five wrong error codes the first time it
-  ran. **Nothing under `Apps/FileProvider` may contain a branch worth testing**; a new rule
-  there belongs in `ProviderCore` with a scenario. **Step 8 followed on the same day:
-  `AgentRuntime` and `AgentRuntimeTestSupport`.** `Apps/Agent` is ten adapter files and
-  2,009 lines, down from 13,300; `LocationRuntime` and its extensions, `DomainManager`,
-  `ChangeDetector`, `CacheEvictor`, `IndexReconcile`, `ReconnectingTransport` and its gate,
-  `SSHBackedTransport`, the channel budget and its cache, the helper's deployment and
-  stream, the collect connection and both command handlers are in the package behind the
-  fifteen protocols of `docs/testing-architecture.md` §2.3, all of them carried in one
-  `AgentEnvironment` that `DomainManager` is constructed with. **The same rule applies to
-  `Apps/Agent` as to `Apps/FileProvider`: no branch worth testing may live there**, and a
-  new one belongs in `AgentRuntime` with a scenario. Sixteen agent-side scenarios run here
-  (F6-F10, D5, G1, G4, G5, K13, K14, P1, P2, P8); what they still cannot reach is the write
-  and index half (D2, D4, D6, D8, E1-E6), which wants `SystemModel`'s replica, and the sweep
-  (H1-H10), which wants `ServerModel`'s exec channel. Every Darwin path is byte-for-byte what it was: when you add a `#if`, put the
-  existing code in the Darwin branch untouched, and never `sed` a rename across the file that
-  defines it. `cargo test` for `helper/` has always worked here.
-  **App bundles still need the Mac VM** over ssh:
-  `scripts/mac-build.sh` syncs the tree to `alec@100.114.204.5:~/sshdrive`, runs xcodegen, `swift test`
-  and an ad-hoc signed `xcodebuild` (`app` or `test` argument to run one half). The VM has Xcode 26.4
-  on macOS 26.4, no GUI, no signing identities, no passwordless sudo. Finder-dependent spike questions
-  need a real Mac; see `docs/spikes/`. On Linux: edit code, then run the script.
-- **Never read `DESIGN.md` whole.** Use the section index below and `sed -n 'A,Bp' DESIGN.md`. Reading
-  the whole file costs ~60k tokens and is almost never justified.
-- **Delegate.** The top-level session orchestrates: it hands section-scoped briefs (explicit line
-  ranges) to Opus subagents for reading and coding, and uses Sonnet for mechanical work (renames,
-  boilerplate, file moves, test scaffolding). Subagents get the ranges, not the file.
-- **`DESIGN.md` is the source of truth.** When code and doc diverge, the doc wins unless the divergence
-  was a deliberate decision; then add a dated entry to **§13 Decisions** (`- **<thing>** … (§N)`, with
-  the date) and fix the body section it points at. §13 entries are pointers only; the reasoning must
-  live in the named section and nowhere else.
-- **Tests run on Linux against the models; the VM only seeds quirks.** A behaviour of macOS or
-  of a server is measured on the VM, written into `docs/spikes/results.md` (still the source of
-  truth), catalogued as an entry in `docs/quirks/macos.md` or `docs/quirks/servers.md`, taught to
-  `SystemModel`/`ServerModel` as a rule keyed on that entry's id, and defended by a numbered
-  scenario in `Tests/ScenarioTests/`. A new macOS release is a **new column in the quirk table,
-  not a new test**. Nothing is "proved on the VM" any more: a VM session is finished when the
-  Linux suite is green. What cannot be modelled at all (Finder's drawing, Gatekeeper/AMFI,
-  LaunchServices, TCC, real timing, real key agents, servers we do not own) is listed in
-  `docs/testing-architecture.md` §7 and stays a runbook item. Design: `DESIGN.md` §15.
+- **This Linux box has Swift 6.3.3** (`. ~/.local/share/swiftly/env.sh`). `swift build` and
+  `swift test` in `Packages/SSHDriveCore` are the ordinary loop, and the whole package builds and
+  tests here: every module, every scenario, with the testbed-gated tests skipped. What the Mac runs
+  and this box cannot is the handful of macOS-only assertions that check each mirrored constant and
+  error code against Apple's own - the only thing that can drift silently. The seams that make it
+  build: `Logging` behind a facade, the `@objc` NSXPC half in the macOS-only `XPCInterfaces` target
+  that only the Apps link, `GroupContainerLocating` in `Config` (`SSHDRIVE_GROUP_CONTAINER` off
+  Darwin), a `CSQLite` system-library target for `Index`, `Security` and the keychain store behind
+  `#if canImport(Security)` in `Secrets`, `sysctl` and `posix_spawn` branched (with `/proc` standing
+  in) in `SSHProcess`, and `AgentCore` using the mirrored `ProviderCapabilities`/
+  `ProviderFileSystemFlags` rather than `import FileProvider`. When you add a `#if`, put the existing
+  code in the Darwin branch byte-for-byte, and never `sed` a rename across the file that defines it.
+  `cargo test` for `helper/` runs here too.
+- **App bundles need the Mac VM.** `scripts/mac-build.sh` syncs the tree to
+  `alec@100.114.204.5:~/sshdrive`, runs xcodegen, `swift test` and an ad-hoc signed `xcodebuild`
+  (`app` or `test` argument to run one half). The VM has Xcode 26.4 on macOS 26.4, no GUI, no signing
+  identities, no passwordless sudo. On Linux: edit code, then run the script.
+- **The VM measures; the Linux suite proves.** A behaviour of macOS or of a server is measured on the
+  VM (or on a real Mac, for anything Finder draws), written into `docs/quirks/macos.md` or
+  `docs/quirks/servers.md` as a row with its version and date, taught to `SystemModel`/`ServerModel`
+  as a rule keyed on that row's id, and defended by a numbered scenario. A new macOS release is a new
+  column in the quirk table, not a new test. A VM session is finished when the Linux suite is green.
+  What cannot be modelled at all - Finder's drawing, Gatekeeper/AMFI, LaunchServices, TCC, real
+  timing, real key agents, servers we do not own - is listed in `docs/design/testing.md` and stays a
+  manual check.
+- **`docs/design/` is the source of truth.** When code and doc diverge, the doc wins unless the
+  divergence was a deliberate decision; then change the design page that covers it, in place, so the
+  page still describes one system.
+- **The version comes from `VERSION`.** `scripts/set-version.sh <x.y.z>` writes it and stamps
+  `project.yml`, `helper/Cargo.toml`, `Cargo.lock`, `Config/Version.swift` and the cask;
+  `scripts/set-version.sh --check` names anything that disagrees and runs before every build. The
+  Info.plists carry `$(MARKETING_VERSION)`/`$(CURRENT_PROJECT_VERSION)` and no literal.
+  `CFBundleVersion` is the integer `major*10000 + minor*100 + patch` (0.1.4 is 104), because
+  LaunchServices compares it as a number to choose between two copies of the bundle.
+- **The CLI is silent by default.** A command that changes something prints nothing on success: the
+  exit status is the answer. Prompts that need an answer, warnings and errors are printed whatever
+  the flag says (warnings and errors on stderr). `-v`/`--verbose` restores the full report, including
+  what the agent relays while the command runs. Reporting commands (`list`, `show`, `status`, `pins`,
+  `doctor`, `logs`) print either way. The flag is an `@OptionGroup` per subcommand, so it is typed
+  after the subcommand.
+- **Delegate.** The top-level session orchestrates: it hands scoped briefs to Opus subagents for
+  reading and coding, and uses Sonnet for mechanical work (renames, boilerplate, file moves, test
+  scaffolding).
+- **Write like the rest of the repo.** Plain, present tense, no preamble, no hype. Docs and comments
+  describe what the thing does now, for someone reading it a year from now without the diff; they do
+  not narrate changes, fixes or past defects. A date belongs to a measurement, never to a decision.
 - **Do not run mutating git commands** (commit, push, checkout, branch, merge, rebase, reset, add, …)
   unless explicitly asked. Read-only git is fine.
 
-## The spike testbed (`testbed/`)
+## The testbed (`testbed/`)
 
-Twelve real SSH servers for the milestone 2 (S2), milestone 6 (S7 tiers 0-1) and milestone 9
-(S7 tier 2) work: Debian and Alpine
-targets, every login-shell shape, an external `sftp-server`, keyboard-interactive, `MaxSessions 2`,
-a busybox `find` without `-cmin`, a two-hop `ProxyJump` chain, and **a real Tailscale SSH node**
-(`ts-ssh`: `tailscaled` serves SSH itself, so `none` auth and a Go `pkg/sftp` subsystem - the shape
-of the owner's Tailscale SSH server). `docker compose up -d` in
-`testbed/`, **on the Mac that hosts the build VM** (OrbStack), never on this Linux box. The account
-table, the `~/.ssh/config` stanzas and the per-service smoke tests are in `testbed/README.md`; read
-that before using it. **`testbed/.env` must exist first** (`cp .env.example .env`, then a Tailscale
-auth key): `TS_AUTHKEY` uses compose's `${VAR:?}` required form, so without it every `docker
-compose` command in that directory fails, not just `ts-ssh`.
+Twelve real SSH servers: Debian and Alpine targets, every login-shell shape, an external
+`sftp-server`, keyboard-interactive, `MaxSessions 2`, a busybox `find` without `-cmin`, a two-hop
+`ProxyJump` chain, and a real Tailscale SSH node (`ts-ssh`: `tailscaled` serves SSH itself, so `none`
+auth and a Go `pkg/sftp` subsystem). `docker compose up -d` in `testbed/`, **on the Mac that hosts
+the build VM** (OrbStack), never on this Linux box. `testbed/.env` must exist first
+(`cp .env.example .env`, then a Tailscale auth key): `TS_AUTHKEY` uses compose's `${VAR:?}` required
+form, so without it every `docker compose` command in that directory fails, not just `ts-ssh`.
 
 | Reaching it from the VM | |
 |---|---|
@@ -170,500 +159,178 @@ compose` command in that directory fails, not just `ts-ssh`.
 | Behind the chain | `bastion-b` and `inner` have no published port and are reachable only through `hop@192.168.64.1:2210` |
 | `ts-ssh` | the exception: no port at all. It is on the **tailnet** as `sshdrive-testbed` (`alec@`, no key, no password - the tailnet ACL is the auth), which the VM reaches directly |
 
-Verified from the VM on 2026-09-04, and the traps that pass found (details in `testbed/README.md`):
+**Read `testbed/README.md` before using it.** The account table, the `~/.ssh/config` stanzas, the
+per-service smoke tests and the traps are there: readiness is the SSH banner and not an open port, a
+`-J` chain needs the jump host's key in `known_hosts` already, killing an `ssh` that used `-J` leaves
+its `-W` children alive, a published port can be dead while the container is healthy, containers see
+every connection as coming from the docker bridge gateway, and a re-seed needs `.testbed-seeded`
+deleted.
 
-- **An open port is not a running server.** docker's proxy completes the TCP handshake before sshd
-  is listening, so readiness is the banner: `nc -G 3 -w 4 192.168.64.1 2201 </dev/null | head -1`.
-- **`deb-shells`' `bashbg` account hangs any reader that waits for EOF** - which is the case §9.2's
-  sentinel exists for. Give every exec-channel read a deadline, in test harnesses too.
-- **A `-J` chain needs the *jump* host's key in `known_hosts` already**; `-o StrictHostKeyChecking`
-  on the command line does not reach the `-W` children, only a `~/.ssh/config` alias does.
-- **Killing an `ssh`/`sftp` that used `-J` leaves its `-W` children alive**, holding the pipe open.
-  The same orphan problem §6.1 describes for our own masters.
-- **A published port can be dead while the container is healthy.** `alp` (2206) accepted TCP and
-  answered nothing; its sshd was listening and had logged no connection at all, so the broken thing
-  was OrbStack's forward. `docker compose up -d --force-recreate <svc>` rebuilds it, and the volumes
-  mean no re-seed and no `known_hosts` churn.
-- Containers see connections coming from the docker bridge gateway (`192.168.117.1`), never from the
-  VM, so sshd logs and `Match Address` cannot tell clients apart.
-- **Current busybox has no `find -cmin`.** BusyBox 1.36.1 on Alpine 3.20 answers
-  `find: unrecognized: -cmin`; it has `-mmin` and `-newer FILE` only. §6.4 and §13 now say so
-  (2026-09-04); the ladder is unchanged, but the `-mmin` fallback is every busybox server's path.
-  Its `find --version` prints `find: unrecognized: --version` **and exits 0**, so a flavour probe
-  keyed on the exit status calls every busybox server GNU; ours reads the `busybox` banner and the
-  `-cmin` answer. The cost of the fallback is measured, not assumed: a `chmod` on a file with an
-  old mtime is found by `-cmin` and missed by `-mmin` (S7, 2026-09-04).
-- The Alpine data trees come from `entrypoint.sh`'s shell fallback (no perl in the image). It used
-  to diverge from the perl branch - unpadded names, 29-byte files, no `weird/utf8-café`; fixed
-  2026-09-04, but an already-seeded volume keeps the old shape until `.testbed-seeded` is deleted
-  and the service restarted (`testbed/README.md`).
+## Docs map
 
-## Section index of DESIGN.md
+Everything under `docs/design/` is one page per subject. Read the page, not the whole directory.
 
-Regenerate after any edit: `grep -nE '^#{2,4} ' DESIGN.md`
+| Page | What a coder finds |
+|---|---|
+| `docs/design/goals.md` | Goals and non-goals: SFTP only, no GUI, no trash, no multi-user; the auth promise and its exceptions |
+| `docs/design/platform.md` | The File Provider, OpenSSH and launchd facts every other choice rests on, each with what it forces on us; minimum macOS 14 |
+| `docs/design/components.md` | The four processes, why the agent owns everything, the identifier and entitlement tables, the group-container layout |
+| `docs/design/locations.md` | `config.json` field by field, and how a location reuses `~/.ssh/config` through `ssh -G` (attribution by diffing against `-F /dev/null`, the fixed override set) |
+| `docs/design/secrets.md` | The askpass token protocol, the prompt classification table, keychain keying, the two-pass collect connection, touch-key refusal, the authentication deadline and its re-arm, and `known_hosts` handling |
+| `docs/design/extension.md` | What the extension answers itself, the system-call to agent-action table, error mapping to `NSFileProviderError`, the XPC shape, FileHandle passing, the read-only WAL reader and the code requirement |
+| `docs/design/item-index.md` | The SQLite schema, identifier rules, the content and metadata version formulas, one-transaction listings, anchors and the working set, no tombstones, backup + restore-into-live + reconcile |
+| `docs/design/names-and-attributes.md` | Case and UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's wording, local xattrs, Finder tags through `tagData`, `.DS_Store` |
+| `docs/design/writes.md` | The temp+rename upload protocol, case-only renames, the post-upload `lstat`, the in-flight set, the conflict check and conflict copies, stale temp files, recursive delete |
+| `docs/design/offline.md` | Situation -> behaviour table, the circuit breaker and its bounded waiting, the backoff as a reconnect schedule, `NWPathMonitor`, `ConnectTimeout=15`, when `disconnect(reason:)` is used |
+| `docs/design/symlinks.md` | The lexical inside-the-root check under two root spellings, the relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
+| `docs/design/ssh.md` | The exact `ssh` command lines, master and mux rules, orphan cleanup and its kill, exit classification, `ProxyJump` chain building, the login-shell env snapshot, the channel probe |
+| `docs/design/sftp.md` | Wire-protocol scope, pipelining, the transfer scheduler and what the six-fetch ceiling bounds, per-request deadlines, why not a library |
+| `docs/design/change-detection.md` | The three tiers and the ladder between them, scope and poll schedule, the sweep's two `find` invocations, the heartbeat wrapper, the helper's deployment and NDJSON protocol, the mass-deletion guard |
+| `docs/design/root-set.md` | The `materialized`/`pinned`/`viewed` reasons, the 256 cap and the tier-0 rotation, no per-folder refresh, and where the eviction and pin timers live |
+| `docs/design/eviction.md` | The 5-minute loop, what the TTL measures, TCC, the opaque eviction errors, `evict --all` and its fallback |
+| `docs/design/pinning.md` | Markers versus the kept effect, the three invariants and the five-situation table for nested items, `contentPolicy`, the Finder context menu, the decoration badge |
+| `docs/design/cli.md` | Every command and flag verbatim, the verbosity rule, `logs` and its two-halved predicate, and the capability report `status` prints |
+| `docs/design/security.md` | The security properties, the `RelativePath` chokepoint and canonical root, and how remote commands run (`sh -s`, the sentinel, quoting) |
+| `docs/design/packaging.md` | Bundle layout, CI, the cask postflight/uninstall/zap, `KeepAlive` semantics, upgrade handover, the release flow, signing and notarization credentials |
+| `docs/design/testing.md` | The testing principle, the seam list, `SystemModel`/`ServerModel`, and what stays a manual check |
+| `docs/design/future-work.md` | Explicitly out of v1, including the worked-out inotify tier design |
 
-| Lines | Section | What a coder finds |
-|---|---|---|
-| 1-16 | preamble | "the agent" = ours; "key agent" = ssh-agent/1Password/Secretive |
-| 17-76 | §1 Goals and non-goals | SFTP only, no GUI, no trash, no multi-user; the auth promise and its exceptions |
-| 77-107 | §2 Platform facts | the File Provider / OpenSSH / launchd facts every design choice rests on; minimum macOS 14 |
-| 108-193 | §3 Components | process split, why the agent owns everything, group-container layout |
-| 194-230 | §3.1 Identifiers | the table above, plus per-target entitlements |
-| 231-281 | §4 Location model | `config.json` location schema field by field; `displayName` renames in place (S9) |
-| 282-325 | §4.1 Reusing `~/.ssh/config` | `ssh -G` resolution, attribution by diffing against `-F /dev/null`, the fixed override set |
-| 326-599 | §4.2 Secrets | askpass token protocol, prompt classification table, keychain keying, two-pass collect connection, touch-key refusal, the 60 s authentication deadline (300 s for the collect connection) and its re-arm |
-| 600-629 | §4.3 Host keys | `known_hosts` only; `ask` at `add`, `yes` + `UpdateHostKeys=no` after |
-| 630-631 | §5 The File Provider extension | (heading) |
-| 632-668 | §5.1 Responsibilities | system-call -> agent-action table; error mapping to `NSFileProviderError` |
-| 669-801 | §5.2 Talking to the agent | XPC shape, FileHandle passing, the read-only WAL index reader, `meta` table, code requirement, progress/cancel |
-| 802-1153 | §5.3 Item identifiers and the index | **the SQLite schema**, identifier rules, content/metadata version formula, one-transaction listings and their nesting, anchors and why the working set never reports an empty change set, no tombstones (and the local-only exception), backup + restore-into-live + reconcile-against-replica and when the walk runs |
-| 1154-1327 | §5.4 Names, permissions, attributes | case/UTF-8 collisions, mode -> capabilities and `fileSystemFlags`, no trash and Finder's exact wording, local xattrs and what the system will and will not tell us about them, Finder tags through `tagData` and what S10 measured, `.DS_Store` (which never reaches us) |
-| 1328-1476 | §5.5 Writes, conflicts, atomicity | temp+rename upload protocol, case-only renames, post-upload lstat, in-flight set, conflict copies (and the **retried** evict that makes them work), stale temp files, recursive delete |
-| 1477-1513 | §5.6 Offline behaviour | situation -> behaviour table; what the system's own retry does and does not do; when `disconnect(reason:)` is and is not used |
-| 1514-1659 | §5.7 Symlinks | lexical inside-the-root check, two root spellings, relative rewrite, the `readlink` per link, what Finder draws, hidden-link collisions |
-| 1660-1661 | §6 The background agent | (heading) |
-| 1662-2059 | §6.1 SSH process management | **the exact `ssh` command lines**, master/mux rules, orphan cleanup **and its kill**, exit classification, `ProxyJump` chain building, login-shell env snapshot, the `MaxSessions` probe |
-| 2060-2182 | §6.2 SFTP client | wire protocol scope, pipelining, transfer scheduler and what the six-fetch ceiling does and does not bound, per-request deadlines, why not a library |
-| 2183-2249 | §6.3 Fail fast when offline | `NWPathMonitor`, circuit breaker, bounded waiting, the backoff as a **reconnect schedule**, the one retry a read gets, `ConnectTimeout=15` |
-| 2250-2328 | §6.4 Remote change detection | the three tiers, scope, selection ladder (incl. the *held* channel tier 2 needs), poll schedule |
-| 2329-2334 | Tier 0: SFTP poll | `readdir` every root |
-| 2335-2408 | Tier 1: remote sweep | the two `find` invocations, `-cmin`, the server-clock window as elapsed time, GNU `-printf`, what a `stat` per entry costs, the `./` root spelling and the non-UTF-8 root |
-| 2409-2477 | Lifetime of remote processes | the heartbeat wrapper (15 s ping / 60 s timeout), that `ClientAliveInterval` does not help, and why the kill names `-$$` and never `0` |
-| 2478-2600 | Tier 2: remote helper | targets, deployment and verification (incl. the self-computed digest), the NDJSON protocol and how its stdin is relayed through a FIFO, ignore list, FreeBSD kqueue caveat |
-| 2601-2654 | Mass-deletion guard | thresholds, `held` table, re-check schedule, `.cannotSynchronize` vs `.noSuchItem` as S5 measured them, and why pending items are held |
-| 2655-2713 | §6.5 The root set | `materialized` / `pinned` / `viewed` reasons, the 256 cap, tier-0 rotation, and that there is no per-folder refresh |
-| 2714-2721 | §6.6 Eviction and pin maintenance | where the timers live |
-| 2722-2825 | §7 Cache eviction (TTL) | the 5-minute loop, what the TTL means and why atime is read but not decided on, TCC, the opaque eviction errors, what `evict --all` does with a pin in place, "anything that opens files downloads them" |
-| 2826-2914 | §7.1 Pinning | pinned/excluded markers vs kept effect, the five pin steps incl. the replica lookup an unseen path needs, `contentPolicy` |
-| 2915-3019 | §7.1.1 Nested items | the three invariants and the five-situation table - read before touching pin code |
-| 3020-3059 | §7.1.2 Pinning the root | why the root is not a special case |
-| 3060-3224 | §7.2 Finder context menu | the two custom actions and the exact spelling their activation rules need, why the eager policy rather than `allowsEvicting` is the guarantee, why dropping the capability changes nothing, the re-assert safety net, the decoration badge and the three silent traps in declaring one |
-| 3225-3418 | §8 The CLI | every command and flag, verbatim; `logs` and its two-halved predicate; `agent stop` shuts the masters down |
-| 3419-3614 | §8.1 Capability report | the probe, how the server software is identified, the feature/level catalogue, `status` output format, the helper's `note:` list |
-| 3615-3658 | §9 Security | the security properties in one list |
-| 3659-3723 | §9.1 Path containment | the `RelativePath` chokepoint, canonical root, never descend through a link - **including on enumeration** |
-| 3724-3817 | §9.2 Remote command execution | `sh -s` + stdin script + sentinel, quoting rules, the external `sftp-server` workaround, the helper's relay FIFO as the one exception to `</dev/null` |
-| 3818-3952 | §10 Packaging and install | targets, CI, cask postflight (assess, strip quarantine, unregister, open) /uninstall/zap, `KeepAlive` semantics, upgrade handover, the Local Network prompt on first connect |
-| 3953-4058 | §10.1 Repository and hosting | GitHub layout, release flow, which helper targets CI builds and how, tap naming, **the profile-certificate rule, the signed DMG and the notarization credentials** |
-| 4059-4075 | §11 Spikes | S1-S10, each with its question and why it matters |
-| 4076-4125 | §12 Milestones | the ten milestones and which spikes fold into each |
-| 4126-4682 | §13 Decisions | one-line pointers to every settled question - **start here** when orienting |
-| 4683-4718 | §14 Future work | explicitly out of v1 (incl. the worked-out inotify tier design) |
-| 4719-4761 | §15 Testing | the principle in the owner's words, the seam list, `SystemModel`/`ServerModel`, and the pointer to `docs/testing-architecture.md` |
+Beside them:
 
-## Milestones (§12)
-
-- [x] **1. Skeleton** - all four targets sign and launch, XPC between them, the extension's read-only
-      index reader (kept or dropped on S3's measurement), `sshdrive doctor` green, and a **fake
-      backend** behind `SFTPTransport` that stays as the test double forever. Spikes **S1, S3
-      (fake-backend part), S4, S6**. *Done 2026-09-04 except notarization, which is milestone 10:
-      scaffold written 2026-09-03, compiles Debug+Release, signs with a real Apple Development
-      identity and the embedded profile, launches under launchd, XPC works, the domain mounts.
-      Spikes: **S1, S4 and S6 done**; S3 done bar s3-9 to s3-14. S1 c2 is closed as "Finder
-      offers no cancel control", so the `Progress` cancellation belongs in a milestone 3
-      test. See `docs/spikes/`.*
-- [ ] **2. Transport** - `-N` master + mux clients, agent-built `ProxyJump`, login-shell snapshot,
-      askpass token protocol + keychain, SFTP client, `RelativePath`, `sh -s` scripts. Spike **S2**.
-      *Modules written and merged 2026-09-04; 214/214 package tests, and three real mounts on the
-      VM through `~/Library/CloudStorage` (plain key, a two-hop `ProxyJump` chain with a password
-      on each hop, an encrypted key with its passphrase in the keychain), each listed, read,
-      written, renamed and deleted. `sshdrive debug ssh add` was the hook that created one; the
-      real `add` replaced it in milestone 3 and the hook is gone. **S2 is answered except the six items that need a real Mac** (Tailscale
-      `none`, 1Password/Secretive `IdentityAgent`, `UseKeychain`, FIDO touch, the deadline against
-      a touch, the screen-unlock and present-user re-arm). Still open inside milestone 2: the
-      second, bulk SFTP channel and the transfer scheduler (milestone 3's fetching), and the
-      `MaxSessions` probe. See `docs/spikes/milestone-2.md`.*
-- [x] **3. Read-only** - `add`/`list`/`show`/`remove`, browsing and fetching, capability probe and
-      `status`, permissions mapping, hidden names. Deferred real-server part of **S3** (containment).
-      *Done 2026-09-04. Part 1: the section 6.2 transfer scheduler on a second bulk SFTP channel
-      (four at once, foreground before background, the window split between them, cancellation
-      from the extension's `Progress`), the section 6.1 `MaxSessions` probe (verified against
-      `deb-maxsess`: at 2 the bulk channel is dropped and the exec channel kept), section 5.4's
-      permissions-to-capabilities mapping against a real `id` and its hidden-name handling,
-      directory paging, `fetchPartialContents`, and **S3's deferred containment test, which
-      passed after finding that SFTP `opendir` follows a symlink**. Part 2: the whole
-      user-facing CLI - `add` with the section 4.1 `ssh -G` display and config attribution,
-      the two-pass collect connection of section 4.2 with every prompt relayed to the
-      terminal over a CLI callback interface, `list`, `show`, `remove` (with the shared-item
-      rule), `set`, `mount`/`unmount`, `status` with section 8.1's capability report, and
-      `doctor` extended for the transport. **295/295 package tests.** Proved on the VM
-      against seven testbed servers: key auth, a relayed and stored password, a second
-      location on the same host that does not prompt, one- and two-hop `ProxyJump` chains
-      with a different password per hop, keyboard-interactive, a fresh host key answered no
-      then yes, a wrong password, and busybox. See `docs/spikes/results.md`
-      (2026-09-04, "milestone 3, part 2").
-      Not in milestone 3 and not claimed: `passwd`, `test`, `--password-stdin`, and the
-      helper tier the capability report reports as absent.*
-- [x] **4. Read-write** - create/modify/delete/rename/move, temp+rename uploads, conflict copies,
-      local xattrs, `.DS_Store`, symlinks. Spikes **S8, S10**.
-      *Done 2026-09-04. The section 5.5 write half moved into `AgentCore` as
-      `RemoteWriter` (temp file, the create-versus-overwrite rename, mode and
-      modification-date restore, the post-upload `lstat`, the in-flight set, the
-      stale-temp rule, the rename-semantics probe, the conflict check and copy, the
-      delete rules), beside `RowBuilder` and `SymlinkPolicy`; the transport gained
-      `writeExclusive`, since the conflict check sits between the bytes and the rename.
-      Local xattrs and Finder tags travel in one `LocalAttributes` blob hashed into the
-      metadata version (schema version 2). **355/355 package tests.** Proved on a real
-      mount of `alec@192.168.64.1:2201` and again on `alp` (2206, busybox +
-      `internal-sftp`): create, modify, rename in place and across directories, a
-      directory subtree move, delete, a refused `rmdir` of a non-empty directory,
-      `rm -r`, a locked read-only item, `chmod +x`, a confirmed collision, stale temp
-      files, a genuine conflict copy, and a lost master surfacing as `serverUnreachable`
-      with the edit in the pending set. **S8 and S10 answered.** See
-      `docs/spikes/milestone-4.md` and `docs/spikes/results.md` (2026-09-04, "milestone
-      4"). Not in milestone 4 and not claimed: the sync-error list `status` needs to
-      show a refused link's message (milestone 5/6), and reconnection, which is why a
-      queued write does not flush by itself.*
-- [x] **5. Offline hardening** - breaker with bounded waiting, reconnect, queued-write flush,
-      sleep/wake, agent-missing behaviour, deadline re-arm. Spike **S5**.
-      *Done 2026-09-04. `AgentCore` gained two pure state machines - `CircuitBreaker`
-      (§6.3's four rules, time as an argument) and `DeadlineRearmState` (§4.2's two
-      triggers and the once-a-minute presence rule) - and the agent gained
-      `ReconnectingTransport` with its `ConnectionGate`, which sits between
-      `LocationRuntime` and `SSHBackedTransport` and holds the live connection or does
-      not. Beside them `PowerEvents` (IOKit, not `NSWorkspace`), `NetworkPathGate`
-      (`NWPathMonitor`), `AgentPresence` (`CGEventSource` + `CGSessionCopyCurrentDictionary`)
-      and `ScreenLockObserver`. `LocationRuntime.start()` split into a part that always
-      runs and `applyConnection()`, which is re-run on every reconnect, so a location whose
-      server is down still mounts and still queues writes. **381/381 package tests**, with
-      two long-standing flaky scheduler tests fixed. Proved on a real mount of
-      `alec@192.168.64.1:2201`: an edit made while the master was `kill -9`ed flushed 20 ms
-      after `signalErrorResolved`; two fetches arriving during a 20 s reconnect both waited
-      and both succeeded; the will-sleep drop, the wake reconnect and the path gate all
-      exercised. **S5 is answered.** Two behaviours were added because S5 measured that the
-      system will not do them: the agent reconnects on the breaker's backoff unprompted, and
-      a read that meets a silently dead connection is retried once. See
-      `docs/spikes/milestone-5.md` and `docs/spikes/results.md` (2026-09-04, "milestone 5").
-      Not in milestone 5 and not claimed: `sshdrive test` and `passwd` (the CLI commands
-      that clear a stop; the mechanism is there as `debug breaker --connect`), the reconcile
-      walk, and s5-7b, the unmatched-content-version half of S5's working-set question.*
-- [x] **6. Change detection tiers 0-1** - root set, anchors, poll cadence, sweep, fallback ladder,
-      mass-deletion guard. Spike **S7**.
-      *Done 2026-09-04. `AgentCore` gained the whole of section 6.4's decision-making as
-      pure, clock-injected types - `RootSet` (the three reasons, the 64-per-cycle
-      `materialized` rotation, the 256 `viewed` cap, the pin-root exclusion),
-      `SweepPlan`/`SweepParser`/`SweepWindow`, `RemoteSweep` (one sweep on one exec
-      channel under the heartbeat wrapper, ended by its own closing sentinel),
-      `ChangeDetectionLadder`, `MassDeletionGuard` and `PollSchedule` - and the agent
-      gained `ChangeDetector` (one per location: the cadence, the tier, the full sweep on
-      reconnect, wake, network-up and a fresh working-set anchor, and the 30-minute
-      insurance pass), `ReplicaEnumerators` (the system's own materialized and pending
-      sets), `LocationRuntime+ChangeDetection` (the guard-aware listing diff, the `held`
-      table, `accept-deletions`, the root-set refresh and the sweep's application to the
-      index), `IndexReconcile` (section 5.3's health check, the restore **into** the live
-      database, the truncate-the-sidecars path and the walk against the replica) and
-      `ExtensionPeers`. Index schema version 3: `roots.last_listed`, `held.checks` and
-      `held.reason`, and the sweep's server clock in `meta`. **503/503 package tests**
-      (was 381), including eight new testbed-backed sweep tests. Proved on real mounts of
-      `deb` (GNU `-cmin -printf`) and `alp` (busybox `-mmin`): a file created, modified,
-      renamed and deleted on the server by a separate ssh appeared, changed and vanished
-      inside the poll interval; a directory deleted with a pending local edit inside it
-      was held and released by `accept-deletions`; a 30-of-40 deletion was held and
-      reported in `status`. See `docs/spikes/milestone-6.md` and `docs/spikes/results.md`
-      (2026-09-04, "milestone 6"). Not in milestone 6 and not claimed: tier 2, the remote
-      helper - **done in milestone 9 on 2026-09-05**, so `auto` no longer tops out at sweep; BSD `find`, which the testbed
-      cannot provide; and a real server whose clock disagrees with ours, which a container
-      cannot be.*
-- [x] **7. Eviction** - TTL loop, `evict`, `set cache-ttl`. Uses S4's answers from milestone 1
-      (TTL = time since last fetch or save; `evict --all` is one call on the root).
-      *Done 2026-09-05, with milestone 8. `AgentCore` gained **`EvictionPlan`** (last use,
-      the TTL comparison, the four skips - `never`, directory, local-only, kept - and the
-      cache totals `status` prints) and the agent **`CacheEvictor`**, one actor per
-      location holding section 6.6's five-minute timer, the pass, `evict <path>` and
-      `evict --all`. Milestone 1's `SpikeHooks` were promoted to **`ReplicaAccess`**
-      (`evictItem` with and without the doubling backoff, `getUserVisibleURL`, the `lstat`,
-      the replica lookup), which the hooks now forward to, so the spikes and the product
-      make the same calls. **The one assumption that failed is atime**: it is now read,
-      logged and decided on by nobody (2026-09-05, section 7, gotcha 80). Proved on a real
-      mount of `alec@192.168.64.1:2201`: a 30 s TTL evicted a file fetched 35 s earlier and
-      spared one saved since; the five-minute timer fired with no CLI at all; a pending
-      edit was refused and passed over; `evict --all` took 9 items to 0 from one call on
-      the root container. See `docs/spikes/milestone-7-8.md` and `docs/spikes/results.md`
-      (2026-09-05).*
-- [x] **8. Pinning** - `pin`/`unpin`/`pins`, content policy, kept-subtree watching, Finder actions,
-      badge. Uses S6's answers from milestone 1 (an unseen path needs the replica lookup;
-      the eager policy is what refuses eviction).
-      *Done 2026-09-05. `AgentCore` gained **`PinPolicy`/`PinMarkerSet`** - section 7.1.1's
-      whole algebra as a value: the effective state from the nearest marker at or above a
-      path, the five situations, and the *smallest* marker change that produces the
-      asked-for effect (invariant 3) with what it clears beneath it (invariant 2). The
-      agent gained **`LocationRuntime+Pinning`**: the marker write, the descendant rewrite
-      in one transaction with an anchor each, the root-set bookkeeping, `pins` with
-      `--export`/`--import` and the `pins.json` sidecar, the sweep's `-prune` list, the
-      tier 0 expansion of a pin root into every known directory under it, and section 7.2's
-      re-assert net. `RowBuilder` derives `kept` from the parent row's effective state,
-      which is the whole of "descendants the index has never seen need nothing"; the
-      extension gained `performAction` and `decorations`, and the appex plist
-      `NSFileProviderDecorations`. **548/548 package tests** (was 503). Proved on the same
-      mount: a pin on a folder nothing had opened downloaded its subtree including the
-      never-enumerated subfolder; a pin on a path with no rows at all worked through the
-      replica lookup; a file created on the server under a pin was fetched and its row was
-      born kept; an exclusion under a pin stayed lazy and the TTL took it; `pin /`
-      downloaded the location and cleared every nested marker; both Finder entries toggled
-      the pin from a file and from the window background, and the badge is drawn. See
-      `docs/spikes/milestone-7-8.md` and `docs/spikes/results.md` (2026-09-05). Not in
-      milestone 8 and not claimed: section 7.2's re-assert net has no route to fire on 26.4
-      and stays dormant, and the sidebar row still offers nothing (S6).*
-- [x] **9. Remote helper (tier 2)** - Rust binary, CI cross-compilation, deploy/verify/upgrade, NDJSON.
-      *Done 2026-09-05. The Rust crate `helper/` (`sshdrive-helper`, one static
-      binary, `libc` its only dependency, 443 KB for `linux/aarch64`): inotify read
-      directly on Linux, kqueue plus a 60 s sweep on the BSDs and macOS, a `sweep`
-      subcommand carrying size/ns-mtime/inode/mode, server-side coalescing, the
-      fixed ignore list, and `--version` printing the SHA-256 of its own executable.
-      `AgentCore` gained **`HelperManifest`** (the `uname -sm` table),
-      **`HelperDeployment`** (the upload verdict, the seven-day rule, the version
-      line) and **`HelperEvent`/`HelperEventDecoder`/`HelperControl`** (the NDJSON
-      protocol, its framing and its backpressure); the agent gained
-      **`HelperDeployer`** (mkdir 700 and the ownership check, the hash comparison,
-      temp-name-and-rename upload, re-verify, the stale sweep, removal) and
-      **`HelperStream`** (the exec channel, the `ready` handshake, the reader, the
-      15 s ping, live root-set updates, death reported to the ladder); `SFTP` gained
-      **`HelperDirectory`/`HelperFile`**, the one deliberate exception to §9.1's
-      chokepoint. **592 package tests** (was 548) and **54 crate tests**. Proved on
-      real mounts of `deb` (glibc) and `alp` (musl + busybox): create 260/129 ms,
-      modify 903/308 ms, rename 82/106 ms, delete 78/82 ms, **chmod 76/78 ms** -
-      against 60 s at tier 1, and a `chmod` a busybox `-mmin` sweep never sees at
-      all. The stream coexisted with two 48 MiB fetches; a `kill -9` of the client
-      took the helper off the server in under 10 s; a corrupted binary of the right
-      size was re-uploaded; `helper off` removed it and dropped to sweep;
-      `deb-maxsess` refused it a channel and said so; `forcesftp` reported no shell.
-      **S7's helper half is answered.** See `docs/spikes/milestone-9.md` and
-      `docs/spikes/results.md` (2026-09-05, "milestone 9"). Not answered and not
-      claimable from here: **FreeBSD kqueue** (no BSD in the testbed) and **armv7**
-      (links only, no hardware).
-      **2026-09-08: tier 2 works on Tailscale SSH too.** The exec channel dying
-      `255` there was the heartbeat wrapper's `kill -TERM 0`, and `tailscaled`
-      puts every session in *its own* process group, so that killed the account's
-      other sessions and the connection under them - tier 1 as well as tier 2. The
-      wrapper names `-$$` now (gotcha 100). Proved over eleven minutes on the
-      testbed's `ts-ssh` node: 42 of 42 events, create 145 ms / modify 405 ms /
-      rename 134 ms / delete 17 ms / chmod 153 ms median, a forced full sweep
-      mid-run leaving the stream up, and `deb` and `alp` re-checked at 8/8. The
-      capability report also names the server software now (gotcha 101).
-      **635 package tests.** See `docs/spikes/results.md` (2026-09-08).
-      **2026-09-08, second addendum: the helper stopped coming back.** Three
-      recorded side findings were one failure - the stream is re-opened by the
-      poll cycle rather than by the reconnect (up to ten minutes, and never on
-      a location a runtime failure had dropped); every runtime failure was
-      permanent, so an outage that killed the stream read as a verdict about
-      the server; and a `MaxSessions` probe that met a dying connection was
-      cached as the server's answer for the life of the install. `kill -9` on
-      the master went from 40.7 s back to tier 2 to **0.8 s**, and four 90 s
-      stalls in a row went from **never** (4 of 4 rounds stuck at sweep) to
-      all four back at tier 2 before the link was even restored.
-      `ReconnectSequence`, the ladder's transient/permanent split with its
-      bounded climb-back, and `ChannelProbeVerdict` are the fix (gotchas
-      103-106). **679 package tests.** See `docs/spikes/results.md`
-      (2026-09-08, second addendum).*
-- [x] **10. Ship** - notarized DMG, cask, `logs`, docs. Spike **S9** applied to `set nickname` if it passed.
-      *Done 2026-09-05, and **notarization is done**: `scripts/release.sh` builds Release,
-      signs with the Developer ID identity and the hardened runtime, embeds the helper,
-      builds the DMG with `hdiutil` (volume `SSH Drive`, the app plus an `/Applications`
-      symlink), and notarizes and staples the app and then the DMG - `xcrun notarytool
-      submit --wait` returned **Accepted** with no issues, `stapler validate` passed and
-      `spctl --assess` says `accepted / source=Notarized Developer ID`. It notarizes with
-      an **App Store Connect API key** (`--key/--key-id/--issuer`), because
-      `notarytool store-credentials` cannot be run over ssh at all; the
-      `--keychain-profile` form is the fallback and the missing-credentials message names
-      both. The cask is `packaging/homebrew-tap/Casks/sshdrive.rb` (the tap is a separate
-      repo that does not exist yet; `packaging/homebrew-tap/README.md` says where it goes),
-      `sshdrive logs [--follow] [<name>]` reads our subsystem **and** fileproviderd's lines
-      for the domain, and the docs are `README.md`, `docs/troubleshooting.md` and
-      `docs/release.md`. **S9 is answered: yes** - `add(domain)` with the same identifier
-      and a new `displayName` renames the domain in place, keeping the mount directory's
-      contents, the materialized set and a pending upload, so `set nickname` renames in
-      place and section 13's data-loss caveat is gone. Also fixed here: `agent stop` shuts
-      every location's masters and mux clients down first, the orphan sweep kills the
-      process that owned the socket it removes, the agent handles **SIGTERM** (it had no
-      handler, and the default is death by signal, which `KeepAlive` reads as a crash), the
-      agent watches its own executable and hands over on an upgrade (section 10.1's vnode
-      source), the `unregister` role waits for launchd to drop the job before exiting, and
-      the first start removes File Provider domains that no location claims (section 10).
-      **611 package tests** (was 592; 627 after the addendum below). Proved on the VM: a notarized DMG installed the way
-      the cask does, an upgrade over a running install with a materialized tree and a
-      pending upload, and a fresh-user install as `sshtest` with a quarantined bundle. See
-      `docs/spikes/milestone-10.md` and `docs/spikes/results.md` (2026-09-05, "milestone
-      10"). **The first real cask install, on the owner's 26.6.2 Mac, then found that
-      Homebrew's `com.apple.quarantine` keeps LaunchServices from registering the appex at
-      all** (gotcha 99): the postflight now assesses with `spctl` and strips the attribute
-      before its unregister and `open -g`, and `doctor` has a `quarantine` check.
-      **A second addendum (2026-09-05) fixes what that install's `add` report said**: the
-      capability report was built before the helper was deployed *and* was never handed
-      `helperAvailable`, so it printed "the server cannot run the remote helper" for a
-      server that could. `add` now waits (bounded) for the first deployment attempt and the
-      report takes a `HelperState` with a `deploying` case; `CapabilityReport` and
-      `ServerProbe` moved into `AgentCore` so `swift test` can reach them. Also fixed
-      there: the cached-probe path handed the report an empty extension set, the helper
-      directory is set back to 0700 rather than refused, the poll interval backs off when a
-      cycle eats it, and a dying helper stream logs the channel's exit status and stderr.
-      **627 package tests.** See `docs/spikes/results.md` (2026-09-05, the milestone 10
-      addenda).
-      **The one thing not delivered: the release ships without `keychain-access-groups`.**
-      The Developer ID provisioning profile on the VM was issued for the other of the
-      account's two Developer ID Application certificates (`D853BADB…` rather than the
-      `6C055553…` in the keychain), and a profile whose certificate does not match makes
-      AMFI kill the agent at exec - after notarizing perfectly. `release.sh` detects it,
-      drops the entitlement with a loud warning and carries on, so the shipped build runs,
-      mounts and syncs but cannot use a stored password or key passphrase and `doctor`
-      says so. The owner re-creating the profile against certificate `T9DF89U2YU` and
-      re-running the script is the whole fix; no code changes. Also not done: `brew style`
-      and `brew audit` (no Homebrew on either machine - `ruby -c` is what ran), and
-      `passwd`, `test` and `--password-stdin`, which no milestone has claimed.*
-
-Spike-to-milestone summary: S1/S3/S4/S6 -> M1 (S3's containment half -> M3), S2 -> M2, S8/S10 -> M4,
-S5 -> M5, S7 -> M6 (tiers 0-1) and M9 (the helper), S9 -> M10.
+| Path | What it is |
+|---|---|
+| `docs/quirks/README.md` | The quirk catalog's rules: id format, what a row must carry, the macOS versions and servers a measurement can name |
+| `docs/quirks/macos.md` | Every measured macOS behaviour (`MQ-###`), with the version and date it was measured on, the design page that acts on it and the scenarios that defend it |
+| `docs/quirks/servers.md` | The same for servers (`SQ-###`); `ServerModel.ServerProfile` is built from these rows |
+| `docs/troubleshooting.md` | User-facing: organised by what a `doctor` line says, and by what can look wrong when `doctor` is green |
+| `docs/release.md` | The release procedure: what `release.sh` does, what Apple material it needs, what must be true first |
+| `testbed/README.md` | The twelve services, accounts, `~/.ssh/config` stanzas, smoke tests and traps |
+| `README.md` | The user-facing introduction |
 
 ## Things a coder gets wrong without the doc
 
-1. Transport is the system **`/usr/bin/ssh`** by absolute path with `argv[0]` set to it, plus our own SFTP v3 wire client in Swift. Not libssh2, Citadel or swift-nio-ssh; never a `PATH` lookup (§6.1, §6.2).
-2. The master is `ssh -N` with `ControlPersist=no` - with it set, `ssh` forks away and the agent loses the pid, stderr and exit signal. `ControlPath` is `$TMPDIR/sshdrive-<id8>`, never `%C` (collides for two locations on one host; 104-byte socket limit) (§6.1).
-3. Mux clients run `-F /dev/null -o BatchMode=yes -o ProxyCommand=/usr/bin/false`; otherwise a missing socket makes `ssh` open a *second, unsupervised* connection instead of failing. A mux client exiting before its channel opened is always "master lost", never an auth failure (§6.1).
-4. `ProxyJump` is never handed to `ssh`: cancel it with `ProxyJump=none` and rebuild each hop as the agent's own `ProxyCommand` with the same overrides plus `ControlMaster=no` **and `ControlPath=none`** (`no` alone still attaches to the config's socket). Write the `ProxyCommand` **first** and the cancellation after it, and double a nested hop's `%h`/`%p` once per level (§6.1, §2, item 33).
-5. A location that passed the collect connection's first pass runs `IdentityAgent=none` for good; only `agentDependent` locations ever consult a key agent (§4.2, §6.1).
-6. askpass holds nothing: it sends the agent a one-time `SSHDRIVE_ASKPASS_TOKEN`, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`). Keychain items are keyed `password:<user>@<hostname>:<port>` / `passphrase:<keypath>` from `ssh -G`, never the alias, shared across locations. The **host-key question arrives with `SSH_ASKPASS_PROMPT` unset**, exactly like a password prompt, so it is classified by its own text and the hint is only corroboration; `Enter passphrase for key '%.100s'` truncates, so the prompt text alone can never be the key. The three variable names live once, in `XPCProtocols/AskpassEnvironment.swift` (§4.2).
-7. Authentication has a **60 s deadline from spawn**, signalled by the control socket appearing; the 15 s `ConnectTimeout` is contained in it, never added. A deadline stop is re-armed for exactly one attempt on screen unlock or a request arriving with input idle < 30 s and the screen unlocked; refusals are never re-armed (§4.2, §6.3).
-8. Every remote path goes through the **`RelativePath` chokepoint** - the SFTP layer exposes no string-path API. Zero components is the root. System filenames, CLI paths, sweep output and helper events all pass the same constructor (§9.1).
-9. **No tombstones.** A deleted row goes with its pin marker and xattrs; a re-created path is a new item with a new identifier (§5.3).
-10. `content_version` is `"\(size)-\(mtime)-\(generation)"` at **every tier** with whole-second mtime, so a tier change is invisible. ns-mtime and inode are separate columns, feed change detection only, and are **reset to null after every upload of ours** (§5.3, §5.5).
-11. The extension opens `index.sqlite` read-only in WAL mode for `item(for:)` and the working set; the agent is sole writer. Any SQLite error there answers `.serverUnreachable`, **never `.noSuchItem`** - that deletes the user's file (§5.2).
-12. A row is a finished item: `capabilities`, `fs_flags`, `kept` and `link_target` are derived and stored by the agent. The extension never re-derives them and never walks ancestors (§5.2).
-13. Every exec channel runs exactly `sh -s` with the script on stdin, values single-quoted through `set --`. Each script prints a random 128-bit sentinel first and the agent discards everything before it, because rc files print on non-interactive startup (§9.2).
-14. Nothing on the server runs bare: the wrapper backgrounds its child with `</dev/null`, reads a 15 s heartbeat, and kills the child after 60 s of silence or EOF (§6.4).
-15. Sweep windows come from the **server's** clock (`date +%s` printed by the script, stored only after results are applied) and use `-cmin`, with a `-mmin` fallback on **every** busybox - no busybox build has `-cmin`, so that fallback and its `status` note are the ordinary NAS path, not a legacy case (§6.4).
-16. The mass-deletion guard holds listing-derived deletions removing >= half a directory and >= 20 items (or emptying a non-empty root), re-checking at 5 and 30 min. Helper delete events apply at once. A fetch of a held item fails `.cannotSynchronize`, never `.noSuchItem` (§6.4).
-17. Uploads go to `.sshdrive-upload-<mac8>-<uuid>` then non-overwriting `rename` (create) or `posix-rename@openssh.com` (overwrite), then `setstat` the mode back, then `lstat` for the version. Never write in place (§5.5).
-18. A path with an upload in flight sits in the **in-flight set** and change detection skips it; otherwise our own writes come back as remote changes (§5.5).
-19. The conflict check compares size and mtime from a fresh `lstat` **and** `generation` from the row - the wire cannot carry generation, and without it a same-size same-second remote change is overwritten (§5.5).
-20. `allowsTrashing` is never set (no trash); xattrs and Finder tags stay local and hash into the metadata version; `.DS_Store` is swallowed as a local-only row with its bytes in `local_content` (§5.4).
-21. Symlinks are native items, **never followed**, shown only if a lexical check keeps them inside the root under either spelling (canonical `realpath` or user-typed/`$HOME`); absolute in-root targets are rewritten relative for the Mac; failures are omitted from enumeration entirely (§5.7).
-22. Pin markers (`pin_state`) live in the index, the sole authority. **Any change to a path's explicit state first deletes every explicit state beneath it**, silently from Finder too, and a pin change rewrites and anchors **every known descendant row** (§7.1, §7.1.1).
-23. What stops a kept item being evicted is its **eager `contentPolicy`**, inherited by the system; `allowsEvicting` is deprecated since macOS 13 and dropping it changes nothing - the system reports the bit from `isDownloaded`, not from us (S6, 2026-09-04). An eviction that reaches a kept item anyway is **re-asserted**, not read as an unpin (unless S6 finds a deliberate route) (§7.1, §7.2).
-24. The SFTP wire gives status classes, not errno: `ENOSPC`, `EEXIST`, `ENOTEMPTY`, `EXDEV` all arrive as bare `FAILURE` - ask a second question (`lstat`, `statvfs`, `readdir`). Also OpenSSH's `SSH2_FXP_SYMLINK` takes its two paths in the **opposite order from the draft** (§6.2).
-25. A pin on a path nothing has ever listed is not done when the rows are reported: the system ingests nothing from the working set alone, so `pin` finishes with `getUserVisibleURL` + one `lstat` of the replica, which is what makes it enumerate the chain (§7.1).
-26. Finder tags never arrive as an xattr: they are the item's `tagData`, and the system wipes them on the next re-download if the item does not return them. It also only reports xattrs it considers syncable (§5.4).
-27. A corrupt index is restored **into** the live database via `sqlite3_backup_init` (never by replacing the file: the `-wal`/`-shm` sidecars and the extension's open reader belong to the old inode), then reconciled against the replica under `meta.reconciling` (§5.3).
-28. The domain's `displayName` is the **bare nickname**: the system prepends the app name to the mount directory and to the sidebar label itself (§2, §4).
-29. **A folder is enumerated once, ever.** Revisiting it in Finder, or a remote change landing while it is open, produces no container-enumerator call at all; everything after the first listing arrives through the working set (§6.5).
-30. The system **believes whatever version a `modifyItem` reply carries** - it never re-fetches and never re-offers - so a conflict copy must `evictItem` the item after returning the remote one, and `.filenameCollision` from `createItem` is retried for ever with no alert (§5.5).
-31. A custom action's activation rule binds **`fileproviderItems`** (lower-case p) as a **key path**, not a `$` substitution variable. Either mistake drops the menu entry silently; `fileproviderctl evaluate <path>` is how to check (§7.2).
-32. Finder contributes exactly two File Provider entries, **"Download Now"** or **"Remove Download"** by `isDownloaded`, and draws no built-in "Keep Downloaded" for us. Our two actions land **at the bottom of the contextual menu, top level**, and on the window background, but **never on the sidebar row** - so a whole location is pinned only from the CLI (§7.2).
-33. **`-o ProxyCommand=…` is written before `-o ProxyJump=none`.** Both keywords write the same field and `ssh` takes the first, so the reverse order makes OpenSSH discard the `ProxyCommand` outright and the master then resolves a hostname that only exists behind the bastion. A nested hop's `%h`/`%p` are doubled once per level it sits below the master (`%%h:%%p` at hop *n-1*), because `ssh` percent-expands the whole string before `/bin/sh -c` sees it; without that, hop 1 dials the destination. A `ProxyJump` in a location's own `sshOptions` reaches `ssh -G`, where the chain builder wants it, and is stripped from the master's command line (2026-09-04, §6.1).
-34. **Every sentinel's NUL is printed by a `printf` of its own.** `printf "\0<sentinel>"` reads `\0` and the octal digits after it as one character, so a sentinel beginning with a digit silently loses its first bytes and the marker is never found (§6.1, §9.2).
-35. **Every `sh -s` script is one `{ … }` group ending in an `exit`.** A compound command must be parsed whole before any of it runs, which is what stops the heartbeat reader eating the script's own tail off the same stdin - and `.` with no argument is a POSIX special builtin that ends a non-interactive shell outright (§9.2).
-36. **The heartbeat wrapper reads heartbeats from a descriptor duplicated in the parent, and every subshell clears the `EXIT` trap;** without either it kills its own healthy child seconds after starting it. Its stamp file is `touch`ed, never `:`-redirected, and the `sleep`-and-mtime branch is the *ordinary* Linux path, because an exec channel runs `sh` and Debian's `sh` is dash (§6.4).
-37. **A `ForceCommand internal-sftp` account may answer an exec channel with a plain sentence,** `This service allows sftp connections only.`, rather than SFTP framing. The probe recognises both and reports "no shell access (ForceCommand)", never "shell output unusable" (§9.2).
-38. **`limits@openssh.com` sizes the request, not the window.** It says nothing about how many requests may be outstanding, so the chunk size is the server's and the depth of sixteen is ours (§6.2).
-39. **An SFTP channel is a mux client of the master** (`ssh $MUX -s <host> sftp`), and the wire client sits on the same `ByteStream` an exec channel hands over - one definition, in `SSHProcess`, which `SFTP` depends on. `SFTPSubprocess`, which spawns an `ssh` of its own, is a test path only (§6.1, §6.2).
-40. **stderr distinguishes no key-agent state.** A missing socket, a dead socket and a *locked* agent all exit with the same bare `Permission denied (publickey)` at `LogLevel=ERROR`, so the pre-spawn socket probe is the only signal; `agent refused operation` corroborates, it does not decide (2026-09-04, §6.1).
-41. **SFTP `opendir` follows a symlink,** so every listing re-`lstat`s its own directory before `readdir`: a directory swapped on the server for a link to `/etc` is otherwise read straight through and every name under it gets a row (2026-09-04, S3, §9.1).
-42. **The six-fetch ceiling bounds an eager subtree, not the queue.** Eight files opened at once from a shell arrive as eight simultaneous foreground `fetchContents` calls, so a transfer past the ceiling is admitted and counted, never refused (§6.2).
-43. **A directory listing is written in one transaction.** Row by row, a 10,000-entry directory is 10,000 autocommits and `ls` of the mount answers `fts_read: Operation timed out` (§5.3).
-44. **The `MaxSessions` probe asks "may I hold three channels at once",** not "what is `MaxSessions`", and proves a channel open by completing the SFTP handshake on it: `ssh` spawns successfully whether or not the session was granted. The answer is cached per location, because the agent never sees a server banner to key it on (§6.1).
-45. **The index's transaction helper nests.** §5.3's "a listing is one transaction" wraps calls that are each a transaction of their own (`appendAnchor`, `delete`), and SQLite has no nested `BEGIN`: below the outermost level it is a `SAVEPOINT` (§5.3).
-46. **The collect connection of `add` runs to 300 s, not 60.** §4.2's deadline exists because nothing may wait for a human unattended; a person *is* at the keyboard for that one connection. The master `add` brings up afterwards carries the 60 s (§4.2).
-47. **The CLI exports an object.** The agent relays the collect connection's prompts back along the same connection, so the listener hands a `sshdrive` peer the CLI callback interface and everyone else the extension's - the same rule that gives askpass its own (§4.2, §5.2).
-48. **The CLI's stdout is unbuffered.** The agent writes relayed prompts through the file descriptor; a buffered `print` from the CLI's own report would land out of order behind them whenever stdout is a pipe (§8).
-49. **The conflict copy's eviction has to be retried and the working set signalled.** An `evictItem` straight after the `modifyItem` reply is refused `NSFileProviderErrorNonEvictable` (-2008) - the system is still finishing the modification - so it retries with a doubling backoff from 0.25 s; and the copy is a new sibling in a folder that will never be enumerated again, so its anchor needs a working-set signal or Finder never shows it (2026-09-04, §5.5, §6.5).
-50. **The xattr hash does not prevent a retry loop, because there is none.** A tag change is not re-offered even when the reply carries the version the item already had. The hash is what makes a change the **agent** makes reach the system - a restore from the index backup - and nothing else (2026-09-04, S10, §5.4, §5.3).
-51. **Finder tags are an `NSKeyedArchiver` archive in `tagData`,** never an xattr: `changedFields` carries `NSFileProviderItemTagData` (`0x10`) with an empty `extendedAttributes`. Stored and served opaquely, never parsed (2026-09-04, S10, §5.4).
-52. **A `.DS_Store` written into the mount never reaches the extension.** The system keeps it in the replica and never asks anyone to upload it, so §5.4's local-only path exists for other writers, not for Finder (2026-09-04, §5.4).
-53. **A local-only row survives a listing that does not mention it** - the one exception to "deleted rows are deleted", and without it the first listing after the create takes the user's file (§5.3, §5.4).
-54. **Every symlink a listing reports costs a `readlink`:** SFTP v3's `readdir` carries attributes but no target. Finder then draws the link as Kind **"Alias"** with the arrow badge, dangling or not, with no broken-link marker (2026-09-04, S8, §5.7, §6.2).
-55. **A refused `ln -s` is a sync error, not a message.** The create succeeds locally and the refusal comes back as the item's `uploadingError` with the system's own wording, so §5.7's sentence only reaches the user through `sshdrive status` (2026-09-04, S8, §5.7).
-56. **`launchctl kill` plus `open -g` does not reinstall the agent** - launchd brings the old binary back before `ditto` finishes and `open -g` then does nothing. Use `sshdrive agent restart`, and check `ping`'s `interfaceVersion`. Related: `pgrep` lists killed mux clients as zombies until the agent reaps them, and a restarted location can hold two masters (2026-09-04).
-57. **macOS asks for Local Network access in the app's name on first connect,** which every NAS on the user's own network will hit; no entitlement suppresses it and a launchd agent has no window to put it over (2026-09-04, §2, §10).
-58. **`signalErrorResolved(.serverUnreachable)` is the only thing that flushes a queued write.** `signalEnumerator` alone does not, and neither does reconnecting; the queued `modifyItem` arrived 20 ms after the signal and not at all without it. §5.6's "fallback" does not exist (2026-09-04, S5, §5.6).
-59. **The system re-offers a queued write on a doubling backoff past five minutes, and re-issues a failed `fetchContents` never.** So the agent reconnects on the breaker's backoff **unprompted**, and a read that meets a silently dead connection is retried once through the breaker; a write is not (its source cannot be replayed, and the write is the one thing the system does re-offer) (2026-09-04, S5, §6.3).
-60. **The system does not time out an `enumerateItems` held the full 60 s** the breaker may hold a call for, and leaves the extension running. Finder draws a static circular progress ring in place of the dataless badge for the length of the wait, with no alert (2026-09-04, S5, §6.3).
-61. **`disconnect(reason:)` works from inside the extension.** With the login item unregistered the domain goes `permanently disconnected` (state 4); the replica listing and queued writes survive, and re-launching the app lifts it and flushes them (2026-09-04, S5, §5.2).
-62. **From `fetchContents`, `.noSuchItem` and `.cannotSynchronize` both leave the item in place** - `ESTALE` against `ETIMEDOUT`. The "never `.noSuchItem`" rule is about `item(for:)` and only about it (2026-09-04, S5, §6.4, §5.2).
-63. **A pending edit on an item reported deleted comes back as a `createItem`,** which collides with the path still on the server and is then retried for ever with no alert - the save is stranded and the identifier is new. The mass-deletion guard must hold deletions of pending items (2026-09-04, S5, §6.4, §5.5).
-64. **Sleep and wake are IOKit, and the constants do not import.** `kIOMessageSystemWillSleep` and friends are `iokit_common_msg()` macros, spelled out as `0xE0000280` / `0xE0000270` / `0xE0000300`; `CGEventType` likewise has no `.any`, so the presence read is `CGEventType(rawValue: ~0)`. The will-sleep message must be acknowledged with `IOAllowPowerChange` (§6.1).
-65. **`launchctl setenv` does not reach a launchd agent on macOS 26,** even across `sshdrive agent restart`, so the spike's presence override is a file in the group container (2026-09-04, S5, §4.2).
-66. **`scripts/mac-build.sh` rsyncs with `--delete` and there is no `build/` on the Linux side,** so every run wipes the Mac's build directory. Run `signed` last, or `ditto` fails with "Cannot get the real path for source" (2026-09-04).
-67. **The local-attributes blob is encoded with `JSONEncoder` and `.sortedKeys` is load-bearing.** The blob is hashed into the metadata version, and without a sorted key order the same attributes encode to two different byte strings *within one process*, the hash moves, and the system re-reads every item the agent holds (2026-09-04, §5.3, §5.4).
-68. **The build VM does not honour `pmset sleepnow`** (`error 0xe00002e2`, exit 71): `powerd` holds "Prevent sleep while display is on". `IORegisterForSystemPower` does register there, so the handlers are driven with `sshdrive debug power will-sleep|did-wake` and only the delivery is unproven (2026-09-04, S5, §6.1).
+The numbers are stable: `docs/quirks/*.md` cites them as `gotcha N`. Never renumber. A page name
+in brackets is a page of `docs/design/`.
 
-69. **A bare background process on the server survives an abrupt client kill whatever `ClientAliveInterval` is set to.** sshd reaping the session does not reach a child that has left the foreground job: measured alive three minutes later on Debian with it unset, Debian with it at 15/3, and Alpine/busybox with it unset. The heartbeat wrapper is the only thing that ever kills what we started (2026-09-04, S7, §6.4).
-70. **`-cmin` and `-printf` each cost a `stat` per entry, and that is what a sweep spends.** Over a million files, warm: 204 ms with `-print0` and no time test, 850-900 ms adding `-cmin`, 1.6-3.0 s adding `-printf`. The ordinary incremental sweep of that tree is under a second and returns one record (2026-09-04, S7, §6.4).
-71. **Every sweep root is spelled `./name`.** `find` has no portable `--`, so a top-level directory named `-name` would be read as an option and take the whole sweep with it; the prefix comes back on every path and is stripped before the `RelativePath` constructor (§6.4).
-72. **A sweep root whose bytes are not valid UTF-8 never reaches `find`** - `set --` is a String pipeline end to end - so it is dropped from the argv and listed at tier 0 in the same cycle instead (§6.4, §9.2).
-73. **busybox `find --version` prints an error and exits 0,** so the flavour probe reads the `busybox` banner and the `-cmin` answer, never the exit status. And `SweepPlan` refuses `-cmin`/`-printf` on a busybox flavour even when the probe claims them: a busybox `-cmin` does not lose a field, it fails the whole sweep (2026-09-04, S7, §8.1, §6.4).
-74. **The sweep's server timestamp is stored only after its results are applied, and a truncated sweep stores nothing,** so the next window still covers what the cut-off one missed (§6.4).
-75. **A directory rename rewrites `held.dir` as well as `held.path`,** or the guard's 5- and 30-minute re-checks re-list a name that no longer exists and the holds never resolve (2026-09-04, §5.3, §6.4).
-76. **The reconcile walk runs after `add(domain)`, never inside `start()`** - it reads the system's replica - so the restore leaves `meta.reconciling` set and the walk is what clears it. A walk that hits its deadline or item cap **still clears the flag**, because the alternative is a domain stalled for ever (2026-09-04, §5.3).
-77. **A CLI command naming a location is a touch,** and it has to be: a folder is enumerated once ever, so a user watching a mount from a terminal produces no File Provider traffic at all and the location would sit at the ten-minute cadence while they worked (§6.4, §6.5).
-
-78. **The working set must answer `.serverUnreachable` while its reader is not ready, never an empty change set.** The system launches a fresh extension instance for every working-set signal, so the first `enumerateChanges` on a signalled instance races the `indexReady` round trip; "no changes" at the anchor the system already holds tells it that it is up to date and the change is dropped until something else signals - a deleted file then sits in Finder indefinitely though it is gone from both the server and the index (2026-09-04, §5.3, §5.2).
-
-79. **The orphan control-socket sweep matches on the socket type, not the name.** `$TMPDIR` is shared and `sshdrive-` is not ours exclusively there - the package's own test databases are `sshdrive-nested-<uuid>.sqlite`, and their `-wal`/`-shm` sidecars made `sshdrive doctor` report a clean install as failing, with six "orphaned sockets" it would have deleted. Each candidate is `lstat`ed and only `S_IFSOCK` counts (2026-09-04, §6.1).
-
-80. **atime is not in the TTL's `max`.** Something in the system advances a materialized file's atime minutes after the fetch, deferred and with no read of ours near it, so with atime in the rule the TTL silently became "time since whatever last touched the replica" - a file fetched 280 s earlier survived a 60 s TTL. It is read, logged beside the age the decision used, and decided on by nobody; `last_fetch` and the later of the replica's and the row's mtime are the whole rule (2026-09-05, §7).
-
-81. **A decoration's Info.plist keys are the bare `Identifier`, `BadgeImageType`, `Label` and `Category`,** not `NSFileProviderDecoration`-prefixed spellings and not the `NSExtensionFileProviderAction*` shape beside them, and `BadgeImageType` is a **UTI conforming to `com.apple.icon-decoration.badge`** (the system ships `.badge.pinned`), never an asset name. Every mistake is silent, like `fileproviderItems`. Finder draws a `Badge` at the trailing edge of the Name column, not on the icon (2026-09-05, §7.2).
-
-82. **`evict --all` is one call on the root container only while nothing is *or has just been* pinned.** With a pin in place it meets a kept child and fails as a whole, and straight after `--unpin-all` it fails as `NSCocoaErrorDomain` "The file couldn't be opened" because the system has not re-read the rows whose policy just changed - a single file becomes evictable 5-10 s after an unpin, the container did not within a minute. Both cases fall back to walking the materialized set with §5.5's backoff per file, which leaves the directory rows materialized (2026-09-05, §7, §7.1).
-
-83. **A pin change rewrites the changed row *and every known descendant row*,** because `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the capabilities are per item and cached until that item's own metadata version moves. Invariant 2 clears every explicit state beneath first, which is what makes the rewrite one value rather than a per-row ancestor walk (§7.1, §7.1.1).
-
-84. **The helper cannot be started `</dev/null` *and* fed on its stdin.** §9.2 starts every background child with no stdin so it cannot swallow the heartbeat lines; §6.4 feeds the helper its root set and its pings on stdin. Only one process may read a pipe, so the wrapper stays the only reader and **relays** each line into a FIFO the helper is given instead (`RemoteScript.stdinRelay`). A server where `mkfifo` fails runs it `</dev/null` with its roots on its argv. And the relay fragment already ends in a `;`: writing `… || break; <relay>; done` makes `;;`, which dash answers with `Syntax error` and the channel dies at once (2026-09-05, §6.4, §9.2).
-
-85. **A hash the build embeds in a binary is not the hash of that binary.** `--version` prints the SHA-256 the helper computes of **its own executable** at startup, which is what makes §6.4's "size plus `--version`" fallback the same check as the `sha256sum` path rather than a weaker one (2026-09-05, §6.4, §9).
-
-86. **Tier 2 needs an exec channel it can *hold*, not merely open.** A sweep spends half a second on one and gives it back; the helper's stream keeps one for the life of the connection. At `MaxSessions 2` the single spare channel is shared with the probe and the 30-minute insurance sweep, so the helper is refused there - `ChannelBudget.allowsPersistentExecChannel` (2026-09-05, §6.1, §6.4).
-
-87. **The helper's `ready` line is what the ladder settles on.** "The first tier that starts successfully" cannot be decided from the channel opening: `sh` may print anything. `ready` (and `error`) are part of the NDJSON protocol, and a non-UTF-8 path travels as `path_b64` because a JSON string is UTF-8 by definition (2026-09-05, §6.4).
-
-88. **The helper's deployment is the one exception to the `RelativePath` chokepoint.** It writes to `~/.cache/sshdrive`, outside every location root by design, so `SFTP` exposes `HelperDirectory`/`HelperFile` - a probe-chosen absolute directory plus one filename component, no `..`, no nesting - and nothing on the File Provider path can build one (2026-09-05, §9.1, §6.4).
-
-89. **Writing over a running helper fails `ETXTBSY`,** which is why §6.4 uploads to a temp name and renames; and **the wrapper's `EXIT` trap does not run when the wrapper is `SIGKILL`ed**, which is every abrupt client kill, so its relay FIFO is swept by the next deployment instead (2026-09-05, §6.4, §5.5).
-
-90. **`aarch64-unknown-freebsd` has no prebuilt `rust-std`** - `rustup target add` refuses it - so it cannot be built or even `cargo check`ed, and the helper's FreeBSD target is x86_64 only. The three musl targets need no `cross` and no C toolchain: `rust-lld` with `-C link-self-contained=yes` (2026-09-05, §10.1).
-
-91. **A provisioning profile only authorises the certificate it was issued for.** A profile carries its `DeveloperCertificates`, and AMFI matches on them: one created against a *different* Developer ID Application certificate than the signing one makes **every** restricted entitlement unsatisfied (`taskgated-helper: Unsatisfied entitlements: keychain-access-groups`, `amfid: -413 "No matching profile found"`), and the agent is SIGKILLed at exec with a `Launch Constraint Violation` - `open -g` says `Launchd job spawn failed`. It signs, verifies, **notarizes and staples** first: notarization never looks at profiles. Adding `com.apple.application-identifier` to "match properly" makes it worse and is the key S1 a1 forbids anyway. `scripts/release.sh` compares the hashes before signing (2026-09-05, §10.1, §3.1).
-
-92. **`xcrun notarytool store-credentials` cannot run over ssh** - "User interaction is not allowed", with the login keychain unlocked - so a headless release notarizes with an App Store Connect API key (`--key`, `--key-id`, `--issuer`). A read-only key notarizes fine but **cannot create a provisioning profile** (`403 FORBIDDEN_ERROR`) (2026-09-05, §10.1).
-
-93. **`SMAppService.unregister()` returns before launchd has dropped the job,** and `status` says `notRegistered` while launchd is still spawning the old record. A `register()` inside that window leaves the job carrying the previous bundle's launch constraint and every spawn dies `EXC_CRASH (SIGKILL (Code Signature Invalid))` on a 10 s retry, for ever. The `unregister` role polls `launchctl print` until the service is gone before exiting, which is what makes the cask's back-to-back postflight safe (2026-09-05, §10).
-
-94. **The agent had no SIGTERM handler, and the default disposition would have made the cask's `signal:` stanza a crash.** Death by signal is an unsuccessful exit, `KeepAlive` with `SuccessfulExit` false restarts at once, and mid-upgrade that is the old bundle. TERM now runs the same shutdown as `agent stop` and exits 0 (2026-09-05, §10).
-
-95. **`add(domain)` can report `NSCocoaErrorDomain 4099` ("connection to com.apple.FileProvider was invalidated") after the call has landed.** Seen on `set nickname` and on the first location start after an upgrade. The domain list is the authority: `addDomain` re-reads `NSFileProviderManager.domains()` before believing the error (2026-09-05, §5.2, §10).
-
-96. **`sshdrive logs` reads fileproviderd's lines too.** Everything the *system* decides about a domain is under Apple's subsystem and never reaches ours, and `--info` must be passed or `log show` hides most of the transport. `/usr/bin/log` is spelled absolutely: zsh has a `log` builtin (§8).
-
-97. **A pending upload survives a bundle replacement and can be re-offered after it,** so the same write can arrive twice; the §5.5 conflict check is what makes that safe, and it produced a conflict copy rather than a loss (2026-09-05, §10, §5.5).
-
-98. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen (2026-09-05).
-
-99. **LaunchServices registers no plugin of a quarantined bundle nobody has launched.** Homebrew leaves `com.apple.quarantine` on the installed app, `open -g` is not an assessed launch, and the appex then does not exist: `pluginkit -m` prints nothing, `doctor` fails "extension registered" and "file provider domains" ("The application cannot be used right now"), and `fileproviderd` logs `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014`. The agent is unaffected - launchd starts it directly - so the install looks finished. `pluginkit -a` registers it and the next launch wipes that again; `xattr -dr com.apple.quarantine` then `open -g` is durable. The cask's postflight now runs `spctl --assess` and then the strip before its unregister and open, and `doctor` has a `quarantine` check ahead of "extension registered" (2026-09-05, first real cask install on macOS 26.6.2; a fresh-user quarantined install on the 26.4.1 VM had passed, and which half of that difference matters is not claimed, §10).
-
-100. **A `kill … 0` in a remote script is only safe where sshd gave the session its own process group.** Tailscale SSH runs every session in `tailscaled`'s process group, shared with every other session of every client, so the heartbeat wrapper's `kill -TERM 0` killed the account's other sessions **and the connection under them**: the helper's exec channel exited 255 and the tier-1 sweep dropped the master once a cycle. The wrapper names `-$$` instead - the group *this shell leads*, which is the same group where sshd gave us one and a harmless `ESRCH` where it did not - and signals the child by pid on both passes so the helper still cannot outlive the connection. Read the pgid with `/proc/$$/stat` if you ever need to see it; on that node it is `tailscaled`'s pid (2026-09-08, §6.4, §13).
-
-101. **The one `ssh` that can read the server's identification string is the collect connection.** Masters run at `LogLevel=ERROR` and mux clients never speak to the server, so `add`'s verification connection runs at `DEBUG1`, `remote software version …` is taken out of its stderr into `capabilities.json`, and the `debug1:` lines are stripped before the exit classifier or `add`'s message sees them. Beside it the SFTP extension fingerprint is free on every connection: exactly `hardlink`, `posix-rename` and `statvfs` is Go `pkg/sftp`; anything with `fsync`/`lsetstat`/`limits` is OpenSSH's own `sftp-server`. `status` names the server, and "not OpenSSH" and "not identified" stay different answers (2026-09-08, §8.1, §6.1).
-
-102. **`ssh` ends every stderr log line with CRLF, and in Swift `"\r\n"` is one `Character`,** so `split(separator: "\n")` finds no separator in `ssh -v` output at all: the whole transcript is one "line" and the first value read off it takes the rest of the file with it. The captured server version became `Tailscale` followed by a hundred `debug1:` lines, and `sshdrive status` printed the lot into the middle of its own report. Normalise line endings on **unicode scalars** before splitting (2026-09-08, §8.1).
-
-103. **The helper's stream is per connection, so re-opening it belongs to the reconnect, not to the next poll cycle.** `ChangeDetector.ensureHelper` used to be called only from `runCycle`, so a master that died, an agent restart, a wake or a network path change cost up to 60 s of no push detection on a touched location, up to 10 minutes on an idle one, and on a location a runtime failure had dropped, for ever. `ReconnectSequence` in `AgentCore` now owns the order and `DomainManager` drives it: `applyConnection`, `applyCapabilities`, `reopenHelperStream`, `signalErrorResolved`, `signalWorkingSet`. The stream comes **after** the SFTP channels because both are channels of the master that step rebuilt, and it is started on the detector's own actor rather than awaited, because `DomainManager` is where every File Provider request serialises (2026-09-08, §6.4, §5.6).
-
-104. **A tier failure is permanent only for the reasons §6.4 lists as permanent.** The helper's stream dies with **every** connection, so "drops the location one tier down for the rest of the session" turned a 90-second stall into a mount stuck at sweep until the agent was restarted - four times out of four on the VM. Permanent is: no shell, no exec channel, an unsupported OS or arch, a `noexec` directory, a hash that came back and disagreed after a redeploy, a `find` that is missing. Everything else holds the tier for 2 s doubling to 60 s and then climbs back; a connection coming up clears the hold and the backoff outright. And the loop has to be woken for it: a 2 s hold recorded while the detector was asleep for the rest of its minute measured as a 21 s climb back (2026-09-08, §6.4).
-
-105. **"helper upload failed" is two different failures.** `HelperDeployment.verdict` answers "the copy on the server does not match this build" when a hash came back and disagreed - about the file, permanent - and "the server could not verify the helper's contents" when the size matched and **nothing** could vouch for it, which is what an exec channel that will not run `sha256sum` or `--version` produces. Reading the second as permanent parked a location at sweep for the session against a server that was fine a minute later. `HelperDeployment.uploadFailureIsPermanent(after:)` is the split (2026-09-08, §6.4).
-
-106. **A channel that did not open says nothing about `MaxSessions` unless the master is alive.** `ssh` fails a channel open just as readily because the master has gone (`Control socket connect: No such file or directory`, `mux_client_hello_exchange: … Broken pipe`, or nothing at all), and §6.1's cache had no invalidation but an explicit re-probe - so one connect attempt made in a bad moment is a permanent "MaxSessions 1", taking the exec channel, the identity, the sweep and the helper with it, across every later restart. `ChannelProbeVerdict` classifies (a real refusal on a live master is still a refusal, and so is unfamiliar wording on a live master), a probe that met a dying connection **records nothing** and fails the connect attempt instead, and an abrupt loss of a connection that was up marks the cached budget suspect so the next connect re-probes (2026-09-08, §6.1, §8.1).
+1. Transport is the system **`/usr/bin/ssh`** by absolute path with `argv[0]` set to it, plus our own SFTP v3 wire client in Swift. Not libssh2, Citadel or swift-nio-ssh; never a `PATH` lookup (`ssh.md`, `sftp.md`).
+2. The master is `ssh -N` with `ControlPersist=no` - with it set, `ssh` forks away and the agent loses the pid, stderr and exit signal. `ControlPath` is `$TMPDIR/sshdrive-<id8>`, never `%C` (collides for two locations on one host; 104-byte socket limit) (`ssh.md`).
+3. Mux clients run `-F /dev/null -o BatchMode=yes -o ProxyCommand=/usr/bin/false`; otherwise a missing socket makes `ssh` open a *second, unsupervised* connection instead of failing. A mux client exiting before its channel opened is always "master lost", never an auth failure (`ssh.md`).
+4. `ProxyJump` is never handed to `ssh`: cancel it with `ProxyJump=none` and rebuild each hop as the agent's own `ProxyCommand` with the same overrides plus `ControlMaster=no` **and `ControlPath=none`** (`no` alone still attaches to the config's socket). Write the `ProxyCommand` **first** and the cancellation after it, and double a nested hop's `%h`/`%p` once per level (`ssh.md`, gotcha 33).
+5. A location that passed the collect connection's first pass runs `IdentityAgent=none` for good; only `agentDependent` locations ever consult a key agent (`secrets.md`, `ssh.md`).
+6. askpass holds nothing: it sends the agent a one-time `SSHDRIVE_ASKPASS_TOKEN`, the prompt, `SSH_ASKPASS_PROMPT` and its parent `ssh`'s argv (`sysctl KERN_PROCARGS2`). Keychain items are keyed `password:<user>@<hostname>:<port>` / `passphrase:<keypath>` from `ssh -G`, never the alias, shared across locations. The **host-key question arrives with `SSH_ASKPASS_PROMPT` unset**, exactly like a password prompt, so it is classified by its own text and the hint is only corroboration; `Enter passphrase for key '%.100s'` truncates, so the prompt text alone can never be the key. The three variable names live once, in `XPCProtocols/AskpassEnvironment.swift` (`secrets.md`).
+7. Authentication has a **60 s deadline from spawn**, signalled by the control socket appearing; the 15 s `ConnectTimeout` is contained in it, never added. A deadline stop is re-armed for exactly one attempt on screen unlock or a request arriving with input idle < 30 s and the screen unlocked; refusals are never re-armed (`secrets.md`, `offline.md`).
+8. Every remote path goes through the **`RelativePath` chokepoint** - the SFTP layer exposes no string-path API. Zero components is the root. System filenames, CLI paths, sweep output and helper events all pass the same constructor (`security.md`).
+9. **No tombstones.** A deleted row goes with its pin marker and xattrs; a re-created path is a new item with a new identifier (`item-index.md`).
+10. `content_version` is `"\(size)-\(mtime)-\(generation)"` at **every tier** with whole-second mtime, so a tier change is invisible. ns-mtime and inode are separate columns, feed change detection only, and are **reset to null after every upload of ours** (`item-index.md`, `writes.md`).
+11. The extension opens `index.sqlite` read-only in WAL mode for `item(for:)` and the working set; the agent is sole writer. Any SQLite error there answers `.serverUnreachable`, **never `.noSuchItem`** - that deletes the user's file (`extension.md`).
+12. A row is a finished item: `capabilities`, `fs_flags`, `kept` and `link_target` are derived and stored by the agent. The extension never re-derives them and never walks ancestors (`extension.md`).
+13. Every exec channel runs exactly `sh -s` with the script on stdin, values single-quoted through `set --`. Each script prints a random 128-bit sentinel first and the agent discards everything before it, because rc files print on non-interactive startup (`security.md`).
+14. Nothing on the server runs bare: the wrapper backgrounds its child with `</dev/null`, reads a 15 s heartbeat, and kills the child after 60 s of silence or EOF (`change-detection.md`).
+15. Sweep windows come from the **server's** clock (`date +%s` printed by the script, stored only after results are applied) and use `-cmin`, with a `-mmin` fallback on **every** busybox - no busybox build has `-cmin`, so that fallback and its `status` note are the ordinary NAS path, not a legacy case (`change-detection.md`).
+16. The mass-deletion guard holds listing-derived deletions removing >= half a directory and >= 20 items (or emptying a non-empty root), re-checking at 5 and 30 min. Helper delete events apply at once. A fetch of a held item fails `.cannotSynchronize`, never `.noSuchItem` (`change-detection.md`).
+17. Uploads go to `.sshdrive-upload-<mac8>-<uuid>` then non-overwriting `rename` (create) or `posix-rename@openssh.com` (overwrite), then `setstat` the mode back, then `lstat` for the version. Never write in place (`writes.md`).
+18. A path with an upload in flight sits in the **in-flight set** and change detection skips it; otherwise our own writes come back as remote changes (`writes.md`).
+19. The conflict check compares size and mtime from a fresh `lstat` **and** `generation` from the row - the wire cannot carry generation, and without it a same-size same-second remote change is overwritten (`writes.md`).
+20. `allowsTrashing` is never set (no trash); xattrs and Finder tags stay local and hash into the metadata version; `.DS_Store` is swallowed as a local-only row with its bytes in `local_content` (`names-and-attributes.md`).
+21. Symlinks are native items, **never followed**, shown only if a lexical check keeps them inside the root under either spelling (canonical `realpath` or user-typed/`$HOME`); absolute in-root targets are rewritten relative for the Mac; failures are omitted from enumeration entirely (`symlinks.md`).
+22. Pin markers (`pin_state`) live in the index, the sole authority. **Any change to a path's explicit state first deletes every explicit state beneath it**, silently from Finder too, and a pin change rewrites and anchors **every known descendant row** (`pinning.md`).
+23. What stops a kept item being evicted is its **eager `contentPolicy`**, inherited by the system; `allowsEvicting` is deprecated since macOS 13 and dropping it changes nothing - the system reports the bit from `isDownloaded`, not from us (measured on macOS 26.4, 2026-09-04). An eviction that reaches a kept item anyway is **re-asserted**, not read as an unpin (`pinning.md`).
+24. The SFTP wire gives status classes, not errno: `ENOSPC`, `EEXIST`, `ENOTEMPTY`, `EXDEV` all arrive as bare `FAILURE` - ask a second question (`lstat`, `statvfs`, `readdir`). Also OpenSSH's `SSH2_FXP_SYMLINK` takes its two paths in the **opposite order from the draft** (`sftp.md`).
+25. A pin on a path nothing has ever listed is not done when the rows are reported: the system ingests nothing from the working set alone, so `pin` finishes with `getUserVisibleURL` + one `lstat` of the replica, which is what makes it enumerate the chain (`pinning.md`).
+26. Finder tags never arrive as an xattr: they are the item's `tagData`, and the system wipes them on the next re-download if the item does not return them. It also only reports xattrs it considers syncable (`names-and-attributes.md`).
+27. A corrupt index is restored **into** the live database via `sqlite3_backup_init` (never by replacing the file: the `-wal`/`-shm` sidecars and the extension's open reader belong to the old inode), then reconciled against the replica under `meta.reconciling` (`item-index.md`).
+28. The domain's `displayName` is the **bare nickname**: the system prepends the app name to the mount directory and to the sidebar label itself (`platform.md`, `locations.md`). `add(domain)` with the same identifier and a new `displayName` renames in place, keeping the mount directory's contents, the materialized set and a pending upload, which is what `set nickname` does.
+29. **A folder is enumerated once, ever.** Revisiting it in Finder, or a remote change landing while it is open, produces no container-enumerator call at all; everything after the first listing arrives through the working set (`root-set.md`).
+30. The system **believes whatever version a `modifyItem` reply carries** - it never re-fetches and never re-offers - so a conflict copy must `evictItem` the item after returning the remote one, and `.filenameCollision` from `createItem` is retried for ever with no alert (`writes.md`).
+31. A custom action's activation rule binds **`fileproviderItems`** (lower-case p) as a **key path**, not a `$` substitution variable. Either mistake drops the menu entry silently; `fileproviderctl evaluate <path>` is how to check (`pinning.md`).
+32. Finder contributes exactly two File Provider entries, **"Download Now"** or **"Remove Download"** by `isDownloaded`, and draws no built-in "Keep Downloaded" for us. Our two actions land **at the bottom of the contextual menu, top level**, and on the window background, but **never on the sidebar row** - so a whole location is pinned only from the CLI (`pinning.md`).
+33. **`-o ProxyCommand=…` is written before `-o ProxyJump=none`.** Both keywords write the same field and `ssh` takes the first, so the reverse order makes OpenSSH discard the `ProxyCommand` outright and the master then resolves a hostname that only exists behind the bastion. A nested hop's `%h`/`%p` are doubled once per level it sits below the master (`%%h:%%p` at hop *n-1*), because `ssh` percent-expands the whole string before `/bin/sh -c` sees it; without that, hop 1 dials the destination. A `ProxyJump` in a location's own `sshOptions` reaches `ssh -G`, where the chain builder wants it, and is stripped from the master's command line (`ssh.md`).
+34. **Every sentinel's NUL is printed by a `printf` of its own.** `printf "\0<sentinel>"` reads `\0` and the octal digits after it as one character, so a sentinel beginning with a digit silently loses its first bytes and the marker is never found (`ssh.md`, `security.md`).
+35. **Every `sh -s` script is one `{ … }` group ending in an `exit`.** A compound command must be parsed whole before any of it runs, which is what stops the heartbeat reader eating the script's own tail off the same stdin - and `.` with no argument is a POSIX special builtin that ends a non-interactive shell outright (`security.md`).
+36. **The heartbeat wrapper reads heartbeats from a descriptor duplicated in the parent, and every subshell clears the `EXIT` trap;** without either it kills its own healthy child seconds after starting it. Its stamp file is `touch`ed, never `:`-redirected, and the `sleep`-and-mtime branch is the *ordinary* Linux path, because an exec channel runs `sh` and Debian's `sh` is dash (`change-detection.md`).
+37. **A `ForceCommand internal-sftp` account may answer an exec channel with a plain sentence,** `This service allows sftp connections only.`, rather than SFTP framing. The probe recognises both and reports "no shell access (ForceCommand)", never "shell output unusable" (`security.md`).
+38. **`limits@openssh.com` sizes the request, not the window.** It says nothing about how many requests may be outstanding, so the chunk size is the server's and the depth of sixteen is ours (`sftp.md`).
+39. **An SFTP channel is a mux client of the master** (`ssh $MUX -s <host> sftp`), and the wire client sits on the same `ByteStream` an exec channel hands over - one definition, in `SSHProcess`, which `SFTP` depends on. `SFTPSubprocess`, which spawns an `ssh` of its own, is a test path only (`ssh.md`, `sftp.md`).
+40. **stderr distinguishes no key-agent state.** A missing socket, a dead socket and a *locked* agent all exit with the same bare `Permission denied (publickey)` at `LogLevel=ERROR`, so the pre-spawn socket probe is the only signal; `agent refused operation` corroborates, it does not decide (measured 2026-09-04) (`ssh.md`).
+41. **SFTP `opendir` follows a symlink,** so every listing re-`lstat`s its own directory before `readdir`: a directory swapped on the server for a link to `/etc` is otherwise read straight through and every name under it gets a row (measured 2026-09-04) (`security.md`).
+42. **The six-fetch ceiling bounds an eager subtree, not the queue.** Eight files opened at once from a shell arrive as eight simultaneous foreground `fetchContents` calls, so a transfer past the ceiling is admitted and counted, never refused (`sftp.md`).
+43. **A directory listing is written in one transaction.** Row by row, a 10,000-entry directory is 10,000 autocommits and `ls` of the mount answers `fts_read: Operation timed out` (`item-index.md`).
+44. **The `MaxSessions` probe asks "may I hold three channels at once",** not "what is `MaxSessions`", and proves a channel open by completing the SFTP handshake on it: `ssh` spawns successfully whether or not the session was granted. The answer is cached per location, because the agent never sees a server banner to key it on (`ssh.md`).
+45. **The index's transaction helper nests.** "A listing is one transaction" wraps calls that are each a transaction of their own (`appendAnchor`, `delete`), and SQLite has no nested `BEGIN`: below the outermost level it is a `SAVEPOINT` (`item-index.md`).
+46. **The collect connection of `add` runs to 300 s, not 60.** The deadline exists because nothing may wait for a human unattended; a person *is* at the keyboard for that one connection. The master `add` brings up afterwards carries the 60 s (`secrets.md`).
+47. **The CLI exports an object.** The agent relays the collect connection's prompts back along the same connection, so the listener hands a `sshdrive` peer the CLI callback interface and everyone else the extension's - the same rule that gives askpass its own (`secrets.md`, `extension.md`).
+48. **The CLI's stdout is unbuffered.** The agent writes relayed prompts through the file descriptor; a buffered `print` from the CLI's own report would land out of order behind them whenever stdout is a pipe (`cli.md`).
+49. **The conflict copy's eviction has to be retried and the working set signalled.** An `evictItem` straight after the `modifyItem` reply is refused `NSFileProviderErrorNonEvictable` (-2008) - the system is still finishing the modification - so it retries with a doubling backoff from 0.25 s; and the copy is a new sibling in a folder that will never be enumerated again, so its anchor needs a working-set signal or Finder never shows it (measured on macOS 26.4, 2026-09-04) (`writes.md`, `root-set.md`).
+50. **The xattr hash does not prevent a retry loop, because there is none.** A tag change is not re-offered even when the reply carries the version the item already had. The hash is what makes a change the **agent** makes reach the system - a restore from the index backup - and nothing else (measured on macOS 26.4, 2026-09-04) (`names-and-attributes.md`, `item-index.md`).
+51. **Finder tags are an `NSKeyedArchiver` archive in `tagData`,** never an xattr: `changedFields` carries `NSFileProviderItemTagData` (`0x10`) with an empty `extendedAttributes`. Stored and served opaquely, never parsed (measured on macOS 26.4, 2026-09-04) (`names-and-attributes.md`).
+52. **A `.DS_Store` written into the mount never reaches the extension.** The system keeps it in the replica and never asks anyone to upload it, so the local-only path exists for other writers, not for Finder (measured on macOS 26.4, 2026-09-04) (`names-and-attributes.md`).
+53. **A local-only row survives a listing that does not mention it** - the one exception to "deleted rows are deleted", and without it the first listing after the create takes the user's file (`item-index.md`, `names-and-attributes.md`).
+54. **Every symlink a listing reports costs a `readlink`:** SFTP v3's `readdir` carries attributes but no target. Finder then draws the link as Kind **"Alias"** with the arrow badge, dangling or not, with no broken-link marker (measured on macOS 26.4, 2026-09-04) (`symlinks.md`, `sftp.md`).
+55. **A refused `ln -s` is a sync error, not a message.** The create succeeds locally and the refusal comes back as the item's `uploadingError` with the system's own wording, so the design's sentence only reaches the user through `sshdrive status` (measured on macOS 26.4, 2026-09-04) (`symlinks.md`).
+56. **`launchctl kill` plus `open -g` does not reinstall the agent** - launchd brings the old binary back before `ditto` finishes and `open -g` then does nothing. Use `sshdrive agent restart`, and check `ping`'s `interfaceVersion`. Related: `pgrep` lists killed mux clients as zombies until the agent reaps them, and a restarted location can hold two masters.
+57. **macOS asks for Local Network access in the app's name on first connect,** which every NAS on the user's own network will hit; no entitlement suppresses it and a launchd agent has no window to put it over (`platform.md`, `packaging.md`).
+58. **`signalErrorResolved(.serverUnreachable)` is the only thing that flushes a queued write.** `signalEnumerator` alone does not, and neither does reconnecting; the queued `modifyItem` arrived 20 ms after the signal and not at all without it (measured on macOS 26.4, 2026-09-04) (`offline.md`).
+59. **The system re-offers a queued write on a doubling backoff past five minutes, and re-issues a failed `fetchContents` never.** So the agent reconnects on the breaker's backoff **unprompted**, and a read that meets a silently dead connection is retried once through the breaker; a write is not (its source cannot be replayed, and the write is the one thing the system does re-offer) (measured on macOS 26.4, 2026-09-04) (`offline.md`).
+60. **The system does not time out an `enumerateItems` held the full 60 s** the breaker may hold a call for, and leaves the extension running. Finder draws a static circular progress ring in place of the dataless badge for the length of the wait, with no alert (measured on macOS 26.4, 2026-09-04) (`offline.md`).
+61. **`disconnect(reason:)` works from inside the extension.** With the login item unregistered the domain goes `permanently disconnected` (state 4); the replica listing and queued writes survive, and re-launching the app lifts it and flushes them (measured on macOS 26.4, 2026-09-04) (`offline.md`, `extension.md`).
+62. **From `fetchContents`, `.noSuchItem` and `.cannotSynchronize` both leave the item in place** - `ESTALE` against `ETIMEDOUT`. The "never `.noSuchItem`" rule is about `item(for:)` and only about it (measured on macOS 26.4, 2026-09-04) (`change-detection.md`, `extension.md`).
+63. **A pending edit on an item reported deleted comes back as a `createItem`,** which collides with the path still on the server and is then retried for ever with no alert - the save is stranded and the identifier is new. The mass-deletion guard must hold deletions of pending items (measured on macOS 26.4, 2026-09-04) (`change-detection.md`, `writes.md`).
+64. **Sleep and wake are IOKit, and the constants do not import.** `kIOMessageSystemWillSleep` and friends are `iokit_common_msg()` macros, spelled out as `0xE0000280` / `0xE0000270` / `0xE0000300`; `CGEventType` likewise has no `.any`, so the presence read is `CGEventType(rawValue: ~0)`. The will-sleep message must be acknowledged with `IOAllowPowerChange` (`ssh.md`).
+65. **`launchctl setenv` does not reach a launchd agent on macOS 26,** even across `sshdrive agent restart`, so an override for the agent is a file in the group container (measured on macOS 26.4, 2026-09-04) (`secrets.md`).
+66. **`scripts/mac-build.sh` rsyncs with `--delete` and there is no `build/` on the Linux side,** so every run wipes the Mac's build directory. Run `signed` last, or `ditto` fails with "Cannot get the real path for source".
+67. **The local-attributes blob is encoded with `JSONEncoder` and `.sortedKeys` is load-bearing.** The blob is hashed into the metadata version, and without a sorted key order the same attributes encode to two different byte strings *within one process*, the hash moves, and the system re-reads every item the agent holds (`item-index.md`, `names-and-attributes.md`).
+68. **The build VM does not honour `pmset sleepnow`** (`error 0xe00002e2`, exit 71): `powerd` holds "Prevent sleep while display is on". `IORegisterForSystemPower` does register there, so the handlers are driven with `sshdrive debug power will-sleep|did-wake` and only the delivery is unproven (measured on macOS 26.4, 2026-09-04) (`ssh.md`).
+69. **A bare background process on the server survives an abrupt client kill whatever `ClientAliveInterval` is set to.** sshd reaping the session does not reach a child that has left the foreground job: measured alive three minutes later on Debian with it unset, Debian with it at 15/3, and Alpine/busybox with it unset (2026-09-04). The heartbeat wrapper is the only thing that ever kills what we started (`change-detection.md`).
+70. **`-cmin` and `-printf` each cost a `stat` per entry, and that is what a sweep spends.** Over a million files, warm: 204 ms with `-print0` and no time test, 850-900 ms adding `-cmin`, 1.6-3.0 s adding `-printf` (measured 2026-09-04). The ordinary incremental sweep of that tree is under a second and returns one record (`change-detection.md`).
+71. **Every sweep root is spelled `./name`.** `find` has no portable `--`, so a top-level directory named `-name` would be read as an option and take the whole sweep with it; the prefix comes back on every path and is stripped before the `RelativePath` constructor (`change-detection.md`).
+72. **A sweep root whose bytes are not valid UTF-8 never reaches `find`** - `set --` is a String pipeline end to end - so it is dropped from the argv and listed at tier 0 in the same cycle instead (`change-detection.md`, `security.md`).
+73. **busybox `find --version` prints an error and exits 0,** so the flavour probe reads the `busybox` banner and the `-cmin` answer, never the exit status. And `SweepPlan` refuses `-cmin`/`-printf` on a busybox flavour even when the probe claims them: a busybox `-cmin` does not lose a field, it fails the whole sweep (measured on BusyBox 1.36.1 / Alpine 3.20, 2026-09-04) (`cli.md`, `change-detection.md`).
+74. **The sweep's server timestamp is stored only after its results are applied, and a truncated sweep stores nothing,** so the next window still covers what the cut-off one missed (`change-detection.md`).
+75. **A directory rename rewrites `held.dir` as well as `held.path`,** or the guard's 5- and 30-minute re-checks re-list a name that no longer exists and the holds never resolve (`item-index.md`, `change-detection.md`).
+76. **The reconcile walk runs after `add(domain)`, never inside `start()`** - it reads the system's replica - so the restore leaves `meta.reconciling` set and the walk is what clears it. A walk that hits its deadline or item cap **still clears the flag**, because the alternative is a domain stalled for ever (`item-index.md`).
+77. **A CLI command naming a location is a touch,** and it has to be: a folder is enumerated once ever, so a user watching a mount from a terminal produces no File Provider traffic at all and the location would sit at the ten-minute cadence while they worked (`change-detection.md`, `root-set.md`).
+78. **The working set must answer `.serverUnreachable` while its reader is not ready, never an empty change set.** The system launches a fresh extension instance for every working-set signal, so the first `enumerateChanges` on a signalled instance races the `indexReady` round trip; "no changes" at the anchor the system already holds tells it that it is up to date and the change is dropped until something else signals - a deleted file then sits in Finder indefinitely though it is gone from both the server and the index (measured on macOS 26.4, 2026-09-04) (`item-index.md`, `extension.md`).
+79. **The orphan control-socket sweep matches on the socket type, not the name.** `$TMPDIR` is shared and `sshdrive-` is not ours exclusively there - the package's own test databases are `sshdrive-nested-<uuid>.sqlite`, and their `-wal`/`-shm` sidecars made `sshdrive doctor` report a clean install as failing, with six "orphaned sockets" it would have deleted. Each candidate is `lstat`ed and only `S_IFSOCK` counts (`ssh.md`).
+80. **atime is not in the TTL's `max`.** Something in the system advances a materialized file's atime minutes after the fetch, deferred and with no read of ours near it, so with atime in the rule the TTL silently becomes "time since whatever last touched the replica" - a file fetched 280 s earlier survived a 60 s TTL. It is read, logged beside the age the decision used, and decided on by nobody; `last_fetch` and the later of the replica's and the row's mtime are the whole rule (measured on macOS 26.4, 2026-09-05) (`eviction.md`).
+81. **A decoration's Info.plist keys are the bare `Identifier`, `BadgeImageType`, `Label` and `Category`,** not `NSFileProviderDecoration`-prefixed spellings and not the `NSExtensionFileProviderAction*` shape beside them, and `BadgeImageType` is a **UTI conforming to `com.apple.icon-decoration.badge`** (the system ships `.badge.pinned`), never an asset name. Every mistake is silent, like `fileproviderItems`. Finder draws a `Badge` at the trailing edge of the Name column, not on the icon (measured on macOS 26.4, 2026-09-05) (`pinning.md`).
+82. **`evict --all` is one call on the root container only while nothing is *or has just been* pinned.** With a pin in place it meets a kept child and fails as a whole, and straight after `--unpin-all` it fails as `NSCocoaErrorDomain` "The file couldn't be opened" because the system has not re-read the rows whose policy just changed - a single file becomes evictable 5-10 s after an unpin, the container did not within a minute. Both cases fall back to walking the materialized set with the write path's backoff per file, which leaves the directory rows materialized (measured on macOS 26.4, 2026-09-05) (`eviction.md`, `pinning.md`).
+83. **A pin change rewrites the changed row *and every known descendant row*,** because `contentPolicy` is inherited by the system but `userInfo.kept`, the badge and the capabilities are per item and cached until that item's own metadata version moves. Invariant 2 clears every explicit state beneath first, which is what makes the rewrite one value rather than a per-row ancestor walk (`pinning.md`).
+84. **The helper cannot be started `</dev/null` *and* fed on its stdin.** Every background child starts with no stdin so it cannot swallow the heartbeat lines, but the helper is fed its root set and its pings on stdin. Only one process may read a pipe, so the wrapper stays the only reader and **relays** each line into a FIFO the helper is given instead (`RemoteScript.stdinRelay`). A server where `mkfifo` fails runs it `</dev/null` with its roots on its argv. And the relay fragment already ends in a `;`: writing `… || break; <relay>; done` makes `;;`, which dash answers with `Syntax error` and the channel dies at once (`change-detection.md`, `security.md`).
+85. **A hash the build embeds in a binary is not the hash of that binary.** `--version` prints the SHA-256 the helper computes of **its own executable** at startup, which is what makes the "size plus `--version`" fallback the same check as the `sha256sum` path rather than a weaker one (`change-detection.md`, `security.md`).
+86. **Tier 2 needs an exec channel it can *hold*, not merely open.** A sweep spends half a second on one and gives it back; the helper's stream keeps one for the life of the connection. At `MaxSessions 2` the single spare channel is shared with the probe and the 30-minute insurance sweep, so the helper is refused there - `ChannelBudget.allowsPersistentExecChannel` (`ssh.md`, `change-detection.md`).
+87. **The helper's `ready` line is what the ladder settles on.** "The first tier that starts successfully" cannot be decided from the channel opening: `sh` may print anything. `ready` (and `error`) are part of the NDJSON protocol, and a non-UTF-8 path travels as `path_b64` because a JSON string is UTF-8 by definition (`change-detection.md`).
+88. **The helper's deployment is the one exception to the `RelativePath` chokepoint.** It writes to `~/.cache/sshdrive`, outside every location root by design, so `SFTP` exposes `HelperDirectory`/`HelperFile` - a probe-chosen absolute directory plus one filename component, no `..`, no nesting - and nothing on the File Provider path can build one (`security.md`, `change-detection.md`).
+89. **Writing over a running helper fails `ETXTBSY`,** which is why the upload goes to a temp name and renames; and **the wrapper's `EXIT` trap does not run when the wrapper is `SIGKILL`ed**, which is every abrupt client kill, so its relay FIFO is swept by the next deployment instead (`change-detection.md`, `writes.md`).
+90. **`aarch64-unknown-freebsd` has no prebuilt `rust-std`** - `rustup target add` refuses it - so it cannot be built or even `cargo check`ed, and the helper's FreeBSD target is x86_64 only. The three musl targets need no `cross` and no C toolchain: `rust-lld` with `-C link-self-contained=yes` (`packaging.md`).
+91. **A provisioning profile only authorises the certificate it was issued for.** A profile carries its `DeveloperCertificates`, and AMFI matches on them: one created against a *different* Developer ID Application certificate than the signing one makes **every** restricted entitlement unsatisfied (`taskgated-helper: Unsatisfied entitlements: keychain-access-groups`, `amfid: -413 "No matching profile found"`), and the agent is SIGKILLed at exec with a `Launch Constraint Violation` - `open -g` says `Launchd job spawn failed`. It signs, verifies, **notarizes and staples** first: notarization never looks at profiles. Adding `com.apple.application-identifier` to "match properly" makes it worse and is a private-entitlement dead end anyway. `scripts/release.sh` compares the hashes before signing and drops the entitlement rather than ship a bundle that cannot launch (`packaging.md`, `components.md`).
+92. **`xcrun notarytool store-credentials` cannot run over ssh** - "User interaction is not allowed", with the login keychain unlocked - so a headless release notarizes with an App Store Connect API key (`--key`, `--key-id`, `--issuer`). A read-only key notarizes fine but **cannot create a provisioning profile** (`403 FORBIDDEN_ERROR`) (`packaging.md`).
+93. **`SMAppService.unregister()` returns before launchd has dropped the job,** and `status` says `notRegistered` while launchd is still spawning the old record. A `register()` inside that window leaves the job carrying the previous bundle's launch constraint and every spawn dies `EXC_CRASH (SIGKILL (Code Signature Invalid))` on a 10 s retry, for ever. The `unregister` role polls `launchctl print` until the service is gone before exiting, which is what makes the cask's back-to-back postflight safe (measured on macOS 26.4, 2026-09-05) (`packaging.md`).
+94. **The agent handles SIGTERM itself.** Death by signal is an unsuccessful exit, `KeepAlive` with `SuccessfulExit` false restarts at once, and mid-upgrade that is the old bundle. TERM runs the same shutdown as `agent stop` and exits 0, which is what makes the cask's `signal:` stanza safe (`packaging.md`).
+95. **`add(domain)` can report `NSCocoaErrorDomain 4099` ("connection to com.apple.FileProvider was invalidated") after the call has landed.** Seen on `set nickname` and on the first location start after an upgrade. The domain list is the authority: `addDomain` re-reads `NSFileProviderManager.domains()` before believing the error (measured on macOS 26.4, 2026-09-05) (`extension.md`, `packaging.md`).
+96. **`sshdrive logs` reads fileproviderd's lines too.** Everything the *system* decides about a domain is under Apple's subsystem and never reaches ours, and `--info` must be passed or `log show` hides most of the transport. `/usr/bin/log` is spelled absolutely: zsh has a `log` builtin (`cli.md`).
+97. **A pending upload survives a bundle replacement and can be re-offered after it,** so the same write can arrive twice; the conflict check is what makes that safe, and it produces a conflict copy rather than a loss (measured on macOS 26.4, 2026-09-05) (`packaging.md`, `writes.md`).
+98. **A zsh harness must spell `${=K}`.** zsh does not word-split an unquoted parameter, so `ssh $K …` with `K="-o BatchMode=yes -i key"` passes it as one argument and every remote command fails with `keyword batchmode extra arguments at end of line`. A latency run then "passes" the steps that check for absence, because a file that was never created is also never seen.
+99. **LaunchServices registers no plugin of a quarantined bundle nobody has launched.** Homebrew leaves `com.apple.quarantine` on the installed app, `open -g` is not an assessed launch, and the appex then does not exist: `pluginkit -m` prints nothing, `doctor` fails "extension registered" and "file provider domains" ("The application cannot be used right now"), and `fileproviderd` logs `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014`. The agent is unaffected - launchd starts it directly - so the install looks finished. `pluginkit -a` registers it and the next launch wipes that again; `xattr -dr com.apple.quarantine` then `open -g` is durable. The cask's postflight runs `spctl --assess` and then the strip before its unregister and open, and `doctor` has a `quarantine` check ahead of "extension registered" (measured on macOS 26.6.2, 2026-09-05; a quarantined install by a fresh user on macOS 26.4.1 had passed, and which half of that difference matters is not claimed) (`packaging.md`).
+100. **A `kill … 0` in a remote script is only safe where sshd gave the session its own process group.** Tailscale SSH runs every session in `tailscaled`'s process group, shared with every other session of every client, so a heartbeat wrapper's `kill -TERM 0` kills the account's other sessions **and the connection under them**: the helper's exec channel exits 255 and the tier-1 sweep drops the master once a cycle. The wrapper names `-$$` - the group *this shell leads*, which is the same group where sshd gave us one and a harmless `ESRCH` where it did not - and signals the child by pid on both passes so the helper still cannot outlive the connection. Read the pgid with `/proc/$$/stat` if you ever need to see it; on that node it is `tailscaled`'s pid (measured 2026-09-08) (`change-detection.md`).
+101. **The one `ssh` that can read the server's identification string is the collect connection.** Masters run at `LogLevel=ERROR` and mux clients never speak to the server, so `add`'s verification connection runs at `DEBUG1`, `remote software version …` is taken out of its stderr into `capabilities.json`, and the `debug1:` lines are stripped before the exit classifier or `add`'s message sees them. Beside it the SFTP extension fingerprint is free on every connection: exactly `hardlink`, `posix-rename` and `statvfs` is Go `pkg/sftp`; anything with `fsync`/`lsetstat`/`limits` is OpenSSH's own `sftp-server`. `status` names the server, and "not OpenSSH" and "not identified" stay different answers (`cli.md`, `ssh.md`).
+102. **`ssh` ends every stderr log line with CRLF, and in Swift `"\r\n"` is one `Character`,** so `split(separator: "\n")` finds no separator in `ssh -v` output at all: the whole transcript is one "line" and the first value read off it takes the rest of the file with it. Normalise line endings on **unicode scalars** before splitting (`cli.md`).
+103. **The helper's stream is per connection, so re-opening it belongs to the reconnect, not to the next poll cycle.** A master that died, an agent restart, a wake or a network path change otherwise costs up to 60 s of no push detection on a touched location, up to 10 minutes on an idle one, and for ever on a location a runtime failure had dropped. `ReconnectSequence` in `AgentCore` owns the order and `DomainManager` drives it: `applyConnection`, `applyCapabilities`, `reopenHelperStream`, `signalErrorResolved`, `signalWorkingSet`. The stream comes **after** the SFTP channels because both are channels of the master that step rebuilt, and it is started on the detector's own actor rather than awaited, because `DomainManager` is where every File Provider request serialises (`change-detection.md`, `offline.md`).
+104. **A tier failure is permanent only for the reasons the design lists as permanent.** The helper's stream dies with **every** connection, so treating that as permanent turns a 90-second stall into a mount stuck at sweep until the agent is restarted. Permanent is: no shell, no exec channel, an unsupported OS or arch, a `noexec` directory, a hash that came back and disagreed after a redeploy, a `find` that is missing. Everything else holds the tier for 2 s doubling to 60 s and then climbs back; a connection coming up clears the hold and the backoff outright. And the loop has to be woken for it: a 2 s hold recorded while the detector is asleep for the rest of its minute measures as a 21 s climb back (`change-detection.md`).
+105. **"helper upload failed" is two different failures.** `HelperDeployment.verdict` answers "the copy on the server does not match this build" when a hash came back and disagreed - about the file, permanent - and "the server could not verify the helper's contents" when the size matched and **nothing** could vouch for it, which is what an exec channel that will not run `sha256sum` or `--version` produces. Reading the second as permanent parks a location at sweep for the session against a server that is fine a minute later. `HelperDeployment.uploadFailureIsPermanent(after:)` is the split (`change-detection.md`).
+106. **A channel that did not open says nothing about `MaxSessions` unless the master is alive.** `ssh` fails a channel open just as readily because the master has gone (`Control socket connect: No such file or directory`, `mux_client_hello_exchange: … Broken pipe`, or nothing at all), and a cached budget with no invalidation makes one connect attempt in a bad moment a permanent "MaxSessions 1", taking the exec channel, the identity, the sweep and the helper with it across every later restart. `ChannelProbeVerdict` classifies (a real refusal on a live master is still a refusal, and so is unfamiliar wording on a live master), a probe that met a dying connection **records nothing** and fails the connect attempt instead, and an abrupt loss of a connection that was up marks the cached budget suspect so the next connect re-probes (`ssh.md`, `cli.md`).
 
 ## Glossary
 
-- **root set** - the bounded directory set every tier watches: `materialized` + `pinned` (recursive) + `viewed` (30 min, capped at 256). Nothing else is polled (§6.5).
-- **working set** - the File Provider change stream. Only ever a change stream, never a listing; `enumerateItems` on it returns nothing (§5.3).
-- **anchor** - an `anchors` row (sequence number + changed identifier + kind) replayed by the working-set enumerator; expiry answers `.syncAnchorExpired` and triggers a full sweep (§5.3).
-- **reconcile** - rebuilding the index from the system's replica by walking the mount and calling `getIdentifierForUserVisibleFile(at:)`, under `meta.reconciling`, which stalls all service (§5.3).
-- **pin / excluded / kept** - `pinned`/`excluded` are markers on a path; **kept** is the effect at an item (nearest marker at or above it is a pin). Kept is what everything acts on (§7.1, §7.1.1).
-- **tier 0 / 1 / 2** - poll (SFTP `readdir`) / sweep (`find` over exec) / helper (our Rust binary, push ~1 s, real renames). `watchMode: auto` tries top down and degrades (§6.4). Tier 2 is real since 2026-09-05; measured 76-903 ms against tier 1's 60 s.
-- **helper** - `sshdrive-helper`, the Rust crate in `helper/`. Uploaded to `~/.cache/sshdrive` over SFTP, hash-verified against `Contents/Resources/helper/manifest.json`, run on one held exec channel under the heartbeat wrapper, and speaking NDJSON back. `helper on|off` per location; `HelperDeployer` puts it there, `HelperStream` reads it (§6.4 tier 2).
-- **sweep** - one exec-channel `find` pass over the root set within a window from the **server's** clock; also the 30-min insurance pass. **full sweep** = window opened to the last recorded server timestamp, run on reconnect and on fresh anchors (§6.4, §5.3).
-- **metadata version** - content version + mode/uid/gid + derived `capabilities`/`fs_flags` + effective `kept` + xattr hash. The system re-reads an item only when this moves (§5.3).
-- **generation** - per-row counter bumped when ns-mtime or inode evidence shows a change size+second-mtime cannot; it is what moves the content version (§5.3).
-- **breaker** - per-location circuit breaker, 2 s doubling to 60 s (300 s for a key agent that is not ready), failing calls fast; calls **wait** for an attempt already in progress, bounded by that attempt's own remaining 60 s. The backoff is also a **reconnect schedule**: the agent attempts unprompted when it expires. Auth and host-key failures bypass it and stop reconnection (§6.3).
-- **collect connection** - the verification connection the *agent* makes during `add`/`passwd`, prompts relayed to the CLI; twice at most, `IdentityAgent=none` first (§4.2).
-- **in-flight set** - paths with an upload in progress; change detection skips them so our own writes never look like remote changes (§5.5).
+- **root set** - the bounded directory set every tier watches: `materialized` + `pinned` (recursive) + `viewed` (30 min, capped at 256). Nothing else is polled (`root-set.md`).
+- **working set** - the File Provider change stream. Only ever a change stream, never a listing; `enumerateItems` on it returns nothing (`item-index.md`).
+- **anchor** - an `anchors` row (sequence number + changed identifier + kind) replayed by the working-set enumerator; expiry answers `.syncAnchorExpired` and triggers a full sweep (`item-index.md`).
+- **reconcile** - rebuilding the index from the system's replica by walking the mount and calling `getIdentifierForUserVisibleFile(at:)`, under `meta.reconciling`, which stalls all service (`item-index.md`).
+- **pin / excluded / kept** - `pinned`/`excluded` are markers on a path; **kept** is the effect at an item (nearest marker at or above it is a pin). Kept is what everything acts on (`pinning.md`).
+- **tier 0 / 1 / 2** - poll (SFTP `readdir`) / sweep (`find` over exec) / helper (our Rust binary, push ~1 s, real renames). `watchMode: auto` tries top down and degrades (`change-detection.md`). Tier 2 latency measured at 76-903 ms against tier 1's 60 s.
+- **helper** - `sshdrive-helper`, the Rust crate in `helper/`. Uploaded to `~/.cache/sshdrive` over SFTP, hash-verified against `Contents/Resources/helper/manifest.json`, run on one held exec channel under the heartbeat wrapper, and speaking NDJSON back. `helper on|off` per location; `HelperDeployer` puts it there, `HelperStream` reads it (`change-detection.md`).
+- **sweep** - one exec-channel `find` pass over the root set within a window from the **server's** clock; also the 30-min insurance pass. **full sweep** = window opened to the last recorded server timestamp, run on reconnect and on fresh anchors (`change-detection.md`, `item-index.md`).
+- **metadata version** - content version + mode/uid/gid + derived `capabilities`/`fs_flags` + effective `kept` + xattr hash. The system re-reads an item only when this moves (`item-index.md`).
+- **generation** - per-row counter bumped when ns-mtime or inode evidence shows a change size+second-mtime cannot; it is what moves the content version (`item-index.md`).
+- **breaker** - per-location circuit breaker, 2 s doubling to 60 s (300 s for a key agent that is not ready), failing calls fast; calls **wait** for an attempt already in progress, bounded by that attempt's own remaining 60 s. The backoff is also a **reconnect schedule**: the agent attempts unprompted when it expires. Auth and host-key failures bypass it and stop reconnection (`offline.md`).
+- **collect connection** - the verification connection the *agent* makes during `add`/`passwd`, prompts relayed to the CLI; twice at most, `IdentityAgent=none` first (`secrets.md`).
+- **in-flight set** - paths with an upload in progress; change detection skips them so our own writes never look like remote changes (`writes.md`).

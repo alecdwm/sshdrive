@@ -113,8 +113,9 @@ final class ScenarioHarness {
 
     func id(_ raw: String) -> ProviderItemIdentifier { ProviderItemIdentifier(raw) }
 
-    /// A row that has stopped carrying the user's tags - section 5.4 as it was written
-    /// before S4 corrected it. `L4`'s bite-proof needs an item that returns no `tagData`.
+    /// A row that has stopped carrying the user's tags
+    /// (docs/design/names-and-attributes.md). `L4`'s bite-proof needs an item that
+    /// returns no `tagData`.
     func forgetStoredTags(of identifier: String) throws {
         guard var row = try writer.item(identifier: identifier) else { return }
         row.xattrs = nil
@@ -145,8 +146,8 @@ final class ScenarioHarness {
 }
 
 /// The working-set enumerator **as version 0.1.2 shipped it**, kept here and only here so
-/// `A2` can prove that it fails and today's passes (`docs/testing-architecture.md`
-/// section 8, step 1: "Done when A2 fails on the 0.1.2 code and passes on today's").
+/// `A2` can prove that it fails against this code and passes against the shipping
+/// enumerator (docs/design/testing.md).
 ///
 /// Two lines are the whole defect and both are reproduced:
 ///

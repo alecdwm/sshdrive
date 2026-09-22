@@ -1,7 +1,7 @@
 import Foundation
 
 /// Which of our `ssh` processes exited. The role decides some classifications outright,
-/// so it is an input and not a label (DESIGN.md section 6.1).
+/// so it is an input and not a label (docs/design/ssh.md).
 public enum SSHRole: String, Sendable, Equatable {
     /// The `-N` ControlMaster.
     case master
@@ -9,11 +9,12 @@ public enum SSHRole: String, Sendable, Equatable {
     case muxClient
     /// `-O check` / `-O exit`.
     case controlCommand
-    /// The two-pass verification connection `add` and `passwd` make (section 4.2).
+    /// The two-pass verification connection `add` and `passwd` make
+    /// (docs/design/secrets.md).
     case collect
 }
 
-/// What the agent does about an `ssh` that exited (DESIGN.md section 6.1).
+/// What the agent does about an `ssh` that exited (docs/design/ssh.md).
 public enum SSHExitClassification: String, Sendable, Equatable {
     /// Exit 0, nothing to do.
     case clean
@@ -24,20 +25,21 @@ public enum SSHExitClassification: String, Sendable, Equatable {
     /// Reconnection stops until `sshdrive test`, `passwd`, or a settings change: a stale
     /// password retried every minute is a `fail2ban` ban within the hour.
     case authenticationFailed
-    /// `known_hosts` said no. Stops reconnection the same way (section 4.3).
+    /// `known_hosts` said no. Stops reconnection the same way (docs/design/secrets.md).
     case hostKeyFailed
     /// The 60 s authentication deadline for an `agentDependent` location. Stops, but is
     /// re-armed for exactly one attempt on screen unlock or a request with the user
-    /// present (section 4.2).
+    /// present (docs/design/secrets.md).
     case authenticationDeadline
     /// A key agent that is not ready: `agent refused operation`, or a socket that is not
     /// there yet. Transient, but with the backoff cap raised, because a locked key agent
-    /// stays locked for hours (section 6.1).
+    /// stays locked for hours (docs/design/ssh.md).
     case keyAgentNotReady
     /// The server refused another channel: `MaxSessions`. The probe reads the limit off
     /// this; a running location drops a channel rather than reconnecting.
     case channelLimitReached
-    /// Everything else: retried with jittered backoff through the breaker (section 6.3).
+    /// Everything else: retried with jittered backoff through the breaker
+    /// (docs/design/offline.md).
     case transient
 
     /// Whether the agent stops reconnecting until the user acts.
@@ -49,11 +51,12 @@ public enum SSHExitClassification: String, Sendable, Equatable {
     }
 
     /// Whether one attempt is re-armed on screen unlock or a present-user request.
-    /// Refusals are never re-armed; only a deadline stop is (section 4.2).
+    /// Refusals are never re-armed; only a deadline stop is (docs/design/secrets.md).
     public var isReArmable: Bool { self == .authenticationDeadline }
 
     /// The breaker's ceiling for this failure. 60 s normally; 5 minutes for a key agent
-    /// that is not ready, since a socket probe every minute buys nothing (section 6.1).
+    /// that is not ready, since a socket probe every minute buys nothing
+    /// (docs/design/ssh.md).
     public var backoffCapSeconds: Int { self == .keyAgentNotReady ? 300 : 60 }
 }
 
@@ -66,9 +69,9 @@ public enum SSHExitClassifier {
     ///   - channelOpened: whether the mux client's channel ever opened. A mux client that
     ///     exits before that is always master lost, never an authentication failure: it
     ///     runs `BatchMode=yes` with no askpass token, so anything that looks like auth
-    ///     is really the missing socket (section 6.1).
+    ///     is really the missing socket (docs/design/ssh.md).
     ///   - deadlineExpired: the 60 s authentication deadline fired before the control
-    ///     socket appeared (section 4.2).
+    ///     socket appeared (docs/design/secrets.md).
     ///   - agentDependent: only an `agentDependent` location can be held up by a key
     ///     agent, so only for one of those is a deadline an authentication stop; for a
     ///     first-pass location the same timeout is transient.

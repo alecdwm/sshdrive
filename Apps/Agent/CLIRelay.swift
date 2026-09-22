@@ -4,11 +4,11 @@ import XPCInterfaces
 import XPCProtocols
 import Logging
 
-/// The terminal, as the agent sees it (DESIGN.md section 4.2).
+/// The terminal, as the agent sees it (`docs/design/secrets.md`).
 ///
-/// "The CLI does not run `ssh`. It asks the agent to make the verification connection …
-/// For every prompt the agent has no stored answer for, it calls back to the CLI over the
-/// same XPC connection." This is that call, made synchronous: the askpass broker's
+/// The CLI does not run `ssh`. It asks the agent to make the verification connection, and
+/// for every prompt the agent has no stored answer for, the agent calls back to the CLI
+/// over the same XPC connection. This is that call, made synchronous: the askpass broker's
 /// `collectResponder` is a plain closure because `ssh` is blocked on the askpass process,
 /// which is blocked on the agent, so there is nothing to be gained by making the wait
 /// asynchronous and a great deal to be lost by letting the reply arrive after `ssh` has

@@ -1,7 +1,8 @@
 import Foundation
 import SFTP
 
-/// DESIGN.md section 5.4's name rules, applied to one directory listing.
+/// The name rules of docs/design/names-and-attributes.md, applied to one directory
+/// listing.
 ///
 /// **Case and normalisation.** The server is byte-exact and usually case-sensitive; the
 /// local replica is case-insensitive and normalisation-insensitive. When two server names
@@ -12,16 +13,15 @@ import SFTP
 /// tie-breaker: the visible name must not flip from one cycle to the next.
 ///
 /// **Names that are not valid UTF-8 are hidden the same way,** which is why the index
-/// stores names as bytes (section 5.3).
+/// stores names as bytes (docs/design/item-index.md).
 ///
 /// **Hidden names hold their slot:** a create or rename to one of them fails with
 /// `.filenameCollision`, which is what `LocationRuntime` checks before a create.
 ///
 /// Four kinds of entry get no row at all rather than a hidden one, because they are not
 /// items the Mac ever sees: `.` and `..`, anything that is not a file, directory or
-/// symlink (section 5.4: "sockets, FIFOs and device nodes ... are never enumerated and
-/// never get a row"), a server-side `.DS_Store` (section 5.4: "a `.DS_Store` on the
-/// server is never enumerated"), and our own upload temp files (section 5.5).
+/// symlink (sockets, FIFOs and device nodes are never enumerated and never get a row), a
+/// server-side `.DS_Store`, and our own upload temp files (docs/design/writes.md).
 public enum NameVisibility {
 
     /// `hidden = 2`: recorded, holding its name, never shown.
@@ -73,8 +73,8 @@ public enum NameVisibility {
         return text.precomposedStringWithCanonicalMapping.lowercased()
     }
 
-    /// Byte-wise ordering, which is the tie-breaker section 5.4 names. Not string
-    /// ordering: the names need not be text at all.
+    /// Byte-wise ordering, which is the tie-breaker for a collision. Not string ordering:
+    /// the names need not be text at all.
     public static func byteWiseLower(_ a: Data, _ b: Data) -> Bool {
         for (x, y) in zip(a, b) where x != y { return x < y }
         return a.count < b.count
@@ -130,9 +130,9 @@ public enum NameVisibility {
                     Skipped(name: name, reason: "an SSH Drive upload temp file"))
                 continue
             }
-            // The section 9.1 chokepoint has the last word on whether a name can be a path
-            // component at all. A name it rejects (a NUL, a slash) can never be addressed,
-            // so it gets no row.
+            // The `RelativePath` chokepoint (docs/design/security.md) has the last word
+            // on whether a name can be a path component at all. A name it rejects (a NUL,
+            // a slash) can never be addressed, so it gets no row.
             guard (try? RelativePath(components: [name])) != nil else {
                 result.skipped.append(
                     Skipped(name: name, reason: "the name cannot be a path component"))

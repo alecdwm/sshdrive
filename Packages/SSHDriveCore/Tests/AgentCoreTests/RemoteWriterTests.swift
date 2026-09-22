@@ -4,9 +4,9 @@ import SFTP
 
 @testable import AgentCore
 
-/// DESIGN.md section 5.5's write matrix, against the fake backend: the temp-file plus
-/// rename upload with its mode and mtime restore, the create-versus-overwrite rule, the
-/// conflict copy, the in-flight set, stale temp files, and the delete rules.
+/// The write matrix (docs/design/writes.md), against the fake backend: the temp-file
+/// plus rename upload with its mode and mtime restore, the create-versus-overwrite
+/// rule, the conflict copy, the in-flight set, stale temp files, and the delete rules.
 final class RemoteWriterTests: XCTestCase {
 
     private func path(_ text: String) throws -> RelativePath { try RelativePath(string: text) }
@@ -61,8 +61,8 @@ final class RemoteWriterTests: XCTestCase {
 
         guard case let .landed(attributes) = outcome else { return XCTFail("expected a landing") }
         XCTAssertEqual(attributes.size, 5)
-        // Section 5.5: the mtime the system passed in, truncated to whole seconds, is set
-        // back after the rename and read out by the post-upload `lstat`.
+        // docs/design/writes.md: the mtime the system passed in, truncated to whole
+        // seconds, is set back after the rename and read out by the post-upload `lstat`.
         XCTAssertEqual(attributes.mtime, 1_700_000_000)
         XCTAssertEqual(attributes.mode & 0o777, 0o644)
         let landedBytes = try await transport.read(target, offset: 0, length: nil)
@@ -178,9 +178,10 @@ final class RemoteWriterTests: XCTestCase {
     }
 
     func testAGenerationThatMovedIsAConflictThatTheLstatAloneCannotSee() async throws {
-        // Section 5.3: a remote rewrite of equal size within the same second is visible
-        // only through the inode or nanosecond evidence that bumped the generation, and a
-        // check that read the `lstat` alone would let this save overwrite that change.
+        // docs/design/item-index.md: a remote rewrite of equal size within the same
+        // second is visible only through the inode or nanosecond evidence that bumped
+        // the generation, and a check that read the `lstat` alone would let this save
+        // overwrite that change.
         let transport = try await seededTree()
         let writer = makeWriter(transport)
         let target = try path("Docs/note.txt")
@@ -254,8 +255,9 @@ final class RemoteWriterTests: XCTestCase {
     // MARK: The in-flight set
 
     func testTheInFlightSetIsEmptyOnceTheUploadHasLanded() async throws {
-        // Section 5.5: the differ skips paths with an upload in flight, and the set is
-        // also what tells a live temp file from a stale one, so it has to empty.
+        // docs/design/writes.md: the differ skips paths with an upload in flight, and
+        // the set is also what tells a live temp file from a stale one, so it has to
+        // empty.
         let transport = try await seededTree()
         let writer = makeWriter(transport)
         let target = try path("Docs/slow.txt")
@@ -339,9 +341,9 @@ final class RemoteWriterTests: XCTestCase {
     }
 
     func testACaseOnlyRenameIsRedoneWithPosixRenameRatherThanRefused() async throws {
-        // Section 5.5: on a case-insensitive server `link` fails with EEXIST and the
-        // confirming `lstat` finds a file at the destination, which the plain rule would
-        // report as a collision for a legitimate rename.
+        // docs/design/writes.md: on a case-insensitive server `link` fails with EEXIST
+        // and the confirming `lstat` finds a file at the destination, which the plain
+        // rule would report as a collision for a legitimate rename.
         let transport = CaseInsensitiveFake(root: "/srv/fake")
         try await transport.apply(.createDirectory(path: try path("Docs"), mode: 0o755))
         try await transport.apply(
@@ -474,7 +476,7 @@ final class RemoteWriterTests: XCTestCase {
         XCTAssertFalse(refuses)
 
         // Without the preflight this create would silently replace the file, because the
-        // server's rename does not refuse (section 5.5).
+        // server's rename does not refuse (docs/design/writes.md).
         do {
             _ = try await writer.upload(
                 to: try path("Docs/note.txt"), mode: 0o644, modificationDate: nil,
@@ -492,8 +494,8 @@ final class RemoteWriterTests: XCTestCase {
 
 // MARK: - Doubles
 
-/// A fake whose plain `rename` overwrites, which is the non-OpenSSH server section 5.5
-/// warns about.
+/// A fake whose plain `rename` overwrites, which is the non-OpenSSH server behavior
+/// docs/design/writes.md warns about.
 final actor OverwritingRenameFake: SFTPTransport {
     private let inner: FakeTransport
     init(root: String) { inner = FakeTransport(root: root) }
@@ -560,7 +562,7 @@ final actor CaseInsensitiveFake: SFTPTransport {
 
     var extensions: SFTPServerExtensions { get async { await inner.extensions } }
     /// Case-folded, so the two spellings resolve to one file - which is exactly the
-    /// question section 5.5 tells the agent to ask.
+    /// question docs/design/writes.md tells the agent to ask.
     func realpath(_ path: RelativePath) async throws -> String {
         path.absolute(root: root).lowercased()
     }

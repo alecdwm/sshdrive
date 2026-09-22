@@ -3,8 +3,9 @@ import XCTest
 @testable import XPCProtocols
 
 /// The one blob a row keeps for this Mac: the extended attributes and the Finder tags
-/// that never arrive as one (DESIGN.md section 5.4). Its bytes are what section 5.3
-/// hashes into the metadata version, so what it encodes has to be stable.
+/// that never arrive as one (docs/design/names-and-attributes.md). Its bytes are what
+/// docs/design/item-index.md hashes into the metadata version, so what it encodes has to
+/// be stable.
 final class LocalAttributesTests: XCTestCase {
 
     func testAnEmptyAttributeSetEncodesToNothingAtAll() {
@@ -57,10 +58,10 @@ final class LocalAttributesTests: XCTestCase {
         XCTAssertEqual(back.extendedAttributes, ["k": Data([1])])
     }
 
-    /// The blob is hashed into the metadata version (section 5.3), so two encodes of the
-    /// same attributes have to be the same bytes. `JSONEncoder` promises no key order
-    /// without `.sortedKeys`, and without it this fails about one run in three - which is
-    /// the system re-reading every item the agent holds, for nothing (2026-09-04).
+    /// The blob is hashed into the metadata version (docs/design/item-index.md), so two
+    /// encodes of the same attributes have to be the same bytes. `JSONEncoder` promises no
+    /// key order without `.sortedKeys`, and without it this fails about one run in three -
+    /// which is the system re-reading every item the agent holds, for nothing.
     func testEncodingIsByteStableAcrossManyEncodesAndManyKeys() {
         let local = LocalAttributes(
             xattrs: [

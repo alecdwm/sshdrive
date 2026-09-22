@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Logging
 
-/// Which of our four executables a peer is (DESIGN.md section 5.2).
+/// Which of our four executables a peer is (`docs/design/extension.md`).
 ///
 /// The code requirement, set on the connection before it is resumed, has already
 /// established that the peer is one of ours and is the only security boundary here. This

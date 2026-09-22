@@ -8,7 +8,7 @@ import XPCProtocols
 
 /// Suite P on the agent's side: the login item after a bundle replacement, the window
 /// `unregister()` returns inside, and the nickname that renames a domain in place
-/// (`docs/testing-architecture.md` section 5).
+/// (`docs/design/testing.md` section 5).
 ///
 /// These are the `VM`-anchored ones. What runs here is the **state machine** our code
 /// reasons about; that LaunchServices and `SMAppService` really behave this way is
@@ -80,7 +80,7 @@ extension AgentScenarios {
 
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.
         ///
-        /// Section 10.1: the agent waits until the bundle at its path is readable, its
+        /// docs/design/packaging.md: the agent waits until the bundle at its path is readable, its
         /// `Info.plist` parses, and its main executable is a **different inode** from the one it
         /// is running. The inode test is what makes a `brew reinstall` of the same version
         /// terminate: `ditto` of an identical tree still produces a new file.
@@ -119,8 +119,8 @@ extension AgentScenarios {
 
         /// **P8** - a nickname renames the domain in place.
         ///
-        /// S9 (2026-09-05): `add(domain)` with the identifier the system already holds and a new
-        /// `displayName` renames the domain in place (`MQ-051`). Nothing is removed first -
+        /// Measured 2026-09-05: `add(domain)` with the identifier the system already holds and a
+        /// new `displayName` renames the domain in place (`MQ-051`). Nothing is removed first -
         /// deliberately, since removing the domain is exactly what would throw the cache and the
         /// pending uploads away - so the materialized set and the pending upload are untouched
         /// and nothing is re-fetched.
@@ -271,7 +271,7 @@ extension AgentScenarios {
         /// end on).
         ///
         /// `add` prints one capability report and the user reads it as the truth about this
-        /// server (section 8.1). The helper is deployed by the first change-detection
+        /// server (docs/design/cli.md). The helper is deployed by the first change-detection
         /// cycle, which starts with the location, so the report would otherwise be written
         /// in the window where the tier has been chosen and the binary is still going up
         /// the wire - and that report described a sweep and blamed the server for it, ten
@@ -309,7 +309,7 @@ extension AgentScenarios {
                 location: location, runtime: runtime, detector: detector, relay: relay)
             harness.clock.autoAdvance = false
 
-            // Section 6.4: the upload sentence names the directory the probe chose, and it
+            // docs/design/change-detection.md: the upload sentence names the directory the probe chose, and it
             // is said before the upload rather than after it.
             let notice = try #require(addReport.helperNotice)
             #expect(notice.contains(CapabilityScenarios.shellProbe.cacheDirectory))
@@ -397,7 +397,7 @@ extension AgentScenarios {
 
         /// A `Contents/Resources/helper/` with a manifest in it, so the probe's
         /// `uname -sm` has a binary to match and the location is one where a helper would
-        /// really be deployed (section 10.1: CI records every hash into the manifest).
+        /// really be deployed (docs/design/packaging.md: CI records every hash into the manifest).
         static func helperResources() throws -> URL {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("sshdrive-helper-resources-\(UUID().uuidString)")

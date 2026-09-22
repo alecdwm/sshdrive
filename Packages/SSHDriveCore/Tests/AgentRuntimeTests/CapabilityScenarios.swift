@@ -8,15 +8,15 @@ import SFTP
 import ServerModel
 import Testing
 
-/// Suite N on the agent's side: what the capability report of DESIGN.md section 8.1 is
-/// allowed to say about a server (`docs/testing-architecture.md` section 5).
+/// Suite N on the agent's side: what the capability report (docs/design/cli.md) is
+/// allowed to say about a server.
 ///
-/// Half of section 8.1's catalogue is a claim about the **server**, and every line of it
-/// is read by the user as the truth about their machine. Two failures are recorded here
-/// rather than argued about: a helper that was still going up the wire being reported as a
-/// server that "cannot run the remote helper" (2026-09-05), and `fsync@openssh.com` being
-/// offered as an `upgrade:` to a Tailscale SSH node, which is Go `pkg/sftp` and has never
-/// advertised it in any version (2026-09-08).
+/// Half the report's catalogue is a claim about the **server**, and every line of it is
+/// read by the user as the truth about their machine. Two things matter enough to guard
+/// directly: a helper that is still going up the wire must never be reported as a server
+/// that "cannot run the remote helper", and `fsync@openssh.com` must never be offered as
+/// an `upgrade:` to a Tailscale SSH node, which is Go `pkg/sftp` and has never advertised
+/// it in any version.
 extension AgentScenarios {
 
     @Suite struct CapabilityScenarios {
@@ -29,18 +29,16 @@ extension AgentScenarios {
         /// either). Both are our state wearing a server's clothes.
         ///
         /// The window `add` writes its one report in is the window where the ladder has
-        /// chosen tier 2 from the probe and the binary is still going up the wire. The
-        /// report written there used to reach for the sweep branch's "the server cannot
-        /// run the remote helper", which was false for every server that could - and the
-        /// first real cask install printed it, ten seconds before `sshdrive status` said
-        /// `helper 0.1.0`. So `deploying` is its own state: the sweep level, a `note:`
-        /// saying the binary is on its way, and **no `upgrade:` line**, because there is
-        /// nothing for the user to do.
+        /// chosen tier 2 from the probe and the binary is still going up the wire.
+        /// Reaching for the sweep branch's "the server cannot run the remote helper" in
+        /// that window would be false for every server that could run it. So `deploying`
+        /// is its own state: the sweep level, a `note:` saying the binary is on its way,
+        /// and **no `upgrade:` line**, because there is nothing for the user to do.
         ///
-        /// The second half is the one that keeps it fixed: that sentence must be
-        /// unreachable from any state of ours. Section 6.4's list of things that really do
-        /// mean "not on this server" is no shell, no exec channel, an unsupported arch,
-        /// `noexec`, and a hash mismatch after a redeploy - all of them refusals the
+        /// The second half is what keeps it that way: the blame sentence must be
+        /// unreachable from any state of ours. What really does mean "not on this server"
+        /// (docs/design/change-detection.md) is no shell, no exec channel, an unsupported
+        /// arch, `noexec`, and a hash mismatch after a redeploy - all of them refusals the
         /// server or the account made.
         @Test func n1TheDeployingWindowNeverBlamesTheServer() async throws {
             let harness = try AgentHarness()
@@ -68,9 +66,9 @@ extension AgentScenarios {
 
             // The other side of the same rule: the sentence is reachable, and only from a
             // server that really did refuse. A `ForceCommand internal-sftp` account has no
-            // shell, so there is no exec channel to deploy over and none of section 6.4's
-            // named reasons applies - this is the one state the generic sentence is for,
-            // and the ladder is at tier 0 because of it.
+            // shell, so there is no exec channel to deploy over and none of the named
+            // reasons (docs/design/change-detection.md) applies - this is the one state
+            // the generic sentence is for, and the ladder is at tier 0 because of it.
             harness.launcher.succeed(probe: Self.shelllessProbe)
             let shellless = try await harness.addLocation(nickname: "sftponly", host: "other")
             let refusedRuntime = try await harness.manager.runtime(for: shellless)
@@ -86,10 +84,10 @@ extension AgentScenarios {
                 Self.text(refused).contains(Self.blameSentence),
                 "N1: a real refusal is what the sentence is for")
 
-            // Bite-proof. The logic as it stood before 2026-09-05, in one line: anything
-            // that is not a running stream is the sweep branch's refusal. Fed the very
-            // state the scenario above is about, it produces the false sentence and an
-            // `upgrade:` line telling the user to get shell access they already have.
+            // Bite-proof. The naive logic in one line: anything that is not a running
+            // stream is the sweep branch's refusal. Fed the very state the scenario above
+            // is about, it produces the false sentence and an `upgrade:` line telling the
+            // user to get shell access they already have.
             let asItWas: HelperState = .unavailable(Self.blameSentence)  // "not running" => "cannot run"
             let old = CapabilityReport.make(
                 probe: Self.shellProbe, extensions: [], location: location,
@@ -173,8 +171,8 @@ extension AgentScenarios {
             }
 
             // "Not OpenSSH" and "not identified" are different answers. A server we have
-            // not identified keeps section 8.1's original wording, because for all we know
-            // it *is* an old OpenSSH that could be upgraded.
+            // not identified keeps the report's original wording (docs/design/cli.md),
+            // because for all we know it *is* an old OpenSSH that could be upgraded.
             let unknown = try await harness.addLocation(nickname: "mystery", host: "mystery")
             CapabilityCache.storeProbe(
                 Self.shellProbe, extensions: [.posixRename],
@@ -195,12 +193,12 @@ extension AgentScenarios {
         /// **N6** - `status` never touches the wire.
         ///
         /// The free-space line of the capability report is the one that could dial: a
-        /// `transport.statvfs(.root)` goes through the `ReconnectingTransport`, and section
-        /// 6.3's gate holds a call behind a connect attempt for up to the 60 s
-        /// authentication deadline, or *starts* one where there is no attempt at all. A
-        /// report must neither dial a server the user has not touched nor wait out a
-        /// reconnect. Section 8 gives `--probe` as the way to ask for a connection on
-        /// purpose, and this is the rest of the command promising not to.
+        /// `transport.statvfs(.root)` goes through the `ReconnectingTransport`, and the
+        /// gate (docs/design/offline.md) holds a call behind a connect attempt for up to
+        /// the 60 s authentication deadline, or *starts* one where there is no attempt at
+        /// all. A report must neither dial a server the user has not touched nor wait out
+        /// a reconnect. `--probe` (docs/design/cli.md) is the way to ask for a connection
+        /// on purpose, and this is the rest of the command promising not to.
         ///
         /// Three states, because the failure would be different in each: connected (a call
         /// succeeds and costs a round trip), connecting (a call *waits*), and backing off
@@ -228,9 +226,9 @@ extension AgentScenarios {
             #expect(harness.launcher.attempts == attemptsBefore, "N6: and dialled nothing")
             #expect(harness.clock.now() == wallBefore, "N6: and waited for nothing")
 
-            // 2. An attempt in progress. `--connect-hang` is section 6.3 rule 3 on its own:
-            // the attempt is parked on the virtual clock and every call that reaches the
-            // gate would be held on it, bounded only by the attempt's own deadline.
+            // 2. An attempt in progress. `--connect-hang` parks the attempt on the virtual
+            // clock, and every call that reaches the gate (docs/design/offline.md) would
+            // be held on it, bounded only by the attempt's own deadline.
             let gate = try #require(await harness.manager.gate(locationID: location.id))
             await gate.setFault(
                 unreachable: nil, hangMilliseconds: nil, connectHangMilliseconds: 30_000)
@@ -268,14 +266,15 @@ extension AgentScenarios {
 
         /// **N7** - the free-space figure is taken at probe time and kept.
         ///
-        /// It is the one number in section 8.1's report that is a live measurement rather
-        /// than a property of the server, which is why it is the line that could dial.
-        /// It is captured where a connection already exists - `applyConnection` on every
-        /// connection, and `reprobeServer` on `--probe` - and lives in `capabilities.json`
-        /// beside the probe. `status` renders what is there, with its age once it is old
-        /// enough that the user should not read it as this minute's figure, and `unknown`
-        /// where no probe has ever run. A `capabilities.json` written before the key existed
-        /// decodes as one that has never been probed, not as an error.
+        /// It is the one number in the capability report (docs/design/cli.md) that is a
+        /// live measurement rather than a property of the server, which is why it is the
+        /// line that could dial. It is captured where a connection already exists -
+        /// `applyConnection` on every connection, and `reprobeServer` on `--probe` - and
+        /// lives in `capabilities.json` beside the probe. `status` renders what is there,
+        /// with its age once it is old enough that the user should not read it as this
+        /// minute's figure, and `unknown` where no probe has ever run. A `capabilities.json`
+        /// written before the key existed decodes as one that has never been probed, not
+        /// as an error.
         @Test func n7FreeSpaceIsCapturedAtProbeTimeAndCached() async throws {
             let harness = try AgentHarness(clock: VirtualAgentClock())
             let location = try await harness.addLocation(nickname: "nas")
@@ -347,8 +346,8 @@ extension AgentScenarios {
         /// a cooperative pool thread parked, and every other caller of that master queued
         /// behind it, for one word of one line of `status`. The gate already holds the
         /// connection and the breaker already knows why there is not one, so both halves
-        /// of the answer are there for free, in section 8's wording: `online`, or
-        /// `offline (<reason>)`.
+        /// of the answer are there for free, in the report's own wording
+        /// (docs/design/cli.md): `online`, or `offline (<reason>)`.
         @Test func n8TheStateWordComesFromTheGate() async throws {
             let harness = try AgentHarness(clock: VirtualAgentClock())
             let location = try await harness.addLocation(nickname: "nas")
@@ -370,24 +369,25 @@ extension AgentScenarios {
             // that the location is retrying rather than only that it is down.
             harness.launcher.fail()
             await gate.drop(reason: "the master was killed")
-            // The drop reconnects (section 6.1), so the word is read after that attempt has
-            // failed rather than while it is still in flight: one call through the gate
-            // waits for exactly the attempt the drop started and comes back when the
-            // breaker has been told how it went. `isConnected == false` is not that
+            // The drop reconnects (docs/design/ssh.md), so the word is read after that
+            // attempt has failed rather than while it is still in flight: one call through
+            // the gate waits for exactly the attempt the drop started and comes back when
+            // the breaker has been told how it went. `isConnected == false` is not that
             // moment - it is true as soon as `drop` returns, with the attempt still
             // running, and the word there is `connecting`, truthfully.
             let transport = ReconnectingTransport(gate: gate, locationID: location.id)
             await #expect(throws: SFTPError.noConnection) { try await transport.readdir(.root) }
             let backingOff = await Self.stateWord(harness, "nas")
-            #expect(backingOff.hasPrefix("offline ("), "section 8's wording is unchanged")
+            #expect(backingOff.hasPrefix("offline ("), "matches the report's offline wording")
             #expect(backingOff.contains("backing off"))
             #expect(live.aliveCheckCount == 0)
 
-            // Stopped until the user acts. Section 6.3 rule 6: an auth failure gets no
-            // reconnect schedule at all, and that is the one the user has to be told about.
+            // Stopped until the user acts: an auth failure gets no reconnect schedule at
+            // all (docs/design/offline.md), and that is the one the user has to be told
+            // about.
             harness.launcher.fail(classification: .authenticationFailed, stderr: "Permission denied")
-            // The breaker's backoff is also a reconnect schedule (section 6.3 rule 5), so
-            // the next attempt is the one the clock brings round - and it is the attempt
+            // The breaker's backoff is also a reconnect schedule (docs/design/offline.md),
+            // so the next attempt is the one the clock brings round - and it is the attempt
             // that meets the refused password.
             await harness.clock.advanceAndSettle(5)
             await harness.settle { await gate.stateSentence().contains("stopped") }
@@ -404,8 +404,8 @@ extension AgentScenarios {
         ///
         /// The index half of keeping `status` off the writer; N6 is the wire half.
         /// `LocationRuntime` is an actor, a directory listing writes its rows in one
-        /// **synchronous** SQLite transaction on it (section 5.3), and a row is about
-        /// eighteen questions per location - the hidden names, the held rows, the root
+        /// **synchronous** SQLite transaction on it (docs/design/item-index.md), and a row
+        /// is about eighteen questions per location - the hidden names, the held rows, the root
         /// set, one `item(identifier:)` per materialized file, the pin tree, and eight
         /// more. Asked on that actor, any of them queues behind a listing of a large
         /// folder.
@@ -431,9 +431,10 @@ extension AgentScenarios {
             try await harness.manager.addDomain(for: location)
             let fake = try #require(await runtime.transport as? FakeTransport)
 
-            // A tree with something for every line of section 8's report: a pin with files
-            // under it, a directory the mass-deletion guard will hold, and a link that
-            // leaves the location, which is section 5.4's "not shown".
+            // A tree with something for every line of the report (docs/design/cli.md): a
+            // pin with files under it, a directory the mass-deletion guard will hold, and
+            // a link that leaves the location, which is the "not shown" case
+            // (docs/design/names-and-attributes.md).
             try await fake.apply(.createDirectory(path: try RelativePath(string: "Docs"), mode: 0o755))
             for index in 0 ..< 3 {
                 try await fake.apply(
@@ -467,10 +468,11 @@ extension AgentScenarios {
             }
             harness.replica.setMaterialized(downloaded, locationID: location.id)
             // The extension's own signal, which is what publishes the set `status` reads
-            // rather than draining a third enumerator for it (section 6.5).
+            // rather than draining a third enumerator for it (docs/design/root-set.md).
             await harness.manager.materializedItemsChanged(locationID: location.id)
 
-            // 30 of 40 gone: section 6.4's guard holds them rather than reporting them.
+            // 30 of 40 gone: the mass-deletion guard (docs/design/change-detection.md)
+            // holds them rather than reporting them.
             for index in 0 ..< 30 {
                 try await fake.apply(
                     .delete(path: try RelativePath(string: "Photos/p\(index).jpg"), recursive: false))
@@ -550,7 +552,7 @@ extension AgentScenarios {
                         if case .materialized = $0 { return true }
                         return false
                     }.count,
-                "N9: and status drained no third materialized enumerator (section 6.5)")
+                "N9: and status drained no third materialized enumerator (docs/design/root-set.md)")
 
             // And the listing that was held finishes normally once it is let go.
             await harness.clock.advanceAndSettle(3600)
@@ -563,12 +565,12 @@ extension AgentScenarios {
         /// **N10** - one location that has stopped answering costs its own row, not the
         /// report.
         ///
-        /// `status` with no name is a report about every location, and section 8's output
-        /// prints them in the order `config.json` holds. Built one after another with no
-        /// bound, a fourth location's wedged File Provider call - S1 measured
-        /// `remove(domain)` not returning within three minutes - takes the whole command
-        /// out through the CLI's own timeout and the user learns nothing about the three
-        /// that are fine.
+        /// `status` with no name is a report about every location, and the output
+        /// (docs/design/cli.md) prints them in the order `config.json` holds. Built one
+        /// after another with no bound, a fourth location's wedged File Provider call -
+        /// `remove(domain)` measured not returning within three minutes - takes the whole
+        /// command out through the CLI's own timeout and the user learns nothing about the
+        /// three that are fine.
         ///
         /// So: the sections run concurrently, each under `Deadline.statusSeconds` on the
         /// agent's own clock, and a section that runs out prints its row with a note in
@@ -631,11 +633,12 @@ extension AgentScenarios {
 
         /// **N11** - a rebuild in progress, and an index that is not there yet.
         ///
-        /// Section 5.3's restore sets `meta.reconciling` for the whole replica walk, and
-        /// section 5.2 makes any read of the index during it answer "unreachable", never
-        /// "no such item". `status` is a read of the index like any other, so it says the
-        /// index is being rebuilt and prints the rest of the row - it does not print zeroes,
-        /// which would read as facts about the server, and it does not fail the command.
+        /// The restore (docs/design/item-index.md) sets `meta.reconciling` for the whole
+        /// replica walk, and any read of the index during it answers "unreachable"
+        /// (docs/design/extension.md), never "no such item". `status` is a read of the
+        /// index like any other, so it says the index is being rebuilt and prints the rest
+        /// of the row - it does not print zeroes, which would read as facts about the
+        /// server, and it does not fail the command.
         ///
         /// The second half is the state a location is in before it has ever started: the
         /// file is not there, which is not an error and is not permanent.
@@ -647,7 +650,8 @@ extension AgentScenarios {
             _ = try await runtime.enumerateItems(
                 container: IndexWriter.rootIdentifier, pageToken: nil)
 
-            // Section 5.3's flag, set the way `IndexReconcile` sets it.
+            // The reconciling flag (docs/design/item-index.md), set the way
+            // `IndexReconcile` sets it.
             let writer = try harness.indexWriter(locationID: location.id)
             try writer.setReconciling(true)
 
@@ -697,8 +701,8 @@ extension AgentScenarios {
 
         // MARK: fixtures
 
-        /// The `state` word of one `status` row, which is what section 8 prints after the
-        /// destination.
+        /// The `state` word of one `status` row, which the report prints after the
+        /// destination (docs/design/cli.md).
         static func stateWord(_ harness: AgentHarness, _ name: String) async -> String {
             let rows = try? await harness.control("status", ["name": name])
             return ((rows?["locations"] as? [[String: Any]])?.first)?["state"] as? String ?? ""

@@ -5,7 +5,7 @@ import Index
 import ProviderCore
 import SystemModel
 
-/// **Suite G - eviction and pinning** (`docs/testing-architecture.md` section 5).
+/// **Suite G - eviction and pinning** (docs/design/testing.md).
 ///
 /// The agent-side halves of `G1`, `G4` and `G5` run in `Tests/AgentRuntimeTests` against
 /// `FakeReplica`; these are the same rows against the **model**, so that what refuses an
@@ -52,10 +52,9 @@ final class EvictionAndPinningScenarios: XCTestCase {
         XCTAssertEqual(domain.replica.item(harness.id(file))?.atime, harness.clock.now())
     }
 
-    /// **The bite-proof.** The same candidate through the rule as it stood before
-    /// 2026-09-05, with atime in the `max`. It survives the TTL for ever, which is the bug
-    /// milestone 7 found: the TTL silently became "time since whatever last touched the
-    /// replica".
+    /// **The bite-proof.** The same candidate through a rule that puts atime in the
+    /// `max`. It survives the TTL for ever: the TTL silently becomes "time since
+    /// whatever last touched the replica".
     func testG1_AtimeInTheMaxWouldHaveSpareTheFile() throws {
         let harness = try ScenarioHarness()
         let file = try harness.serverCreates("stale.txt")
@@ -229,7 +228,7 @@ final class EvictionAndPinningScenarios: XCTestCase {
         domain.openFolder()
 
         // The agent lists the ancestors, writes the rows and anchors each of them, exactly
-        // as section 7.1's five steps do.
+        // as the five pin steps do (docs/design/pinning.md).
         let documents = try harness.serverCreatesDirectory("Documents")
         let reports = try harness.serverCreatesDirectory(
             "Reports", identifier: "id-Reports", parent: documents)
@@ -333,8 +332,8 @@ final class EvictionAndPinningScenarios: XCTestCase {
     /// on a kept item, where it fails. It draws no built-in "Keep Downloaded" for a
     /// third-party provider, which is why our labels do not clash.
     ///
-    /// What Finder *puts on the screen* is a VM measurement (section 7); this asserts the
-    /// rule that decides which entry exists.
+    /// What Finder *puts on the screen* is a VM measurement (docs/design/eviction.md);
+    /// this asserts the rule that decides which entry exists.
     func testG10_FinderOwnsDownloadNowAndRemoveDownloadByDownloadState() throws {
         let harness = try ScenarioHarness()
         let file = try harness.serverCreates("doc.txt")

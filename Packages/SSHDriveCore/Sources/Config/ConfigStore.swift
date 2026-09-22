@@ -1,15 +1,15 @@
 import Foundation
 import Logging
 
-/// `config.json` in the app-group container (DESIGN.md section 3). Written only by the
-/// agent; the CLI reaches it through XPC and the extension never opens it at all.
+/// `config.json` in the app-group container (docs/design/components.md). Written only
+/// by the agent; the CLI reaches it through XPC and the extension never opens it at all.
 public struct ConfigFile: Codable, Equatable, Sendable {
     /// Bumped whenever the on-disk shape changes.
     public static let currentSchemaVersion = 1
 
     public var schemaVersion: Int
     /// This install's identity, used to name our own upload temp files and conflict
-    /// copies (section 5.5). Eight lowercase hex characters.
+    /// copies (docs/design/writes.md). Eight lowercase hex characters.
     public var macID: String
     public var locations: [Location]
 
@@ -92,7 +92,7 @@ public final class ConfigStore {
         return file
     }
 
-    /// Resolves a `<name>` the way section 8 says: nickname, then host, then id prefix.
+    /// Resolves a `<name>` the way the CLI does: nickname, then host, then id prefix.
     public func location(named name: String) throws -> Location {
         let file = try load()
         if let exact = file.locations.first(where: { $0.nickname == name || $0.host == name }) {
@@ -107,8 +107,7 @@ public final class ConfigStore {
         }
     }
 
-    /// Drops the in-memory copy. The agent calls this after an external edit; nothing in
-    /// milestone 1 makes one.
+    /// Drops the in-memory copy. The agent calls this after an external edit.
     public func invalidate() {
         cached = nil
     }

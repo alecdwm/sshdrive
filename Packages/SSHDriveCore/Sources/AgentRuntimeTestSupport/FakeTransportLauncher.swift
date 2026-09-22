@@ -7,8 +7,8 @@ import XPCProtocols
 import SSHProcess
 import Secrets
 
-/// One location's connection, without an `ssh` (docs/testing-architecture.md section 2.3's
-/// `TransportLauncher` row).
+/// One location's connection, without an `ssh` (the `TransportLauncher` seam,
+/// docs/design/testing.md).
 ///
 /// It is an `SFTPTransport` forwarding to whatever double the scenario handed it - the
 /// existing `SFTP.FakeTransport` by default, or `ServerModel.FakeSFTPServer` over a real
@@ -36,13 +36,14 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     private var _peakReadlinksInFlight = 0
     private var _calls = 0
 
-    /// Links whose `readlink` this connection refuses, by path. Section 5.7 omits the link
-    /// from enumeration and says why; what a scenario needs from this is the other half -
-    /// that one refusal cannot fail the listing it was found in.
+    /// Links whose `readlink` this connection refuses, by path. A link whose target
+    /// cannot be read is omitted from enumeration (docs/design/symlinks.md); what a
+    /// scenario needs from this is the other half - that one refusal cannot fail the
+    /// listing it was found in.
     public var readlinkFailures: Set<String> = []
     /// Held inside every `readlink` before it is answered.
     ///
-    /// A listing reads its links through section 6.2's window rather than one at a time,
+    /// A listing reads its links through the SFTP window rather than one at a time,
     /// and a fake that answers without ever suspending cannot show the difference: the
     /// calls would be serialised by the executor whatever the caller did. A delay is what
     /// makes the high-water mark below mean something.
@@ -66,9 +67,9 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     /// drop takes every master, and the wake brings up new ones.
     public var shutdownCount: Int { lock.lock(); defer { lock.unlock() }; return _shutdowns }
 
-    /// How many `statvfs` calls reached this connection. Section 8.1's free-space figure
-    /// is taken at probe time and read from `capabilities.json` afterwards, so `status`
-    /// must never move this number.
+    /// How many `statvfs` calls reached this connection. The free-space figure `status`
+    /// prints is taken at probe time and read from `capabilities.json` afterwards, so
+    /// `status` must never move this number.
     public var statvfsCount: Int { lock.lock(); defer { lock.unlock() }; return _statvfs }
 
     /// How many liveness checks reached this connection. On a real one this is
@@ -93,7 +94,7 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     /// How many `readlink`s reached this connection, and the most that were in flight at
     /// once. SFTP v3's `readdir` carries no link target (`SQ-031`), so a listing's links
     /// are one request each; the second number is the one that says whether they went
-    /// through section 6.2's window or one at a time.
+    /// through the SFTP window or one at a time.
     public var readlinkCount: Int { lock.lock(); defer { lock.unlock() }; return _readlinks }
     public var peakReadlinksInFlight: Int {
         lock.lock(); defer { lock.unlock() }; return _peakReadlinksInFlight
@@ -231,10 +232,10 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     }
 }
 
-/// What stands in for spawning `/usr/bin/ssh` (section 6.1).
+/// What stands in for spawning `/usr/bin/ssh` (docs/design/ssh.md).
 ///
 /// A scenario stages the outcome of the *next* attempt - a connection, or a failure with a
-/// named `SSHExitClassification`, which is what section 6.3's breaker branches on - and
+/// named `SSHExitClassification`, which is what the breaker branches on - and
 /// reads back how many attempts were made and what each one produced. `connectionFactory`
 /// is the hook `ServerModel` fills in: hand out a connection over its fake channels and
 /// nothing above this changes.
@@ -267,7 +268,7 @@ public final class FakeTransportLauncher: TransportLauncher, @unchecked Sendable
 
     /// Every attempt fails this way until `succeed()`. `classification` is what the
     /// breaker reads: `.transient` retries, `.authenticationDeadline` stops and waits for
-    /// section 4.2's re-arm, `.authentication` waits for the user.
+    /// the deadline re-arm, `.authentication` waits for the user.
     public func fail(classification: SSHExitClassification = .transient, stderr: String = "fake") {
         lock.lock()
         _failure = SSHProcessError.connectionFailed(

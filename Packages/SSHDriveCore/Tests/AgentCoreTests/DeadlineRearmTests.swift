@@ -2,9 +2,9 @@ import XCTest
 import SSHProcess
 @testable import AgentCore
 
-/// DESIGN.md section 4.2's re-arm after an authentication-deadline stop. The clock is an
-/// argument and the presence reading is a closure, so the once-a-minute rule is provable
-/// by counting the closure's calls rather than by waiting a minute.
+/// The re-arm rule after an authentication-deadline stop (docs/design/secrets.md). The
+/// clock is an argument and the presence reading is a closure, so the once-a-minute rule
+/// is provable by counting the closure's calls rather than by waiting a minute.
 final class DeadlineRearmTests: XCTestCase {
 
     private let present = PresenceReading(secondsSinceLastInputEvent: 3, screenLocked: false)
@@ -62,7 +62,8 @@ final class DeadlineRearmTests: XCTestCase {
         XCTAssertFalse(state.requestTriggerUsed)
     }
 
-    /// Section 4.2: "evaluated at most once a minute so the test itself costs nothing".
+    /// The re-arm rule (docs/design/secrets.md): "evaluated at most once a minute so the
+    /// test itself costs nothing".
     /// Spotlight, Quick Look and the working-set enumerator issue requests all day; this
     /// is the number that proves the test is not on all of them.
     func testThePresenceTestIsReadAtMostOnceAMinute() {
@@ -116,9 +117,9 @@ final class DeadlineRearmTests: XCTestCase {
     }
 
     /// A stop, an unlock that re-arms, a second stop, and then a request that re-arms
-    /// again: the morning-after sequence section 4.2 is written for. The point is that the
-    /// user gets a second chance without running `sshdrive test`, and that an unattended
-    /// Mac between the two stops retries nothing.
+    /// again: the morning-after sequence the re-arm rule (docs/design/secrets.md) covers.
+    /// The point is that the user gets a second chance without running `sshdrive test`,
+    /// and that an unattended Mac between the two stops retries nothing.
     func testTheMorningSequence() {
         var state = DeadlineRearmState()
         state.noteStop(.authenticationDeadline)          // overnight reconnect timed out

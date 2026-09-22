@@ -2,7 +2,8 @@ import Foundation
 import Logging
 
 /// Accumulates a child's stderr on a thread of its own. `ssh` writes little of it and the
-/// agent keeps all of it: stderr is what `sshdrive status` shows in every case (section 6.1).
+/// agent keeps all of it: stderr is what `sshdrive status` shows in every case
+/// (docs/design/ssh.md).
 final class StderrCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes: [UInt8] = []
@@ -45,14 +46,15 @@ final class StderrCollector: @unchecked Sendable {
 }
 
 /// An exec channel: a mux client running `ssh $MUX <host> sh -s` with a script on stdin
-/// (DESIGN.md section 9.2).
+/// (docs/design/security.md).
 ///
 /// By the time one of these exists the opening sentinel has arrived and everything the
 /// account's rc files printed is in `prefix`. `stream` is the script's own output from
 /// there on, and the agent's heartbeat lines go back over `sendHeartbeat`.
 public final class ExecChannel: @unchecked Sendable {
     public let stream: PipeByteStream
-    /// What the account printed before the sentinel; `status` shows it (section 9.2).
+    /// What the account printed before the sentinel; `status` shows it
+    /// (docs/design/security.md).
     public let prefix: Data
     public let sentinel: Sentinel
     private let process: SpawnedProcess
@@ -71,7 +73,7 @@ public final class ExecChannel: @unchecked Sendable {
     public var stderrText: String { stderrCollector.text }
 
     /// One heartbeat line. The agent writes one every 15 s; 60 s of silence, or EOF, and
-    /// the wrapper on the server kills its child (section 6.4).
+    /// the wrapper on the server kills its child (docs/design/change-detection.md).
     public func sendHeartbeat() async throws {
         try await stream.write(RemoteScript.heartbeatLine)
     }
@@ -91,7 +93,8 @@ public final class ExecChannel: @unchecked Sendable {
 }
 
 /// An SFTP channel: `ssh $MUX -s <host> sftp`. Handed to the SFTP client as a byte stream
-/// and nothing more; the wire protocol is section 6.2's problem.
+/// and nothing more; the wire protocol belongs to the SFTP client
+/// (docs/design/sftp.md).
 public final class SFTPChannel: @unchecked Sendable {
     public let stream: PipeByteStream
     private let process: SpawnedProcess
@@ -107,7 +110,7 @@ public final class SFTPChannel: @unchecked Sendable {
     public var stderrText: String { stderrCollector.text }
 
     /// A wedged SFTP channel is killed and reopened on its own without touching the
-    /// connection: the master outlives any one of them (section 6.1).
+    /// connection: the master outlives any one of them (docs/design/ssh.md).
     public func close() {
         stream.close()
         Spawn.terminate(process, grace: 1)
@@ -116,13 +119,15 @@ public final class SFTPChannel: @unchecked Sendable {
     public func exitStatus() -> ProcessExit? { Spawn.poll(pid: process.pid) }
 }
 
-/// What killed an exec channel, once it has an exit (DESIGN.md sections 6.1 and 6.4).
+/// What killed an exec channel, once it has an exit (docs/design/ssh.md,
+/// docs/design/change-detection.md).
 ///
 /// `ssh` answers **255** both for a failure of its own and for a remote command killed by
 /// a signal, and in the second case it prints **nothing at all** on stderr (`SQ-011`,
-/// measured on `ts-ssh` 2026-09-08). The two mean opposite things to the agent. Its own
+/// measured on `ts-ssh`, 2026-09-08). The two mean opposite things to the agent. Its own
 /// failure is a channel that never opened, which for a mux client is always master lost
-/// (section 6.1) and takes the connection down with it. A signal-killed remote command is
+/// (docs/design/ssh.md) and takes the connection down with it. A signal-killed remote
+/// command is
 /// **the wrapper on the server** dying with the connection still perfectly good, and the
 /// answer is to start the tier again, not to rebuild the master.
 ///
@@ -131,15 +136,15 @@ public final class SFTPChannel: @unchecked Sendable {
 /// the whole of the rule.
 ///
 /// The exit status and the stderr are carried and logged **whichever** it was: "an outage
-/// that is silently swallowed" is the failure this defends. A helper that died on a real
-/// server once left one sentence in the log - "the helper exited" - and no status, no
-/// signal and no stderr to say why (2026-09-05).
+/// that is silently swallowed" is the failure this defends. Without them a helper that
+/// dies on a real server leaves one sentence in the log, "the helper exited", with no
+/// status, no signal and no stderr to say why.
 public struct ExecChannelDeath: Sendable, Equatable {
     /// What the caller noticed - an EOF, a read error, a `ready` that never came.
     public var reason: String
     /// Nil while the mux client has not been reaped at all.
     public var exit: ProcessExit?
-    /// Everything `ssh` wrote, kept for `sshdrive status` (section 6.1).
+    /// Everything `ssh` wrote, kept for `sshdrive status` (docs/design/ssh.md).
     public var stderr: String
     public var classification: SSHExitClassification
     /// `SQ-011`'s exact signature: exit **255**, `ssh` itself not signalled, and

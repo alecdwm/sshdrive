@@ -3,11 +3,11 @@ import SSHProcess
 
 /// A stub that stands in for `/usr/bin/ssh`.
 ///
-/// `docs/testing-architecture.md` section 4.2: "It exists so `SSHInvocation`'s argv
-/// assembly, `Spawn.swift`, `ExitClassification` and `ControlSocket` are exercised for
-/// real." `SSHMaster` spawns it exactly as it spawns the real thing - same argv, same
-/// `posix_spawn`, same pipes, same control-socket wait - so everything from the option
-/// ordering to the exit classification runs on a box with no server at all.
+/// It exists so `SSHInvocation`'s argv assembly, `Spawn.swift`, `ExitClassification` and
+/// `ControlSocket` are exercised for real (docs/design/testing.md). `SSHMaster` spawns it
+/// exactly as it spawns the real thing - same argv, same `posix_spawn`, same pipes, same
+/// control-socket wait - so everything from the option ordering to the exit classification
+/// runs on a box with no server at all.
 ///
 /// What it reproduces, each from `docs/quirks/servers.md`:
 ///
@@ -53,10 +53,9 @@ public final class FakeSSH: @unchecked Sendable {
         self.profile = profile
         // Eight hex digits, not a UUID string. Control sockets are made **inside** this
         // directory and a `sockaddr_un` path is limited to 104 bytes; macOS's `$TMPDIR` is
-        // about fifty of them on its own, so a 36-character component here put every
-        // socket path over the limit and the stub silently fell back to a plain file
-        // (`SQ-085`, measured 2026-09-08 - `K4`'s "the socket outlived the pid" then failed
-        // against a file that was never a socket).
+        // about fifty of them on its own, so a 36-character component here would put
+        // every socket path over the limit and the stub would silently fall back to a
+        // plain file that is not a socket at all (`SQ-085`, measured 2026-09-08).
         directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("sd-ssh-\(HostTools.shortID())")
         state = directory.appendingPathComponent("state")
@@ -69,8 +68,8 @@ public final class FakeSSH: @unchecked Sendable {
 
         // The session's shell is a generated script rather than an argv the stub has to
         // re-split: word-splitting a command line back out of one variable is exactly the
-        // kind of quoting bug section 9.2 exists to avoid, and a harness that has one
-        // cannot be trusted about anybody else's. `sshd`'s side of an exec channel is
+        // kind of quoting bug the remote-script rules exist to avoid, and a harness that
+        // has one cannot be trusted about anybody else's. `sshd`'s side of an exec channel is
         // "hand the account's shell this stdin", and that is all this is.
         let sessionShell = directory.appendingPathComponent("session-shell.sh")
         var sessionBody = "#!/bin/sh\n"
@@ -101,25 +100,26 @@ public final class FakeSSH: @unchecked Sendable {
             }(),
             "HOST_KEY_KNOWN": hostKeyKnown ? "1" : "0",
             "AUTH_DELAY": String(Int(authenticationDelay)),
-            // Section 4.2's second pass: a key that lives **only** in the key agent. The
-            // first collect pass runs `IdentityAgent=none` and cannot use it, the second
-            // can, and that is the whole of what makes a location `agentDependent`. The
-            // stub reads the option off its own argv, so the branch is decided by the
-            // command line the agent built and not by a flag the test set (inferred from
-            // section 4.2; the measured half is `SQ-064`, a server that takes both).
+            // The collect connection's second pass: a key that lives **only** in the key
+            // agent. The first collect pass runs `IdentityAgent=none` and cannot use it,
+            // the second can, and that is the whole of what makes a location
+            // `agentDependent`. The stub reads the option off its own argv, so the branch
+            // is decided by the command line the agent built and not by a flag the test
+            // set (inferred from docs/design/secrets.md; the measured half is `SQ-064`, a
+            // server that takes both).
             "AGENT_ONLY": agentOnlyKey ? "1" : "0",
             // One further prompt this server raises before it authenticates, with its
-            // `SSH_ASKPASS_PROMPT` hint. Section 4.2's table has three shapes no testbed
-            // service can produce - a smartcard/FIDO **PIN**, a one-time code, and the
-            // user-presence notice a touch-required FIDO key raises - and all three are
-            // refusals, so a scenario that wants one states it here.
+            // `SSH_ASKPASS_PROMPT` hint. The prompt classification table has three shapes
+            // no testbed service can produce - a smartcard/FIDO **PIN**, a one-time code,
+            // and the user-presence notice a touch-required FIDO key raises - and all
+            // three are refusals, so a scenario that wants one states it here.
             //
             // Confidence: the prompt *wording* is OpenSSH's own format string, read from
             // `strings /usr/bin/ssh` and catalogued in `Secrets.AskpassPrompt`
-            // (`SQ-060`'s family); the *refusal* is DESIGN.md section 4.2. Neither has
-            // been raised against a real key of ours, because we have no FIDO key -
-            // `docs/testing-architecture.md` section 7 lists a real touch key as
-            // unmodellable, and this is the modellable half.
+            // (`SQ-060`'s family); the *refusal* is ours (docs/design/secrets.md).
+            // Neither has been raised against a real key of ours, because we have no FIDO
+            // key - a real touch key is unmodellable (docs/design/testing.md), and this is
+            // the modellable half.
             "EXTRA_PROMPT": extraPrompt ?? "",
             "EXTRA_PROMPT_HINT": extraPromptHint,
             "SESSION_SHELL": sessionShell.path,
@@ -319,8 +319,9 @@ public final class FakeSSH: @unchecked Sendable {
 
     /// What `ssh -G` resolves this alias's `hostname` to.
     ///
-    /// Section 4.2 keys a password on the **resolved** `hostname`, "lowercased as `ssh`
-    /// itself prints it in the prompt; the alias the user typed never appears in a key".
+    /// A keychain password is keyed on the **resolved** `hostname`, lowercased as `ssh`
+    /// itself prints it in the prompt; the alias the user typed never appears in a key
+    /// (docs/design/secrets.md).
     /// A model whose alias and hostname are the same string cannot tell a correct
     /// implementation from one that keys on the alias, so a scenario that cares seeds the
     /// two apart.
@@ -374,7 +375,7 @@ public final class FakeSSH: @unchecked Sendable {
     }
 
     /// The pid of every master this stub ended on a **signal** rather than on an exit
-    /// request, so a scenario can say which of section 6.1's three routes took which
+    /// request, so a scenario can say which of the three shutdown routes took which
     /// master (`SQ-043`, `SQ-044`).
     public var terminatedPIDs: [pid_t] { lines("terminated.log").compactMap(pid_t.init) }
 
@@ -392,7 +393,7 @@ public final class FakeSSH: @unchecked Sendable {
     }
 
     /// An askpass that answers from a table, and records what it was asked. The real one
-    /// is `sshdrive-askpass` with the token protocol of section 4.2.
+    /// is `sshdrive-askpass` with the askpass token protocol.
     public struct StubAskpass {
         public let path: String
         public let logPath: String
@@ -445,8 +446,7 @@ public final class FakeSSH: @unchecked Sendable {
         """
         #!/bin/sh
         # ServerModel.FakeSSH - the stand-in for /usr/bin/ssh
-        # (docs/testing-architecture.md section 4.2). Every branch cites the SQ row it
-        # reproduces.
+        # (docs/design/testing.md). Every branch cites the SQ row it reproduces.
         . \(singleQuoted(configurationPath))
 
         say() { printf '%s\\r\\n' "$1" >&2; }   # SQ-035: every stderr line ends CRLF.
@@ -475,7 +475,7 @@ public final class FakeSSH: @unchecked Sendable {
         mode=master
         # `-G` wins over every other mode, whatever order the flags arrive in: the broker
         # resolves a master's own destination by running `ssh -G` over that master's whole
-        # argv, `-N` included (section 4.2), and a `-N` read after the `-G` would put this
+        # argv, `-N` included, and a `-N` read after the `-G` would put this
         # back into master mode and open a connection where `ssh` opens none.
         resolve=0
         ctl=""
@@ -522,9 +522,9 @@ public final class FakeSSH: @unchecked Sendable {
                 # `-o User=` is how the agent names the account (SSHCommandBuilder's
                 # destinationOverrides); `-l` is how a ProxyJump hop does.
                 User) [ -z "$session_user" ] && session_user="$__v" ;;
-                # Section 4.2: the password prompt names `HostKeyAlias` where the config
-                # sets one - which is exactly why the keychain key is built from the
-                # `ssh -G` resolution and never parsed out of the prompt text.
+                # The password prompt names `HostKeyAlias` where the config sets one,
+                # which is exactly why the keychain key is built from the `ssh -G`
+                # resolution and never parsed out of the prompt text.
                 HostKeyAlias) host_key_alias="$__v" ;;
                 IdentityAgent) identity_agent="$__v" ;;
                 IdentityFile) identity_files="$identity_files$(printf '\\001')$__v" ;;
@@ -561,8 +561,8 @@ public final class FakeSSH: @unchecked Sendable {
           if [ -f "$STATE/$1/$__n" ]; then cat "$STATE/$1/$__n"; else printf '%s' "$3"; fi
         }
 
-        # `ssh -G`'s `hostname`: the alias the user typed resolves to it, and section 4.2
-        # keys a password on **this**, never on the alias.
+        # `ssh -G`'s `hostname`: the alias the user typed resolves to it, and a keychain
+        # password is keyed on **this**, never on the alias.
         resolved_host=$(table alias "$host" "$host")
         # SQ-063: the password is the asking host's own, so two hops of one chain really
         # can carry different ones.
@@ -599,7 +599,7 @@ public final class FakeSSH: @unchecked Sendable {
               return 1
             }
           fi
-          # Section 4.3: `ask` raises the fingerprint question for an unknown host, and
+          # `ask` raises the fingerprint question for an unknown host, and
           # only for an unknown one - a *changed* key raises no prompt at all (`SQ-049`).
           if [ "$HOST_KEY_KNOWN" != 1 ]; then
             # SQ-047: the host-key question reaches askpass with SSH_ASKPASS_PROMPT UNSET,
@@ -622,9 +622,9 @@ public final class FakeSSH: @unchecked Sendable {
           # first.
           __key="$ACCEPTS_KEY"
           if [ "$AGENT_ONLY" = 1 ]; then
-            # The key lives only in the key agent, so the `IdentityAgent=none` pass of
-            # section 4.2 cannot use it and the second pass can. The option is read off
-            # this ssh's own argv.
+            # The key lives only in the key agent, so the `IdentityAgent=none` first pass
+            # cannot use it and the second pass can. The option is read off this ssh's own
+            # argv.
             if [ "$identity_agent" = none ]; then __key=0; else __key=1; fi
           fi
 
@@ -657,7 +657,7 @@ public final class FakeSSH: @unchecked Sendable {
         #
         # `ssh -G -W …` resolves and connects to nothing, so `-G` wins over every other
         # mode. That is what lets the askpass broker resolve a *hop* from the hop's own
-        # argv, which is the only thing that tells two hops apart (`SQ-063`, section 4.2).
+        # argv, which is the only thing that tells two hops apart (`SQ-063`).
         if [ "$is_hop" = 1 ] && [ "$resolve" = 0 ]; then
           if [ -n "$proxy_command" ] && [ "$proxy_command" != none ]; then
             expanded=$(expand_proxy "$proxy_command")
@@ -675,14 +675,14 @@ public final class FakeSSH: @unchecked Sendable {
 
         if [ "$resolve" = 1 ]; then
           # `ssh -G` prints resolved values only, one lowercased keyword per line
-          # (section 4.1). `hostname` is the one section 4.2 keys a password on, and it is
-          # deliberately not the alias on the command line.
+          # (docs/design/locations.md). `hostname` is the one a keychain password is keyed
+          # on, and it is deliberately not the alias on the command line.
           printf 'host %s\\n' "$host"
           printf 'hostname %s\\n' "$resolved_host"
           printf 'port %s\\n' "$port"
           printf 'user %s\\n' "${session_user:-${USER:-alec}}"
           # A path may contain a space, so the accumulator is \\001-separated and never
-          # word-split (section 9.2's quoting rule, applied to our own harness).
+          # word-split (the remote-command quoting rule, applied to our own harness).
           printf '%s' "$identity_files" | tr '\\001' '\\n' | while IFS= read -r __f; do
             [ -n "$__f" ] && printf 'identityfile %s\\n' "$__f"
           done
@@ -710,7 +710,7 @@ public final class FakeSSH: @unchecked Sendable {
               exit 255 ;;
             exit)
               if [ -e "$ctl" ]; then
-                # SQ-044, DESIGN.md section 6.1: the request reaches a master *through*
+                # SQ-044: the request reaches a master *through*
                 # its socket, so it takes only one that is still serving it. A master
                 # that has stopped serving - or one whose socket has already been
                 # unlinked, the branch below - is left running, holding its connection
@@ -807,7 +807,7 @@ public final class FakeSSH: @unchecked Sendable {
             printf '%s\n' "$__argv" >> "$STATE/fallback.log"
             if [ "$ACCEPTS_KEY" = 1 ]; then run_session; fi
             # And where the account needs a password there is nobody to answer it: the
-            # agent mints no askpass token for a mux client (section 4.2), so the
+            # agent mints no askpass token for a mux client, so the
             # fallback dies with the one sentence the exit classifier must NOT read as
             # an authentication failure.
             say "Permission denied (publickey,password)."
@@ -861,7 +861,7 @@ public final class FakeSSH: @unchecked Sendable {
           printf '%s\\n' "$$" > "$STATE/master.pid"
           # A master that is *serving* its socket is one `-O exit` can take. With
           # SSHDRIVE_FAKESSH_MASTER=wedged it owns the socket and has stopped serving
-          # it, which is the case section 6.1 says only the pid can reach.
+          # it, which is the case only the pid can reach.
           [ "$SSHDRIVE_FAKESSH_MASTER" = wedged ] || : > "$STATE/serving.$$"
         fi
 
@@ -882,7 +882,7 @@ public final class FakeSSH: @unchecked Sendable {
         #     master survives every exit request and only a signal ends it;
         #   - socket unlinked from outside (SQ-044): likewise.
         # A master taken by a signal records itself, so a scenario can say which of the
-        # three routes of section 6.1 actually took which master.
+        # three routes above actually took which master.
         : > "$STATE/live.$$"
         trap 'printf "%s\\n" "$$" >> "$STATE/terminated.log"; [ -n "$ctl" ] && rm -f "$ctl"; exit 0' TERM INT
         while [ -e "$STATE/live.$$" ]; do sleep 1; done

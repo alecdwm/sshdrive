@@ -1,8 +1,7 @@
 import Foundation
 
 /// How long a fetched file may sit in the local replica before the eviction loop may
-/// take it (DESIGN.md section 7). Milestone 7 implements the loop; the value is carried
-/// from milestone 1 so the model does not change under it.
+/// take it (docs/design/eviction.md).
 public enum CacheTTL: String, Codable, CaseIterable, Sendable {
     case fifteenMinutes = "15m"
     case oneHour = "1h"
@@ -25,13 +24,14 @@ public enum CacheTTL: String, Codable, CaseIterable, Sendable {
     }
 }
 
-/// Whether server mode bits become Finder capabilities (DESIGN.md section 5.4).
+/// Whether server mode bits become Finder capabilities
+/// (docs/design/names-and-attributes.md).
 public enum PermissionsMode: String, Codable, CaseIterable, Sendable {
     case mode
     case none
 }
 
-/// Change-detection tier selection (DESIGN.md section 6.4). Milestones 6 and 9.
+/// Change-detection tier selection (docs/design/change-detection.md).
 public enum WatchMode: String, Codable, CaseIterable, Sendable {
     case auto
     case poll
@@ -39,21 +39,21 @@ public enum WatchMode: String, Codable, CaseIterable, Sendable {
     case helper
 }
 
-/// Whether an lstat preflight runs before every create and rename (DESIGN.md section 5.5).
+/// Whether an lstat preflight runs before every create and rename
+/// (docs/design/writes.md).
 public enum CreateCheck: String, Codable, CaseIterable, Sendable {
     case auto
     case lstat
 }
 
-/// Which backend a location runs on. Milestone 1 has only the fake one; `sftp` arrives
-/// with the transport in milestone 2. The field is stored so a fake location survives an
+/// Which backend a location runs on. The field is stored so a fake location survives an
 /// agent restart and so `status` can never mistake one for a real mount.
 public enum LocationBackend: String, Codable, Sendable {
     case sftp
     case fake
 }
 
-/// One location (DESIGN.md section 4). The id doubles as the File Provider domain
+/// One location (docs/design/locations.md). The id doubles as the File Provider domain
 /// identifier. No secret is ever stored here: `secrets` only names the keychain items
 /// that exist.
 public struct Location: Codable, Equatable, Sendable, Identifiable {
@@ -69,7 +69,7 @@ public struct Location: Codable, Equatable, Sendable, Identifiable {
     public var remotePath: String?
     /// Keychain item keys: "password:<user>@<hostname>:<port>", "passphrase:<keypath>".
     public var secrets: [String]
-    /// Set by `add` when only the key agent could authenticate (section 4.2).
+    /// Set by `add` when only the key agent could authenticate (docs/design/secrets.md).
     public var agentDependent: Bool
     public var cacheTTL: CacheTTL
     public var permissions: PermissionsMode
@@ -118,11 +118,13 @@ public struct Location: Codable, Equatable, Sendable, Identifiable {
         self.backend = backend
     }
 
-    /// nickname ?? host. Whether it is prefixed with "SSH Drive - " is decided by spike
-    /// S3, which records whether the system prefixes the app name itself (section 4).
+    /// nickname ?? host, bare. The system prepends the app name to the mount directory
+    /// and to the sidebar label itself, so nothing here spells "SSH Drive - "
+    /// (docs/design/locations.md).
     public var displayName: String { nickname ?? host }
 
-    /// `<name>` on the CLI resolves nickname, then host, then id prefix (section 8).
+    /// `<name>` on the CLI resolves nickname, then host, then id prefix
+    /// (docs/design/cli.md).
     public func matches(name: String) -> Bool {
         if let nickname, nickname == name { return true }
         if host == name { return true }

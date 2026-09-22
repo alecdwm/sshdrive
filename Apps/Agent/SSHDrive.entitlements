@@ -3,8 +3,9 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  App/agent entitlements (DESIGN.md section 3.1): hardened runtime (a build setting),
-	  the app group, and keychain sharing. Not sandboxed (section 9): the agent runs ssh,
+	  App/agent entitlements (docs/design/components.md): hardened runtime (a build
+	  setting), the app group, and keychain sharing. Not sandboxed
+	  (docs/design/security.md): the agent runs ssh,
 	  which must reach ~/.ssh, ssh-agent and ProxyCommand exactly as it does in a terminal.
 
 	  keychain-access-groups is a restricted entitlement on macOS: it needs a Developer ID

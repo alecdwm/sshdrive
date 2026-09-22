@@ -2,7 +2,8 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// The sweep's output is NUL-delimited and parsed as bytes (DESIGN.md sections 6.4, 9.2).
+/// The sweep's output is NUL-delimited and parsed as bytes (docs/design/change-detection.md,
+/// docs/design/security.md).
 final class SweepParserTests: XCTestCase {
 
     /// Joins fields the way the script prints them: every record NUL-terminated, including
@@ -76,8 +77,9 @@ final class SweepParserTests: XCTestCase {
     // MARK: Bytes, never Strings and never lines
 
     func testAPathWithANewlineAndANonUTF8ByteSurvives() {
-        // Section 9.2: output is "parsed as bytes, never split on newlines". A filename may
-        // contain one, and a name need not be valid UTF-8 (section 5.4).
+        // The output is parsed as bytes, never split on newlines (docs/design/security.md).
+        // A filename may contain one, and a name need not be valid UTF-8
+        // (docs/design/names-and-attributes.md).
         let path = Data([0x74, 0x77, 0x6F, 0x0A, 0x6C, 0x69, 0x6E, 0x65, 0x73, 0xFF])
         let output = stream([Data("10".utf8), path, Data("f".utf8), Data("1".utf8),
                              Data("1.0".utf8), Data("2".utf8), Data("644".utf8),
@@ -112,7 +114,7 @@ final class SweepParserTests: XCTestCase {
 
     func testASweepThatFoundNothingStillCarriesTheServerTime() {
         // The stamp is what the next window is computed from, so an empty sweep is not an
-        // empty answer (section 6.4).
+        // empty answer (docs/design/change-detection.md).
         let (serverTime, hits) = SweepParser.parse(stream(["1756900123"]), usesPrintf: true)
         XCTAssertEqual(serverTime, 1_756_900_123)
         XCTAssertTrue(hits.isEmpty)

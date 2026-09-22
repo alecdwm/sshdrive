@@ -70,7 +70,7 @@ struct UnconfiguredNetwork: NetworkPathObserving {
     var report: [String: Any] { ["status": "unknown"] }
 }
 
-/// Nobody at the keyboard, and the screen locked: the reading that makes section 4.2's
+/// Nobody at the keyboard, and the screen locked: the reading that makes the deadline
 /// re-arm refuse rather than fire.
 struct UnconfiguredPresence: PresenceReporting {
     func read() -> PresenceReading {

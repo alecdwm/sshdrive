@@ -1,7 +1,7 @@
 import Foundation
 
 /// The destination an `ssh` process is authenticating to, as `ssh -G` resolves it
-/// (DESIGN.md section 4.2). Never the alias the user typed: `nas` and
+/// (docs/design/secrets.md). Never the alias the user typed: `nas` and
 /// `nas.tail1234.ts.net` resolve to the same `hostname` and therefore share one item.
 public struct SSHDestination: Hashable, Sendable, CustomStringConvertible {
     public var user: String
@@ -19,12 +19,12 @@ public struct SSHDestination: Hashable, Sendable, CustomStringConvertible {
 }
 
 /// Keychain items are keyed by the prompt's identity, and shared by every location that
-/// names the same one (DESIGN.md sections 3, 4.2). There is no location id in a key:
+/// names the same one (docs/design/secrets.md). There is no location id in a key:
 /// keying passwords by `<user>@<hostname>:<port>` is what makes `ProxyJump` work with
 /// password auth on both hops, because each hop's prompt names its own host.
 ///
-/// Section 4.2's table lists exactly two kinds of stored answer. Everything else it
-/// classifies - the host-key question, the user-presence notice, a PIN, a one-time code -
+/// There are exactly two kinds of stored answer. Everything else the prompt classifier
+/// recognises - the host-key question, the user-presence notice, a PIN, a one-time code -
 /// is answered without the keychain or refused, and so has no key.
 public enum SecretKey: Hashable, Sendable, CustomStringConvertible {
     /// `password:<user>@<hostname>:<port>`.
@@ -69,8 +69,7 @@ public enum SecretKey: Hashable, Sendable, CustomStringConvertible {
     public var description: String { account }
 
     /// What `sshdrive list` and `sshdrive show` say about an item that exists
-    /// (section 4.2: "password stored for alec@nas", "passphrase stored for
-    /// ~/.ssh/id_nas").
+    /// ("password stored for alec@nas", "passphrase stored for ~/.ssh/id_nas").
     public var report: String {
         switch self {
         case .password(let destination):

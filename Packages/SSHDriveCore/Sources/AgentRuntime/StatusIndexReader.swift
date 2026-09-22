@@ -5,17 +5,17 @@ import Index
 import Logging
 
 /// The agent's own read-only view of one location's index, for `sshdrive status`
-/// (DESIGN.md sections 8, 8.1, 5.2, 5.3).
+/// (docs/design/cli.md).
 ///
 /// `LocationRuntime` is an actor because the index has a single writer by design, and a
-/// directory listing writes its rows inside one **synchronous** SQLite transaction on it
-/// (section 5.3), so a hop onto that actor queues behind whatever listing is in flight.
+/// directory listing writes its rows inside one **synchronous** SQLite transaction on it,
+/// so a hop onto that actor queues behind whatever listing is in flight.
 /// A row is about eighteen of those hops per location - the hidden names, the held
 /// deletions, the root set, the eviction rows, the pin tree - which is a report that waits
 /// for Finder to finish walking a large folder.
 ///
-/// Section 5.2 already sanctions the answer: `index.sqlite` is opened **read-only in WAL
-/// mode**, which is what the extension does for `item(for:)` and the working set. A WAL
+/// So `index.sqlite` is opened **read-only in WAL mode**, exactly as the extension opens
+/// it for `item(for:)` and the working set. A WAL
 /// reader never blocks the writer and never delays it, and it always sees a consistent
 /// snapshot - the state as of the last commit, which for a listing in flight is the state
 /// before it. The agent remains the sole writer; nothing here writes.
@@ -32,23 +32,23 @@ public actor StatusIndexReader {
     /// one entry on `LocationRuntime` for the things only the live runtime knows.
     public struct Report {
         /// Nil when the index answered. A sentence when it could not - no index file yet,
-        /// a rebuild in progress (section 5.3), a schema this build does not understand -
+        /// a rebuild in progress, a schema this build does not understand -
         /// which `status` prints in place of the index-derived lines rather than failing
         /// the whole report.
         public var unavailable: String?
-        /// Section 5.4's "not shown" list.
+        /// The "not shown" list.
         public var notShown: [[String: Any]] = []
-        /// Section 6.4's held deletions, and how many of them.
+        /// The held deletions, and how many of them.
         public var held: [[String: Any]] = []
         public var heldCount = 0
-        /// Section 6.4's watch bookkeeping, as `LocationRuntime.watchReport` reported it
+        /// The watch bookkeeping, as `LocationRuntime.watchReport` reported it
         /// from the writer: the stored tier, the sweep's server clock, the last full
         /// sweep, and the root set's size and rotation period.
         public var watch: [String: Any] = [:]
-        /// Section 7's TTL candidates behind the identifiers the system says it holds
-        /// content for.
+        /// The TTL candidates behind the identifiers the system says it holds content
+        /// for.
         public var cacheCandidates: [EvictionPlan.Candidate] = []
-        /// Section 7.1's marker tree.
+        /// The pin marker tree.
         public var pins: [[String: Any]] = []
 
         public init() {}
@@ -59,7 +59,7 @@ public actor StatusIndexReader {
     private var reader: IndexReader?
     /// Shut for the truncate window of a restore, exactly like the extension's reader: the
     /// reader holds the `-shm` mapped and truncating a mapped file under a live process
-    /// faults it on its next access (section 5.3).
+    /// faults it on its next access.
     private var closedForRestore = false
 
     public init(locationID: String, path: String) {
@@ -80,8 +80,7 @@ public actor StatusIndexReader {
     }
 
     /// Drops the connection so the next call opens a fresh one. Called for any failure:
-    /// a database replaced under us reads through a stale page cache otherwise
-    /// (section 5.3).
+    /// a database replaced under us reads through a stale page cache otherwise.
     private func discard() {
         reader?.close()
         reader = nil
@@ -104,7 +103,7 @@ public actor StatusIndexReader {
     ///
     /// - Parameters:
     ///   - hiddenReasons: the sentences `LocationRuntime` recorded while it built the rows
-    ///     (section 5.4). They are runtime state rather than index state, so they are
+    ///     They are runtime state rather than index state, so they are
     ///     handed in with the rest of the live facts; the derived sentence is the fallback,
     ///     which is exactly what the runtime's own `notShown()` does.
     ///   - materialized: the identifiers the system says it holds content for, or nil for
@@ -160,7 +159,7 @@ public actor StatusIndexReader {
 
     // MARK: The mappings, shared with the writer
 
-    /// One "not shown" entry (section 5.4). Static and shared so the writer's own
+    /// One "not shown" entry. Static and shared so the writer's own
     /// `notShown()` and this reader cannot describe the same row differently.
     public static func notShownEntry(row: IndexItem, hiddenReasons: [Data: String])
         -> [String: Any]
@@ -182,7 +181,8 @@ public actor StatusIndexReader {
         }
     }
 
-    /// Section 8's "14 deletions held in Photos, re-check at 14:32".
+    /// One held-deletion line for `status`: "14 deletions held in Photos, re-check at
+    /// 14:32".
     public static func heldEntry(row: IndexWriter.HeldRow) -> [String: Any] {
         [
             "path": String(decoding: row.path, as: UTF8.self),
@@ -194,14 +194,13 @@ public actor StatusIndexReader {
         ]
     }
 
-    /// One TTL candidate (section 7). The rule itself is `EvictionPlan`'s; this is only
-    /// the row.
+    /// One TTL candidate. The rule itself is `EvictionPlan`'s; this is only the row.
     public static func candidate(row: IndexItem) -> EvictionPlan.Candidate {
         EvictionPlan.Candidate(
             identifier: row.identifier,
             path: String(decoding: row.path, as: UTF8.self),
             isDirectory: row.type == "directory",
-            // Section 5.4's local-only row: there is nothing on the server to fetch back,
+            // A local-only row: there is nothing on the server to fetch back,
             // so evicting it would take the user's file.
             isLocalOnly: row.hidden == RowBuilder.hiddenLocalOnly,
             kept: row.kept,
@@ -211,7 +210,7 @@ public actor StatusIndexReader {
             atime: nil)
     }
 
-    /// Section 7.1's marker tree with what each subtree costs.
+    /// The pin marker tree with what each subtree costs.
     static func pinEntries(_ index: IndexReader, materialized: Set<String>?) throws
         -> [[String: Any]]
     {
@@ -258,7 +257,7 @@ public actor StatusIndexReader {
             "downloadedFiles": downloadedFiles,
             "downloadedBytes": downloadedBytes,
             // The depth is what the CLI indents by: an exclusion inside a pin is drawn
-            // under it (section 7.1).
+            // under it.
             "depth": markers.ancestorMarkerDepth(of: path),
         ]
         if let covering = markers.nearestAncestorMarker(of: path) {
@@ -267,9 +266,9 @@ public actor StatusIndexReader {
         return entry
     }
 
-    /// The index half of section 8's watch line. The live half - the tier the detector is
-    /// actually running and the last cycle's outcome - is merged over this by the caller,
-    /// exactly as `status` has always merged the detector's answer over the runtime's.
+    /// The index half of the watch line in `status`. The live half - the tier the
+    /// detector is actually running and the last cycle's outcome - is merged over this by
+    /// the caller, the way `status` merges the detector's answer over the runtime's.
     static func watchFields(_ index: IndexReader) throws -> [String: Any] {
         var out: [String: Any] = [:]
         if let tier = try index.metaString(IndexSchema.MetaKey.watchTier) { out["tier"] = tier }

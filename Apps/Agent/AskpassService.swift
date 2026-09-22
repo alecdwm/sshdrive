@@ -10,10 +10,10 @@ import XPCProtocols
 /// The object exported to `sshdrive-askpass`, and to nothing else.
 ///
 /// The listener gives an askpass peer this one-method interface instead of the agent
-/// interface (section 5.2: the peer requirement is the boundary, and the interface a peer
-/// is handed follows from which of our four executables it is). So the process that
-/// relays `ssh`'s prompts cannot remove a location or evict a cache, and the processes
-/// that can do those cannot ask for a secret.
+/// interface: the peer requirement is the boundary, and the interface a peer is handed
+/// follows from which of our four executables it is. So the process that relays `ssh`'s
+/// prompts cannot remove a location or evict a cache, and the processes that can do those
+/// cannot ask for a secret.
 final class AskpassService: NSObject, SSHDriveAskpassProtocol {
     private let callerPID: Int32
     private let secrets: AgentSecrets
@@ -42,8 +42,8 @@ final class AskpassService: NSObject, SSHDriveAskpassProtocol {
     }
 
     /// Is this peer our `sshdrive-askpass`? The code requirement has already established
-    /// that it is one of our four signed executables (section 5.2); this only says which,
-    /// so the wrong one cannot be handed the secrets interface.
+    /// that it is one of our four signed executables; this only says which, so the wrong
+    /// one cannot be handed the secrets interface.
     private static func isAskpass(pid: Int32, environment: AgentEnvironment) -> Bool {
         guard let path = environment.peers.executablePath(pid: pid) else { return false }
         if let expected = AgentSecrets.shared.askpassPath { return path == expected }

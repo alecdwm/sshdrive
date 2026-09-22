@@ -1,23 +1,18 @@
 import Foundation
 import Logging
 
-/// The extension's read-only view of a domain's index (DESIGN.md section 5.2).
+/// The extension's read-only view of a domain's index (docs/design/extension.md).
 ///
 /// `item(for:)` is issued in bulk by the system and must be answered from local state, so
 /// the extension opens `domains/<id>/index.sqlite` read-only in WAL mode from the group
 /// container and answers `item(for:)` and the working-set change enumerator from it with
 /// no agent involved. The agent remains the only writer, and that is what makes this
 /// safe: WAL readers never block the writer and always see a consistent snapshot.
-///
-/// Whether this class survives is S3's call: if the XPC path serves 50,000 item(for:)
-/// calls within twice the reader's time and under two seconds in all, the reader goes and
-/// `meta.reconciling`, `meta.generation`, the ready check and the close-and-reopen
-/// protocol go with it.
 public final class IndexReader {
     private var connection: SQLiteConnection?
     private let path: String
     /// Re-read when `meta.generation` moves, since the agent has replaced the contents
-    /// wholesale (section 5.3).
+    /// wholesale.
     private var cachedGeneration: Int64 = -1
 
     public init(path: String) throws {
@@ -33,13 +28,12 @@ public final class IndexReader {
 
     /// Any SQLite error, a corrupt page, a not-a-database header during the truncate
     /// window, a missing table, is answered by the caller as serverUnreachable, never as
-    /// noSuchItem, so a rebuild in progress can never look like a deletion (section 5.3).
+    /// noSuchItem, so a rebuild in progress can never look like a deletion.
     ///
-    /// The three keys are read in **one** statement: a `SELECT value FROM meta WHERE
-    /// key = ?1` each, with the row read and the generation the caller wants after it,
-    /// makes an `item(for:)` five statements where two will do, and the system issues
-    /// `item(for:)` in bulk (section 5.2). A key that is missing, or whose value is not a
-    /// number, reads as 0.
+    /// The three keys are read in **one** statement: a `SELECT value FROM meta WHERE key =
+    /// ?1` each, with the row read and the generation the caller wants after it, makes an
+    /// `item(for:)` five statements where two will do, and the system issues `item(for:)`
+    /// in bulk. A key that is missing, or whose value is not a number, reads as 0.
     @discardableResult
     private func checkMeta() throws -> Int64 {
         let statement = try database().prepare(
@@ -67,8 +61,8 @@ public final class IndexReader {
     ///
     /// A schema newer than this build is the extension's cue to fall back to the agent; a
     /// database being reconciled answers nothing at all; anything else hands back the
-    /// generation the caller wants for the state file (section 5.2). A key that is
-    /// missing, or whose value is not a number, reads as 0.
+    /// generation the caller wants for the state file. A key that is missing, or whose
+    /// value is not a number, reads as 0.
     private func judge(version: Int64, reconciling: Int64, generation: Int64) throws -> Int64 {
         guard version <= IndexSchema.version else {
             throw IndexError.schemaTooNew(found: Int(version))
@@ -91,7 +85,7 @@ public final class IndexReader {
     }
 
     /// `meta.generation`, the wholesale-replacement counter, for the extension's state
-    /// file (section 5.2).
+    /// file.
     public func generation() throws -> Int64 {
         try metaInt(IndexSchema.MetaKey.generation) ?? 0
     }
@@ -137,7 +131,7 @@ public final class IndexReader {
             localContent: statement.data(22))
     }
 
-    /// One row read and a field-by-field copy, with no ancestor walk (section 5.2).
+    /// One row read and a field-by-field copy, with no ancestor walk.
     public func item(identifier: String) throws -> IndexItem {
         try itemAndGeneration(identifier: identifier).item
     }
@@ -145,15 +139,15 @@ public final class IndexReader {
     /// The same row, with the `meta.generation` the check above already read.
     ///
     /// The extension's store wants both on every `item(for:)` - the row for the system and
-    /// the generation for the state file `doctor` reads (section 5.2) - and asking for the
-    /// generation separately is a meta statement per call on top of the check.
+    /// the generation for the state file `doctor` reads - and asking for the generation
+    /// separately is a meta statement per call on top of the check.
     public func itemAndGeneration(identifier: String) throws -> (item: IndexItem, generation: Int64) {
         // The meta check rides on the row's own query as three scalar subqueries, so an
-        // `item(for:)` is **one** statement rather than two: the system issues them in
-        // bulk and a whole statement of overhead per call is a third of what one costs
-        // (section 5.2). The three values are judged before the row is returned, exactly
-        // as `checkMeta()` judges them for every other read here, and one query is if
-        // anything the firmer answer - the row and the meta keys come from one snapshot.
+        // `item(for:)` is **one** statement rather than two: the system issues them in bulk
+        // and a whole statement of overhead per call is a third of what one costs. The
+        // three values are judged before the row is returned, exactly as `checkMeta()`
+        // judges them for every other read here, and one query is if anything the firmer
+        // answer - the row and the meta keys come from one snapshot.
         let statement = try database().prepare(
             """
             SELECT \(Self.itemColumns), \
@@ -169,8 +163,8 @@ public final class IndexReader {
         defer { statement.reset() }
         guard try statement.step() else {
             // No row here says nothing about the database's health, and a rebuild in
-            // progress must never look like a deletion (section 5.3): the meta check is
-            // asked in its own right before the answer is given.
+            // progress must never look like a deletion: the meta check is asked in its own
+            // right before the answer is given.
             try checkMeta()
             throw IndexError.noSuchItem
         }
@@ -192,8 +186,8 @@ public final class IndexReader {
         return rows
     }
 
-    /// The newest sequence number. `enumerateItems` on the working set returns no items
-    /// and this as the anchor: the working set is only ever a change stream (section 5.3).
+    /// The newest sequence number. `enumerateItems` on the working set returns no items and
+    /// this as the anchor: the working set is only ever a change stream.
     public func currentSequence() throws -> Int64 {
         try checkMeta()
         let statement = try database().prepare("SELECT COALESCE(MAX(seq), 0) FROM anchors")
@@ -202,12 +196,12 @@ public final class IndexReader {
         return statement.int(0)
     }
 
-    /// The working-set change stream. Throws `.syncAnchorExpired` when the anchor is
-    /// older than the oldest row we still hold; the caller then hands out a fresh anchor
-    /// and tells the agent, whose response is one full sweep of the root set (section 5.3).
+    /// The working-set change stream. Throws `.syncAnchorExpired` when the anchor is older
+    /// than the oldest row we still hold; the caller then hands out a fresh anchor and
+    /// tells the agent, whose response is one full sweep of the root set.
     ///
     /// The query itself is `IndexChangeStream`, shared with the writer, so the extension's
-    /// direct read and the agent's XPC fallback answer the same question (section 5.2).
+    /// direct read and the agent's XPC fallback answer the same question.
     public func changes(since anchor: Int64, limit: Int = 500) throws
         -> (entries: [IndexAnchorEntry], newAnchor: Int64, hasMore: Bool)
     {
@@ -216,14 +210,14 @@ public final class IndexReader {
         return (page.entries, page.newAnchor, page.hasMore)
     }
 
-    // MARK: The agent's own read-only view (section 8)
+    // MARK: The agent's own read-only view
 
-    /// The queries below are not the extension's. They are what `sshdrive status` reads,
-    /// and they are here rather than on `IndexWriter` for the reason section 5.2 gives the
-    /// extension one at all: `LocationRuntime` is an actor, a directory listing writes its
-    /// rows in one synchronous transaction on it (section 5.3), and a hop onto that actor
-    /// waits for a whole listing to finish. A WAL reader neither blocks the writer nor
-    /// waits for it, so the report is taken from a connection of its own (section 8).
+    /// The queries below are not the extension's. They are what `sshdrive status` reads
+    /// (docs/design/cli.md), and they are here rather than on `IndexWriter` for the same
+    /// reason the extension has a reader at all: `LocationRuntime` is an actor, a directory
+    /// listing writes its rows in one synchronous transaction on it, and a hop onto that
+    /// actor waits for a whole listing to finish. A WAL reader neither blocks the writer
+    /// nor waits for it, so the report is taken from a connection of its own.
     ///
     /// They are read-only, they call `checkMeta()` like every other read here, and the
     /// agent remains the sole writer.
@@ -251,7 +245,8 @@ public final class IndexReader {
         return Self.decodeItem(statement)
     }
 
-    /// Every row, which is what section 5.4's "not shown" list is filtered out of.
+    /// Every row, which the "not shown" name rules are filtered out of
+    /// (docs/design/names-and-attributes.md).
     public func allItems() throws -> [IndexItem] {
         try checkMeta()
         let statement = try database().prepare(
@@ -285,7 +280,8 @@ public final class IndexReader {
         return rows
     }
 
-    /// Every explicit pin marker (section 7.1), which is the whole of `sshdrive pins`.
+    /// Every explicit pin marker (docs/design/pinning.md), which is the whole of `sshdrive
+    /// pins`.
     public func pinMarkerRows() throws -> [(path: Data, marker: Int64)] {
         try checkMeta()
         let statement = try database().prepare(
@@ -299,8 +295,8 @@ public final class IndexReader {
         return rows
     }
 
-    /// The mass-deletion guard's held rows (section 6.4), for section 8's
-    /// "0 held deletions" line.
+    /// The mass-deletion guard's held rows (docs/design/change-detection.md), for section
+    /// 8's "0 held deletions" line.
     public func heldRows() throws -> [IndexWriter.HeldRow] {
         try checkMeta()
         let statement = try database().prepare(
@@ -319,7 +315,8 @@ public final class IndexReader {
         return Int(statement.int(0))
     }
 
-    /// The change-detection root set (section 6.5), least recently listed first.
+    /// The change-detection root set (docs/design/root-set.md), least recently listed
+    /// first.
     public func rootRows() throws -> [IndexWriter.RootRow] {
         try checkMeta()
         let statement = try database().prepare(
@@ -338,14 +335,14 @@ public final class IndexReader {
     }
 
     /// `meta.reconciling`, read without `checkMeta()` throwing on it: `status` reports the
-    /// rebuild rather than failing on it (section 5.3).
+    /// rebuild rather than failing on it.
     public func isReconciling() throws -> Bool {
         (try metaInt(IndexSchema.MetaKey.reconciling) ?? 0) != 0
     }
 
-    /// Closes the reader for the truncate window of a restore (section 5.3). The reader
-    /// holds the -shm file mapped, and truncating a mapped file under a live process
-    /// faults it on its next access.
+    /// Closes the reader for the truncate window of a restore. The reader holds the -shm
+    /// file mapped, and truncating a mapped file under a live process faults it on its next
+    /// access.
     public func close() {
         connection = nil
     }
@@ -359,10 +356,10 @@ public final class IndexReader {
         cachedGeneration = -1
     }
 
-    // MARK: The test seam of section 5.2's statement cache
+    // MARK: The test seam of the statement cache
 
     /// Kept on the reader rather than only on the connection so that a close and reopen
-    /// - the truncate window of a restore (section 5.3) - does not silently stop a test
+    /// - the truncate window of a restore - does not silently stop a test
     /// counting. Both are nil in the shipping extension.
     private var statementObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
     private var compileObserver: (@Sendable (_ sql: String, _ depth: Int) -> Void)?
@@ -373,9 +370,8 @@ public final class IndexReader {
         connection?.statementObserver = observer
     }
 
-    /// Every statement this reader *compiles*, which is what says the cache is working:
-    /// an `item(for:)` storm must compile a constant number and not five per call
-    /// (section 5.2).
+    /// Every statement this reader *compiles*, which is what says the cache is working: an
+    /// `item(for:)` storm must compile a constant number and not five per call.
     public func observeCompilations(_ observer: (@Sendable (_ sql: String, _ depth: Int) -> Void)?) {
         compileObserver = observer
         connection?.compileObserver = observer

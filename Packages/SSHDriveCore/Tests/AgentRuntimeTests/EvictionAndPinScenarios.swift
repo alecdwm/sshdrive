@@ -9,8 +9,8 @@ import SFTP
 import Testing
 import XPCProtocols
 
-/// Suite G on the agent's side: the TTL loop against a driven clock, and section 7.1.1's
-/// inheritance (`docs/testing-architecture.md` section 5).
+/// Suite G on the agent's side: the TTL loop against a driven clock, and the pinning
+/// inheritance rules of docs/design/pinning.md (`docs/design/testing.md` section 5).
 extension AgentScenarios {
 
     @Suite struct EvictionAndPinScenarios {
@@ -76,8 +76,8 @@ extension AgentScenarios {
         /// **G4** - the policy refuses, not the capability.
         ///
         /// A pin on a directory makes every known descendant `kept` without writing a marker on
-        /// any of them: section 7.1.1's invariant 3 says the *smallest* marker change that
-        /// produces the asked-for effect is the one made. `evict <path>` on such a file is
+        /// any of them: invariant 3 (docs/design/pinning.md) says the *smallest* marker change
+        /// that produces the asked-for effect is the one made. `evict <path>` on such a file is
         /// refused with "unpin it first" rather than left to fail opaquely, because the eager
         /// content policy would refuse it anyway and the code says nothing about why
         /// (`MQ-018`, `MQ-024`).
@@ -119,7 +119,7 @@ extension AgentScenarios {
         ///
         /// `Documents/Reports` excluded inside a pinned `Documents`: the excluded subtree stops
         /// being kept, the direct sibling stays kept, and the pin above it is untouched
-        /// (`MQ-027`, section 7.1.1's five situations).
+        /// (`MQ-027`, the five situations of docs/design/pinning.md).
         @Test func g5AnExplicitExclusionBeatsThePinAboveIt() async throws {
             let harness = try AgentHarness()
             let (_, runtime) = try await Self.tree(harness)
@@ -179,12 +179,12 @@ extension AgentScenarios {
         /// is that atime is outside the `max` (`MQ-021`, `MQ-022`, `MQ-023`). Here the rule
         /// itself: last use is `max(last_fetch, mtime)`, and the replica's mtime counts
         /// beside the row's because a save in the mount moves the replica's before the
-        /// upload finishes and the row's only afterwards (section 7 step 2). A file saved
+        /// upload finishes and the row's only afterwards (docs/design/eviction.md, step 2). A file saved
         /// since its fetch is spared; one fetched long ago and never touched is taken.
         ///
         /// The four skips of `EvictionPlan.Skip` are asserted where they are observable -
         /// at the seam: `cacheTTL = never` evicts nothing, and a directory, a local-only
-        /// row (section 5.4's `.DS_Store`) and a kept item are decided without so much as
+        /// row (the `.DS_Store` handling of docs/design/names-and-attributes.md) and a kept item are decided without so much as
         /// a `getUserVisibleURL`, let alone an `evictItem`. A directory is skipped because
         /// a TTL is per file, not because `evictItem` cannot take one (`MQ-020`).
         @Test func g1TheTTLIsTheLaterOfTheFetchAndTheSave() async throws {
@@ -202,7 +202,8 @@ extension AgentScenarios {
             let fetchedAt = try #require(
                 try await runtime.evictionRows(identifiers: [readme]).first?.lastFetch)
 
-            // Section 5.4's local-only row: Finder's `.DS_Store`, which is never uploaded
+            // The local-only row for Finder's `.DS_Store` (docs/design/names-and-attributes.md),
+            // which is never uploaded
             // and has nothing on the server to fetch back.
             let dsStore = try await runtime.createItem(
                 parentIdentifier: IndexWriter.rootIdentifier, filename: ".DS_Store",
@@ -258,7 +259,7 @@ extension AgentScenarios {
             #expect(!statted.contains(documents) && !statted.contains(media))
             #expect(!statted.contains(dsStore.identifier) && !statted.contains(notes))
 
-            // `cacheTTL = never` (section 7 step 1): the pass runs and evicts nothing, no
+            // `cacheTTL = never` (docs/design/eviction.md, step 1): the pass runs and evicts nothing, no
             // matter how old the content is.
             harness.replica.setMaterialized([clip], locationID: location.id)
             harness.replica.resetCalls()
@@ -278,12 +279,12 @@ extension AgentScenarios {
         /// **G2** - `evict --all` falls back to a walk.
         ///
         /// The one call on the root container is an optimisation and not the contract
-        /// (section 7 step 4). Two measurements say so: with a pin in place the call meets
+        /// (docs/design/eviction.md, step 4). Two measurements say so: with a pin in place the call meets
         /// a kept child and fails as a whole (`MQ-033`), and for 5-10 s after an unpin it
         /// fails as `NSCocoaErrorDomain` "The file couldn't be opened", which names no
         /// reason, because the system has not re-read the rows whose policy just changed
         /// (`MQ-034`). Either way `--all` walks the materialized set and evicts the unkept
-        /// files one by one, each with the doubling backoff of section 5.5.
+        /// files one by one, each with the doubling backoff described in docs/design/writes.md.
         ///
         /// Three arrangements, because the runtime has two ways of not evicting the root:
         /// when it *knows* the call is doomed - a pin is in place, or `--unpin-all` has
@@ -300,7 +301,7 @@ extension AgentScenarios {
 
             let harness = try AgentHarness()
             // The backoff is exercised at its real numbers and costs no real time
-            // (docs/testing-architecture.md section 3.1).
+            // (docs/design/testing.md).
             harness.clock.autoAdvance = true
             let (location, runtime) = try await Self.evictionTree(harness)
 
@@ -446,7 +447,7 @@ extension AgentScenarios {
         /// `NSFileProviderErrorNonEvictable` (-2008), never the documented
         /// `NSFileProviderErrorUnsyncedEdits` (-2007), so the eviction loop cannot tell a
         /// pin from a pending write by error code and must not try (gotcha 82). The loop's
-        /// contract is section 7 step 3's: ignore the refusal, log it, pass the item over
+        /// contract is eviction.md's step 3: ignore the refusal, log it, pass the item over
         /// and carry on to the next one; the pass comes round again in five minutes.
         ///
         /// `MQ-019` is the same rule one level up: evicting the **parent directory** of a
@@ -486,11 +487,10 @@ extension AgentScenarios {
                 Self.shape(pendingRefusal) == Self.shape(keptRefusal),
                 "G3: the two refusals are the same value; -2007 never appears")
 
-            // The bite-proof for gotcha 82. This is the logic the loop used to carry -
-            // "a -2008 means the item is kept" - injected as a copy, against the two
-            // reports the system really returns. It labels the pending upload exactly as
-            // it labels the pin, so any code that read a pin out of the code was reading
-            // a coin flip.
+            // The bite-proof for gotcha 82: a check reading "a -2008 means the item is kept"
+            // out of the error code, injected here as a copy, against the two reports the
+            // system really returns. It labels the pending upload exactly as it labels the
+            // pin, so any code that reads a pin out of the error code is reading a coin flip.
             func aPinReadOutOfTheErrorCode(_ report: [String: Any]) -> Bool {
                 (report["errorCode"] as? Int) == -2008
             }
@@ -557,19 +557,19 @@ extension AgentScenarios {
         }
 
         /// **G11** - `pins --export` / `pins --import` and the `pins.json` sidecar
-        /// (section 7.1).
+        /// (docs/design/pinning.md).
         ///
         /// Driven through the real command handler, because the import is the handler's:
         /// it applies the markers shortest path first, so a pin above an exclusion is
         /// written before the exclusion that invariant 2 would otherwise wipe. What is
-        /// asserted is section 7.1.1's algebra surviving a round trip: the exported set is
+        /// asserted is the pinning algebra (docs/design/pinning.md) surviving a round trip: the exported set is
         /// the *smallest* one that produces the effect (invariant 3), an exclusion nested
         /// under a pin comes back nested under it, an import clears every explicit state
         /// beneath a path it sets (invariant 2), and a second import of the same file
         /// changes nothing.
         ///
         /// The markers are the index's, never the sidecar's: `pins.json` is "a write-only
-        /// copy for recovery, never read while the index is healthy" (section 5.3), and
+        /// copy for recovery, never read while the index is healthy" (docs/design/item-index.md), and
         /// this asserts it is written and that it matches - not that anything reads it.
         /// No macOS measurement is involved in the round trip itself; `MQ-027` is what
         /// makes the nested exclusion worth preserving, since an explicit lazy child is
@@ -598,7 +598,7 @@ extension AgentScenarios {
             let pins = try #require(exported["pins"] as? [[String: Any]])
             #expect(pins.count == 2, "G11: a marker per *change*, not per kept path")
 
-            // The sidecar beside the index holds the same list (section 5.3).
+            // The sidecar beside the index holds the same list (docs/design/item-index.md).
             let sidecarURL = try GroupContainer.pinsURL(locationID: nasID)
             let sidecar = try #require(
                 try JSONSerialization.jsonObject(with: try Data(contentsOf: sidecarURL))
@@ -653,16 +653,16 @@ extension AgentScenarios {
 
         /// **G12** - the agent's own `stat` under `~/Library/CloudStorage` is allowed.
         ///
-        /// `MQ-060` (S4, 2026-09-04, macOS 26.4): a launchd agent's `stat` and `open`
+        /// `MQ-060` (measured on macOS 26.4, 2026-09-04): a launchd agent's `stat` and `open`
         /// under its **own** domain's mount draw no TCC prompt and no `EPERM`. `tccd`
         /// denies the agent `kTCCServiceSystemPolicyAllFiles`, which it does not need, and
         /// then allows the access as `kTCCServiceFileProviderDomain` with our own domain
         /// as the indirect object, silently. The rule in the model is therefore a
         /// **no-op**: the TTL loop's `getUserVisibleURL` and the `lstat` behind it just
-        /// work, and `sshdrive doctor` carries no line for it (section 7).
+        /// work, and `sshdrive doctor` carries no line for it (docs/design/eviction.md).
         ///
         /// **Confidence.** TCC cannot be modelled: it is a VM-only measurement
-        /// (`docs/testing-architecture.md` section 7), so nothing here proves what macOS
+        /// (`docs/design/testing.md` section 7), so nothing here proves what macOS
         /// does - the row does, and a new macOS release is a new column in that table, not
         /// a new test. What this scenario defends is the half we control: that our code
         /// does not *add* a guard, a permission probe, a prompt path or a fallback around
@@ -710,7 +710,7 @@ extension AgentScenarios {
             // enumerator, the lookup and the eviction - in that order and with nothing
             // else in it. No pre-flight probe, no permission request, no second path for
             // a denial, which is also why `sshdrive doctor` carries no line for this and
-            // why there is nothing for a user to grant (section 7).
+            // why there is nothing for a user to grant (docs/design/eviction.md).
             #expect(
                 harness.replica.calls.map(Self.name(of:))
                     == ["materialized", "userVisibleURL", "evict"],
@@ -730,7 +730,8 @@ extension AgentScenarios {
                 "one attempt, swallowed; the loop does not re-ask or escalate")
             #expect(harness.replica.evictedIdentifiers == [readme, clip])
 
-            // Section 7.1 step 1's replica lookup under the same denial: reported, and the
+            // The pin replica lookup (docs/design/pinning.md, step 1) under the same denial:
+            // reported, and the
             // markers - which are the index's, not the system's - are written regardless.
             let report = try await runtime.applyPin(pathString: "Media", request: .keep)
             #expect(report["changed"] as? Bool == true)

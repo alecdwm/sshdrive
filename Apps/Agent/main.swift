@@ -4,8 +4,9 @@ import Logging
 import XPCInterfaces
 import XPCProtocols
 
-// SSH Drive.app's main executable is the background agent (DESIGN.md section 3). The same
-// binary runs in three roles, and this file is the whole of what tells them apart:
+// SSH Drive.app's main executable is the background agent (docs/design/components.md).
+// The same binary runs in three roles, and this file is the whole of what tells them
+// apart:
 //
 //   launchd     the login agent proper, started by SMAppService from
 //               Contents/Library/LaunchAgents/org.shirls.sshdrive.agent.plist, which sets
@@ -13,7 +14,7 @@ import XPCProtocols
 //
 //   unregister  SSHDRIVE_AGENT_ROLE=unregister: drop the login item, wait for launchd to
 //               let go of the job, and exit. The cask's postflight runs it before it
-//               re-opens the app (section 10).
+//               re-opens the app.
 //
 //   app         what `open -g -a "SSH Drive"` launches, from the Homebrew postflight or
 //               from `sshdrive doctor`. Launching the app is what registers the extension
@@ -29,11 +30,11 @@ let environment = AgentEnvironment.runningOnMacOS
 let agent = AgentRuntimeBootstrap.install(environment: environment)
 
 /// One line per launch when our own bundle still carries `com.apple.quarantine`
-/// (section 10). The agent itself runs quarantined - launchd starts it directly - but
-/// LaunchServices registers no plugin of such a bundle until it has been assessed through
-/// a user-visible launch, so the File Provider extension is missing and every domain call
-/// fails. `sshdrive doctor`'s "quarantine" check says the same thing with the fix; this is
-/// what puts it in the log of an install nobody ran `doctor` on.
+/// (docs/design/packaging.md). The agent itself runs quarantined - launchd starts it
+/// directly - but LaunchServices registers no plugin of such a bundle until it has been
+/// assessed through a user-visible launch, so the File Provider extension is missing and
+/// every domain call fails. `sshdrive doctor`'s "quarantine" check says the same thing
+/// with the fix; this is what puts it in the log of an install nobody ran `doctor` on.
 func warnIfQuarantined() {
     let path = environment.bundle.bundleURL.path
     guard let value = environment.bundle.quarantineValue(atPath: path) else { return }
@@ -70,9 +71,9 @@ case "launchd":
 
     Task { await agent.start() }
 
-    // Section 10: a TERM from the cask's `uninstall` stanza exits 0 with every master shut
-    // down, and the vnode watch on our own executable hands over to a bundle an upgrade
-    // put in our place (section 10.1).
+    // A TERM from the cask's `uninstall` stanza exits 0 with every master shut down, and
+    // the vnode watch on our own executable hands over to a bundle an upgrade put in our
+    // place (docs/design/packaging.md).
     AgentLifecycleAdapter.install(manager: agent, environment: environment)
     dispatchMain()
 

@@ -1,10 +1,10 @@
 import Foundation
 
-/// The decisions the helper's deployment makes, with the I/O taken out (DESIGN.md section
-/// 6.4 tier 2, steps 1 and 2).
+/// The decisions the helper's deployment makes, with the I/O taken out (tier 2,
+/// docs/design/change-detection.md).
 ///
-/// Every rule here is one sentence of section 6.4, and every one of them is a decision
-/// rather than a round trip, which is why they are values and not part of the deployer:
+/// Every rule here is a decision rather than a round trip, which is why they are values
+/// and not part of the deployer:
 ///
 /// - upload "if `sha256sum`/`shasum` of the remote copy does not match the hash embedded
 ///   in the app";
@@ -17,8 +17,7 @@ import Foundation
 ///   without deleting the other's while it is in use."
 public enum HelperDeployment {
 
-    /// Section 6.4: "Versions other than ours whose mtime is older than seven days are
-    /// removed".
+    /// Versions other than ours whose mtime is older than seven days are removed.
     public static let staleAfter: TimeInterval = 7 * 24 * 3600
 
     /// The prefix of the relay FIFOs the wrapper makes (`RemoteScript.stdinRelay`). One is
@@ -26,7 +25,7 @@ public enum HelperDeployment {
     /// every abrupt client kill, and the whole case the wrapper exists for - so they are
     /// swept on every deployment rather than trusted to clean themselves up. A FIFO with
     /// no reader is inert, so there is no age rule: if it is there and nothing is using
-    /// it, it is litter (2026-09-05).
+    /// it, it is litter.
     public static let relayPrefix = ".sshdrive-helper-in-"
 
     /// One file the server has in the helper directory.
@@ -59,7 +58,7 @@ public enum HelperDeployment {
         public var sha256: String?
         /// From running it with `--version`, which prints the digest of its own
         /// executable. Present on a server with no checksum tool, and the reason that
-        /// fallback is a real check rather than a size comparison (2026-09-05, section 13).
+        /// fallback is a real check rather than a size comparison.
         public var reportedDigest: String?
         /// The version string the binary printed, for `status`.
         public var reportedVersion: String?
@@ -88,25 +87,27 @@ public enum HelperDeployment {
         guard size == binary.size else {
             return .upload(reason: "the copy on the server is \(size) bytes, not \(binary.size)")
         }
-        // Size matched and nothing could vouch for the contents. Section 6.4's fallback is
-        // "size plus running it with `--version`"; with no answer from either tool the
-        // honest thing is to replace it rather than to run it.
+        // Size matched and nothing could vouch for the contents. The fallback is size
+        // plus running it with `--version`; with no answer from either tool the honest
+        // thing is to replace it rather than to run it.
         return .upload(reason: "the server could not verify the helper's contents")
     }
 
-    /// Whether a verification that failed **after** an upload is section 6.4's permanent
-    /// "hash mismatch after redeploy", or an outage wearing its message.
+    /// Whether a verification that failed **after** an upload is the permanent "hash
+    /// mismatch after redeploy" (docs/design/change-detection.md), or an outage wearing
+    /// its message.
     ///
     /// A hash that came back and disagreed is about the file. No hash coming back at all -
     /// neither `sha256sum`/`shasum` nor the binary's own `--version` - is about the exec
     /// channel that would have produced one, and a connection going away is how that
     /// happens. Treating the second as permanent left a location at the sweep tier for the
-    /// session against a server that was fine a minute later (2026-09-08).
+    /// session against a server that is fine a minute later.
     public static func uploadFailureIsPermanent(after evidence: RemoteEvidence) -> Bool {
         evidence.sha256 != nil || evidence.reportedDigest != nil
     }
 
-    /// The temp name an upload goes to. Section 5.5's shape, so a half-written helper is
+    /// The temp name an upload goes to. The shape of docs/design/writes.md, so a
+    /// half-written helper is
     /// as recognisable as a half-written file of the user's, and the same
     /// `.sshdrive-upload-*` ignore rule covers it inside the helper directory too.
     public static func temporaryName(macID: String, uuid: String = UUID().uuidString) -> String {

@@ -4,14 +4,14 @@ import SFTP
 
 @testable import AgentCore
 
-/// DESIGN.md section 8.1's report, rendered from a recorded probe and a recorded SFTP
-/// extension set.
+/// The capability report (docs/design/cli.md), built from a recorded probe and a
+/// recorded SFTP extension set.
 ///
-/// Written after the first real install (2026-09-05): `sshdrive add` printed "4/8
-/// optimal", "the server cannot run the remote helper" and "upgrade: fsync@openssh.com"
-/// for a Debian server that ran the helper ten seconds later. The first two were this
-/// type reading a helper state it had not been given; the extension lines are here so a
-/// recorded set can never quietly become an empty one again.
+/// A report built before the helper's deployment result is known must not read that as
+/// the server being unable to run it - `sshdrive add` can otherwise print "the server
+/// cannot run the remote helper" and an "upgrade: fsync@openssh.com" line for a server
+/// that runs the helper moments later. The extension-set tests below exist so a recorded
+/// set can never quietly become an empty one.
 final class CapabilityReportTests: XCTestCase {
 
     /// A Debian 12 server as the probe finds it: shell, GNU find, an identity.
@@ -98,8 +98,8 @@ final class CapabilityReportTests: XCTestCase {
         XCTAssertEqual(feature(report, "collision-safe create").glyph, "●")
     }
 
-    /// An empty set is what an offline report used to be handed instead of the recorded
-    /// one: four lines go down at once, which is how the bug announced itself.
+    /// An empty extension set costs four lines at once: an offline or cached report must
+    /// not silently substitute an empty set for the recorded one.
     func testAnEmptyExtensionSetCostsFourLines() {
         let report = CapabilityReport.make(
             probe: debianProbe(), extensions: [], location: location(),
@@ -112,8 +112,8 @@ final class CapabilityReportTests: XCTestCase {
         }
     }
 
-    /// The bug itself: a report taken while the helper is still going up the wire must
-    /// never blame the server.
+    /// A report taken while the helper is still going up the wire must never blame the
+    /// server.
     func testADeployingHelperIsNeverReportedAsAServerThatCannotRunIt() {
         let report = CapabilityReport.make(
             probe: debianProbe(), extensions: openSSH, location: location(),
@@ -156,8 +156,8 @@ final class CapabilityReportTests: XCTestCase {
         XCTAssertTrue(feature(report, "change detection").note!.hasPrefix("helper off (user setting)"))
     }
 
-    /// No shell at all: section 5.4's SFTP-only rule, and no helper sentence pretending
-    /// otherwise.
+    /// No shell at all: the SFTP-only rule (docs/design/names-and-attributes.md), and no
+    /// helper sentence pretending otherwise.
     func testAnAccountWithoutAShellFallsToPoll() {
         var probe = ServerProbe.Result()
         probe.failure = "the account has no shell access"
@@ -171,7 +171,7 @@ final class CapabilityReportTests: XCTestCase {
         XCTAssertEqual(feature(report, "permissions").upgrade, "shell access")
     }
 
-    // MARK: The server flavour (section 8.1, 2026-09-08)
+    // MARK: The server flavour (docs/design/cli.md)
 
     /// The fingerprint of the owner's Tailscale SSH server, and of the testbed's
     /// `ts-ssh` node: Go's `pkg/sftp` advertises exactly these three.
@@ -227,8 +227,8 @@ final class CapabilityReportTests: XCTestCase {
         XCTAssertEqual(report.asJSON["software"] as? [String: Any] != nil, true)
     }
 
-    /// And the same two lines keep section 8.1's original wording where the server was
-    /// never identified, because there the upgrade really may exist.
+    /// And the same two lines keep the original wording (docs/design/cli.md) where the
+    /// server was never identified, because there the upgrade really may exist.
     func testAnUnidentifiedServerKeepsTheUpgradeWording() {
         let report = CapabilityReport.make(
             probe: debianProbe(), extensions: SFTPExtensionNames.parse(["statvfs@openssh.com"]),

@@ -1,8 +1,9 @@
 import Foundation
 
 /// A random 128-bit value printed by a script before its own output, so the agent can
-/// discard whatever the account's rc files wrote first (DESIGN.md section 9.2), and by
-/// the login-shell snapshot for the same reason plus a closing marker (section 6.1).
+/// discard whatever the account's rc files wrote first (docs/design/security.md), and by
+/// the login-shell snapshot for the same reason plus a closing marker
+/// (docs/design/ssh.md).
 ///
 /// One per channel, per run. It is never derived from anything: a predictable sentinel
 /// could be printed by the server.
@@ -35,12 +36,12 @@ public struct Sentinel: Sendable, Equatable, CustomStringConvertible {
 /// Fed incrementally, because the noise and the sentinel routinely arrive in different
 /// reads and the sentinel itself can be split across two. Everything before the opening
 /// marker is kept, capped, as `prefix`: `sshdrive status` prints it so the user can find
-/// the rc file that produced it (section 9.2).
+/// the rc file that produced it (docs/design/security.md).
 ///
-/// The same parser serves the login-shell snapshot (section 6.1), which prints the marker
-/// a second time at the end. `sawClosingSentinel` is what lets the reader stop without
-/// waiting for EOF, which an rc file that leaves a background child holding stdout never
-/// delivers (`deb-shells`' `bashbg` account).
+/// The same parser serves the login-shell snapshot (docs/design/ssh.md), which prints
+/// the marker a second time at the end. `sawClosingSentinel` is what lets the reader
+/// stop without waiting for EOF, which an rc file that leaves a background child holding
+/// stdout never delivers (`deb-shells`' `bashbg` account).
 public struct SentinelParser: Sendable {
     public let sentinel: Sentinel
     /// How much of the pre-sentinel noise to keep for diagnostics.
@@ -53,17 +54,17 @@ public struct SentinelParser: Sendable {
     private var prefixBytes: [UInt8] = []
     private var payloadBytes: [UInt8] = []
     /// The login-shell snapshot's command opens with a `printf '\000'` of its own before
-    /// the sentinel (section 6.1); an exec channel's script does not.
+    /// the sentinel (docs/design/ssh.md); an exec channel's script does not.
     private let expectsALeadingNUL: Bool
     private var settledAnyPrefixBytes = false
 
     /// - Parameter expectsALeadingNUL: true for the login-shell snapshot, whose command is
-    ///   `NUL sentinel NUL … sentinel NUL` (section 6.1). That first NUL is **ours**, not
-    ///   the account's, and it is normally still next to the marker when the marker is
-    ///   found, where it is stripped below. A read that ends exactly on the sentinel's
-    ///   last hex digit settles it into the prefix instead, and `sshdrive doctor` then
-    ///   tells the user their login shell printed one byte - naming an rc file that
-    ///   printed nothing at all. Found by `J14`, 2026-09-08.
+    ///   `NUL sentinel NUL … sentinel NUL` (docs/design/ssh.md). That first NUL is
+    ///   **ours**, not the account's, and it is normally still next to the marker when
+    ///   the marker is found, where it is stripped below. A read that ends exactly on
+    ///   the sentinel's last hex digit settles it into the prefix instead, and
+    ///   `sshdrive doctor` then tells the user their login shell printed one byte, naming
+    ///   an rc file that printed nothing at all (scenario `J14`).
     ///
     ///   It is a flag rather than a rule for every parser because a NUL really can be the
     ///   first byte of an exec channel's answer: a `ForceCommand internal-sftp` account
@@ -90,7 +91,7 @@ public struct SentinelParser: Sendable {
     /// True when the first bytes are an SFTP `SSH_FXP_VERSION` packet rather than our
     /// sentinel: a `ForceCommand internal-sftp` account answers an exec channel with SFTP
     /// framing, and the probe must report "no shell access (ForceCommand)" rather than
-    /// "shell output unusable" (section 9.2).
+    /// "shell output unusable" (docs/design/security.md).
     public var looksLikeSFTPVersion: Bool {
         let bytes = opened ? payloadBytes : (prefixBytes + carry)
         guard bytes.count >= 5 else { return false }
@@ -190,13 +191,13 @@ public struct SentinelParser: Sendable {
 
     /// True when the channel was refused because the account has no shell.
     ///
-    /// Two shapes, both measured against the testbed on 2026-09-04: an account whose sshd
+    /// Two shapes, both measured against the testbed, 2026-09-04: an account whose sshd
     /// answers an exec request with `internal-sftp`'s own refusal prints
     /// `This service allows sftp connections only.` in plain text (`deb-shells`'
     /// `forcesftp`), and one that hands the exec channel straight to the subsystem answers
-    /// with `SSH_FXP_VERSION` framing. Section 9.2 describes only the second; the first is
-    /// what OpenSSH 9.2 actually does for `ForceCommand internal-sftp`. Either way the
-    /// probe must report "no shell access (ForceCommand)", not "shell output unusable".
+    /// with `SSH_FXP_VERSION` framing. OpenSSH 9.2 takes the first shape for
+    /// `ForceCommand internal-sftp`. Either way the probe must report "no shell access
+    /// (ForceCommand)", not "shell output unusable".
     public var looksLikeForceCommandRefusal: Bool {
         if looksLikeSFTPVersion { return true }
         let text = String(decoding: opened ? payloadBytes : (prefixBytes + carry), as: UTF8.self)

@@ -1,16 +1,17 @@
 import Foundation
 
-/// One line of the NDJSON stream the remote helper writes (DESIGN.md section 6.4 tier 2).
+/// One line of the NDJSON stream the remote helper writes (tier 2,
+/// docs/design/change-detection.md).
 ///
 /// `{"op":"create|modify|delete|rename|overflow","path":…,"from":…,"size":…,
-/// "mtime_ns":…,"inode":…}` plus a heartbeat every 15 s, and two lines section 6.4 does
-/// not name but the stream needs: `ready`, which is what "settling on the first tier that
-/// starts successfully" is decided on, and `error`, so a helper that cannot watch says
-/// why (2026-09-05, section 13).
+/// "mtime_ns":…,"inode":…}` plus a heartbeat every 15 s, and two lines the stream needs on
+/// top of those: `ready`, which is what the ladder settles the tier on, and `error`, so a
+/// helper that cannot watch says why.
 ///
 /// A path arrives as `path` when its bytes are UTF-8 and as `path_b64` when they are not,
 /// because a JSON string is UTF-8 by definition and a server filename need not be
-/// (section 5.4). Either way what comes out here is the same bytes the index stores.
+/// (docs/design/names-and-attributes.md). Either way what comes out here is the same bytes
+/// the index stores.
 public struct HelperEvent: Equatable, Sendable {
 
     public enum Kind: String, Sendable {
@@ -47,8 +48,9 @@ public struct HelperEvent: Equatable, Sendable {
 
     public init(kind: Kind) { self.kind = kind }
 
-    /// Whole seconds, which is what the content version is built from (section 5.3, gotcha
-    /// 10: whole-second mtime "at every tier, so a tier change is invisible").
+    /// Whole seconds, which is what the content version is built from
+    /// (docs/design/item-index.md, gotcha 10): a whole-second mtime at every tier, so a
+    /// tier change is invisible.
     public var mtimeSeconds: Int64? {
         guard let ns = mtimeNanoseconds else { return nil }
         return ns / 1_000_000_000
@@ -64,8 +66,8 @@ public struct HelperEvent: Equatable, Sendable {
 ///
 /// Framing, not parsing, is the thing that has to be right: the channel hands over
 /// arbitrary chunks, one line may arrive in six reads and six lines in one. And the
-/// decoder is where backpressure lives - section 6.4 puts "server-side batching and
-/// filtering" on the helper, but a helper that has just seen a `rm -rf` can still outrun
+/// decoder is where backpressure lives. Server-side batching and filtering is the
+/// helper's job, but a helper that has just seen a `rm -rf` can still outrun
 /// the agent, so a bounded buffer turns a flood into one `overflow`, which the agent
 /// answers with a sweep. Dropping to a sweep is always safe; growing without limit is not.
 public struct HelperEventDecoder: Sendable {
@@ -157,11 +159,11 @@ public struct HelperEventDecoder: Sendable {
 
 /// The other direction: the root set, as one control line.
 ///
-/// Section 6.4: "When it changes, the helper (tier 2) is sent the new set on its stdin and
-/// applies it live." A root whose bytes are not UTF-8 travels as `{"b64":"…"}`, which is
-/// the one thing tier 1 could not do - `set --` is a String pipeline end to end (section
-/// 9.2), so such a root has to be dropped from a sweep and listed at tier 0 instead. The
-/// helper has no such limit, and this is where that shows.
+/// When the root set changes, the helper is sent the new set on its stdin and applies it
+/// live. A root whose bytes are not UTF-8 travels as `{"b64":"…"}`, which tier 1 cannot do:
+/// `set --` is a String pipeline end to end (docs/design/security.md), so such a root is
+/// dropped from a sweep and listed at tier 0 instead. The helper has no such limit, and
+/// this is where that shows.
 public enum HelperControl {
 
     public static func rootsLine(shallow: [Data], recursive: [Data], excluded: [Data]) -> Data {

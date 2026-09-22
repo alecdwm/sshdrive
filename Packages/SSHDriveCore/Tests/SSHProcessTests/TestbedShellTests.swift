@@ -1,9 +1,9 @@
 import XCTest
 @testable import SSHProcess
 
-/// Spike S2/S7 against `deb-shells`: the section 9.2 sentinel under every login-shell
-/// shape, the section 6.1 login-shell snapshot command under the same shells, and the
-/// `ForceCommand` case. Gated on `SSHDRIVE_TESTBED=1`.
+/// Against `deb-shells`: the sentinel (docs/design/security.md) under every
+/// login-shell shape, the login-shell snapshot command (docs/design/ssh.md) under
+/// the same shells, and the `ForceCommand` case. Gated on `SSHDRIVE_TESTBED=1`.
 final class TestbedShellTests: XCTestCase {
 
     private var masters: [SSHMaster] = []
@@ -74,10 +74,11 @@ final class TestbedShellTests: XCTestCase {
         XCTAssertEqual(records, awkward)
     }
 
-    /// The section 6.1 snapshot command, run by each of the login shells the testbed has.
-    /// The snapshot itself is local to the Mac; what is under test here is the claim that
-    /// the command line is valid in every shell and that the closing sentinel returns the
-    /// answer before the timeout even when a background child holds stdout open.
+    /// The snapshot command (docs/design/ssh.md), run by each of the login shells the
+    /// testbed has. The snapshot itself is local to the Mac; what is under test here
+    /// is the claim that the command line is valid in every shell and that the
+    /// closing sentinel returns the answer before the timeout even when a
+    /// background child holds stdout open.
     func testLoginShellSnapshotCommandUnderEveryShell() async throws {
         try Testbed.skipUnlessEnabled()
         for user in ["bashnoisy", "bashbg", "zshuser", "fishuser", "tcshuser", "dashuser"] {

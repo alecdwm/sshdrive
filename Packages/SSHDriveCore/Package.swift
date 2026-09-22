@@ -2,7 +2,7 @@
 import PackageDescription
 
 // SSHDriveCore: the modules shared by the agent, the extension, the CLI and askpass
-// (DESIGN.md section 3). Kept as a local package so the Xcode targets and `swift test`
+// (docs/design/components.md). Kept as a local package so the Xcode targets and `swift test`
 // build the same sources.
 let package = Package(
     name: "SSHDriveCore",
@@ -27,7 +27,7 @@ let package = Package(
         // os.Logger subsystems, shared by all processes.
         .target(name: "Logging"),
 
-        // Paths, the SFTPTransport protocol, and the milestone 1 fake backend.
+        // Paths, the SFTPTransport protocol, and the fake backend that is the test double.
         // The wire client sits on `SSHProcess`'s `ByteStream`: an SFTP channel is a mux
         // client's stdio, exactly like an exec channel, so there is one definition of
         // that pipe and not two (sections 6.1, 6.2).
@@ -57,7 +57,7 @@ let package = Package(
 
         // The @objc NSXPC protocols and the configured NSXPCInterfaces. macOS only -
         // the file bodies are `#if canImport(Darwin)` - and linked only by the four app
-        // targets (docs/testing-architecture.md section 2.1). The peer code requirement
+        // targets (docs/design/testing.md). The peer code requirement
         // stays in XPCProtocols: it is a string, and the SecStaticCode check that applies
         // it lives in Apps/Agent.
         .target(name: "XPCInterfaces", dependencies: ["XPCProtocols", "Logging"]),
@@ -67,7 +67,7 @@ let package = Package(
 
         // ssh supervision: the -N ControlMaster, mux clients, the agent-built ProxyJump
         // chain, the login shell snapshot, sh -s scripts and exit classification
-        // (DESIGN.md sections 6.1 and 9.2).
+        // (docs/design/ssh.md, docs/design/security.md).
         .target(name: "SSHProcess", dependencies: ["Logging", "Config", "XPCProtocols"]),
 
         // The agent's own derivations, kept in the package so they are unit-testable
@@ -75,7 +75,7 @@ let package = Package(
         // rules, and section 6.2's transfer scheduler.
         .target(name: "AgentCore", dependencies: ["Logging", "Config", "Index", "ProviderCore", "SFTP", "Secrets", "SSHProcess", "XPCProtocols"]),
 
-        // Everything Apps/FileProvider decides (docs/testing-architecture.md section 2.2):
+        // Everything Apps/FileProvider decides (docs/design/testing.md):
         // the enumerators, the working-set change path, the reader store and its
         // readiness rule, item construction, the trash contract, the error selection and
         // the two Finder actions - behind ProviderFailure, EnumerationObserving,
@@ -84,7 +84,7 @@ let package = Package(
         // error codes. Apps/FileProvider is the adapter above it and holds no decision.
         .target(name: "ProviderCore", dependencies: ["Logging", "Config", "Index", "XPCProtocols"]),
 
-        // Everything Apps/Agent decides (docs/testing-architecture.md section 2.3):
+        // Everything Apps/Agent decides (docs/design/testing.md):
         // LocationRuntime and its extensions, the domain registry, change detection,
         // eviction, the reconnecting transport and its gate, the helper's deployment and
         // stream, the channel budget, the collect connection and the command handlers -
@@ -111,14 +111,14 @@ let package = Package(
 
         // The simulated macOS: a fileproviderd that drives ProviderCore the way the real
         // one drives the extension, with the measured quirks of docs/quirks/macos.md as a
-        // per-version table and a virtual clock (docs/testing-architecture.md section 3).
+        // per-version table and a virtual clock (docs/design/testing.md).
         .target(name: "SystemModel", dependencies: ["Logging", "AgentCore", "Config", "Index", "ProviderCore", "SFTP", "XPCProtocols"]),
 
         // The simulated server: ServerProfile values for the testbed's twelve services and
         // for the owner's own two servers, a wire-level SFTP v3 server over ByteStream, an
         // exec channel whose remote end is a real local shell, and a stub standing in for
         // /usr/bin/ssh - every rule keyed on a row of docs/quirks/servers.md
-        // (docs/testing-architecture.md section 4).
+        // (docs/design/testing.md).
         .target(name: "ServerModel", dependencies: ["Logging", "SFTP", "SSHProcess", "XPCProtocols"]),
 
         .testTarget(name: "LoggingTests", dependencies: ["Logging"]),

@@ -7,7 +7,7 @@ import SSHProcess
 @testable import ServerModel
 
 /// Suite H's server half: the `find` flavour probe and the sweep it selects
-/// (`docs/testing-architecture.md` section 5).
+/// (`docs/design/testing.md`).
 ///
 /// This box has GNU findutils and no busybox, so a busybox server's `find` is a generated
 /// shim that behaves the way BusyBox 1.36.1 was **measured** to - `-cmin` and `-printf`
@@ -93,7 +93,7 @@ final class SweepScenarios: XCTestCase {
         // profile is only a GNU control where this box actually has GNU findutils; on a
         // BSD host it is a **BSD** control, and the probe must say so rather than be told
         // to lie - `.bsd` is a flavour `ServerModel` carries precisely because the testbed
-        // has no BSD to measure (`docs/testing-architecture.md` section 4.1).
+        // has no BSD to measure (`docs/design/testing.md`).
         let gnu = try sshd(.debian)
         let gnuProbe = try await records(
             gnu, body: ServerProbe.script, expecting: ServerProbe.recordCount, timeout: 25)
@@ -368,9 +368,9 @@ final class SweepScenarios: XCTestCase {
     /// the files and their mtimes - is real, and the model is the only coverage this case
     /// will ever get.
     ///
-    /// Confidence: the arithmetic and the "never the Mac's clock" rule are DESIGN.md
-    /// section 6.4's, and the unskewed path was measured against `deb` and `alp` in
-    /// milestone 6. The skew itself is **inferred**, never measured on a server: `SQ-054`
+    /// Confidence: the arithmetic and the "never the Mac's clock" rule are
+    /// docs/design/change-detection.md's, and the unskewed path is measured against `deb`
+    /// and `alp`. The skew itself is **inferred**, never measured on a server: `SQ-054`
     /// says why it cannot be.
     func testH4_theSweepWindowIsElapsedTimeAndNeitherClocksAbsoluteValueEnters() async throws {
         // Two flavours and two directions of skew. One takes `-cmin`, the busybox one falls
@@ -532,8 +532,8 @@ final class SweepScenarios: XCTestCase {
     /// only end-of-sweep there is - and a stream that ends without it is a prefix, however
     /// complete the first record looks.
     ///
-    /// Confidence: the rule is DESIGN.md section 6.4's ("stored once the sweep's results
-    /// have been applied, never before") and `ChangeDetector` stores on
+    /// Confidence: the rule is docs/design/change-detection.md's ("stored once the
+    /// sweep's results have been applied, never before") and `ChangeDetector` stores on
     /// `serverTime != nil && !truncated`; what is asserted here is the outcome that rule
     /// reads, produced by a real killed sweep.
     func testH5_aTruncatedSweepStoresNothingAndTheNextWindowStillCoversIt() async throws {
@@ -541,8 +541,9 @@ final class SweepScenarios: XCTestCase {
         let server = try sshd(profile)
 
         // Enough output that the sweep is **certainly** still writing when the kill lands:
-        // the channel buffers 4 MB before it stops draining (section 6.2's backpressure on
-        // `PipeByteStream`), so this tree prints half as much again in `-print0` records.
+        // the channel buffers 4 MB before it stops draining (docs/design/sftp.md's
+        // backpressure on `PipeByteStream`), so this tree prints half as much again in
+        // `-print0` records.
         // That is also the realistic shape of a truncated sweep - it is the big trees that
         // get cut off, not the small ones.
         let tree = try makeDeepTree(bytes: 6 * 1024 * 1024)
@@ -606,11 +607,12 @@ final class SweepScenarios: XCTestCase {
     /// because either one alone is a bug: dropped and not listed is a directory nothing
     /// watches, listed and not dropped is a sweep argument that cannot be spelled.
     ///
-    /// `set --` is a String pipeline end to end (section 9.2), so there is no spelling of
-    /// these bytes that reaches `find`. The bite-proof is the tempting fix: the lossy
-    /// `String(decoding:as:)` conversion *succeeds*, substituting U+FFFD, and the root
-    /// that comes out names a directory that exists on no server - `find` answers `No such
-    /// file or directory`, the real directory is never walked, and nothing says so. It is
+    /// `set --` is a String pipeline end to end (docs/design/security.md), so there is
+    /// no spelling of these bytes that reaches `find`. The bite-proof is the tempting
+    /// fix: the lossy `String(decoding:as:)` conversion *succeeds*, substituting U+FFFD,
+    /// and the root that comes out names a directory that exists on no server - `find`
+    /// answers `No such file or directory`, the real directory is never walked, and
+    /// nothing says so. It is
     /// run here against a real `find` on a real directory whose name really does hold a
     /// `0xFF` byte.
     ///
@@ -620,10 +622,10 @@ final class SweepScenarios: XCTestCase {
     /// the name to exist on the local filesystem, which **APFS refuses** (`SQ-080`), so on a
     /// Mac the row skips from that point with the reason named.
     ///
-    /// Confidence: the rule is DESIGN.md section 6.4 tier 1 verbatim ("such a root is left
-    /// out of the `find` argv and listed at tier 0 in the same cycle instead"); that names
-    /// on a server need not be valid UTF-8 is section 5.4's, measured on the testbed's
-    /// `weird/` tree.
+    /// Confidence: the rule is docs/design/change-detection.md tier 1 verbatim ("such a
+    /// root is left out of the `find` argv and listed at tier 0 in the same cycle
+    /// instead"); that names on a server need not be valid UTF-8 is
+    /// docs/design/names-and-attributes.md's, measured on the testbed's `weird/` tree.
     func testH7_aNonUTF8RootIsDroppedFromTheArgvAndListedAtTierZeroInTheSameCycle() async throws {
         var rawName = Data("latin1-caf".utf8)
         rawName.append(0xFF)
@@ -708,8 +710,9 @@ final class SweepScenarios: XCTestCase {
 
     }
 
-    /// A directory whose name is not valid UTF-8, created with the POSIX calls: there is no
-    /// `String` for these bytes, so `FileManager` cannot make one (section 5.4).
+    /// A directory whose name is not valid UTF-8, created with the POSIX calls: there is
+    /// no `String` for these bytes, so `FileManager` cannot make one
+    /// (docs/design/names-and-attributes.md).
     private func makeRawDirectory(_ name: Data, in parent: URL, containing child: String) throws {
         var bytes = Array(parent.path.utf8)
         bytes.append(0x2F)

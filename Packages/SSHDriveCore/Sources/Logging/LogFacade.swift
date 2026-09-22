@@ -1,6 +1,6 @@
 import Foundation
 
-// The portable half of the logging facade (docs/testing-architecture.md section 8, step 1).
+// The portable half of the logging facade (docs/design/testing.md).
 //
 // `Log`'s loggers are `os.Logger` on Darwin and `SSHDriveLogger` everywhere else, chosen by
 // `#if canImport(os)` in `Log.swift`. Call sites never name either type: they write

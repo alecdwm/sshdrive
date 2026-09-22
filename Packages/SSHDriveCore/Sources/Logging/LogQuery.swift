@@ -1,20 +1,19 @@
 import Foundation
 
-/// The `sshdrive logs` query (DESIGN.md section 8).
+/// The `sshdrive logs` query (docs/design/cli.md).
 ///
-/// Section 8 spells the command out: "our subsystem's unified log, through
-/// `/usr/bin/log show` and `log stream` with a subsystem predicate, since `OSLogStore`'s
-/// local store is not open to a standard user". `OSLogStore(scope: .system)` needs an
-/// entitlement a standard user's process does not have, so the CLI shells out to
-/// `/usr/bin/log` and lets it do the reading.
+/// `logs` reads our subsystem's unified log through `/usr/bin/log show` and `log stream`
+/// with a subsystem predicate. `OSLogStore(scope: .system)` needs an entitlement a
+/// standard user's process does not have, so the CLI shells out to `/usr/bin/log` and
+/// lets it do the reading.
 ///
 /// Two things make the predicate more than `subsystem == …`:
 ///
 /// - **fileproviderd is half the story.** Everything the *system* decides about a domain
 ///   - the enumerations it asks for, the items it refuses, `FP -2011`, the disconnection
 ///   states - is logged by `fileproviderd`, under Apple's own subsystem, and never
-///   reaches ours. Every File Provider diagnosis in `docs/spikes/` was made by reading
-///   the two side by side, so `logs` reads them side by side too. The filter for those
+///   reaches ours. Diagnosing anything on the File Provider path means reading the two
+///   side by side, so `logs` reads them side by side too. The filter for those
 ///   lines is our own bundle identifier, which fileproviderd prints because it is the
 ///   provider's. It is **not** narrowed by location, and cannot be: fileproviderd
 ///   obfuscates domain identifiers in its messages (`uuid:63...0B`, `domain: 1{34}1
@@ -29,9 +28,10 @@ import Foundation
 /// Everything here is a pure string builder so the predicate can be tested without a Mac.
 public enum LogQuery {
 
-    /// `Log.subsystem`, which is also the app's bundle identifier (section 3.1). The two
-    /// being the same string is what lets one constant serve as both our subsystem filter
-    /// and the needle in fileproviderd's messages.
+    /// `Log.subsystem`, which is also the app's bundle identifier
+    /// (docs/design/components.md). The two being the same string is what lets one
+    /// constant serve as both our subsystem filter and the needle in fileproviderd's
+    /// messages.
     public static let subsystem = Log.subsystem
 
     /// The process whose lines carry the system's own view of our domains.
@@ -41,7 +41,7 @@ public enum LogQuery {
     ///
     /// - Parameters:
     ///   - domainIdentifier: the location's UUID, which is also its File Provider domain
-    ///     identifier (section 4). `nil` means every location.
+    ///     identifier (docs/design/locations.md). `nil` means every location.
     ///   - displayName: the location's display name, matched as well as the identifier so
     ///     that lines written for a person are not dropped.
     public static func predicate(domainIdentifier: String? = nil, displayName: String? = nil)
@@ -69,7 +69,7 @@ public enum LogQuery {
     }
 
     /// `/usr/bin/log`, by absolute path. `zsh` has a `log` builtin that shadows it and
-    /// answers `zsh:log:1: too many arguments` (docs/spikes/results.md, 2026-09-04), so
+    /// answers `zsh:log:1: too many arguments` (measured 2026-09-04), so
     /// nothing here ever spells the bare name.
     public static let executable = "/usr/bin/log"
 

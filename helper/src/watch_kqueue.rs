@@ -1,19 +1,18 @@
 //! The BSD and macOS watcher: kqueue on directories, plus the periodic sweep
-//! (DESIGN.md section 6.4 tier 2).
+//! (docs/design/change-detection.md).
 //!
-//! Section 6.4 is blunt about why this is not the same thing as inotify: "kqueue, the
-//! only facility FreeBSD offers, reports content changes only through a descriptor held
-//! open on each watched *file*, so a recursive watch on a TrueNAS Core share of a hundred
-//! thousand files is a hundred thousand open descriptors and does not fit. On `freebsd`
-//! the helper watches directories with kqueue for creates, deletes and renames, finds
-//! content changes with its own `sweep` every 60 s over the roots it was given … and
-//! `status` shows the change-detection line as `helper (kqueue + 60s sweep)` rather than
-//! claiming push latency."
+//! This is not the same thing as inotify. kqueue, the only facility FreeBSD offers,
+//! reports content changes only through a descriptor held open on each watched *file*, so
+//! a recursive watch on a TrueNAS Core share of a hundred thousand files is a hundred
+//! thousand open descriptors and does not fit. Here the helper watches directories with
+//! kqueue for creates, deletes and renames, finds content changes with its own `sweep`
+//! every 60 s over the roots it was given, and the agent shows the change-detection line
+//! as `helper (kqueue + 60s sweep)` rather than claiming push latency.
 //!
 //! A kqueue vnode event says only "this directory changed", never what changed in it, so
 //! this keeps a name -> (inode, size, mtime) snapshot per watched directory and diffs. An
 //! inode that leaves one directory's snapshot and appears in another's inside the same
-//! batch is a rename, which is how this build keeps section 6.4's rename promise.
+//! batch is a rename, which is how this build reports renames as renames.
 
 #![cfg(any(
     target_os = "freebsd",
@@ -35,7 +34,7 @@ use std::time::{Duration, Instant};
 
 pub const MECHANISM: &str = "kqueue + 60s sweep";
 
-/// How often the content sweep runs. Section 6.4 fixes it at 60 s.
+/// How often the content sweep runs.
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[cfg(target_os = "macos")]
@@ -128,7 +127,8 @@ impl Watcher {
         let absolute = paths::absolute(&self.root, relative);
         let Ok(c) = std::ffi::CString::new(absolute.as_os_str().as_bytes()) else { return };
         // O_NOFOLLOW: a directory replaced by a symlink out of the root is not opened
-        // (section 9.1), the same rule the inotify build gets from IN_DONT_FOLLOW.
+        // (docs/design/security.md), the same rule the inotify build gets from
+        // IN_DONT_FOLLOW.
         let fd = unsafe { libc::open(c.as_ptr(), OPEN_FLAGS | libc::O_NOFOLLOW) };
         if fd < 0 {
             if self.complaint.is_none() {
@@ -245,7 +245,7 @@ impl Watcher {
         }
 
         // An inode that left one name and arrived at another in the same batch is a
-        // rename, and section 6.4 wants it reported as one.
+        // rename, and is reported as one.
         for (from, gone) in &removed {
             // Inode 0 means the snapshot never learned one, and matching on it would pair
             // two unrelated names.
@@ -281,7 +281,7 @@ impl Watcher {
     fn run_sweep(&mut self, out: &mut Coalescer) {
         let now = fsmeta::now_seconds();
         let mut options = walk::SweepOptions::new(&self.root, &self.roots);
-        // One second of overlap, for the same reason section 6.4's tier 1 window has a
+        // One second of overlap, for the same reason the agent's own sweep window has a
         // minute of it: a change landing in the same second as the last sweep must not
         // fall between two windows.
         options.since = if self.swept_at == 0 { None } else { Some(self.swept_at - 1) };

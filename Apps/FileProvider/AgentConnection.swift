@@ -5,7 +5,7 @@ import ProviderCore
 import XPCInterfaces
 import XPCProtocols
 
-/// The extension's XPC client (DESIGN.md section 5.2).
+/// The extension's XPC client (`docs/design/extension.md`).
 ///
 /// The extension connects to the agent's mach service on first use. launchd starts the
 /// agent on demand if it is registered, so the extension does not care whether the agent
@@ -57,12 +57,11 @@ final class AgentConnection: NSObject {
     }
 
     /// The connection dropped. That is *not* on its own a missing agent: the system kills
-    /// an idle extension instance (`MQ-073`), and the invalidation that follows our own
-    /// teardown used to call `disconnect(reason:)` on the way out, which left the domain
-    /// disconnected for every later instance and answered every request
-    /// `.serverUnreachable` for good (docs/spikes/results.md, 2026-09-04 signed pass).
-    /// Only a call that actually fails reports a missing agent; the next call rebuilds
-    /// the connection.
+    /// an idle extension instance (`MQ-073`), and our own teardown invalidates the
+    /// connection too. Calling `disconnect(reason:)` from here would leave the domain
+    /// disconnected for every later instance and answer every request
+    /// `.serverUnreachable` for good. Only a call that actually fails reports a missing
+    /// agent; the next call rebuilds the connection.
     private func connectionWentAway() {
         lock.lock()
         connection = nil
@@ -363,8 +362,8 @@ final class XPCAgentChannel: AgentChannel {
     }
 }
 
-/// The object the agent calls back on: transfer progress and the close-and-reopen
-/// protocol of section 5.3.
+/// The object the agent calls back on: transfer progress and the index reader's
+/// close-and-reopen protocol (`docs/design/item-index.md`).
 final class ExtensionCallbacks: NSObject, SSHDriveExtensionProtocol {
     private let lock = NSLock()
     private var progresses: [String: Progress] = [:]

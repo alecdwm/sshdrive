@@ -1,7 +1,7 @@
 import XCTest
 @testable import AgentCore
 
-/// The NDJSON protocol of DESIGN.md section 6.4 tier 2, from the agent's side.
+/// The NDJSON protocol for tier 2 (docs/design/change-detection.md), from the agent's side.
 ///
 /// Framing is the half that has to be right: the exec channel hands over arbitrary chunks,
 /// so one line may arrive in six reads and six lines in one, and a decoder that assumed
@@ -13,7 +13,7 @@ final class HelperEventTests: XCTestCase {
         return decoder.append(Data(text.utf8))
     }
 
-    func testAChangeLineCarriesEverySection6_4Field() throws {
+    func testAChangeLineCarriesEveryDocumentedField() throws {
         let events = decode(
             #"{"op":"modify","path":"a/b.txt","type":"f","size":3,"mtime_ns":1700000000123456789,"# +
             #""inode":42,"mode":420,"uid":1000,"gid":1000}"# + "\n")
@@ -22,15 +22,16 @@ final class HelperEventTests: XCTestCase {
         XCTAssertEqual(event.path, Data("a/b.txt".utf8))
         XCTAssertEqual(event.size, 3)
         XCTAssertEqual(event.mtimeNanoseconds, 1_700_000_000_123_456_789)
-        // Section 5.3: the content version uses whole-second mtime at every tier, so a tier
-        // change is invisible. The nanoseconds feed change detection and nothing else.
+        // The content version (docs/design/item-index.md) uses whole-second mtime at
+        // every tier, so a tier change is invisible. The nanoseconds feed change
+        // detection and nothing else.
         XCTAssertEqual(event.mtimeSeconds, 1_700_000_000)
         XCTAssertEqual(event.inode, 42)
         XCTAssertEqual(event.mode, 420)
         XCTAssertTrue(event.isSelfSufficient)
     }
 
-    func testEveryOpSection6_4NamesIsUnderstood() {
+    func testEveryDocumentedOpIsUnderstood() {
         let lines = """
             {"op":"ready","version":"0.1.0","os":"linux","arch":"aarch64","mechanism":"inotify","roots":3}
             {"op":"create","path":"a"}
@@ -52,9 +53,9 @@ final class HelperEventTests: XCTestCase {
         XCTAssertEqual(events[5].message, "the kernel event queue overflowed")
     }
 
-    /// A JSON string is UTF-8 by definition and a server filename need not be (section
-    /// 5.4), so a name that is not text travels base64 under its own key and comes back as
-    /// the same bytes the index stores.
+    /// A JSON string is UTF-8 by definition and a server filename need not be
+    /// (docs/design/names-and-attributes.md), so a name that is not text travels base64
+    /// under its own key and comes back as the same bytes the index stores.
     func testANonUTF8NameArrivesAsTheSameBytes() throws {
         let raw = Data([0x61, 0xff, 0xfe, 0x62])
         let line = #"{"op":"create","path_b64":"# + "\"\(raw.base64EncodedString())\"}\n"
@@ -106,8 +107,8 @@ final class HelperEventTests: XCTestCase {
     }
 
     /// Backpressure: the helper coalesces server-side, but a `rm -rf` can still outrun the
-    /// agent. A bounded batch becomes one `overflow`, which section 6.4 says the agent
-    /// answers with a sweep - always safe, where growing without limit is not.
+    /// agent. A bounded batch becomes one `overflow`, which the agent answers with a sweep
+    /// (docs/design/change-detection.md) - always safe, where growing without limit is not.
     func testAFloodBecomesAnOverflowRatherThanAnUnboundedBatch() {
         let text = (0..<(HelperEventDecoder.batchLimit + 500))
             .map { #"{"op":"create","path":"f\#($0)"}"# }
@@ -140,9 +141,9 @@ final class HelperEventTests: XCTestCase {
         XCTAssertEqual(object["excluded"] as? [String], ["pin/big"])
     }
 
-    /// The one thing tier 1 cannot do: `set --` is a String pipeline end to end (section
-    /// 9.2), so a root whose bytes are not UTF-8 has to be dropped from a sweep and listed
-    /// at tier 0 instead. The helper takes it.
+    /// The one thing tier 1 cannot do: `set --` is a String pipeline end to end
+    /// (docs/design/security.md), so a root whose bytes are not UTF-8 has to be dropped
+    /// from a sweep and listed at tier 0 instead. The helper takes it.
     func testARootThatIsNotUTF8TravelsBase64() throws {
         let raw = Data([0x61, 0xff])
         let line = HelperControl.rootsLine(shallow: [raw], recursive: [], excluded: [])

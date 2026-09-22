@@ -3,9 +3,9 @@ import XCTest
 @testable import AgentCore
 import Config
 
-/// DESIGN.md section 7's TTL rule, with the clock as an argument. Nothing here sleeps and
-/// nothing touches a replica: the five-minute timer and the `evictItem` call are the
-/// agent's, and everything they decide is decided here.
+/// The TTL rule (docs/design/eviction.md), with the clock as an argument. Nothing here
+/// sleeps and nothing touches a replica: the five-minute timer and the `evictItem` call
+/// are the agent's, and everything they decide is decided here.
 final class EvictionPlanTests: XCTestCase {
 
     private let now: Double = 1_800_000_000
@@ -72,7 +72,7 @@ final class EvictionPlanTests: XCTestCase {
     }
 
     func testTheBoundaryIsStrictlyGreater() {
-        // Section 7 step 3: "if now - lastUse > TTL".
+        // The TTL rule's step 3 (docs/design/eviction.md): "if now - lastUse > TTL".
         let exactly = candidate("edge", lastFetch: now - 900, mtime: 0, atime: nil)
         XCTAssertFalse(decision(exactly, ttl: 900).evict)
         let justPast = candidate("edge", lastFetch: now - 901, mtime: 0, atime: nil)
@@ -92,7 +92,7 @@ final class EvictionPlanTests: XCTestCase {
         XCTAssertEqual(outcome.skip, .ttlNever)
     }
 
-    func testEveryTTLValueMapsToTheSecondsSectionSevenLists() {
+    func testEveryTTLValueMapsToItsDocumentedSeconds() {
         XCTAssertEqual(CacheTTL.fifteenMinutes.seconds, 900)
         XCTAssertEqual(CacheTTL.oneHour.seconds, 3600)
         XCTAssertEqual(CacheTTL.twelveHours.seconds, 43200)
@@ -112,14 +112,15 @@ final class EvictionPlanTests: XCTestCase {
     }
 
     func testADirectoryIsSkippedBecauseATTLIsPerFile() {
-        // Not because a directory cannot be evicted: `evictItem` on one is recursive
-        // (S4, 2026-09-04), which is what `evict --all` uses on the root container.
+        // Not because a directory cannot be evicted: `evictItem` on one is recursive,
+        // which is what `evict --all` uses on the root container.
         let item = candidate("Docs", directory: true, lastFetch: 0, mtime: 0, atime: 0)
         XCTAssertEqual(decision(item, ttl: 900).skip, .directory)
     }
 
     func testALocalOnlyRowIsSkipped() {
-        // Section 5.4: there is nothing on the server to fetch back.
+        // A local-only row has nothing on the server to fetch back
+        // (docs/design/names-and-attributes.md).
         let item = candidate(".DS_Store", localOnly: true, lastFetch: 0, mtime: 0, atime: 0)
         XCTAssertEqual(decision(item, ttl: 900).skip, .localOnly)
     }

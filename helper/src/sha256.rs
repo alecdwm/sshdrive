@@ -1,12 +1,12 @@
 //! SHA-256, so `--version` can print the digest of the binary that is answering.
 //!
-//! DESIGN.md section 6.4 asks for verification "by SHA-256 against a hash embedded in the
-//! app where the server has `sha256sum` or `shasum`, and by size plus its own `--version`
-//! output otherwise". A hash the build embedded as a constant cannot be the hash of the
-//! binary that contains it, so what `--version` prints is the digest the helper computes
-//! of its **own executable** at startup. That makes the no-`sha256sum` fallback do the
-//! same job as the good path rather than a weaker one, and it costs a few milliseconds
-//! over a file this size (2026-09-05, section 13).
+//! The agent verifies the deployed copy by SHA-256 against a hash embedded in the app
+//! where the server has `sha256sum` or `shasum`, and by size plus this binary's own
+//! `--version` output otherwise (docs/design/change-detection.md). A hash the build
+//! embedded as a constant cannot be the hash of the binary that contains it, so what
+//! `--version` prints is the digest the helper computes of its **own executable** at
+//! startup. That makes the no-`sha256sum` fallback do the same job as the good path
+//! rather than a weaker one, and it costs a few milliseconds over a file this size.
 
 use std::io::Read;
 use std::path::Path;
@@ -144,8 +144,9 @@ pub fn file(path: &Path) -> Option<String> {
 }
 
 /// The path of the running binary. `/proc/self/exe` where there is one; otherwise
-/// `argv[0]`, which the agent always spells absolutely because section 9.2 puts the
-/// helper's path into the script single-quoted and never on a command line.
+/// `argv[0]`, which the agent always spells absolutely because it puts the helper's path
+/// into the remote script single-quoted and never on a command line
+/// (docs/design/security.md).
 pub fn own_executable() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok()
 }

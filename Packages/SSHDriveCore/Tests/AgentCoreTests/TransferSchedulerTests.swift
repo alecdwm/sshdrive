@@ -2,8 +2,8 @@ import XCTest
 import SFTP
 @testable import AgentCore
 
-/// DESIGN.md section 6.2's transfer scheduler, driven against `FakeTransport` - the test
-/// double milestone 1 built for exactly this (section 12).
+/// The transfer scheduler (docs/design/sftp.md), driven against `FakeTransport`, the
+/// test double built for exactly this.
 final class TransferSchedulerTests: XCTestCase {
 
     /// A body that blocks until it is released, so several transfers can be in flight at
@@ -46,8 +46,8 @@ final class TransferSchedulerTests: XCTestCase {
         }
     }
 
-    /// Section 6.2: "the agent runs at most four at once per location ... and holds the
-    /// rest with their XPC calls open". Six arrive; four run, two wait.
+    /// docs/design/sftp.md: "the agent runs at most four at once per location ... and
+    /// holds the rest with their XPC calls open". Six arrive; four run, two wait.
     func testFourRunAtOnceAndTheRestWait() async throws {
         let scheduler = TransferScheduler(locationID: "test")
         let gate = Gate()
@@ -72,7 +72,7 @@ final class TransferSchedulerTests: XCTestCase {
         await fulfillment(of: [started], timeout: 5)
 
         let midway = await scheduler.stats()
-        XCTAssertEqual(midway.running, 4, "section 6.2's four")
+        XCTAssertEqual(midway.running, 4, "the four-per-location ceiling")
         XCTAssertEqual(midway.waitingForeground, 2)
         XCTAssertEqual(concurrency.peak, 4)
         XCTAssertEqual(
@@ -95,11 +95,10 @@ final class TransferSchedulerTests: XCTestCase {
         let concurrency = Concurrency()
 
         // Four background transfers fill every slot, each on a gate of its own so exactly
-        // one slot can be freed. Releasing all four at once was the old shape of this
-        // test, and it raced: with four slots free both queued transfers are admitted and
-        // which of their bodies reaches `enter` first is the executor's business, not the
-        // scheduler's. One slot means only one can be admitted, and the class is then the
-        // only thing that can choose (2026-09-04).
+        // one slot can be freed. A shared gate would race: with four slots free at once,
+        // both queued transfers are admitted and which of their bodies reaches `enter`
+        // first is the executor's business, not the scheduler's. One slot means only one
+        // can be admitted, and the class is then the only thing that can choose.
         let holders = (0..<4).map { _ in Gate() }
         let running = expectation(description: "four background running")
         running.expectedFulfillmentCount = 4
@@ -180,8 +179,8 @@ final class TransferSchedulerTests: XCTestCase {
         // The first gets the whole window, the fourth a quarter of it: the share is
         // computed at admission and a running transfer is never re-sized. Compared sorted,
         // because the shares are handed out in a defined order but four concurrent bodies
-        // record them in whatever order the executor runs them, which used to make this
-        // assertion flaky in its own right (2026-09-04).
+        // record them in whatever order the executor runs them; comparing unsorted would
+        // make this assertion flaky.
         XCTAssertEqual(observed.values.sorted(), [4, 5, 8, 16])
         XCTAssertTrue(observed.values.allSatisfy { $0 >= 2 })
         await gate.release()
@@ -201,7 +200,7 @@ final class TransferSchedulerTests: XCTestCase {
     }
 
     /// A metadata call is never queued, even with every transfer slot full: on a degraded
-    /// location it is what has to get through (section 6.2).
+    /// location it is what has to get through (docs/design/sftp.md).
     func testMetadataIsNeverQueued() async throws {
         let scheduler = TransferScheduler(locationID: "test", sharesMetadataChannel: true)
         let gate = Gate()
@@ -229,7 +228,7 @@ final class TransferSchedulerTests: XCTestCase {
     }
 
     /// Cancelling the extension's `Progress` cancels a queued transfer without it ever
-    /// touching the server (section 5.2).
+    /// touching the server (docs/design/extension.md).
     func testCancellingAQueuedTransferNeverRunsIt() async throws {
         let scheduler = TransferScheduler(locationID: "test")
         let gate = Gate()
@@ -270,8 +269,8 @@ final class TransferSchedulerTests: XCTestCase {
     }
 
     /// Cancelling a *running* transfer cancels its Task, and the wire client's own
-    /// cancellation check is what turns that into `.cancelled` (section 6.2). Here the
-    /// body stands in for the client and reports what it saw.
+    /// cancellation check is what turns that into `.cancelled` (docs/design/sftp.md).
+    /// Here the body stands in for the client and reports what it saw.
     func testCancellingARunningTransferCancelsItsTask() async throws {
         let scheduler = TransferScheduler(locationID: "test")
         let sawCancellation = Concurrency()
@@ -328,8 +327,8 @@ final class TransferSchedulerTests: XCTestCase {
         for task in tasks { try await task.value }
     }
 
-    /// End to end against the milestone 1 fake backend: eight files, all fetched through
-    /// the scheduler, every byte delivered, never more than four transfers in flight.
+    /// End to end against the fake backend: eight files, all fetched through the
+    /// scheduler, every byte delivered, never more than four transfers in flight.
     func testTheFakeBackendStreamsThroughTheScheduler() async throws {
         let transport = FakeTransport(root: "/srv/fake")
         for index in 0..<8 {

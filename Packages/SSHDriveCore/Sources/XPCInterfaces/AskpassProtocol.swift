@@ -2,14 +2,14 @@
 
 import Foundation
 
-/// The askpass program's own interface to the agent (DESIGN.md section 4.2).
+/// The askpass program's own interface to the agent (docs/design/secrets.md).
 ///
 /// It is deliberately **not** part of `SSHDriveAgentProtocol`. The listener exports this
 /// interface, and only this one, to a peer whose executable is our `sshdrive-askpass`,
 /// and exports the agent interface to everyone else. `ssh` invokes the askpass with the
 /// prompt on its command line, and any local process can invoke it too; the token is what
 /// authorises the request, and a one-method interface means the path that hands out
-/// secrets cannot also remove locations or evict caches (section 5.2).
+/// secrets cannot also remove locations or evict caches (docs/design/extension.md).
 @objc public protocol SSHDriveAskpassProtocol {
 
     /// One askpass invocation.

@@ -1,19 +1,18 @@
 import Foundation
 
-/// How a process finds the app-group container (DESIGN.md section 3).
+/// How a process finds the app-group container (docs/design/components.md).
 ///
 /// On macOS this is `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`
 /// and nothing else; the seam exists so the package compiles and tests off Darwin, where
-/// there is no app group and no entitlement to check. See
-/// `docs/testing-architecture.md` section 2.
+/// there is no app group and no entitlement to check. See `docs/design/testing.md`.
 public protocol GroupContainerLocating: Sendable {
     /// The container directory for `identifier`, or nil when this process has none.
     func containerURL(forGroupIdentifier identifier: String) -> URL?
 }
 
 #if canImport(Darwin)
-    /// The real thing: the app-group container the entitlement grants. Unchanged
-    /// behaviour - the same single call this module has always made.
+    /// The real thing: the app-group container the entitlement grants, from the one
+    /// call that reads it.
     public struct SystemGroupContainerLocator: GroupContainerLocating {
         public init() {}
 

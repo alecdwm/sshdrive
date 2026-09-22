@@ -4,8 +4,8 @@ import XCTest
 @testable import SFTP
 
 /// `RealSFTPTransport` over the in-memory wire server: the `SFTPTransport` surface, the
-/// `RelativePath` chokepoint of DESIGN.md section 9.1, and section 5.5's never-write-in-
-/// place upload, all without a network.
+/// `RelativePath` chokepoint (docs/design/security.md), and the never-write-in-place
+/// upload rule (docs/design/writes.md), all without a network.
 final class RealSFTPTransportTests: XCTestCase {
 
     private func connected(_ server: InMemorySFTPServer) async throws -> RealSFTPTransport {
@@ -26,7 +26,7 @@ final class RealSFTPTransportTests: XCTestCase {
         XCTAssertEqual(attributes.size, 2)
 
         // The chokepoint: a component that would escape cannot even be constructed, so
-        // there is no call site here that could get it wrong (section 9.1).
+        // there is no call site here that could get it wrong (docs/design/security.md).
         XCTAssertThrowsError(try RelativePath(string: "a/../../etc/passwd").components)
         var raw = Data("bad".utf8)
         raw.append(0x2F)
@@ -45,7 +45,7 @@ final class RealSFTPTransportTests: XCTestCase {
         XCTAssertEqual(
             try RelativePath(string: "a").absoluteBytes(root: Data("/srv/".utf8)),
             Data("/srv/a".utf8))
-        // Zero components is the root itself (section 7.1.2).
+        // Zero components is the root itself (docs/design/pinning.md).
         XCTAssertEqual(
             RelativePath.root.absoluteBytes(root: Data("/srv/root".utf8)),
             Data("/srv/root".utf8))
@@ -90,8 +90,8 @@ final class RealSFTPTransportTests: XCTestCase {
         await transport.shutdown()
     }
 
-    /// Section 5.5: uploads go to `.sshdrive-upload-<mac8>-<uuid>` and then take the
-    /// name; nothing is ever written in place, and no temp file is left behind.
+    /// Uploads go to `.sshdrive-upload-<mac8>-<uuid>` and then take the name; nothing is
+    /// ever written in place, and no temp file is left behind (docs/design/writes.md).
     func testWriteGoesThroughATempFileAndLeavesNoneBehind() async throws {
         let server = InMemorySFTPServer()
         server.put("existing.txt", contents: Data("old contents".utf8))
@@ -125,8 +125,9 @@ final class RealSFTPTransportTests: XCTestCase {
         try await transport.symlink(target: "target.txt", at: RelativePath(string: "link"))
         let attributes = try await transport.lstat(RelativePath(string: "link"))
         XCTAssertEqual(attributes.type, .symlink)
-        // lstat semantics: the link is a leaf and is never followed (section 9.1), and
-        // the target comes back verbatim (section 5.7).
+        // lstat semantics: the link is a leaf and is never followed
+        // (docs/design/security.md), and the target comes back verbatim
+        // (docs/design/symlinks.md).
         XCTAssertEqual(attributes.symlinkTarget, "target.txt")
         let target = try await transport.readlink(RelativePath(string: "link"))
         XCTAssertEqual(target, "target.txt")
@@ -142,7 +143,7 @@ final class RealSFTPTransportTests: XCTestCase {
             stream: stream, root: String(decoding: server.root, as: UTF8.self))
         try await transport.setstat(RelativePath(string: "f.txt"), mode: 0o600, mtime: nil)
         // It went out as the extension, not as a plain setstat that would have followed a
-        // symlink (section 9.1).
+        // symlink (docs/design/security.md).
         let extended = stream.writtenPackets(ofType: .extended)
         XCTAssertTrue(
             extended.contains { packet in
@@ -178,7 +179,7 @@ final class RealSFTPTransportTests: XCTestCase {
         try await transport.verifyRoot()
         // The in-memory server echoes realpath, so a genuine move cannot be staged here;
         // what is asserted is that the check runs and passes on an unmoved root, which is
-        // the per-connection check section 9.1 requires.
+        // the per-connection check required by docs/design/security.md.
         let root = await transport.root
         XCTAssertEqual(root, String(decoding: server.root, as: UTF8.self))
         await transport.shutdown()

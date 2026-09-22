@@ -7,9 +7,9 @@ import XPCProtocols
 
 @testable import AgentCore
 
-/// The row rules milestone 4 adds: the xattr and tag hash in the metadata version
-/// (DESIGN.md sections 5.3, 5.4 - the S10 question), and the symlink check on the row
-/// (section 5.7).
+/// The row-building rules: the xattr and tag hash in the metadata version
+/// (docs/design/item-index.md, docs/design/names-and-attributes.md), and the symlink
+/// check on the row (docs/design/symlinks.md).
 final class RowBuilderTests: XCTestCase {
 
     private let roots = SymlinkPolicy.Roots(canonical: "/home/alec")
@@ -32,7 +32,7 @@ final class RowBuilderTests: XCTestCase {
             type: .file, size: size, mtime: mtime, mode: 0o644, uid: 501, gid: 20)
     }
 
-    // MARK: The kept state a new row is born with (sections 7.1, 7.1.1)
+    // MARK: The kept state a new row is born with (docs/design/pinning.md)
 
     private func directory(kept: Bool, pinState: Int64, path: String) throws -> IndexItem {
         IndexItem(
@@ -41,24 +41,25 @@ final class RowBuilderTests: XCTestCase {
     }
 
     func testANewRowInsideAKeptFolderIsKeptWithNoAncestorWalk() throws {
-        // Section 7.1: "descendants the index has never seen need nothing: their rows are
-        // created with the right state when they are first listed". The parent row carries
-        // the *effective* state, so one comparison is the whole inheritance.
+        // docs/design/pinning.md: "descendants the index has never seen need nothing:
+        // their rows are created with the right state when they are first listed". The
+        // parent row carries the *effective* state, so one comparison is the whole
+        // inheritance.
         let folder = try directory(kept: true, pinState: 1, path: "Projects")
         let row = builder.build(
             path: try RelativePath(string: "Projects/new.txt"), attributes: file(),
             parent: folder, existing: nil).row
         XCTAssertTrue(row.kept)
         XCTAssertEqual(row.pinState, 0)
-        // A kept item drops allowsEvicting (section 7.2); the eager policy is what actually
-        // refuses the eviction, but the bit is part of the metadata version.
+        // A kept item drops allowsEvicting (docs/design/pinning.md); the eager policy is
+        // what actually refuses the eviction, but the bit is part of the metadata version.
         XCTAssertEqual(
             row.capabilities & Int64(ProviderCapabilities.allowsEvicting.rawValue), 0)
     }
 
     func testANewRowInsideAnExcludedFolderIsNotKept() throws {
         // "A new file appearing remotely inside a kept folder is downloaded; one appearing
-        // inside an excluded subfolder is not" (section 7.1.1).
+        // inside an excluded subfolder is not" (docs/design/pinning.md).
         let excluded = try directory(kept: false, pinState: -1, path: "Projects/archive")
         let row = builder.build(
             path: try RelativePath(string: "Projects/archive/new.txt"), attributes: file(),
@@ -91,7 +92,7 @@ final class RowBuilderTests: XCTestCase {
         XCTAssertNotEqual(unkeptRow.metadataVersion, keptRow.metadataVersion)
     }
 
-    // MARK: The xattr hash in the metadata version (S10)
+    // MARK: The xattr hash in the metadata version
 
     func testAnXattrChangeMovesTheMetadataVersionButNotTheContentVersion() throws {
         let path = try RelativePath(string: "a.txt")
@@ -107,10 +108,10 @@ final class RowBuilderTests: XCTestCase {
     }
 
     func testATagChangeMovesTheMetadataVersionToo() throws {
-        // Section 5.4: tags are stored and served the same way as xattrs, in the row and
-        // hashed into the metadata version, but through `tagData`. Without that, accepting
-        // a tag change would return the version the system already holds and it would
-        // re-offer the change for ever (the S10 question).
+        // docs/design/names-and-attributes.md: tags are stored and served the same way as
+        // xattrs, in the row and hashed into the metadata version, but through `tagData`.
+        // Without that, accepting a tag change would return the version the system
+        // already holds and it would re-offer the change for ever.
         let path = try RelativePath(string: "a.txt")
         let bare = builder.build(
             path: path, attributes: file(), parent: parent, existing: nil).row
@@ -161,7 +162,7 @@ final class RowBuilderTests: XCTestCase {
         XCTAssertEqual(snapshot.tagData, local.tagData)
     }
 
-    // MARK: Symlinks on the row (section 5.7)
+    // MARK: Symlinks on the row (docs/design/symlinks.md)
 
     func testALinkInsideTheShareGetsItsMacTargetOnTheRow() throws {
         let attributes = SFTPFileAttributes(
@@ -238,9 +239,10 @@ final class RowBuilderTests: XCTestCase {
     // MARK: The read-only mapping the write matrix leans on
 
     func testAWritableFileInAReadOnlyDirectoryLosesAllowsWriting() throws {
-        // Section 5.4's most-argued paragraph, and the reason a "write to a read-only
+        // The names-and-attributes design's most-argued paragraph
+        // (docs/design/names-and-attributes.md), and the reason a "write to a read-only
         // item" never gets as far as an upload: replacing content goes through a temp
-        // file in the parent directory (section 5.5).
+        // file in the parent directory (docs/design/writes.md).
         let readOnlyParent = IndexItem(
             identifier: "p", path: Data("ro".utf8), parent: IndexWriter.rootIdentifier,
             type: "directory", uid: 0, gid: 0, mode: 0o555)

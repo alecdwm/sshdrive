@@ -5,11 +5,11 @@ import ProviderCore
 import SystemModel
 
 /// **Suite B - the trash** and the modellable half of **suite M - symlinks**
-/// (`docs/testing-architecture.md` section 5).
+/// (docs/design/testing.md).
 ///
 /// The trash rows are the `.Trash` hang, which made `ls -la` of a mount never return; the
-/// symlink rows are S8's answers about what the system does with an item we serve as a
-/// link, and what happens to a link it refuses.
+/// symlink rows describe what the system does with an item served as a link, and what
+/// happens to a link it refuses.
 final class TrashAndSymlinkScenarios: XCTestCase {
 
     // MARK: B1 - the `.Trash` materialize loop
@@ -86,7 +86,7 @@ final class TrashAndSymlinkScenarios: XCTestCase {
     /// Refused feature-unsupported by the extension itself, and **nothing is sent to the
     /// server**: with `supportsSyncingTrash = false` the system decides how to handle a
     /// trashing operation, and whatever it decides, it is not a `.Trash` directory of ours
-    /// on someone's server (section 5.4).
+    /// on someone's server (docs/design/names-and-attributes.md).
     func testB3_ATrashCreateUnderTheRootIsRefusedAndNothingIsSent() throws {
         let harness = try ScenarioHarness()
         let domain = try harness.addDomain()
@@ -107,11 +107,11 @@ final class TrashAndSymlinkScenarios: XCTestCase {
 
     /// An escaping target created in the mount.
     ///
-    /// S8: `ln -s` exits 0 and the system keeps the item locally; the refusal comes back
-    /// as the item's `uploadingError` (`MQ-078`, -2005) with the system's own wording, and
-    /// section 5.7's sentence about the target reaches the user only through
-    /// `sshdrive status`'s sync-error list. An in-root relative target, by contrast,
-    /// reaches `createItem` with the target **intact**.
+    /// `ln -s` exits 0 and the system keeps the item locally; the refusal comes back as
+    /// the item's `uploadingError` (`MQ-078`, -2005) with the system's own wording, and
+    /// that message reaches the user only through `sshdrive status`'s sync-error list
+    /// (docs/design/symlinks.md). An in-root relative target, by contrast, reaches
+    /// `createItem` with the target **intact**.
     func testM3_ARefusedLinkSurfacesOnlyAsTheItemsUploadingError() throws {
         let harness = try ScenarioHarness()
         try harness.serverCreates("note.txt")
@@ -123,8 +123,8 @@ final class TrashAndSymlinkScenarios: XCTestCase {
         let absolute = harness.finder.symlink("absolute", target: "/etc/passwd")
         harness.system.advance(60)
 
-        // The target crossed unchanged, which is what S8 asked and what section 5.7's
-        // check needs in order to be applied at all.
+        // The target crossed unchanged, which is what the containment check needs in
+        // order to be applied at all (docs/design/symlinks.md).
         XCTAssertTrue(harness.agent.calls.contains("createItem(rel-inside)"))
         XCTAssertNil(domain.replica.item(good)?.uploadingErrorCode)
 

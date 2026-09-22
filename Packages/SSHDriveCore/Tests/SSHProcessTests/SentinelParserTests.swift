@@ -1,9 +1,9 @@
 import XCTest
 @testable import SSHProcess
 
-/// The section 9.2 sentinel: rc files print on every non-interactive startup, so the agent
-/// discards everything up to and including a random 128-bit marker. Driven here with
-/// scripted output rather than a server.
+/// The sentinel (docs/design/security.md): rc files print on every non-interactive
+/// startup, so the agent discards everything up to and including a random 128-bit
+/// marker. Driven here with scripted output rather than a server.
 final class SentinelParserTests: XCTestCase {
 
     private let sentinel = Sentinel(hex: "0123456789abcdef0123456789abcdef")

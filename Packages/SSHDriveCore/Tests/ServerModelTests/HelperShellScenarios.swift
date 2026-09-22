@@ -8,7 +8,7 @@ import SSHProcess
 @testable import ServerModel
 
 /// Suite J's tier 2 half: the helper binary on the server, and what an exec channel's
-/// death looks like from here (`docs/testing-architecture.md` sections 4.2 and 5).
+/// death looks like from here (`docs/design/testing.md` sections 4.2 and 5).
 ///
 /// Three of these run the **real** `sshdrive-helper` - the Rust crate in `helper/`, which
 /// `cargo` builds on this box - because the claims are about what that binary does with
@@ -166,11 +166,11 @@ final class HelperShellScenarios: XCTestCase {
 
     // MARK: - J9: `--version` digests its own executable
 
-    /// The check as it would be if section 6.4's fallback were read as "size" and not as
-    /// "size **plus running it with `--version`**". A copy lives here and nowhere in
-    /// `Sources/`, exactly as `HeartbeatScenarios` keeps a copy of the pre-2026-09-08
-    /// wrapper: a rule is only worth something if the reading it rules out really does
-    /// fail (`SQ-067`).
+    /// The check as it would be if docs/design/change-detection.md's fallback were read as
+    /// "size" and not as "size **plus running it with `--version`**". A copy lives here
+    /// and nowhere in `Sources/`, exactly as `HeartbeatScenarios` keeps a copy of the
+    /// legacy wrapper (gotcha 100): a rule is only worth something if the reading it
+    /// rules out really does fail (`SQ-067`).
     private func legacyVerdictBySizeAlone(
         binary: HelperManifest.Binary, evidence: HelperDeployment.RemoteEvidence
     ) -> HelperDeployment.Verdict {
@@ -183,7 +183,8 @@ final class HelperShellScenarios: XCTestCase {
     /// file could not be the hash of that file. So a binary corrupted **in place**, at
     /// exactly the same size, is caught by the `--version` path just as it is by
     /// `sha256sum`, which is what makes the checksum-less server's fallback the good
-    /// path's check rather than a weaker one (section 6.4 tier 2, section 9).
+    /// path's check rather than a weaker one (docs/design/change-detection.md tier 2,
+    /// docs/design/security.md).
     ///
     /// Run against the real Rust helper through a real shell: the digest is the binary's
     /// own claim about its own bytes, and no stub can make that claim.
@@ -192,8 +193,8 @@ final class HelperShellScenarios: XCTestCase {
         let server = try sshd(.debian)
         let emptyPATH = try server.emptyToolDirectory()
 
-        // The helper as deployed: its own directory, 0700, and the name section 6.4 gives
-        // it on the server.
+        // The helper as deployed: its own directory, 0700, and the name
+        // docs/design/change-detection.md gives it on the server.
         let directory = server.directory.appendingPathComponent("cache/sshdrive")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let shipped = try XCTUnwrap(
@@ -277,7 +278,7 @@ final class HelperShellScenarios: XCTestCase {
             "SQ-067: the checksum-less server catches it too, which is the whole point")
 
         // A server with neither tool and a binary that will not answer: size is all there
-        // is, and section 6.4 replaces rather than runs it.
+        // is, and docs/design/change-detection.md replaces rather than runs it.
         XCTAssertEqual(
             HelperDeployment.verdict(for: binary, evidence: .init(size: size)),
             .upload(reason: "the server could not verify the helper's contents"))
@@ -330,7 +331,8 @@ final class HelperShellScenarios: XCTestCase {
 
     /// **J10** (`SQ-032`, `SQ-028`): a write over a **running** executable fails
     /// `ETXTBSY`, so an upload never writes over the file it is replacing. It goes to a
-    /// temp name and is renamed into place (section 5.5's protocol, section 6.4's rule),
+    /// temp name and is renamed into place (docs/design/writes.md's protocol,
+    /// docs/design/change-detection.md's rule),
     /// which the kernel allows while the old inode stays with the process still running
     /// from it.
     ///
@@ -400,8 +402,8 @@ final class HelperShellScenarios: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: installed), originalBytes,
                        "and the incumbent bytes were left alone")
 
-        // The path the deployment takes instead: a temp name of section 5.5's shape, then
-        // a rename into place. The process keeps the inode it is running from.
+        // The path the deployment takes instead: a temp name of docs/design/writes.md's
+        // shape, then a rename into place. The process keeps the inode it is running from.
         let temporary = directory.appendingPathComponent(
             HelperDeployment.temporaryName(macID: "abcd1234"))
         let replacement = originalBytes + Data(repeating: 0x0A, count: 1)
@@ -409,7 +411,7 @@ final class HelperShellScenarios: XCTestCase {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755], ofItemAtPath: temporary.path)
         XCTAssertTrue(temporary.lastPathComponent.hasPrefix(".sshdrive-upload-"),
-                      "the same ignore rule as every other half-written upload (section 5.5)")
+                      "the same ignore rule as every other half-written upload (docs/design/writes.md)")
         XCTAssertEqual(rename(temporary.path, installed.path), 0,
                        "SQ-032: the rename is what the kernel allows: errno \(errno)")
         XCTAssertEqual(try Data(contentsOf: installed), replacement)
@@ -500,12 +502,12 @@ final class HelperShellScenarios: XCTestCase {
         // identically on every box. The two that a process could merely inherit as
         // harmless are both unusable here - `SIGPIPE` is inherited ignored from this
         // process (Foundation ignores it), and on Darwin `SIGINT` is inherited ignored
-        // too, because SwiftPM ignores it while a test child runs, so `kill -INT $$` left
-        // the shell alive and the channel exited 0 (2026-09-08).
+        // too, because SwiftPM ignores it while a test child runs, so `kill -INT $$`
+        // leaves the shell alive and the channel exits 0.
         //
-        // What made every *other* signal unusable before was the stub's own shell writing
-        // a job report - `Killed`, `Terminated` - onto the channel's stderr, which is an
-        // artifact of this harness and a byte no sshd sends. That is now suppressed at
+        // Every *other* signal is unusable for a different reason: the stub's own shell
+        // would write a job report - `Killed`, `Terminated` - onto the channel's stderr,
+        // an artifact of this harness and a byte no sshd sends. That is suppressed at
         // its source (`SQ-084`, `FakeSSH.run_session`), so the signal can be chosen for
         // what it proves rather than for what it does not print. What the row is about is
         // what `ssh` then makes of the death, and that is the same for any signal: 255,
@@ -566,9 +568,9 @@ final class HelperShellScenarios: XCTestCase {
 
     /// **J13** (`SQ-011`): the other half of the same rule - a remote command that dies
     /// **with** something to say. The exit status and the stderr both reach the log,
-    /// because "an outage that is silently swallowed" is the failure this defends: a
-    /// helper that died on a real server once left one sentence in the log and no status,
-    /// no signal and no stderr to say why (2026-09-05).
+    /// because "an outage that is silently swallowed" is the failure this defends
+    /// against: a helper that dies with no status, no signal and no stderr leaves only
+    /// one sentence in the log and no way to say why.
     func testJ13_theDeathIsReportedWithItsExitStatusAndItsStderrInTheLine() async throws {
         let stub = try fakeSSH(.debian)
         let master = self.master(.debian, stub: stub)

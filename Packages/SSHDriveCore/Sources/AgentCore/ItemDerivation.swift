@@ -8,7 +8,7 @@ import XPCProtocols
 /// The account the probe found on the server (`id -u`, `id -G`), or nothing when exec is
 /// not available. SFTP-only accounts, where the identity is unknown, get full
 /// capabilities and learn about permission errors from the sync error list
-/// (DESIGN.md section 5.4).
+/// (docs/design/names-and-attributes.md).
 public struct ServerIdentity: Sendable, Equatable {
     public var uid: UInt32?
     public var gid: UInt32?
@@ -38,7 +38,7 @@ public struct ServerIdentity: Sendable, Equatable {
 
     private func permits(bit: UInt32, mode: UInt32, uid fileUID: UInt32, gid fileGID: UInt32) -> Bool {
         guard let uid else {
-            // Unknown identity: any bit at all counts (section 5.4).
+            // Unknown identity: any bit at all counts (docs/design/names-and-attributes.md).
             return (mode & (bit | (bit << 3) | (bit << 6))) != 0
         }
         if uid == 0 { return true }
@@ -50,14 +50,15 @@ public struct ServerIdentity: Sendable, Equatable {
     }
 }
 
-/// Turns an lstat plus the location's `permissions` setting into the two bitmasks the
-/// index stores on the row, so that `item(for:)` in the extension is a row read and a
-/// field-by-field copy with no second copy of these rules (DESIGN.md sections 5.2, 5.4).
+/// Turns an lstat plus the location's `permissions` setting into the two bitmasks the index
+/// stores on the row, so that `item(for:)` in the extension is a row read and a
+/// field-by-field copy with no second copy of these rules (docs/design/extension.md,
+/// docs/design/names-and-attributes.md).
 public enum ItemDerivation {
 
     /// `capabilities`, from the item's own mode and its parent's write bit. A file loses
-    /// allowsWriting when the account cannot write it or cannot write its directory,
-    /// because replacing content goes through a temp file in that directory (section 5.5).
+    /// allowsWriting when the account cannot write it or cannot write its directory, because
+    /// replacing content goes through a temp file in that directory (docs/design/writes.md).
     public static func capabilities(
         type: SFTPFileType,
         mode: UInt32,
@@ -107,18 +108,19 @@ public enum ItemDerivation {
             if writable { capabilities.insert(.allowsAddingSubItems) }
         }
 
-        // allowsTrashing is never set: no trash (section 5.4).
+        // allowsTrashing is never set: no trash (docs/design/names-and-attributes.md).
 
         // Kept items drop allowsEvicting, so Finder's own menu cannot undo the pin
-        // (section 7.2). Everything else may be evicted.
+        // (docs/design/pinning.md). Everything else may be evicted.
         if !kept { capabilities.insert(.allowsEvicting) }
 
         return capabilities
     }
 
     /// `fileSystemFlags`. userReadable is always set; userWritable follows allowsWriting;
-    /// userExecutable is set when the mode has an execute bit the account can exercise,
-    /// and a directory always carries it, since there it is the search bit (section 5.4).
+    /// userExecutable is set when the mode has an execute bit the account can exercise, and a
+    /// directory always carries it, since there it is the search bit
+    /// (docs/design/names-and-attributes.md).
     public static func fileSystemFlags(
         type: SFTPFileType,
         mode: UInt32,
@@ -143,7 +145,7 @@ public enum ItemDerivation {
     }
 
     /// Metadata version = content version plus mode, uid, gid, the derived bitmasks, the
-    /// effective kept state and a hash of the stored xattrs blob (section 5.3).
+    /// effective kept state and a hash of the stored xattrs blob (docs/design/item-index.md).
     public static func metadataVersion(
         contentVersion: String,
         mode: Int64?,

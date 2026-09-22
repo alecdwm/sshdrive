@@ -4,7 +4,7 @@ import ProviderCore
 import XPCProtocols
 
 /// The whole of the translation between Apple's File Provider vocabulary and
-/// `ProviderCore`'s (`docs/testing-architecture.md` section 2.2).
+/// `ProviderCore`'s (`docs/design/testing.md`).
 ///
 /// There is no decision in this file. Every rule about *which* error to answer lives in
 /// `ProviderCore`; what is here is the one function that turns a `ProviderFailure` into
@@ -31,13 +31,13 @@ enum AppleMapping {
             return NSError(
                 domain: NSFileProviderErrorDomain, code: failure.appleErrorCode, userInfo: nil)
         case .featureUnsupported:
-            // The trash refusal, with the sentence section 5.4 wants shown (`MQ-010`).
+            // The trash refusal, with the sentence Finder shows (`MQ-010`).
             return SSHDriveTrash.unsupportedError
         }
     }
 
     /// Every error the agent hands back becomes a `ProviderFailure` before it reaches a
-    /// decision (section 5.1).
+    /// decision (`docs/design/extension.md`).
     static func failure(from error: Error) -> ProviderFailure {
         let nsError = error as NSError
         if nsError.domain == NSFileProviderErrorDomain {
@@ -66,7 +66,7 @@ enum AppleMapping {
     }
 
     /// The system's two well-known first-page constants are not tokens of ours; anything
-    /// else is a token we handed out (section 5.2).
+    /// else is a token we handed out.
     static func token(from page: NSFileProviderPage) -> ProviderPageToken? {
         if page.rawValue == NSFileProviderPage.initialPageSortedByName as Data { return nil }
         if page.rawValue == NSFileProviderPage.initialPageSortedByDate as Data { return nil }

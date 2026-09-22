@@ -6,13 +6,13 @@ import SFTP
 import Logging
 import ProviderCore
 
-/// DESIGN.md section 5.3's index recovery: the health check the agent runs before it
-/// serves a location, the restore from `index.sqlite.bak`, and the reconcile walk against
-/// the system's replica that runs after either one.
+/// The index recovery path (docs/design/item-index.md): the health check the agent runs
+/// before it serves a location, the restore from `index.sqlite.bak`, and the reconcile
+/// walk against the system's replica that runs after either one.
 ///
 /// Everything here is called from `LocationRuntime.start()`, before anything is served.
-/// The order section 5.3 fixes is: judge the index, put it back if a backup can, empty it
-/// if nothing can, and then walk the replica so that every path the user can still see
+/// The order is fixed: judge the index, put it back if a backup can, empty it if nothing
+/// can, and then walk the replica so that every path the user can still see
 /// keeps the identifier the system already holds. The walk is what stops a rebuild from
 /// looking like a mass deletion followed by a mass create: the identifiers are the only
 /// thing the index held that the server cannot re-supply, and the replica is the only
@@ -24,20 +24,20 @@ import ProviderCore
 /// it. So the wiring is: call `recoverIfNeeded`, and then, while the returned writer
 /// reports `isReconciling`, call `reconcileAgainstReplica`. Nothing may be enumerated,
 /// fetched or answered from the index in between: the extension is stalled on the same
-/// flag (section 5.2) and the agent answers `.serverUnreachable` for the domain, because
+/// flag and the agent answers `.serverUnreachable` for the domain, because
 /// an agent serving an empty index would answer `.noSuchItem` and the system would delete
 /// the user's files.
 enum IndexReconcile {
 
     // MARK: The three states of an index at start
 
-    /// Which of section 5.3's three cases a location's index is in.
+    /// Which of the three cases a location's index is in.
     enum IndexHealth: String, Sendable {
         /// Opened, and `PRAGMA integrity_check` said "ok".
         case healthy
         /// Opened, but `PRAGMA integrity_check` did not say "ok". The live connection is
         /// usable, so the backup goes in through the online backup API and the file keeps
-        /// its inode (section 5.3).
+        /// its inode.
         case corrupt
         /// `IndexWriter(path:)` itself threw: a truncated header, a not-a-database file,
         /// a disk that will not give us the page. There is no connection to restore into,
@@ -85,8 +85,8 @@ enum IndexReconcile {
         /// Replica entries visited.
         var walked: Int = 0
         var rowsCreated: Int = 0
-        /// Rows whose identifier the replica overruled (section 5.3: the item was deleted
-        /// and re-created after the backup was taken).
+        /// Rows whose identifier the replica overruled, because the item was deleted and
+        /// re-created after the backup was taken.
         var identifiersAdopted: Int = 0
         var pendingLeftUnversioned: Int = 0
         var pinsRestored: Int = 0
@@ -114,7 +114,7 @@ enum IndexReconcile {
 
     /// How long the agent waits for the extension to close its reader before truncating.
     /// It must not wait for ever: an extension that is not running cannot be waiting on
-    /// anything, and there is no reply from a process that does not exist (section 5.3).
+    /// anything, and there is no reply from a process that does not exist.
     static let readerCloseSeconds: Double = 20
 
     // MARK: 1 and 2 - the health check and the restore
@@ -149,7 +149,7 @@ enum IndexReconcile {
         if state == .healthy {
             report.state = "healthy"
             if wasReconciling {
-                // The flag outlives a crash (section 5.3): an agent that starts and finds
+                // The flag outlives a crash: an agent that starts and finds
                 // it set redoes the walk before serving anything, because the extension is
                 // stalled on that flag and nothing else will clear it. The index itself is
                 // sound, so there is nothing to restore - only the walk to finish.
@@ -163,12 +163,12 @@ enum IndexReconcile {
         }
 
         Log.agent.error(
-            "\(locationID, privacy: .public): the index is \(state.rawValue, privacy: .public); recovering from \(haveBackup ? "the backup" : "nothing", privacy: .public) (section 5.3)"
+            "\(locationID, privacy: .public): the index is \(state.rawValue, privacy: .public); recovering from \(haveBackup ? "the backup" : "nothing", privacy: .public)"
         )
 
         // Openable and corrupt: the backup goes in through SQLite's online backup API,
         // into the live database and never over the file, so the inode is stable and the
-        // extension's reader (section 5.2) keeps reading the file it already has open.
+        // extension's reader keeps reading the file it already has open.
         // No close-and-reopen is needed on this path, which is the whole reason it is a
         // separate one.
         if state == .corrupt, haveBackup, let openable = live {
@@ -176,9 +176,9 @@ enum IndexReconcile {
             {
                 report.state = "restored"
                 report.restoredFromBackup = true
-                // Section 5.3: "Then, and also when there is no backup at all, the index
-                // is reconciled against the replica before anything is re-enumerated." A
-                // backup is a point in the past, so even a clean restore owes the walk.
+                // Then, and also when there is no backup at all, the index is reconciled
+                // against the replica before anything is re-enumerated. A backup is a
+                // point in the past, so even a clean restore owes the walk.
                 owe(theWalkOn: live, locationID: locationID, report: &report)
                 report.seconds = Date().timeIntervalSince(began)
                 return (live, report)
@@ -188,7 +188,7 @@ enum IndexReconcile {
         // Everything else empties the file: unopenable, or corrupt with no backup, or
         // corrupt with a backup that did not take. The close comes FIRST and the order is
         // not negotiable - the reader holds the `-shm` mapped, and truncating a mapped
-        // file under a live process faults it on its next access (section 5.3).
+        // file under a live process faults it on its next access.
         await closeReaderBeforeTruncate(closeReader, locationID: locationID)
         // Our own connection goes too, for the same reason: a handle on a file that has
         // been truncated under it reads an empty database through a stale page cache.
@@ -216,7 +216,7 @@ enum IndexReconcile {
             } else {
                 // The backup itself is no good. Empty the file a second time rather than
                 // leaving half a restored database behind, and let the walk start from
-                // nothing (section 5.3).
+                // nothing.
                 live = nil
                 do {
                     try IndexWriter.truncateDatabaseFiles(at: indexURL.path)
@@ -236,7 +236,7 @@ enum IndexReconcile {
         report.state = "rebuilt"
         // Set before the reader is let back in, so that the first thing it reads off the
         // rebuilt database is the flag that tells it to answer `.serverUnreachable`
-        // rather than rows that are not there yet (section 5.2).
+        // rather than rows that are not there yet.
         owe(theWalkOn: live, locationID: locationID, report: &report)
         reopenReader()
         report.seconds = Date().timeIntervalSince(began)
@@ -244,22 +244,21 @@ enum IndexReconcile {
     }
 
     /// Copies the backup in and expires the anchors it brought with it. False when the
-    /// restore threw or when the result still fails `PRAGMA integrity_check`, which
-    /// section 5.3 answers the same way as no backup at all: the reconcile walk, with an
-    /// empty index.
+    /// restore threw or when the result still fails `PRAGMA integrity_check`, which is
+    /// answered the same way as no backup at all: the reconcile walk, with an empty
+    /// index.
     private static func restore(
         backupAt backupURL: URL, into writer: IndexWriter, locationID: String,
         report: inout Report
     ) -> Bool {
         do {
             // `restore(fromBackupAt:)` bumps `meta.generation` itself - that is the
-            // signal that says the contents were replaced wholesale (section 5.2) - so
+            // signal that says the contents were replaced wholesale - so
             // the generation is deliberately not bumped a second time here.
             try writer.restore(fromBackupAt: backupURL)
             // The anchors that came back are the backup's, and the system may hold one
             // newer than any of them. Expiring them makes the extension answer
-            // `.syncAnchorExpired`, which the agent answers with one full sweep
-            // (section 5.3).
+            // `.syncAnchorExpired`, which the agent answers with one full sweep.
             try writer.expireAnchors()
             guard try writer.integrityCheck() else {
                 report.errors.append(
@@ -283,7 +282,7 @@ enum IndexReconcile {
     /// Asks the extension to close its reader, and gives up waiting rather than blocking
     /// the location's start for ever. An extension that is not running cannot be waiting
     /// on anything, and an instance the system launches between this and the truncate is
-    /// covered by the ready check on the agent (section 5.3): a mid-restore agent answers
+    /// covered by the ready check on the agent: a mid-restore agent answers
     /// `indexReady` no, and the instance opens nothing.
     private static func closeReaderBeforeTruncate(
         _ closeReader: @escaping @Sendable () async -> Void, locationID: String
@@ -320,7 +319,7 @@ enum IndexReconcile {
 
     // MARK: 3 - the reconcile walk
 
-    /// Section 5.3's walk, on its own, for `sshdrive debug reconcile` and for the
+    /// The reconcile walk, on its own, for `sshdrive debug reconcile` and for the
     /// crash-recovery path where the index is fine but the flag was left set.
     ///
     /// `meta.reconciling` is set for the whole walk and cleared only at the end, so the
@@ -363,18 +362,18 @@ enum IndexReconcile {
                 "the mount under ~/Library/CloudStorage could not be resolved, so the walk did not run; the domain stays stalled on meta.reconciling"
             )
             Log.agent.error(
-                "\(locationID, privacy: .public): no user-visible URL for the domain root, so the reconcile walk cannot run (section 5.3)"
+                "\(locationID, privacy: .public): no user-visible URL for the domain root, so the reconcile walk cannot run"
             )
             report.seconds = Date().timeIntervalSince(began)
             return report
         }
 
-        // Section 5.3's exception. An item the system lists here holds a pending edit in
+        // The pending exception. An item the system lists here holds a pending edit in
         // its replica file, so its size and mtime are the edit's and not the server's:
         // its content version is left empty and comes back through its own `modifyItem`.
         // A nil answer means there was no manager to ask, which is "no news", never "no
-        // pending items" (section 6.5), and the safe reading of no news here is to treat
-        // nothing as pending rather than to leave every version empty.
+        // pending items", and the safe reading of no news here is to treat nothing as
+        // pending rather than to leave every version empty.
         let pending = Set(await replica.pendingIdentifiers(locationID: locationID) ?? [])
 
         let rootRow: IndexItem
@@ -390,10 +389,11 @@ enum IndexReconcile {
         }
 
         // Every derived field goes through `RowBuilder`, exactly as `LocationRuntime.makeRow`
-        // does, so that no rule of sections 5.2, 5.4 or 5.7 is written twice. There is no
-        // server on this path and therefore no root spelling to measure a symlink against:
-        // the target read from the replica is already the Mac-side one section 5.7 wrote,
-        // and "/" makes the lexical check judge it on its own merits.
+        // does, so that no capability, attribute or symlink rule is written twice. There
+        // is no server on this path and therefore no root spelling to measure a symlink
+        // against: the target read from the replica is already the Mac-side one the
+        // symlink policy wrote, and "/" makes the lexical check judge it on its own
+        // merits.
         let rows = RowBuilder(
             permissions: permissions, identity: identity,
             roots: SymlinkPolicy.Roots(canonical: "/"))
@@ -442,8 +442,9 @@ enum IndexReconcile {
                 let name = entry.lastPathComponent
                 let nameBytes = Data(name.utf8)
                 guard let childPath = try? directory.path.appending(component: nameBytes) else {
-                    // Section 9.1's chokepoint has the last word on what can be a path
-                    // component. A name it rejects can never be addressed, so it gets no row.
+                    // The `RelativePath` chokepoint has the last word on what can be a
+                    // path component. A name it rejects can never be addressed, so it
+                    // gets no row.
                     continue
                 }
                 if NameVisibility.isUploadTemporary(nameBytes) { continue }
@@ -457,7 +458,7 @@ enum IndexReconcile {
                 }
                 let type = fileType(of: buffer)
                 // Sockets, FIFOs and device nodes are never enumerated and never get a
-                // row (section 5.4). Nothing in the replica should be one.
+                // row. Nothing in the replica should be one.
                 guard type != .other else { continue }
 
                 let isSymbolicLink = type == .symlink
@@ -471,9 +472,9 @@ enum IndexReconcile {
                 }
 
                 // `readlink`, not `open`: reading a link's target never materializes
-                // anything, and the target the replica holds is the Mac-side string
-                // section 5.7 already rewrote. `link_target` is set from the replica only
-                // when the entry really is a link.
+                // anything, and the target the replica holds is the Mac-side string the
+                // symlink policy already rewrote. `link_target` is set from the replica
+                // only when the entry really is a link.
                 var target: String?
                 if isSymbolicLink {
                     target = try? FileManager.default.destinationOfSymbolicLink(
@@ -490,8 +491,8 @@ enum IndexReconcile {
                         isDSStore: NameVisibility.isDSStore(nameBytes)))
             }
 
-            // Pass two: one transaction for the directory, as section 5.3 requires of
-            // every multi-row change.
+            // Pass two: one transaction for the directory, which is what every multi-row
+            // change takes.
             do {
                 let descend: [(url: URL, path: RelativePath, parent: IndexItem)] =
                     try writer.batch {
@@ -500,10 +501,10 @@ enum IndexReconcile {
                             let existing = try writer.item(path: item.path.bytes)
                             if let existing, existing.identifier == item.identifier {
                                 // The row is already keyed by the identifier the system
-                                // holds. Section 5.3 creates rows only "for every path
-                                // without a row": rewriting this one would throw away the
-                                // xattrs and the pin marker only the index has, and move
-                                // its versions for nothing.
+                                // holds. The walk creates rows only for a path without
+                                // one: rewriting this would throw away the xattrs and the
+                                // pin marker only the index has, and move its versions
+                                // for nothing.
                                 if item.attributes.type == .directory {
                                     next.append((item.url, item.path, existing))
                                 }
@@ -535,7 +536,7 @@ enum IndexReconcile {
                             row.identifier = item.identifier
 
                             if pending.contains(item.identifier) {
-                                // The pending exception (section 5.3): the replica file
+                                // The pending exception: the replica file
                                 // holds the edit, so its size and mtime are the edit's,
                                 // not the server's. An empty version comes back through
                                 // the item's own `modifyItem`, whose post-upload `lstat`
@@ -622,7 +623,7 @@ enum IndexReconcile {
 
     /// The identifier the system already knows for one replica path, which is the whole
     /// point of the walk. Under a deadline of its own, like every other call the agent
-    /// makes into File Provider (section 6.3), and never longer than the walk's own.
+    /// makes into File Provider, and never longer than the walk's own.
     private static func replicaIdentifier(
         at url: URL, locationID: String, expiry: Date, replica: any ReplicaControlling
     ) async -> String? {
@@ -654,20 +655,20 @@ enum IndexReconcile {
     ///
     /// Size and second-mtime are the values the system was given for the item, dataless
     /// or not, so they are taken verbatim: that is what makes the rebuilt content version
-    /// match the one the system holds (section 5.3).
+    /// match the one the system holds.
     ///
     /// Everything else is deliberately not the replica's:
     ///
     /// - `mtimeNanoseconds` and `inode` are nil. The columns hold the *server's* values,
-    ///   and section 6.4 bumps the generation when either moves while size and mtime do
-    ///   not. Writing the Mac's would make the first real `lstat` look like a change and
-    ///   re-fetch every file. Nil means "record whatever comes next without comparing".
-    /// - mode and owner are the connecting account's, not the replica's. Section 5.3 says
-    ///   plainly that "mode, owner and the xattr hash are not in the replica" and accepts
-    ///   the metadata version moving for it; the replica's own mode and uid are the Mac's
-    ///   and would derive the wrong capabilities, so the item is given the generous
-    ///   reading until the first real `lstat` arrives - the same stance section 5.4 takes
-    ///   for an unknown identity.
+    ///   and change detection bumps the generation when either moves while size and mtime
+    ///   do not. Writing the Mac's would make the first real `lstat` look like a change
+    ///   and re-fetch every file. Nil means "record whatever comes next without
+    ///   comparing".
+    /// - mode and owner are the connecting account's, not the replica's. Mode, owner and
+    ///   the xattr hash are not in the replica, and the metadata version moving for it is
+    ///   accepted; the replica's own mode and uid are the Mac's and would derive the
+    ///   wrong capabilities, so the item is given the generous reading until the first
+    ///   real `lstat` arrives - the same stance taken for an unknown identity.
     private static func attributes(
         from buffer: Foundation.stat, type: SFTPFileType, identity: ServerIdentity,
         symlinkTarget: String?
@@ -693,10 +694,10 @@ enum IndexReconcile {
     // MARK: pins.json
 
     /// Pin markers are one of the two things the walk cannot recover from the replica,
-    /// and `pins.json` beside the index is the copy that brings them back (section 5.3).
-    /// Milestone 8 writes it on every pin change (`LocationRuntime.writePinsSidecar`);
-    /// this reads it defensively and does nothing at all if it is missing or unparseable,
-    /// because an index rebuilt on an older install may have no sidecar at all.
+    /// and `pins.json` beside the index is the copy that brings them back.
+    /// `LocationRuntime.writePinsSidecar` writes it on every pin change; this reads it
+    /// defensively and does nothing at all if it is missing or unparseable, because an
+    /// index rebuilt on an older install may have no sidecar at all.
     private static func restorePins(
         locationID: String, writer: IndexWriter, report: inout Report
     ) {
@@ -713,15 +714,14 @@ enum IndexReconcile {
             guard marker != 0, let path = try? LocationRuntime.pinPath(pathString) else { continue }
             do {
                 guard var row = try writer.item(path: path.bytes) else {
-                    // A marker on a path that is no longer there vanishes with it
-                    // (section 7.1).
+                    // A marker on a path that has gone vanishes with it.
                     continue
                 }
                 row.pinState = marker
                 row.kept = marker == 1
                 // The same bit `setPinState` moves: it is the eager content policy, not
                 // the capability, that refuses an eviction, but the bit is part of the
-                // metadata version and has to agree with the marker (section 7.1).
+                // metadata version and has to agree with the marker.
                 row.capabilities =
                     row.kept
                     ? row.capabilities & ~Int64(ProviderCapabilities.allowsEvicting.rawValue)
@@ -739,14 +739,14 @@ enum IndexReconcile {
             }
         }
         // The markers are back; the *effect* of them is not. Every row under a restored
-        // pin inherits its kept state (section 7.1.1), and a rebuilt row was written
-        // before the marker above it existed, so the whole tree is re-derived here rather
-        // than left disagreeing with the markers it now carries.
+        // pin inherits its kept state (docs/design/pinning.md), and a rebuilt row is
+        // written before the marker above it exists, so the whole tree is re-derived here
+        // rather than left disagreeing with the markers it carries.
         reapplyKept(writer: writer, report: &report)
     }
 
     /// Recomputes `kept` (and the `allowsEvicting` bit and metadata version that follow
-    /// from it) on every row, from the markers the index now holds. Cheap: no `lstat`, no
+    /// from it) on every row, from the markers the index holds. Cheap: no `lstat`, no
     /// network, one pass over the table, and only the rows that disagree are written.
     private static func reapplyKept(writer: IndexWriter, report: inout Report) {
         guard let markerRows = try? writer.pinMarkerRows(), !markerRows.isEmpty else { return }
@@ -771,11 +771,10 @@ enum IndexReconcile {
         }
     }
 
-    /// Reads whatever shape `pins.json` turns out to have, since milestone 8 has not
-    /// written one yet. Three are accepted and anything else is ignored: a list of
-    /// objects, an object with that list under `pins`, and a plain path-to-marker map.
-    /// A marker is `1` pinned, `-1` excluded, `0` inherit, as the `pin_state` column
-    /// spells them, or the words themselves.
+    /// Reads whatever shape `pins.json` turns out to have. Three are accepted and
+    /// anything else is ignored: a list of objects, an object with that list under
+    /// `pins`, and a plain path-to-marker map. A marker is `1` pinned, `-1` excluded, `0`
+    /// inherit, as the `pin_state` column spells them, or the words themselves.
     private static func parsePins(_ data: Data) -> [(path: String, marker: Int64)]? {
         guard let json = try? JSONSerialization.jsonObject(with: data) else { return nil }
         var out: [(path: String, marker: Int64)] = []

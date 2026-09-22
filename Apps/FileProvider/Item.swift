@@ -3,12 +3,12 @@ import Foundation
 import ProviderCore
 import UniformTypeIdentifiers
 
-/// `NSFileProviderItem` over an `ItemView` (DESIGN.md section 5.2).
+/// `NSFileProviderItem` over an `ItemView` (`docs/design/extension.md`).
 ///
 /// Nothing is computed here. Every field was decided in `ProviderCore.ItemView` - which
 /// itself is a field-by-field copy from a finished row, with no ancestor walk and no
-/// second copy of the rules in sections 5.4, 5.7 or 7 - and this class is the Apple coat
-/// over it.
+/// second copy of the naming, symlink or eviction rules - and this class is the Apple
+/// coat over it.
 final class Item: NSObject, NSFileProviderItemDecorating {
     private let view: ItemView
 

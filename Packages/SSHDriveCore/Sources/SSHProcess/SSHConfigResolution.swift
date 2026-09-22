@@ -1,7 +1,7 @@
 import Foundation
 
 /// The output of `ssh -G <host>`: resolved values only, with no indication of where each
-/// came from (DESIGN.md section 4.1).
+/// came from (docs/design/locations.md).
 public struct SSHConfigResolution: Sendable, Equatable {
     /// Lower-cased keyword to its values, in the order `ssh` printed them. Keywords that
     /// may repeat (`identityfile`, `sendenv`, `setenv`, `localforward`) keep every value.
@@ -30,8 +30,8 @@ public struct SSHConfigResolution: Sendable, Equatable {
 
     /// The keychain key for a password prompt from this destination:
     /// `password:<user>@<hostname>:<port>`, lower-cased hostname, never the alias
-    /// (section 4.2). Defined here because this is where the resolution lives; the
-    /// keychain itself is `Secrets`.
+    /// (docs/design/secrets.md). Defined here because this is where the resolution
+    /// lives; the keychain itself is `Secrets`.
     public var passwordKeychainKey: String? {
         guard let user, let hostname else { return nil }
         return "password:\(user)@\(hostname.lowercased()):\(port ?? 22)"
@@ -55,8 +55,8 @@ public struct SSHConfigResolution: Sendable, Equatable {
 }
 
 /// Which values a config file supplied, from diffing `ssh -G` against
-/// `ssh -F /dev/null -G` (DESIGN.md section 4.1). `-F` silences `/etc/ssh/ssh_config` as
-/// well as the user's file, so the label reads "from ssh config" and `show` names both
+/// `ssh -F /dev/null -G` (docs/design/locations.md). `-F` silences `/etc/ssh/ssh_config`
+/// as well as the user's file, so the label reads "from ssh config" and `show` names both
 /// paths rather than crediting `~/.ssh/config` with a value Apple's system file set.
 public struct SSHConfigAttribution: Sendable {
     public var resolved: SSHConfigResolution
@@ -81,7 +81,7 @@ public struct SSHConfigAttribution: Sendable {
 
     /// The control-socket and session-shape settings the config would have applied and the
     /// agent overrode. `sshdrive show` prints these so the user can see they were
-    /// overridden (section 6.1).
+    /// overridden (docs/design/ssh.md).
     public var overriddenByUs: [(keyword: String, configValue: String)] {
         let watched = SSHCommandBuilder.Overrides.all.map { $0.lowercased() }
         return watched.compactMap { keyword in
@@ -94,7 +94,7 @@ public struct SSHConfigAttribution: Sendable {
 public enum SSHConfigResolver {
     /// Runs `ssh -G`. A config written for a newer Homebrew OpenSSH may use a keyword
     /// Apple's build rejects, and `ssh -G` then fails with `Bad configuration option`;
-    /// `add` reports that together with `/usr/bin/ssh -V` (section 4.1).
+    /// `add` reports that together with `/usr/bin/ssh -V` (docs/design/locations.md).
     public static func resolve(
         target: SSHTarget,
         environment: [String: String],

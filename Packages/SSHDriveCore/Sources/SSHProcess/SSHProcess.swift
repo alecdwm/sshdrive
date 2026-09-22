@@ -2,24 +2,25 @@ import Foundation
 import Config
 import Logging
 
-/// Spawns and supervises `ssh` (DESIGN.md section 6.1).
+/// Spawns and supervises `ssh` (docs/design/ssh.md).
 ///
 /// The module's pieces: `SSHCommandBuilder` assembles every command line, `ProxyChainBuilder`
 /// rebuilds a `ProxyJump` chain as the agent's own `ProxyCommand`, `SSHMaster` runs the
 /// `-N` ControlMaster and opens mux clients on its socket, `RemoteScript` is the `sh -s`
-/// script with the section 9.2 sentinel and the section 6.4 heartbeat wrapper,
+/// script with the sentinel (docs/design/security.md) and the heartbeat wrapper
+/// (docs/design/change-detection.md),
 /// `LoginShellSnapshot` takes `PATH` and `SSH_AUTH_SOCK` from the user's login shell, and
 /// `SSHExitClassifier` says what an exit means.
 public enum SSHProcess {
     /// The transport is the system's ssh, spawned by absolute path and never resolved
-    /// through PATH (section 6.1). `argv[0]` is set to this same string, so a ProxyJump
-    /// hop that ssh would build itself cannot be found through PATH either.
+    /// through PATH (docs/design/ssh.md). `argv[0]` is set to this same string, so a
+    /// ProxyJump hop that ssh would build itself cannot be found through PATH either.
     public static let defaultSSHBinaryPath = "/usr/bin/ssh"
 
     /// The one test seam this module has: `ServerModel.FakeSSH` installs its stub here so
     /// `SSHMaster`, `SSHInvocation`'s argv assembly, `Spawn` and `SSHExitClassifier` run
     /// for real against a scripted server on a box with no server at all
-    /// (docs/testing-architecture.md section 4.2). Nothing in the product ever sets it;
+    /// (docs/design/testing.md). Nothing in the product ever sets it;
     /// the agent, the CLI and `doctor` all read `defaultSSHBinaryPath` through it
     /// unchanged, and `SSHDRIVE_SSH_BINARY` on the environment is the same seam for a
     /// child process (the FakeSSH stub's own ProxyCommand hops).
@@ -33,7 +34,8 @@ public enum SSHProcess {
         ProcessInfo.processInfo.environment["SSHDRIVE_SSH_BINARY"] ?? defaultSSHBinaryPath
 
     /// The keywords the agent always overrides, whatever the user's config says
-    /// (section 6.1). `sshdrive show` prints any of these the config would have applied.
+    /// (docs/design/ssh.md). `sshdrive show` prints any of these the config would have
+    /// applied.
     public static var alwaysOverriddenKeywords: [String] { SSHCommandBuilder.Overrides.all }
 
     /// `/usr/bin/ssh -V`, for `sshdrive doctor` and `sshdrive show`.
@@ -52,13 +54,13 @@ public enum SSHProcess {
     }
 
     /// The login shell snapshot: `PATH` and `SSH_AUTH_SOCK` as a fresh login shell has
-    /// them (section 6.1).
+    /// them (docs/design/ssh.md).
     public static func loginShellSnapshot(timeout: TimeInterval = 10) async -> LoginShellSnapshot {
         await LoginShellSnapshotReader.take(timeout: timeout)
     }
 
     /// `ssh -G <host>` and the diff against `ssh -F /dev/null -G <host>` that attributes
-    /// each value to the config (section 4.1).
+    /// each value to the config (docs/design/locations.md).
     public static func resolveConfiguration(
         for location: Location,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -68,7 +70,7 @@ public enum SSHProcess {
 
     /// The location's stored overrides as a spawn target. A location that passed the
     /// collect connection's first pass runs `IdentityAgent=none` for good; only an
-    /// `agentDependent` location ever consults a key agent (section 4.2).
+    /// `agentDependent` location ever consults a key agent (docs/design/secrets.md).
     public static func target(for location: Location) -> SSHTarget {
         SSHTarget(
             host: location.host,

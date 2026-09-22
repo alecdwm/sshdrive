@@ -1,6 +1,7 @@
 #!/bin/sh
-# Build the remote helper (DESIGN.md section 6.4 tier 2) and lay the result out the way
-# section 3 and section 10.1 want it:
+# Build the remote helper (change detection tier 2, docs/design/change-detection.md) and
+# lay the result out the way the bundle and the release expect
+# (docs/design/components.md, docs/design/packaging.md):
 #
 #   Resources/helper/sshdrive-helper-<version>-<os>-<arch>   one static binary per target
 #   Resources/helper/manifest.json                           version + sha256 + size for each
@@ -78,7 +79,7 @@ for TARGET in $TARGETS; do
 	NAME="sshdrive-helper-$VERSION-$OS-$ARCH"
 	cp "$CRATE/target/$TARGET/release/sshdrive-helper" "$OUT/$NAME"
 	chmod 755 "$OUT/$NAME"
-	# arm64 macOS refuses to run unsigned code, even over ssh (section 10.1).
+	# arm64 macOS refuses to run unsigned code, even over ssh.
 	if [ "$OS" = darwin ] && command -v codesign >/dev/null 2>&1; then
 		codesign --force --sign - --timestamp=none "$OUT/$NAME" >/dev/null 2>&1 || true
 	fi

@@ -11,7 +11,7 @@ import Testing
 import XPCProtocols
 
 /// Suite D's write half and suite G's scheduler, on the agent's side
-/// (`docs/testing-architecture.md` section 5).
+/// (docs/design/testing.md).
 ///
 /// Most of these run against the in-memory agent fakes, because what they are about is a
 /// decision `LocationRuntime` and `RemoteWriter` make. Two of them - **D10** and **D11** -
@@ -28,13 +28,14 @@ extension AgentScenarios {
         /// **D2** (`MQ-013`, `MQ-017`, `MQ-018`) - the conflict copy evicts, retried.
         ///
         /// A local edit meets a remote change made between the `baseVersion` the system
-        /// passed us and now. Section 5.5's policy: the temp file, which already holds the
-        /// local content, becomes `<name> (conflicted copy from <Mac> <date>).<ext>` beside
-        /// the original, the **remote** item is returned, the new sibling gets an anchor so
-        /// Finder shows it at once, and the item is then evicted - because the system
-        /// believes whatever version a `modifyItem` reply carries (`MQ-013`), so returning
-        /// the remote version on its own would leave the replica holding the *local* bytes
-        /// under the *remote* version for ever.
+        /// passed us and now. The write policy (docs/design/writes.md): the temp file,
+        /// which already holds the local content, becomes
+        /// `<name> (conflicted copy from <Mac> <date>).<ext>` beside the original, the
+        /// **remote** item is returned, the new sibling gets an anchor so Finder shows it
+        /// at once, and the item is then evicted - because the system believes whatever
+        /// version a `modifyItem` reply carries (`MQ-013`), so returning the remote version
+        /// on its own would leave the replica holding the *local* bytes under the *remote*
+        /// version for ever.
         ///
         /// The eviction cannot be done once: issued straight after the reply it is refused
         /// `-2008 NSFileProviderErrorNonEvictable`, because the system is still finishing
@@ -54,7 +55,7 @@ extension AgentScenarios {
                 .write(path: try RelativePath(string: "README.txt"), contents: remoteBytes))
 
             // Nothing has been asked of the replica yet: the eviction is the caller's, and
-            // it must come *after* the reply has gone (section 5.5).
+            // it must come *after* the reply has gone (docs/design/writes.md).
             harness.replica.resetCalls()
 
             let localBytes = Data("the local edit that must not be lost".utf8)
@@ -76,13 +77,13 @@ extension AgentScenarios {
                 "D2: `modifyItem` itself evicts nothing; the eviction follows the reply")
 
             // The conflict copy is a sibling holding the local content, with an anchor of
-            // its own so the working-set signal below can carry it (section 5.5, MQ-001:
-            // a folder is enumerated once, ever).
+            // its own so the working-set signal below can carry it (docs/design/writes.md,
+            // MQ-001: a folder is enumerated once, ever).
             let rows = try await runtime.dumpIndex()
             let copyRow = try #require(
                 rows.first { String(decoding: $0.path, as: UTF8.self).contains("conflicted copy from") })
             let copyPath = String(decoding: copyRow.path, as: UTF8.self)
-            #expect(copyPath.hasSuffix(".txt"), "D2: the extension is kept, as section 5.5 spells it")
+            #expect(copyPath.hasSuffix(".txt"), "D2: the extension is kept (docs/design/writes.md)")
             let kept = try await fake.read(try RelativePath(string: copyPath), offset: 0, length: nil)
             #expect(kept == localBytes, "D2: the copy holds the local bytes, so nothing is lost")
             let anchors = try await runtime.dumpAnchors(limit: 50)
@@ -130,8 +131,8 @@ extension AgentScenarios {
         /// at 8 s, seven attempts, and a giving-up that is logged rather than silent.
         ///
         /// The measurement behind `MQ-017` is only ever "the first retry was enough". The
-        /// schedule the agent runs is the one section 5.5 writes down, and this is what
-        /// pins it: a run that needs five attempts, and a run that never succeeds.
+        /// schedule the agent runs is the one docs/design/writes.md writes down, and this
+        /// is what pins it: a run that needs five attempts, and a run that never succeeds.
         @Test func d2TheEvictionBackoffDoublesAndIsCappedAtEight() async throws {
             let clock = VirtualAgentClock(autoAdvance: true)
             let harness = try AgentHarness(clock: clock)
@@ -164,14 +165,14 @@ extension AgentScenarios {
 
         /// **D6** (`MQ-013`) - an upload in flight is invisible to change detection.
         ///
-        /// Section 5.5: between the rename landing and the post-upload `lstat`, the path on
-        /// the server carries content the index does not know about yet. A differ that
-        /// looked in that window would report the agent's own write as a remote change and
-        /// make the system re-fetch the file it had just written - and since the system
-        /// believes the version in our reply and never re-fetches on its own (`MQ-013`),
-        /// what the index says about that path is the only account of it there is. So every
-        /// path with an upload in flight sits in a per-location in-flight set and the
-        /// differ skips it.
+        /// Between the rename landing and the post-upload `lstat` (docs/design/writes.md),
+        /// the path on the server carries content the index does not know about yet. A
+        /// differ that looked in that window would report the agent's own write as a
+        /// remote change and make the system re-fetch the file it had just written - and
+        /// since the system believes the version in our reply and never re-fetches on its
+        /// own (`MQ-013`), what the index says about that path is the only account of it
+        /// there is. So every path with an upload in flight sits in a per-location
+        /// in-flight set and the differ skips it.
         ///
         /// The cycle is held open at the `setstat` that follows the rename, which is
         /// exactly that window, and the control at the end is what makes the assertion mean
@@ -213,7 +214,7 @@ extension AgentScenarios {
             }
             #expect(
                 await Self.waitUntil { !wire.arrivals(of: .setstat).isEmpty },
-                "the upload should be held in section 5.5's window")
+                "the upload should be held in the write protocol's window (docs/design/writes.md)")
             let dirty = await runtime.writerInFlightPaths()
             #expect(
                 dirty.contains(Data("Docs/note.txt".utf8)),
@@ -244,7 +245,7 @@ extension AgentScenarios {
             #expect(await runtime.writerInFlightPaths().isEmpty, "the set is released after")
 
             // The next cycle finds a version the index already holds and reports nothing,
-            // which is the other half of section 5.5's promise.
+            // which is the other half of the write protocol's promise (docs/design/writes.md).
             let quiet = await runtime.listOne(Data("Docs".utf8))
             #expect(
                 !quiet.changed.contains { $0.identifier == identifier },
@@ -265,8 +266,9 @@ extension AgentScenarios {
 
         // MARK: - D10: the temp+rename upload, on the wire
 
-        /// **D10** (`SQ-033`, `SQ-028`, `MQ-013`) - the upload protocol of section 5.5, end
-        /// to end, against a server that really speaks SFTP v3.
+        /// **D10** (`SQ-033`, `SQ-028`, `MQ-013`) - the upload protocol
+        /// (docs/design/writes.md), end to end, against a server that really speaks
+        /// SFTP v3.
         ///
         /// The bytes go to `.sshdrive-upload-<mac8>-<uuid>` beside the destination, the
         /// destination is `lstat`ed immediately before the rename, the replacement is
@@ -324,7 +326,7 @@ extension AgentScenarios {
             let temporary = try #require(temporaries.first)
             #expect(
                 temporary.hasPrefix(".sshdrive-upload-\(Self.macID)-"),
-                "D10: the name carries the Mac that made it (section 5.5)")
+                "D10: the name carries the Mac that made it (docs/design/writes.md)")
             #expect(
                 server.contents(of: "Docs/\(temporary)") == bytes,
                 "D10: the bytes are in the temp file, not in the destination")
@@ -356,7 +358,7 @@ extension AgentScenarios {
                 saved.snapshot.contentVersion.hasPrefix("\(bytes.count)-\(modified)-"),
                 "MQ-013: the version comes from the post-upload `lstat`")
             let stored = try #require(try await runtime.row(identifier: identifier))
-            #expect(stored.inode == nil, "section 5.3: the rename gave the path a new inode")
+            #expect(stored.inode == nil, "docs/design/item-index.md: the rename gave the path a new inode")
             #expect(stored.mtimeNanoseconds == nil)
 
             // And the protocol really was in that order, on the wire.
@@ -381,9 +383,10 @@ extension AgentScenarios {
         /// **D10** (`SQ-034`, `SQ-028`) - a create meets the two rename semantics.
         ///
         /// The destination is free when the upload `lstat`s it and taken by the time the
-        /// rename runs - "a file created meanwhile", which is the case section 5.5's plain,
-        /// non-overwriting rename exists for. What happens next is the server's to decide,
-        /// and the probe is what tells the agent which server it has (`SQ-034`):
+        /// rename runs - "a file created meanwhile", which is the case the plain,
+        /// non-overwriting rename exists for (docs/design/writes.md). What happens next is
+        /// the server's to decide, and the probe is what tells the agent which server it
+        /// has (`SQ-034`):
         ///
         /// - OpenSSH refuses, as `link` + `unlink` does. The refusal is a bare `FAILURE`
         ///   with no errno (`SQ-028`), so the agent asks the second question - an `lstat`
@@ -461,7 +464,7 @@ extension AgentScenarios {
         /// **D11** (`SQ-074`'s class, `SQ-033`) - the stale temp sweep takes our prefix and
         /// nothing else.
         ///
-        /// Section 5.5: a temp file carrying **this** Mac's `<mac8>` that is not in the
+        /// A temp file carrying **this** Mac's `<mac8>` that is not in the
         /// in-flight set died with a connection or an agent and is removed as soon as the
         /// agent lists its directory, however new it is; one from another Mac is left alone
         /// until it is 30 days old. Everything else in the directory is the user's.
@@ -575,8 +578,9 @@ extension AgentScenarios {
 
         /// **G10** (`MQ-031`, `MQ-032`) - four at once, foreground first, the window split.
         ///
-        /// Section 6.2: the agent runs at most four transfers at once per location, splits
-        /// the pipelined window between them, and holds the rest with their XPC calls open.
+        /// The agent runs at most four transfers at once per location (docs/design/sftp.md),
+        /// splits the pipelined window between them, and holds the rest with their XPC
+        /// calls open.
         /// Background - the eager downloads of a kept subtree - starts only while no
         /// foreground transfer is waiting, and a running transfer is never pre-empted.
         ///
@@ -600,11 +604,11 @@ extension AgentScenarios {
                     "background \(index) should be running")
             }
             var stats = await runtime.schedulerStatistics()
-            #expect(stats.running == 4, "section 6.2: at most four at once")
+            #expect(stats.running == 4, "docs/design/sftp.md: at most four at once")
             #expect(stats.peakRunning == 4)
             #expect(
                 gate.windows == [16, 8, 5, 4],
-                "section 6.2: the pipelined window is split between the running transfers")
+                "docs/design/sftp.md: the pipelined window is split between the running transfers")
 
             // Two more background transfers wait, and the ceiling holds under load.
             for index in 4 ..< 6 {
@@ -650,9 +654,10 @@ extension AgentScenarios {
 
         /// **G10** (`MQ-032`) - a cancelled transfer really stops, and frees its slot.
         ///
-        /// Section 5.2: cancelling the extension's `Progress`, or its connection going away,
-        /// cancels the transfer's Task and every SFTP request it has not sent yet, which the
-        /// caller is owed as the transport's own `.cancelled`. The slot it was holding goes
+        /// Cancelling the extension's `Progress`, or its connection going away
+        /// (docs/design/extension.md), cancels the transfer's Task and every SFTP request
+        /// it has not sent yet, which the caller is owed as the transport's own
+        /// `.cancelled`. The slot it was holding goes
         /// back to the scheduler, so the transfer that was waiting behind it starts.
         @Test func g10ACancelledTransferStopsAndFreesItsSlot() async throws {
             let harness = try AgentHarness()
@@ -677,10 +682,10 @@ extension AgentScenarios {
                 let nsError = error as NSError
                 #expect(
                     nsError.code == SSHDriveAgentError.serverUnreachable.rawValue,
-                    "section 5.2: an abandoned transfer is retryable, never an alert")
+                    "docs/design/extension.md: an abandoned transfer is retryable, never an alert")
                 #expect(
                     nsError.localizedDescription.contains("cancelled"),
-                    "section 6.2: the transport's own `.cancelled`, not Swift's CancellationError")
+                    "docs/design/sftp.md: the transport's own `.cancelled`, not Swift's CancellationError")
             }
             #expect(
                 Self.bytesOnDisk(harness, index: 2) == 0,
@@ -744,8 +749,8 @@ extension AgentScenarios {
             ]
         }
 
-        /// The `<mac8>` every temp file of ours carries (section 5.5), fixed so a scenario
-        /// can name the files an agent of ours would have left.
+        /// The `<mac8>` every temp file of ours carries (docs/design/writes.md), fixed so
+        /// a scenario can name the files an agent of ours would have left.
         static let macID = "abcd1234"
 
         static let ourStale = ".sshdrive-upload-abcd1234-0f0f0f0f-0000-4000-8000-000000000001"
@@ -840,11 +845,13 @@ extension AgentScenarios {
             harness.launcher.transportFactory = { _ in transport }
             let location = try await harness.addLocation(
                 nickname: "nas", backend: .sftp, remotePath: server.root)
-            // Section 5.5's `<mac8>`, from the top level of `config.json`.
+            // The write protocol's `<mac8>` (docs/design/writes.md), from the top level of
+            // `config.json`.
             try await harness.manager.mutateConfiguration { file in file.macID = macID }
             let runtime = try await harness.manager.runtime(for: location)
-            // Section 5.5's probe is fired detached from `applyConnection`; awaiting it
-            // here means no rename of its own is in flight when a scenario holds one.
+            // The rename-semantics probe is fired detached from `applyConnection`;
+            // awaiting it here means no rename of its own is in flight when a scenario
+            // holds one.
             _ = await runtime.probeRenameSemantics()
             return (location, runtime)
         }
@@ -879,7 +886,8 @@ extension AgentScenarios {
 ///
 /// Nothing here models a server: every call is forwarded. What it adds is a hold that a
 /// test opens by hand, a record of which calls arrived and in what order, and the window
-/// each transfer was handed, which is what section 6.2's split is asserted from.
+/// each transfer was handed, which is what the pipelined-window split
+/// (docs/design/sftp.md) is asserted from.
 final class InterposingTransport: SFTPTransport, @unchecked Sendable {
 
     enum Operation: String, Sendable {
@@ -925,7 +933,8 @@ final class InterposingTransport: SFTPTransport, @unchecked Sendable {
     }
 
     /// Runs `body` the first time an `lstat` of `path` finds nothing - "a file created
-    /// meanwhile", which is the race section 5.5's non-overwriting rename exists for.
+    /// meanwhile", which is the race the non-overwriting rename exists for
+    /// (docs/design/writes.md).
     func plantOnNextMiss(of path: String, _ body: @escaping @Sendable () -> Void) {
         lock.lock()
         missWatch = (path, body)

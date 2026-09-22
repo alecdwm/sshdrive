@@ -4,7 +4,8 @@ import Index
 import SFTP
 import XPCProtocols
 
-/// Builds a finished index row from one `lstat` (DESIGN.md sections 5.2, 5.3, 5.4, 5.7).
+/// Builds a finished index row from one `lstat` (docs/design/extension.md,
+/// docs/design/item-index.md, docs/design/names-and-attributes.md, docs/design/symlinks.md).
 ///
 /// "A row is a finished item": `capabilities`, `fs_flags`, `kept` and `link_target` are
 /// derived here, by the agent, and the extension never re-derives them. It lives in the
@@ -15,7 +16,7 @@ public struct RowBuilder: Sendable {
     public var permissions: PermissionsMode
     public var identity: ServerIdentity
     /// The two spellings of the location root a symlink target is measured against
-    /// (section 5.7).
+    /// (docs/design/symlinks.md).
     public var roots: SymlinkPolicy.Roots
 
     public init(
@@ -27,9 +28,11 @@ public struct RowBuilder: Sendable {
     }
 
     /// `hidden = 1`: a symlink whose target leaves the share. It holds its name on the
-    /// server, so a create or rename onto it fails `.filenameCollision` (section 5.7).
+    /// server, so a create or rename onto it fails `.filenameCollision`
+    /// (docs/design/symlinks.md).
     public static let hiddenEscapingLink: Int64 = 1
-    /// `hidden = 3`: a local-only item, `.DS_Store` being the only one (section 5.4).
+    /// `hidden = 3`: a local-only item, `.DS_Store` being the only one
+    /// (docs/design/names-and-attributes.md).
     public static let hiddenLocalOnly: Int64 = 3
 
     /// The reason string `sshdrive status` prints under "not shown" for a hidden link,
@@ -47,9 +50,9 @@ public struct RowBuilder: Sendable {
         hidden: Int64? = nil,
         localAttributes: LocalAttributes? = nil
     ) -> Built {
-        // ns-mtime and inode feed change detection only. When either differs from the
-        // stored value while size and second-mtime do not, the generation is bumped,
-        // which changes the version and makes the system re-fetch (section 5.3).
+        // ns-mtime and inode feed change detection only. When either differs from the stored
+        // value while size and second-mtime do not, the generation is bumped, which changes
+        // the version and makes the system re-fetch (docs/design/item-index.md).
         var generation = existing?.generation ?? 0
         if let existing,
             existing.size == attributes.size,
@@ -67,20 +70,21 @@ public struct RowBuilder: Sendable {
         let contentVersion = IndexItem.contentVersion(
             size: attributes.size, mtime: attributes.mtime, generation: generation)
 
-        // The effective kept state is derived by the agent from the markers at and above
-        // the path (sections 5.2, 7.1.1): the nearest explicit state at or above the item
-        // decides, so a row with no marker of its own inherits its parent's *effective*
-        // state, which the parent row already carries. That one line is what section 7.1
-        // means by "descendants the index has never seen need nothing: their rows are
-        // created with the right state when they are first listed" - a file appearing
+        // The effective kept state is derived by the agent from the markers at and above the
+        // path (docs/design/extension.md, docs/design/pinning.md): the nearest explicit state
+        // at or above the item decides, so a row with no marker of its own inherits its
+        // parent's *effective* state, which the parent row already carries. That one line is
+        // what makes descendants the index has never seen need nothing: their rows are
+        // created with the right state when they are first listed. A file appearing
         // remotely inside a kept folder is kept, and one appearing inside an excluded
         // subfolder is not, without any ancestor walk here.
         let pinState = existing?.pinState ?? 0
         let ownMarker = PinPolicy.Marker(rawMarker: pinState)
         let kept = ownMarker.isExplicit ? ownMarker == .pinned : parent.kept
 
-        // Section 5.7: the lexical check runs once per link, here, and its answer is
-        // stored on the row so the extension serves the target without repeating it.
+        // The lexical check (docs/design/symlinks.md) runs once per link, here, and its
+        // answer is stored on the row so the extension serves the target without
+        // repeating it.
         var linkTarget: Data?
         var hiddenReason = ""
         var effectiveHidden = hidden ?? existing?.hidden ?? 0
@@ -124,7 +128,8 @@ public struct RowBuilder: Sendable {
             filename: filename)
 
         // The local blob is the xattrs and the Finder tags together, and its hash is what
-        // moves the metadata version (sections 5.3, 5.4).
+        // moves the metadata version (docs/design/item-index.md,
+        // docs/design/names-and-attributes.md).
         let blob = localAttributes.flatMap { $0.encoded() } ?? existing?.xattrs
         let metadataVersion = ItemDerivation.metadataVersion(
             contentVersion: contentVersion,
@@ -164,7 +169,7 @@ public struct RowBuilder: Sendable {
     }
 
     /// Recomputes the metadata version of a row whose local blob or derived fields moved
-    /// without a fresh `lstat` - a tag change, a pin change (section 5.3).
+    /// without a fresh `lstat` - a tag change, a pin change (docs/design/item-index.md).
     public static func restamp(_ row: inout IndexItem) {
         row.metadataVersion = ItemDerivation.metadataVersion(
             contentVersion: row.contentVersion,

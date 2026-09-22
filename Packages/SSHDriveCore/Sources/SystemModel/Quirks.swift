@@ -1,6 +1,6 @@
 import Foundation
 
-/// The quirk table (`docs/testing-architecture.md` section 3.2).
+/// The quirk table (docs/design/testing.md).
 ///
 /// Every rule `SystemModel` implements is keyed on an id from `docs/quirks/macos.md`, and
 /// every value it uses is resolved out of this table for the macOS version the scenario
@@ -9,8 +9,8 @@ import Foundation
 /// The two columns that exist today are 26.4 and 26.6, and they are **identical unless a
 /// quirk says otherwise** - the catalog records which version each behaviour was measured
 /// on, and nothing measured so far differs between the two. `MQ-005` is the one row whose
-/// measurement came from 26.6 (the 0.1.2 field failure); nothing about it suggests 26.4
-/// behaves differently and 26.4 is where the reproduction ran, so it covers both.
+/// measurement came from 26.6; nothing about it suggests 26.4 behaves differently and 26.4
+/// is where the reproduction ran, so it covers both.
 public enum MacOSVersion: String, CaseIterable, Sendable, Hashable {
     case v26_4 = "26.4"
     case v26_6 = "26.6"
@@ -35,8 +35,8 @@ public enum QuirkValue: Equatable, Sendable {
     case durations([Double])
 }
 
-/// One measurement of one quirk: which versions it covers, what was seen, and where the
-/// evidence is. `results.md` stays the source of truth; this is an index into it.
+/// One measurement of one quirk: which versions it covers, what was seen, and when it was
+/// measured. The row under the same id in `docs/quirks/macos.md` is the catalogue.
 public struct QuirkMeasurement: Sendable {
     public let versions: [MacOSVersion]
     public let value: QuirkValue
@@ -85,8 +85,8 @@ public struct QuirkTable {
             let measurement = quirk.measurements.first(where: { $0.versions.contains(version) })
         else {
             fatalError(
-                "quirk \(id) has no measurement covering macOS \(version.rawValue): run "
-                    + "docs/spikes/macos-version-sweep.md on that version and add the row")
+                "quirk \(id) has no measurement covering macOS \(version.rawValue): "
+                    + "measure it on that version and add the row to docs/quirks/macos.md")
         }
         return measurement.value
     }
@@ -134,12 +134,11 @@ extension QuirkTable {
     static let bothVersions: [MacOSVersion] = [.v26_4, .v26_6]
 
     /// The whole catalogue, in the order `docs/quirks/macos.md` lists its sections.
-    /// Statements are abbreviations of that file, which is the catalogue;
-    /// `results.md` is the source of truth behind both.
+    /// Statements are abbreviations of that file, which is the catalogue.
     public static let macOSCatalogue: [Quirk] =
         enumerationQuirks + writeQuirks + evictionQuirks + attributeQuirks + lifecycleQuirks
 
-    /// The rows step 1.3 needed: enumeration, the working set, anchors and the throttle.
+    /// Enumeration, the working set, anchors and the throttle.
     static let enumerationQuirks: [Quirk] = [
         Quirk(
             id: .enumerateOnceEver,
@@ -149,7 +148,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-3; DESIGN.md section 6.5; gotcha 29")
+                    source: "measured 2026-09-04; gotcha 29")
             ]),
         Quirk(
             id: .workingSetIsChangeStreamOnly,
@@ -159,7 +158,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04, s6-3; DESIGN.md section 5.3")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .freshInstancePerSignal,
@@ -169,7 +168,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-1; results 2026-09-04 (M6)")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .emptyChangeSetMeansUpToDate,
@@ -179,7 +178,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M6) \"Four assumptions that failed\"; gotcha 78")
+                    source: "measured 2026-09-04; gotcha 78")
             ]),
         Quirk(
             id: .changeEnumerationThrottleThreshold,
@@ -189,7 +188,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(27),
-                    source: "results 2026-09-08 addendum (measured on 26.6, the 0.1.2 field failure)")
+                    source: "measured on macOS 26.6, 2026-09-08")
             ]),
         Quirk(
             id: .changeEnumerationThrottleCeiling,
@@ -198,7 +197,8 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(47 * 60),
-                    source: "results 2026-09-08 addendum, `fileproviderctl dump`: next:'28min45s' count:27")
+                    source:
+                        "measured 2026-09-08, `fileproviderctl dump`: next:'28min45s' count:27")
             ]),
         Quirk(
             id: .changeEnumerationThrottleAtSevenErrors,
@@ -208,7 +208,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(94),
-                    source: "results 2026-09-08 addendum, the VM reproduction: next:'1min34s' count:7")
+                    source: "measured 2026-09-08, the VM reproduction: next:'1min34s' count:7")
             ]),
         Quirk(
             id: .signalErrorResolvedIsTheOnlyFlush,
@@ -218,7 +218,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-2; gotcha 58")
+                    source: "measured 2026-09-04; gotcha 58")
             ]),
         Quirk(
             id: .syncAnchorExpiredIsReAsked,
@@ -228,7 +228,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "DESIGN.md section 5.3; results 2026-09-04 (M6)")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .noTimeoutOnEnumerateItems,
@@ -238,7 +238,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(60.19),
-                    source: "results 2026-09-04 (M5) s5-6; gotcha 60")
+                    source: "measured 2026-09-04; gotcha 60")
             ]),
         Quirk(
             id: .believesReturnedVersions,
@@ -248,7 +248,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-7; gotcha 30")
+                    source: "measured 2026-09-04; gotcha 30")
             ]),
         Quirk(
             id: .killsIdleInstances,
@@ -258,7 +258,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 S1 signed pass, \"Two bugs found while running this pass\"")
+                    source: "measured 2026-09-04")
             ]),
     ]
 }

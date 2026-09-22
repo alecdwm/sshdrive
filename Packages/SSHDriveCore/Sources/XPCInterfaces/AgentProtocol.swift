@@ -10,7 +10,7 @@ import XPCProtocols
 ///
 /// Every method is a request to the agent. The extension answers `item(for:)` and the
 /// working-set change stream from the index itself and calls none of these on that path
-/// (section 5.2).
+/// (docs/design/extension.md).
 @objc public protocol SSHDriveAgentProtocol {
 
     // MARK: Handshake
@@ -20,14 +20,14 @@ import XPCProtocols
     func ping(interfaceVersion: Int, reply: @escaping (Int) -> Void)
 
     /// Asked once per extension instance launch, before it opens the index reader
-    /// (section 5.3). An agent mid-restore answers false, and the instance serves
-    /// `.serverUnreachable` and opens nothing until `reopenIndexReader` arrives.
+    /// (docs/design/item-index.md). An agent mid-restore answers false, and the instance
+    /// serves `.serverUnreachable` and opens nothing until `reopenIndexReader` arrives.
     func indexReady(domainIdentifier: String, reply: @escaping (Bool) -> Void)
 
     // MARK: Enumeration
 
     /// `opendir`/`readdir` the mapped path, reconcile with the index, return items.
-    /// Records the folder as recently viewed (section 6.5).
+    /// Records the folder as recently viewed (docs/design/root-set.md).
     @objc(enumerateItemsInDomain:container:pageToken:reply:)
     func enumerateItems(
         domainIdentifier: String,
@@ -37,7 +37,7 @@ import XPCProtocols
     )
 
     /// The same listing, diffed against the index. This is how a folder refreshes when
-    /// Finder shows it (S3 confirms the system asks).
+    /// Finder shows it.
     @objc(enumerateChangesInDomain:container:anchor:reply:)
     func enumerateChanges(
         domainIdentifier: String,
@@ -49,13 +49,13 @@ import XPCProtocols
     /// The fallback path for the **working set**: used whenever the extension's own
     /// reader is not usable - the `indexReady` round trip has not come back, the agent
     /// answered no, the schema is newer than this build understands, or the reader could
-    /// not be opened at all (section 5.2).
+    /// not be opened at all (docs/design/extension.md).
     ///
-    /// Before this existed the working-set enumerator answered `.serverUnreachable` in
-    /// every one of those cases. It is the honest answer only when the agent really is
-    /// out of reach: fileproviderd throttles a change enumeration that keeps failing, and
-    /// a run of them takes the domain's event stream out to tens of minutes, after which
-    /// nothing the agent finds on the server reaches Finder at all (2026-09-08).
+    /// Answering `.serverUnreachable` in those cases instead is wrong: it is the honest
+    /// answer only when the agent really is out of reach, and fileproviderd throttles a
+    /// change enumeration that keeps failing, a run of them taking the domain's event
+    /// stream out to tens of minutes, after which nothing the agent finds on the server
+    /// reaches Finder at all.
     @objc(enumerateWorkingSetChangesInDomain:anchor:reply:)
     func enumerateWorkingSetChanges(
         domainIdentifier: String,
@@ -70,7 +70,7 @@ import XPCProtocols
     func currentAnchor(domainIdentifier: String, reply: @escaping (String?, Error?) -> Void)
 
     /// The fallback path for `item(for:)`: used when the extension has no reader, or
-    /// found a schema version newer than it understands (section 5.2).
+    /// found a schema version newer than it understands (docs/design/extension.md).
     @objc(itemInDomain:identifier:reply:)
     func item(
         domainIdentifier: String,
@@ -81,13 +81,13 @@ import XPCProtocols
     // MARK: Transfers
 
     /// The extension creates the target file in its own temp directory, opens it for
-    /// writing and sends the handle; the agent writes through it (section 5.2).
+    /// writing and sends the handle; the agent writes through it (docs/design/extension.md).
     ///
     /// `isFileViewerRequest` and `isSystemRequest` come straight off the call's
-    /// `NSFileProviderRequest`: section 6.2's transfer scheduler puts a fetch that is a
-    /// file-viewer request, or is not a system request, in the foreground class - that is
-    /// an app or the user opening the file - and everything else, the eager downloads of a
-    /// kept subtree included, in the background class.
+    /// `NSFileProviderRequest`: the transfer scheduler (docs/design/sftp.md) puts a fetch
+    /// that is a file-viewer request, or is not a system request, in the foreground class
+    /// - that is an app or the user opening the file - and everything else, the eager
+    /// downloads of a kept subtree included, in the background class.
     @objc(fetchContentsInDomain:identifier:requestedVersion:fileViewer:systemRequest:into:transferID:reply:)
     func fetchContents(
         domainIdentifier: String,
@@ -115,10 +115,10 @@ import XPCProtocols
     /// `mkdir`, `symlink`, or upload-to-temp plus a non-overwriting rename into place.
     /// `contents` is nil for a directory or a symlink.
     ///
-    /// `fileSystemFlags` decides the mode the temp file is opened with: 0644 for an
-    /// ordinary file, 0755 when the local one is executable, as `sftp put` does
-    /// (section 5.5). `modificationDate` is set back onto the file after the rename,
-    /// truncated to whole seconds since SFTP v3 carries no more.
+    /// `fileSystemFlags` decides the mode the temp file is opened with: 0644 for an ordinary
+    /// file, 0755 when the local one is executable, as `sftp put` does
+    /// (docs/design/writes.md). `modificationDate` is set back onto the file after the
+    /// rename, truncated to whole seconds since SFTP v3 carries no more.
     @objc(createItemInDomain:parent:filename:isDirectory:symlinkTarget:fileSystemFlags:modificationDate:extendedAttributes:tagData:contents:transferID:reply:)
     func createItem(
         domainIdentifier: String,
@@ -165,20 +165,20 @@ import XPCProtocols
     )
 
     /// Cancelling the Progress the extension returned, or the extension's connection
-    /// invalidating, abandons the SFTP requests in flight (section 5.2).
+    /// invalidating, abandons the SFTP requests in flight (docs/design/extension.md).
     func cancelTransfer(transferID: String)
 
     // MARK: Signals from the extension
 
-    /// Forwarded so the agent can refresh its root set (section 6.5) and the pin safety
-    /// net (section 7.2).
+    /// Forwarded so the agent can refresh its root set (docs/design/root-set.md) and the pin
+    /// safety net (docs/design/pinning.md).
     func materializedItemsDidChange(domainIdentifier: String)
 
     /// The extension answered `.syncAnchorExpired` and handed out a fresh anchor. The
-    /// agent's response is one full sweep of the root set (section 5.3).
+    /// agent's response is one full sweep of the root set (docs/design/item-index.md).
     func workingSetAnchorExpired(domainIdentifier: String, freshAnchor: String)
 
-    /// Finder context-menu entries. Pin and unpin, milestone 8.
+    /// Finder context-menu entries: pin and unpin.
     @objc(performActionInDomain:action:itemIdentifiers:reply:)
     func performAction(
         domainIdentifier: String,
@@ -191,7 +191,7 @@ import XPCProtocols
     // handed `SSHDriveAskpassProtocol` and nothing else (AskpassProtocol.swift,
     // AskpassService.register), so the process that relays ssh's prompts cannot remove a
     // location or evict a cache, and the processes that can do those cannot ask for a
-    // secret (section 4.2, section 5.2).
+    // secret (docs/design/secrets.md, docs/design/extension.md).
 
     // MARK: CLI
 

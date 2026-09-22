@@ -1,14 +1,15 @@
 //! The `sweep` subcommand, and the directory walk the watcher uses to establish watches.
 //!
-//! DESIGN.md section 6.4 tier 2: the helper offers "a `sweep` subcommand that does tier
-//! 1's job with size/mtime/inode included so no follow-up `stat`s are needed". It is the
-//! whole of what the FreeBSD build does about content changes, and everywhere it is the
-//! thing that runs when the agent's exec channel would otherwise have to spawn `find`.
+//! `sweep` does the job of the agent's `find` sweep with size, mtime and inode included,
+//! so no follow-up `stat`s are needed (docs/design/change-detection.md). It is the whole
+//! of what the FreeBSD build does about content changes, and everywhere it is the thing
+//! that runs when the agent's exec channel would otherwise have to spawn `find`.
 //!
-//! Two rules it shares with tier 1 and with everything else here: the window is a
+//! Two rules it shares with the `find` sweep and with everything else here: the window is a
 //! **ctime** comparison, because ctime moves on `chmod`, `chown` and on writes that
 //! preserve mtime and mtime does not; and a symlink is never followed, so a directory
-//! swapped for a link to `/etc` yields the link and nothing under it (section 9.1).
+//! swapped for a link to `/etc` yields the link and nothing under it
+//! (docs/design/security.md).
 
 use crate::fsmeta::{self, Stat};
 use crate::paths::{self, RootSet};

@@ -5,13 +5,13 @@ import ProviderCore
 import SystemModel
 
 /// **Suite D - writes, conflicts and atomicity**, and the three offline rows of **suite F**
-/// that are about the same queue (`docs/testing-architecture.md` section 5).
+/// that are about the same queue (docs/design/testing.md).
 ///
 /// Every one of these is a statement about what *the system* does with a reply, and the
-/// design of section 5.5 rests on all of them: that a returned version is believed
-/// (`MQ-013`) is why the conflict copy has to evict, and that a `.filenameCollision` is
-/// retried for ever (`MQ-014`) is why one may never be answered for a name that is not
-/// about to free itself.
+/// write design (docs/design/writes.md) rests on all of them: that a returned version is
+/// believed (`MQ-013`) is why the conflict copy has to evict, and that a
+/// `.filenameCollision` is retried for ever (`MQ-014`) is why one may never be answered
+/// for a name that is not about to free itself.
 final class WriteScenarios: XCTestCase {
 
     /// The measured intervals, compared as the clock produced them: the model's virtual
@@ -33,7 +33,8 @@ final class WriteScenarios: XCTestCase {
     ///
     /// `MQ-013`: no second `modifyItem`, no re-fetch, no conflict flag - the replica
     /// records the invented version and keeps the local bytes under it, for ever. The
-    /// whole of section 5.5's conflict path exists because of this one assertion.
+    /// whole of the conflict path (docs/design/writes.md) exists because of this one
+    /// assertion.
     func testD1_AModifyItemReplyIsBelieved() throws {
         let harness = try ScenarioHarness()
         let file = try harness.serverCreates("note.txt")
@@ -87,8 +88,8 @@ final class WriteScenarios: XCTestCase {
         XCTAssertEqual(afterReply.size, 999, "MQ-013: the remote item is recorded as current")
         XCTAssertTrue(afterReply.isDownloaded, "and the bytes on disk are still the Mac's")
 
-        // The agent's retried eviction, section 5.5: doubling from 0.25 s, given up after
-        // seven attempts.
+        // The agent's retried eviction (docs/design/writes.md): doubling from 0.25 s,
+        // given up after seven attempts.
         let (outcome, tries) = domain.evictWithBackoff(harness.id(file))
         XCTAssertEqual(tries, 2, "MQ-017: the first call is refused, the first retry is enough")
         XCTAssertTrue(outcome.didEvict)
@@ -104,7 +105,7 @@ final class WriteScenarios: XCTestCase {
     }
 
     /// **The bite-proof.** The same conflict without the retried eviction - one call, the
-    /// refusal taken as the answer - which is what the code did before 2026-09-04.
+    /// refusal taken as the answer.
     ///
     /// Everything above is false here: the replica keeps the *local* bytes under the
     /// *remote* version, for ever, which is precisely the loss the eviction exists to
@@ -137,8 +138,9 @@ final class WriteScenarios: XCTestCase {
     /// `MQ-014`: it is retried **for ever** with no alert, on the measured 0 s / 0.04 s /
     /// 5 s / 15 s backoff; the caller was told it succeeded, the item stays in the mount,
     /// and `enumeratorForPendingItems` stays empty. So a refusal that is not about to
-    /// resolve itself is a permanent invisible loop, which is why section 5.5 answers it
-    /// only where the conflict path is about to rename our file away.
+    /// resolve itself is a permanent invisible loop, which is why a `.filenameCollision`
+    /// is answered only where the conflict path is about to rename our file away
+    /// (docs/design/writes.md).
     func testD3_AStandingFilenameCollisionIsAnInvisibleForeverLoop() throws {
         let harness = try ScenarioHarness()
         let domain = try harness.addDomain()
@@ -191,11 +193,11 @@ final class WriteScenarios: XCTestCase {
     /// A pending `modifyItem` whose row the agent has forgotten, with the path still taken
     /// on the server.
     ///
-    /// `MQ-080` (s5-7): the system does not lose the edit - it re-offers it as a
+    /// `MQ-080`: the system does not lose the edit - it re-offers it as a
     /// **`createItem`** of the same name, which then collides with the path that is still
     /// there and is retried for ever (`MQ-014`), invisibly. That is why the mass-deletion
-    /// guard of section 6.4 holds pending items and their ancestors rather than reporting
-    /// them deleted.
+    /// guard (docs/design/change-detection.md) holds pending items and their ancestors
+    /// rather than reporting them deleted.
     func testD4_APendingEditOnADeletedItemComesBackAsACollidingCreate() throws {
         let harness = try ScenarioHarness()
         let original = try harness.serverCreates("edit.txt")
@@ -226,8 +228,9 @@ final class WriteScenarios: XCTestCase {
     /// TextEdit's save and the shell's write-a-temp-and-`mv`.
     ///
     /// `MQ-049`: **one `modifyItem` on the original item**, no `createItem`, no
-    /// `deleteItem`. Without tombstones (section 5.3) the other shape would lose a pin or
-    /// a tag placed on that one file. `MQ-048`: a rename is one `modifyItem` too, with
+    /// `deleteItem`. Without tombstones (docs/design/item-index.md) the other shape would
+    /// lose a pin or a tag placed on that one file. `MQ-048`: a rename is one `modifyItem`
+    /// too, with
     /// `changedFields = 0x2`.
     func testD9_AnAtomicSaveIsOneModifyItemOnTheOriginalIdentifier() throws {
         let harness = try ScenarioHarness()
@@ -302,8 +305,8 @@ final class WriteScenarios: XCTestCase {
 
     /// `MQ-036`: the system **never re-issues a failed `fetchContents`**. One call, one
     /// error, and nothing for the next seven minutes; a second read produces a second
-    /// call, so the item is not poisoned - there is simply no retry. That is why section
-    /// 6.3 gives a read one retry of our own.
+    /// call, so the item is not poisoned - there is simply no retry. That is why the
+    /// agent gives a read one retry of its own (docs/design/offline.md).
     func testF2_AFailedFetchIsNeverReIssued() throws {
         let harness = try ScenarioHarness()
         let file = try harness.serverCreates("far.txt")

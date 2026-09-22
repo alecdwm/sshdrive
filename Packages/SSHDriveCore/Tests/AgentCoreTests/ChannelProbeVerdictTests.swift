@@ -1,8 +1,8 @@
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.1's `MaxSessions` probe: a channel that did not open is only
-/// evidence about the server while the connection under it was alive (2026-09-08).
+/// The `MaxSessions` probe (docs/design/ssh.md): a channel that did not open is only
+/// evidence about the server while the connection under it was alive.
 final class ChannelProbeVerdictTests: XCTestCase {
 
     private func classify(_ text: String, masterIsRunning: Bool = true) -> ChannelProbeVerdict {

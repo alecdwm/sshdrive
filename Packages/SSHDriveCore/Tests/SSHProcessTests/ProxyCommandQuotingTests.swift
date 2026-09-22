@@ -1,8 +1,8 @@
 import XCTest
 @testable import SSHProcess
 
-/// The agent-built `ProxyJump` chain (DESIGN.md section 6.1) and the single-quoting rule
-/// (section 9.2) it shares with remote scripts.
+/// The agent-built `ProxyJump` chain (docs/design/ssh.md) and the single-quoting rule
+/// (docs/design/security.md) it shares with remote scripts.
 final class ProxyCommandQuotingTests: XCTestCase {
 
     func testSingleQuotingIsTotal() {

@@ -8,7 +8,7 @@ import SSHProcess
 import Testing
 
 /// Suite F on the agent's side: the breaker, the reconnect sequence, the ladder's
-/// climb-back and the will-sleep drop (`docs/testing-architecture.md` section 5).
+/// climb-back and the will-sleep drop (`docs/design/testing.md` section 5).
 ///
 /// Serialized because `Config.GroupContainer` is process-wide and each harness installs a
 /// container of its own.
@@ -19,9 +19,9 @@ extension AgentScenarios {
         /// **F7** - the reconnect re-opens what the connection took with it, in
         /// `ReconnectSequence` order: after `applyConnection`, before the signals.
         ///
-        /// The order is the part that was wrong. Before 2026-09-08 the recovery signalled
-        /// first and left the helper's stream to the next poll cycle, which is up to ten
-        /// minutes away and, on a location a runtime failure had dropped, never.
+        /// Signalling before the helper's stream is reopened would leave the stream to the
+        /// next poll cycle, up to ten minutes away, and, on a location a runtime failure had
+        /// dropped, never.
         @Test func f7ReconnectRunsTheSequenceInOrder() async throws {
             let harness = try AgentHarness()
             let location = try await harness.addLocation(nickname: "nas")
@@ -65,7 +65,8 @@ extension AgentScenarios {
         /// **F8** - an outage is not a tier verdict.
         ///
         /// A tier-2 failure that says nothing about the server holds the tier for a bounded,
-        /// doubling backoff and no longer. Section 6.4's permanent list - no shell, no exec
+        /// doubling backoff and no longer. The permanent list (docs/design/change-detection.md) -
+        /// no shell, no exec
         /// channel, an unsupported arch, `noexec`, a hash mismatch after a redeploy - is about
         /// the server, and only those cost the location the tier for the session.
         @Test func f8ATransientHelperFailureIsHeldNotVerdicted() async throws {
@@ -100,7 +101,7 @@ extension AgentScenarios {
             #expect(status["downgrades"] as? [[String: Any]] != nil)
             #expect(
                 downgrades.allSatisfy { $0["permanence"] as? String == "transient" },
-                "F8: it never becomes the session-long downgrade section 6.4 reserves for the server's own refusals")
+                "F8: it never becomes the session-long downgrade reserved (docs/design/change-detection.md) for the server's own refusals")
             await detector.stop()
             await harness.manager.dropRuntime(locationID: location.id)
         }
@@ -134,8 +135,9 @@ extension AgentScenarios {
                     await detector.status()["retryingHigherTierInSeconds"] != nil
                 }
                 // The link came back, so the ladder's backoff starts again from the bottom.
-                // Before 2026-09-08 four rounds compounded to 16 s and then to the cap, and a
-                // location that had seen a few outages took a minute to come back each time.
+                // Without that reset, four rounds would compound to 16 s and then to the cap,
+                // and a location that had seen a few outages would take a minute to come back
+                // each time.
                 let status = await detector.status()
                 let remaining = try #require(status["retryingHigherTierInSeconds"] as? Double)
                 #expect(
@@ -214,7 +216,7 @@ extension AgentScenarios {
 
         /// **F10** - the authentication deadline re-arms once per trigger.
         ///
-        /// Section 4.2: a location stopped by the 60 s deadline is re-armed **for one attempt**
+        /// docs/design/secrets.md: a location stopped by the 60 s deadline is re-armed **for one attempt**
         /// when a human is demonstrably present, and each of the two triggers - the screen
         /// unlock and a File Provider request with the presence test passing - fires exactly
         /// once per stop. A request on its own is not evidence of a human: Spotlight, Quick
@@ -240,7 +242,7 @@ extension AgentScenarios {
             #expect(harness.launcher.attempts == attemptsWhenStopped)
             #expect((await gate.report())["presenceEvaluations"] as? Int == 1)
 
-            // And a second request inside the minute does not even read it: section 4.2's
+            // And a second request inside the minute does not even read it: docs/design/secrets.md's
             // "evaluated at most once a minute so the test itself costs nothing".
             await gate.fileProviderRequestArrived()
             await harness.settle()
@@ -274,10 +276,10 @@ extension AgentScenarios {
 
         /// **F5** - a call waits for the attempt in flight.
         ///
-        /// Section 6.3 rule 2, and the number it turns on: two reads three seconds apart
+        /// docs/design/offline.md rule 2, and the number it turns on: two reads three seconds apart
         /// during a 20 s connect both wait for the **one** attempt, and the wait is bounded
         /// by *that attempt's own remaining deadline* - the 60 s authentication deadline of
-        /// section 4.2 measured from the spawn of `ssh`, which already contains the 15 s
+        /// docs/design/secrets.md measured from the spawn of `ssh`, which already contains the 15 s
         /// `ConnectTimeout` - never by 60 s from now and never by the two added together.
         ///
         /// Failing the second call fast instead was considered and rejected: the first
@@ -299,14 +301,14 @@ extension AgentScenarios {
             let gate = try #require(await harness.manager.gate(locationID: location.id))
 
             // A server that accepts the TCP connection and then takes its time: 20 s of
-            // connect, which is section 6.3 rule 3's world with nothing else in it.
+            // connect, which is docs/design/offline.md rule 3's world with nothing else in it.
             await gate.setFault(
                 unreachable: nil, hangMilliseconds: nil, connectHangMilliseconds: 20_000)
             await gate.drop(reason: "the master was killed", reconnect: false)
             let attemptsBefore = harness.launcher.attempts
             // The transport every call goes through, held directly: two calls on one
             // `LocationRuntime` would serialise on the actor and never meet the gate
-            // together, which is not what section 6.3 is about.
+            // together, which is not what docs/design/offline.md is about.
             let transport = ReconnectingTransport(gate: gate, locationID: location.id)
 
             let gateAttemptsBefore = await gate.attempts
@@ -352,7 +354,7 @@ extension AgentScenarios {
 
         /// **F11** - the network path gate fails fast, and a returning path connects at once.
         ///
-        /// Section 6.3 rule 1: `NWPathMonitor` says there is no path at all, so the call is
+        /// docs/design/offline.md rule 1: `NWPathMonitor` says there is no path at all, so the call is
         /// `.serverUnreachable` immediately and **no `ssh` is spawned**. Waiting out a
         /// connect timeout instead is what freezes Finder, and it is the one case where the
         /// answer is free.

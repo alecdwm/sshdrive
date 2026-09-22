@@ -1,12 +1,12 @@
 import Foundation
 
 /// launchd, `SMAppService` and LaunchServices, as a state machine
-/// (`docs/testing-architecture.md` section 3.1's third part).
+/// (docs/design/testing.md).
 ///
 /// Three measured behaviours live here and nothing else does. Whether LaunchServices
-/// *really* declines to register a quarantined bundle's plugins is a VM measurement
-/// (section 7); what the model reproduces is what our code reasons about - the record,
-/// the window, the throttle and the constraint.
+/// *really* declines to register a quarantined bundle's plugins is a VM measurement; what
+/// the model reproduces is what our code reasons about - the record, the window, the
+/// throttle and the constraint.
 ///
 /// `AgentRuntimeTestSupport`'s `FakeLoginItem` and `FakeLaunchd` are the same two quirks
 /// seen from the agent's side, and the two must agree: `register()` is not self-repairing

@@ -6,14 +6,14 @@ import SSHProcess
 import XPCProtocols
 import Logging
 
-/// The verification connection `sshdrive add` and `sshdrive passwd` make (DESIGN.md
-/// section 4.2), and the `AddFlow.AttemptRunning` the state machine drives.
+/// The verification connection `sshdrive add` and `sshdrive passwd` make
+/// (docs/design/secrets.md), and the `AddFlow.AttemptRunning` the state machine drives.
 ///
-/// "The agent runs the exact command it will use later, in its own environment, with the
-/// token marked *collect*." Exactly that: an `SSHMaster` on a scratch control path, which
-/// is the same `ssh` command line the location's real master runs, differing only in
-/// `StrictHostKeyChecking` (`ask` here, so the fingerprint question of section 4.3 is
-/// raised and can be relayed) and in the socket it binds. The master's control socket
+/// The agent runs the exact command it will use later, in its own environment, with the
+/// token marked *collect*: an `SSHMaster` on a scratch control path, which is the same
+/// `ssh` command line the location's real master runs, differing only in
+/// `StrictHostKeyChecking` (`ask` here, so the host-key fingerprint question is raised and
+/// can be relayed) and in the socket it binds. The master's control socket
 /// appearing *is* authentication having succeeded, which is why this needs no remote
 /// command and works against a `ForceCommand internal-sftp` account that could not run one.
 ///
@@ -30,7 +30,7 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
         var environment: [String: String]
         var askpassPath: String?
         /// The `ssh -G` resolution of the destination, so the broker keys a password on
-        /// `user@hostname:port` and not on the alias (section 4.2).
+        /// `user@hostname:port` and not on the alias.
         var resolution: SSHConfigResolution
         /// Identity files in offer order, for the passphrase prompt's `%.100s` mapping and
         /// for the touch refusal's "run --identity …" hint.
@@ -66,8 +66,8 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
         lock.unlock()
 
         var target = request.target
-        // Section 4.2: the first pass runs `IdentityAgent=none` so `ssh` can use only key
-        // files, passphrases and passwords; the second runs with the key agent.
+        // The first pass runs `IdentityAgent=none` so `ssh` can use only key files,
+        // passphrases and passwords; the second runs with the key agent.
         target.identityAgentNone = attempt.identityAgentNone
 
         let hops: [JumpHop]
@@ -81,7 +81,7 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
         // A hop gets the same host-key setting as the master, which is the whole reason
         // the chain is rebuilt rather than handed to `ssh -J`: a `-W` child of `ssh -J`
         // receives a fresh option set and would ask the question with no askpass armed
-        // (testbed/README.md, and section 6.1).
+        // (testbed/README.md).
         let proxyCommand = ProxyChainBuilder.proxyCommand(
             for: hops, identityAgentNone: attempt.identityAgentNone,
             hostKeyChecking: attempt.hostKeyChecking)
@@ -96,7 +96,7 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             agentDependent: !attempt.identityAgentNone,
             proxyCommand: proxyCommand,
             // A person is at the keyboard for this one connection, so the deadline is the
-            // broker's collect deadline rather than section 4.2's unattended 60 s.
+            // broker's collect deadline rather than the unattended 60 s.
             authenticationDeadline: 300,
             controlPath: socket,
             askpassPath: request.askpassPath,
@@ -104,9 +104,8 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             hostKeyChecking: attempt.hostKeyChecking,
             isCollectConnection: true,
             maskedAccounts: attempt.maskedAccounts,
-            // Section 8.1 wants `status` to name the server software, and this one
-            // connection is the only `ssh` the agent runs that ever sees the server's
-            // identification string (section 6.1; 2026-09-08).
+            // `status` names the server software, and this one connection is the only
+            // `ssh` the agent runs that ever sees the server's identification string.
             capturesRemoteVersion: true)
         configuration.identityAgentSocket = nil
 
@@ -137,9 +136,9 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             remoteSoftwareVersion = version
         }
         // The live token is gone the moment the master died, and a failed attempt is
-        // precisely when section 4.2 wants what the session recorded: which prompt needed
-        // a human, and which stored item the server refused (which is what earns the
-        // masked retry). `lastAskpassToken` is the one that outlives the attempt.
+        // precisely when what the session recorded matters: which prompt needed a human,
+        // and which stored item the server refused (which is what earns the masked
+        // retry). `lastAskpassToken` is the one that outlives the attempt.
         let token = await master.lastAskpassToken
         let info = token.flatMap { broker.info(token: $0) }
         // The master goes either way: if it authenticated, the location's own master is
@@ -158,8 +157,8 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
         let fromStore = used.map(\.key.account).filter { !byUser.contains($0) }
 
         if authenticated, let token {
-            // "When the connection succeeds, every answer that was actually used is
-            // written to the keychain; a wrong password is never stored" (section 4.2).
+            // When the connection succeeds, every answer that was actually used is
+            // written to the keychain; a wrong password is never stored.
             do {
                 let written = try broker.commit(token: token)
                 if !written.isEmpty {
@@ -187,18 +186,18 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
     }
 
     /// Keychain accounts the successful attempt wrote. `add` records them on the location,
-    /// which is what `remove` counts references against (section 8).
+    /// which is what `remove` counts references against.
     private(set) var committedKeys: [String] = []
 
     /// "remote software version <x>" as this connection's `ssh` reported it, e.g.
     /// `OpenSSH_9.2p1 Debian-2+deb12u10` or `Tailscale`. `add` stores it in
-    /// `capabilities.json` and section 8.1's report names it (2026-09-08).
+    /// `capabilities.json` and the capability report names it.
     private(set) var remoteSoftwareVersion: String?
 
     // MARK: the relayed prompt
 
     /// The broker's `collectResponder`: shows the prompt on the terminal and returns what
-    /// was typed. An empty answer is a deliberate refusal of that prompt (section 4.2).
+    /// was typed. An empty answer is a deliberate refusal of that prompt.
     private func answer(_ request: AskpassCollectRequest) -> String? {
         guard let relay else {
             lock.lock(); unanswered.append(request.promptText); lock.unlock()
@@ -217,15 +216,15 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             kind = "password"
             lock.lock(); sawPasswordPrompt = true; lock.unlock()
             detail = request.key.map { "It will be stored in your keychain as \($0.report)." } ?? ""
-            // Section 4.2: a user whose only key lives in 1Password and whose server also
-            // accepts passwords would otherwise type a password and end up with a location
-            // that quietly authenticates by password.
+            // A user whose only key lives in 1Password and whose server also accepts
+            // passwords would otherwise type a password and end up with a location that
+            // quietly authenticates by password.
             detail += "\nYour key files did not authenticate and the server accepts "
                 + "passwords; press Enter to skip this and try your key agent instead."
         case .confirmation(_, let isHostKey):
             kind = isHostKey ? "hostkey" : "confirm"
-            // Section 4.3: read visible, and the answer goes to `ssh`, which writes it to
-            // the user's own `known_hosts` exactly as it would have from a tty.
+            // Read visible, and the answer goes to `ssh`, which writes it to the user's
+            // own `known_hosts` exactly as it would have from a tty.
             secret = false
             detail = isHostKey
                 ? "Answer yes only if that fingerprint is the server's. ssh writes the "
@@ -236,8 +235,8 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
             relay.note(request.promptText)
             return ""
         case .pin, .keyboardInteractiveChallenge, .unrecognised:
-            // Never relayed: these need a human on every connection, and section 4.2
-            // refuses the location rather than creating one that fails every reconnect.
+            // Never relayed: these need a human on every connection, so the location is
+            // refused rather than created and left failing every reconnect.
             lock.lock(); unanswered.append(request.promptText); lock.unlock()
             return nil
         }
@@ -261,7 +260,7 @@ final class CollectConnection: AddFlow.AttemptRunning, @unchecked Sendable {
 extension CollectConnection {
 
     /// `ssh-keygen -lf <path>` for every identity file, so a user-presence notice's
-    /// fingerprint can be matched back onto the key that asked for the touch (section 4.2).
+    /// fingerprint can be matched back onto the key that asked for the touch.
     static func fingerprints(of identityFiles: [String], environment: [String: String])
         -> [String: String]
     {

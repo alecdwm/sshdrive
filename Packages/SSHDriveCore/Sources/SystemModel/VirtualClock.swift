@@ -2,7 +2,7 @@ import Foundation
 import ProviderCore
 
 /// The driven clock every part of `SystemModel` reads. There is no real sleeping anywhere
-/// in the suite (`docs/testing-architecture.md` section 3.1): `advance` moves time,
+/// in the suite (docs/design/testing.md): `advance` moves time,
 /// releases whatever the simulated schedulers owe, and returns when everything queued has
 /// run.
 public final class VirtualClock: ProviderClock {

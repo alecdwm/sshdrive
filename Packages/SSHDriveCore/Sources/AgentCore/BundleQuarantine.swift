@@ -1,7 +1,7 @@
 import Foundation
 
-/// `com.apple.quarantine` on our own bundle, and what to say about it (DESIGN.md
-/// section 10).
+/// `com.apple.quarantine` on our own bundle, and what to say about it
+/// (docs/design/packaging.md).
 ///
 /// LaunchServices declines to register the **plugins** of a quarantined bundle that has
 /// never been assessed through a user-visible launch. The agent itself is unaffected -
@@ -12,10 +12,9 @@ import Foundation
 /// `getDomainsForProviderIdentifier((null)) failed: FP -2001 Underlying FP -2014`.
 /// Stripping the attribute and opening the app once registers it durably.
 ///
-/// Measured on the owner's Mac (macOS 26.6.2) on 2026-09-05, on a `brew install --cask
-/// sshdrive` install; a fresh-user quarantined install on the 26.4.1 build VM had not
-/// shown it, so this is a difference between those two machines and nothing here claims
-/// which half of it matters.
+/// Measured on macOS 26.6.2, 2026-09-05, on a `brew install --cask sshdrive` install; a
+/// fresh-user quarantined install on a 26.4.1 VM does not show it, so this is a difference
+/// between those two machines and nothing here claims which half of it matters.
 ///
 /// The reading is split from the deciding so the check can be tested without a
 /// quarantined bundle to point it at.

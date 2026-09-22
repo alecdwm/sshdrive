@@ -1,7 +1,7 @@
 import XCTest
 import SystemModel
 
-/// The guard `docs/testing-architecture.md` section 9 calls `scripts/check-quirks.sh`: the
+/// The guard docs/design/testing.md calls `scripts/check-quirks.sh`: the
 /// model may not read a quirk the catalogue does not carry, and the catalogue may not
 /// carry an id the model has never heard of.
 ///

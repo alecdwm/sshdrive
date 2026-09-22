@@ -1,14 +1,14 @@
-//! Just enough JSON for the NDJSON protocol of DESIGN.md section 6.4 tier 2.
+//! Just enough JSON for the NDJSON protocol the helper speaks
+//! (docs/design/change-detection.md).
 //!
 //! Written by hand rather than pulled in, because the only dependency this crate is
-//! allowed is `libc`: every other target in section 10.1 has to cross-compile from a
-//! Linux box with no C toolchain, and a binary we upload over the user's own link is
-//! built small.
+//! allowed is `libc`: every target but the host has to cross-compile from a Linux box
+//! with no C toolchain, and a binary we upload over the user's own link is built small.
 //!
-//! The one thing that needs care is that a server filename is **bytes**, not text
-//! (section 5.4), and a JSON string is UTF-8 by definition. A path that is valid UTF-8
-//! travels as `"path"`; one that is not travels as `"path_b64"`, base64 of the raw
-//! bytes, and the agent decodes it back to the same bytes the index stores.
+//! The one thing that needs care is that a server filename is **bytes**, not text, and a
+//! JSON string is UTF-8 by definition. A path that is valid UTF-8 travels as `"path"`;
+//! one that is not travels as `"path_b64"`, base64 of the raw bytes, and the agent
+//! decodes it back to the same bytes the index stores.
 
 use std::fmt::Write as _;
 

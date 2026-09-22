@@ -1,13 +1,13 @@
-//! The NDJSON event protocol of DESIGN.md section 6.4 tier 2, and the server-side
+//! The NDJSON event protocol (docs/design/change-detection.md), and the server-side
 //! coalescing that is one of the things tier 2 buys over the polling tiers.
 //!
-//! Section 6.4 names the shape:
+//! The shape is
 //! `{"op":"create|modify|delete|rename|overflow","path":…,"from":…,"size":…,
-//! "mtime_ns":…,"inode":…}` plus a heartbeat every 15 s. Two lines that section does not
-//! name are here as well and are recorded in section 13: a `ready` line, because the
-//! ladder settles on "the first tier that starts successfully" and the agent needs one
-//! byte that says the binary is running rather than that `sh` printed something; and an
-//! `error` line, so a helper that cannot watch says why instead of dying silently.
+//! "mtime_ns":…,"inode":…}` plus a heartbeat every 15 s. Two more lines carry the
+//! stream's own state: a `ready` line, because the ladder settles on the first tier that
+//! starts successfully and the agent needs one byte that says the binary is running
+//! rather than that `sh` printed something; and an `error` line, so a helper that cannot
+//! watch says why instead of dying silently.
 
 use crate::json::{write_path_field, write_string};
 use std::fmt::Write as _;
@@ -68,7 +68,7 @@ pub enum Event {
         meta: Meta,
     },
     /// The kernel queue overflowed, or a watch could not be established. The agent runs a
-    /// sweep rather than silently missing changes (section 6.4).
+    /// sweep rather than silently missing changes.
     Overflow {
         reason: String,
     },
@@ -165,8 +165,7 @@ impl Meta {
     }
 }
 
-/// Section 6.4's "server-side coalescing": a burst of events on one path leaves the
-/// server as one line.
+/// Server-side coalescing: a burst of events on one path leaves the server as one line.
 ///
 /// The merge table is small and every rule in it is a claim about what the agent will do
 /// with the result. The agent re-`stat`s whatever it is told about, so the only thing

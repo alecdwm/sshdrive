@@ -1,17 +1,16 @@
 import Foundation
 import Logging
 
-/// The working set: only ever a change stream, never a listing (DESIGN.md section 5.3,
+/// The working set: only ever a change stream, never a listing (docs/design/item-index.md,
 /// `MQ-002`).
 ///
 /// The extension answers this from the index itself where it can, which is what keeps it
-/// working while the agent is restarting (section 5.2) - but where it cannot, it asks the
-/// agent rather than failing. `.serverUnreachable` here is not cheap: fileproviderd
-/// throttles a change enumeration that keeps returning it, and 27 consecutive failures on
-/// one real domain took the event stream out to a 47-minute retry, after which no
-/// server-side change reached Finder at all (`MQ-005`, 2026-09-08). So it is reserved for
-/// an agent that genuinely cannot be reached, which is the one case where there is nothing
-/// to say.
+/// working while the agent is restarting - but where it cannot, it asks the agent rather
+/// than failing. `.serverUnreachable` here is not cheap: fileproviderd throttles a change
+/// enumeration that keeps returning it, and 27 consecutive failures on one real domain took
+/// the event stream out to a 47-minute retry, after which no server-side change reached
+/// Finder at all (`MQ-005`, 2026-09-08). So it is reserved for an agent that genuinely
+/// cannot be reached, which is the one case where there is nothing to say.
 public final class WorkingSetEnumeration: ProviderEnumerating {
     private unowned let service: ProviderService
 
@@ -65,7 +64,7 @@ public final class WorkingSetEnumeration: ProviderEnumerating {
         } catch ProviderFailure.syncAnchorExpired {
             // The reader hands out a fresh anchor and tells the agent so, one call per
             // expiry; the agent's response is one full sweep of the root set
-            // (section 5.3, `MQ-006`).
+            // (docs/design/item-index.md, `MQ-006`).
             let fresh = service.reader.currentSequence() ?? 0
             Log.extensionLog.notice(
                 "workingSet enumerateChanges anchor=\(anchorValue, privacy: .public) -> syncAnchorExpired, fresh=\(fresh, privacy: .public)"

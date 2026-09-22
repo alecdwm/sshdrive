@@ -2,9 +2,8 @@ import XCTest
 import ProviderCore
 import XPCProtocols
 
-/// Everything `ProviderCore` mirrors from Apple, asserted against Apple (step 1.3 of
-/// `docs/testing-architecture.md` section 8; step 4 promotes this into
-/// `AppleConstantsTests`).
+/// Everything `ProviderCore` mirrors from Apple, asserted against Apple as
+/// `AppleConstantsTests` (docs/design/testing.md).
 ///
 /// `ProviderCore` holds the extension's decisions and compiles on Linux, so every
 /// identifier literal, capability bit, `fileSystemFlags` bit, `changedFields` bit and
@@ -24,8 +23,9 @@ import XPCProtocols
 
         /// The three well-known container identifiers are string literals in the
         /// framework, and both processes have always had to spell them the same way: the
-        /// index's root row carries the root literal, and the trash refusal of
-        /// section 5.4 is keyed on the trash one. Because they match, the adapter's
+        /// index's root row carries the root literal, and the trash refusal
+        /// (docs/design/names-and-attributes.md) is keyed on the trash one. Because they
+        /// match, the adapter's
         /// identifier mapping is the identity - which is worth knowing, and worth
         /// asserting rather than assuming.
         func testContainerIdentifierLiteralsAreApples() {
@@ -175,7 +175,7 @@ import XPCProtocols
 
             // `NSFileProviderErrorNonEvictable` has no Swift symbol to compare against;
             // the number is the one `evictItem` returned on the VM for a pending upload
-            // and for a kept item alike (`MQ-018`, results 2026-09-04 s4-3, s6-5).
+            // and for a kept item alike (`MQ-018`, measured 2026-09-04).
             XCTAssertEqual(ProviderFailure.nonEvictable.appleErrorCode, -2008, "MQ-018")
 
             // The trash refusal's domain and code (`MQ-010`).

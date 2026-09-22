@@ -2,9 +2,9 @@ import XCTest
 
 @testable import Config
 
-/// The seam of `docs/testing-architecture.md` section 2: on macOS the container is the
-/// app group's own, off Darwin it is a directory the test names, and the layout of
-/// DESIGN.md section 3 is derived from whichever one answered.
+/// The seam described in docs/design/testing.md: on macOS the container is the app
+/// group's own, off Darwin it is a directory the test names, and the layout in
+/// docs/design/components.md is derived from whichever one answered.
 final class GroupContainerTests: XCTestCase {
 
     private var directory: URL!

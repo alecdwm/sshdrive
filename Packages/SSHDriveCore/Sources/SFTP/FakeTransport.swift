@@ -2,9 +2,8 @@ import Foundation
 import Logging
 
 /// A remote change, applied to the fake tree from a test hook (`sshdrive debug mutate`).
-/// This is what lets the File Provider half be exercised before a byte of SSH exists
-/// (DESIGN.md section 12, milestone 1): change detection sees the tree move without
-/// anything of ours having asked for it.
+/// It exercises the File Provider half without any SSH: change detection sees the tree
+/// move without anything of ours having asked for it.
 public enum FakeMutation: Sendable, Equatable {
     case createFile(path: RelativePath, contents: Data, mode: UInt32)
     case createDirectory(path: RelativePath, mode: UInt32)
@@ -15,20 +14,20 @@ public enum FakeMutation: Sendable, Equatable {
     case touch(path: RelativePath)
     /// Rewrites contents in place keeping size and second-mtime, and moves the
     /// nanosecond mtime only. This is the case the `generation` column exists for
-    /// (section 5.3): SFTP alone cannot see it.
+    /// (docs/design/item-index.md): SFTP alone cannot see it.
     case rewriteInvisibly(path: RelativePath, contents: Data)
     case chmod(path: RelativePath, mode: UInt32)
     case rename(from: RelativePath, to: RelativePath)
     case delete(path: RelativePath, recursive: Bool)
 }
 
-/// The in-memory tree behind `SFTPTransport` (DESIGN.md section 12, milestone 1). It
-/// lists, fetches, writes, renames and deletes, and can be mutated from a test hook to
-/// stand in for a remote change. It stays as the test double for every later milestone.
+/// The in-memory tree behind `SFTPTransport`. It lists, fetches, writes, renames and
+/// deletes, and can be mutated from a test hook to stand in for a remote change. It is
+/// the test double for the whole app.
 ///
-/// Deliberately faithful in three ways that matter for the spikes: names are bytes, the
-/// error classes are exactly those of section 6.2, and a rename refuses to overwrite,
-/// which is what section 5.5's create path relies on.
+/// Deliberately faithful in three ways: names are bytes, the error classes are exactly
+/// those of docs/design/sftp.md, and a rename refuses to overwrite, which is what the
+/// create path in docs/design/writes.md relies on.
 public actor FakeTransport: SFTPTransport {
 
     final class Node {
@@ -75,16 +74,16 @@ public actor FakeTransport: SFTPTransport {
 
     /// The canonical absolute root the real transport would have resolved.
     public let root: String
-    /// The identity the fake server reports, so the capability probe of section 8.1 has
-    /// something to map permissions from in milestone 1.
+    /// The identity the fake server reports, so the capability probe
+    /// (docs/design/cli.md) has something to map permissions from.
     public let serverUID: UInt32
     public let serverGID: UInt32
 
     private var tree: Node
     /// Paths the fake account may not write, itself or anything under it. The real
-    /// mapping of section 5.4 turns a mode into `capabilities`, and section 5.5's upload
-    /// needs write permission on the *directory*; this is how a test gets a server that
-    /// says no without inventing a whole permission model.
+    /// mapping (docs/design/names-and-attributes.md) turns a mode into `capabilities`,
+    /// and an upload needs write permission on the *directory*; this is how a test gets
+    /// a server that says no without inventing a whole permission model.
     private var refusedPaths: Set<Data> = []
     private var nextInode: UInt64 = 2
     /// Every mutation applied since the transport was created, so a test can assert on
@@ -101,8 +100,8 @@ public actor FakeTransport: SFTPTransport {
     }
 
     /// Which OpenSSH extensions this fake claims. Settable so a test can stand in for a
-    /// server without `posix-rename@openssh.com`, which section 5.5 makes take the
-    /// non-atomic `remove` + `rename` path.
+    /// server without `posix-rename@openssh.com`, which takes the non-atomic `remove` +
+    /// `rename` path (docs/design/writes.md).
     private var offeredExtensions: SFTPServerExtensions = [
         .posixRename, .statvfs, .fsync, .limits, .lsetstat,
     ]
@@ -180,7 +179,8 @@ public actor FakeTransport: SFTPTransport {
         guard node.type == .directory else { throw SFTPError.failure("Failure") }
         return node.children
             .map { SFTPDirectoryEntry(name: $0.key, attributes: $0.value.attributes) }
-            // readdir order is not stable on a real server (section 5.4); returning
+            // readdir order is not stable on a real server
+            // (docs/design/names-and-attributes.md); returning
             // sorted order here would let a bug that depends on it pass.
             .shuffled()
     }
@@ -211,9 +211,9 @@ public actor FakeTransport: SFTPTransport {
         parent.mtime = now()
     }
 
-    /// The exclusive create the section 5.5 upload protocol writes its temp file with.
-    /// A name that is already taken is a `FAILURE` on the wire, exactly as `open` with
-    /// `SSH_FXF_EXCL` gives (section 6.2).
+    /// The exclusive create the upload protocol writes its temp file with
+    /// (docs/design/writes.md). A name that is already taken is a `FAILURE` on the wire,
+    /// exactly as `open` with `SSH_FXF_EXCL` gives.
     public func writeExclusive(
         _ path: RelativePath, mode: UInt32, window: Int,
         source: @Sendable @escaping () throws -> Data,
@@ -241,7 +241,7 @@ public actor FakeTransport: SFTPTransport {
         try checkWritable(path)
         let parent = try parentNode(of: path)
         guard let name = path.lastComponent else { throw SFTPError.failure("Failure") }
-        // EEXIST reaches the wire as a bare FAILURE (section 6.2).
+        // EEXIST reaches the wire as a bare FAILURE (docs/design/sftp.md).
         guard parent.children[name] == nil else { throw SFTPError.failure("Failure") }
         parent.children[name] = Node(
             type: .directory, mode: mode, uid: serverUID, gid: serverGID,
@@ -283,7 +283,7 @@ public actor FakeTransport: SFTPTransport {
             let destinationName = destination.lastComponent,
             let node = sourceParent.children[sourceName]
         else { throw SFTPError.noSuchFile }
-        // Non-overwriting: this is the property section 5.5's create path depends on.
+        // Non-overwriting: the create path depends on this (docs/design/writes.md).
         guard destinationParent.children[destinationName] == nil else {
             throw SFTPError.failure("Failure")
         }
@@ -437,14 +437,14 @@ public actor FakeTransport: SFTPTransport {
     }
 
     /// Fills the tree with a small, deterministic sample so a fresh fake location has
-    /// something in it for spikes S3, S4 and S6.
+    /// something in it.
     public func seedSample(fileCount: Int = 8) throws {
         try apply(.createDirectory(path: RelativePath(string: "Documents"), mode: 0o755))
         try apply(.createDirectory(path: RelativePath(string: "Documents/Reports"), mode: 0o755))
         try apply(.createDirectory(path: RelativePath(string: "Media"), mode: 0o755))
         try apply(.createFile(
             path: RelativePath(string: "README.txt"),
-            contents: Data("SSH Drive fake backend, milestone 1.\n".utf8), mode: 0o644))
+            contents: Data("SSH Drive fake backend.\n".utf8), mode: 0o644))
         try apply(.createFile(
             path: RelativePath(string: "run.sh"),
             contents: Data("#!/bin/sh\necho hello\n".utf8), mode: 0o755))

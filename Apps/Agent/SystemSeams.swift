@@ -14,10 +14,10 @@ import ServiceManagement
 import XPCProtocols
 
 // The Darwin half of every seam that is not the replica or the transport
-// (docs/testing-architecture.md section 2.3). One adapter each, no branch worth testing:
-// what each of them used to decide now lives above it in `AgentRuntime`.
+// (docs/design/testing.md). One adapter each, and no branch worth testing: every decision
+// sits above them in `AgentRuntime`.
 
-// MARK: Sleep and wake (DESIGN.md section 6.1)
+// MARK: Sleep and wake (docs/design/ssh.md)
 
 /// **Sleep and wake come from IOKit**, `IORegisterForSystemPower` with
 /// `kIOMessageSystemWillSleep` and `kIOMessageSystemHasPoweredOn`, and not from
@@ -89,7 +89,7 @@ final class IOKitPowerEvents: PowerObserving, @unchecked Sendable {
         switch messageType {
         case Self.systemWillSleep:
             willSleepCount += 1
-            Log.agent.notice("system will sleep: dropping every master (section 6.1)")
+            Log.agent.notice("system will sleep: dropping every master")
             let rootPort = self.rootPort
             let token = intptr_t(bitPattern: argument)
             let acknowledged = Acknowledgement()
@@ -112,7 +112,7 @@ final class IOKitPowerEvents: PowerObserving, @unchecked Sendable {
 
         case Self.systemHasPoweredOn:
             didWakeCount += 1
-            Log.agent.notice("system has powered on: reconnecting every location (section 6.1)")
+            Log.agent.notice("system has powered on: reconnecting every location")
             let hook = onDidWake
             Task { await hook?() }
 
@@ -139,12 +139,12 @@ final class IOKitPowerEvents: PowerObserving, @unchecked Sendable {
     }
 }
 
-// MARK: The network path (section 6.3)
+// MARK: The network path (docs/design/offline.md)
 
-/// Section 6.3's first rule: `NWPathMonitor` says there is no path at all, and every call
-/// is `.serverUnreachable` immediately without a socket being opened. It covers Wi-Fi off
-/// and a cable pulled, and deliberately not a powered-down NAS or a tailnet that is down
-/// while the Mac is online - that is what the breaker is for.
+/// The first rule of failing fast: `NWPathMonitor` says there is no path at all, and every
+/// call is `.serverUnreachable` immediately without a socket being opened. It covers
+/// Wi-Fi off and a cable pulled, and deliberately not a powered-down NAS or a tailnet that
+/// is down while the Mac is online - that is what the breaker is for.
 final class NWPathNetworkGate: NetworkPathObserving, @unchecked Sendable {
     static let shared = NWPathNetworkGate()
 
@@ -173,14 +173,14 @@ final class NWPathNetworkGate: NetworkPathObserving, @unchecked Sendable {
     }
 }
 
-// MARK: Presence (section 4.2)
+// MARK: Presence (docs/design/secrets.md)
 
 /// Is a human at this Mac? Two readings, both of which a launchd agent may take without
 /// any permission and without an `NSApplication`:
 ///
 /// - **`CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .any)`**
-///   - the time since the last keyboard, mouse or trackpad event. Section 4.2 requires it
-///   to be under 30 s.
+///   - the time since the last keyboard, mouse or trackpad event. It must be under 30 s
+///   for the deadline to re-arm.
 /// - **`CGSSessionScreenIsLocked` from `CGSessionCopyCurrentDictionary()`** - the screen
 ///   must be unlocked. The key is absent, rather than false, on an unlocked session.
 ///
@@ -188,9 +188,9 @@ final class NWPathNetworkGate: NetworkPathObserving, @unchecked Sendable {
 /// background refreshes and the working-set enumerator issue requests on an unattended Mac
 /// all day, and each would re-arm an attempt with nobody there.
 ///
-/// The spike override (`PresenceOverride`, in the package) is read first, because a
-/// headless VM's console session reports an idle time that only grows and a screen that
-/// can never be locked.
+/// The override (`PresenceOverride`, in the package) is read first, because a headless
+/// VM's console session reports an idle time that only grows and a screen that can never
+/// be locked.
 struct CoreGraphicsPresence: PresenceReporting {
     func read() -> PresenceReading {
         if let override = PresenceOverride.reading() { return override }
@@ -224,7 +224,7 @@ struct CoreGraphicsPresence: PresenceReporting {
     }
 }
 
-/// The two distributed notifications the screen lock posts (section 4.2).
+/// The two distributed notifications the screen lock posts (docs/design/secrets.md).
 ///
 /// `com.apple.screenIsUnlocked` re-arms one attempt on every location stopped by the
 /// authentication deadline. `com.apple.screenIsLocked` is observed only so the log can say
@@ -264,7 +264,7 @@ final class DistributedScreenLockObserver: ScreenLockObserving, @unchecked Senda
     var report: [String: Any] { ["unlocks": unlocks, "locks": locks] }
 }
 
-// MARK: The login item and launchd (section 10)
+// MARK: The login item and launchd (docs/design/packaging.md)
 
 /// `SMAppService.agent(plistName:)`. Registration is idempotent and is done on every
 /// launch rather than checking `status` first; it is not self-repairing, which is why the
@@ -308,7 +308,7 @@ struct LaunchctlControl: LaunchdControlling {
     }
 }
 
-// MARK: The bundle (section 10)
+// MARK: The bundle (docs/design/packaging.md)
 
 /// Everything the agent can learn about the bundle it runs from: the paths, the shipped
 /// helper binaries, `com.apple.quarantine`, PlugInKit's view of the extension, and the
@@ -377,11 +377,11 @@ struct RunningBundle: BundleInspecting {
     }
 }
 
-// MARK: The keychain, as `doctor` and S1(d2) ask about it
+// MARK: The keychain, as `doctor` asks about it
 
 /// The two questions about the data-protection keychain that are not "store this secret",
 /// under the shared access group, from the only process that has `keychain-access-groups`
-/// (section 3.1).
+/// (docs/design/components.md).
 struct KeychainDiagnostics: KeychainDiagnosing {
 
     /// One `SecItemCopyMatching` under our access group. An `errSecItemNotFound` is a
@@ -410,7 +410,7 @@ struct KeychainDiagnostics: KeychainDiagnosing {
         }
     }
 
-    /// S1(d2): one `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete` round trip. The
+    /// One `SecItemAdd` / `SecItemCopyMatching` / `SecItemDelete` round trip. The
     /// entitlement is restricted, so it only works from a bundle that embeds a
     /// provisioning profile; this is what proves it live.
     func roundTrip(account: String, value: String) -> [String: Any] {

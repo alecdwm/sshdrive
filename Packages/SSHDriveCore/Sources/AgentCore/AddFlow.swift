@@ -3,8 +3,8 @@ import Config
 import Secrets
 import SSHProcess
 
-/// The state machine behind `sshdrive add` and `sshdrive passwd` (DESIGN.md sections 4.2,
-/// 4.3, 8).
+/// The state machine behind `sshdrive add` and `sshdrive passwd`
+/// (docs/design/secrets.md, docs/design/cli.md).
 ///
 /// It is here, in the package, rather than in `Apps/Agent` for the same reason
 /// `ItemDerivation` and `TransferScheduler` are: the decisions are the part that has to be
@@ -35,7 +35,7 @@ public enum AddFlow {
         public var identityAgentNone: Bool
         /// Keychain accounts the broker must not answer from for this attempt.
         public var maskedAccounts: Set<String>
-        /// `ask`, or `accept-new` under `--trust-first` (section 4.3).
+        /// `ask`, or `accept-new` under `--trust-first` (docs/design/secrets.md).
         public var hostKeyChecking: String
 
         public init(
@@ -100,9 +100,10 @@ public enum AddFlow {
     public enum Failure: Sendable, Equatable {
         /// A FIDO key asked for a touch, or a PIN or one-time code was seen. The location
         /// is not created: mounting it would succeed once and then fail into
-        /// `.notAuthenticated` on the first unattended reconnect (section 4.2).
+        /// `.notAuthenticated` on the first unattended reconnect (docs/design/secrets.md).
         case needsAHumanEveryTime(prompt: String, keys: [String])
-        /// The user answered the fingerprint question with anything but yes (section 4.3).
+        /// The user answered the fingerprint question with anything but yes
+        /// (docs/design/secrets.md).
         case hostKeyDeclined
         case authenticationFailed(String)
         case transport(String)
@@ -135,8 +136,8 @@ public enum AddFlow {
 
     public struct Result: Sendable {
         public var authenticated: Bool
-        /// Set when only the key agent could authenticate (section 4.2). The location
-        /// keeps the config's `IdentityAgent` and `show` says so.
+        /// Set when only the key agent could authenticate (docs/design/secrets.md). The
+        /// location keeps the config's `IdentityAgent` and `show` says so.
         public var agentDependent: Bool
         public var attempts: [Attempt]
         public var failure: Failure?
@@ -199,7 +200,7 @@ public enum AddFlow {
         }
 
         // A stored item this attempt used and the server refused is stale. Repeat the same
-        // pass with it masked, so every prompt reaches the terminal (section 4.2).
+        // pass with it masked, so every prompt reaches the terminal (docs/design/secrets.md).
         if result.classification == .authenticationFailed, !result.accountsAnsweredFromStore.isEmpty {
             let masked = Set(result.accountsAnsweredFromStore)
             say(
@@ -257,7 +258,7 @@ public enum AddFlow {
 
     /// The failures that end the flow whatever else happened, including on an attempt that
     /// otherwise authenticated: a location that needs a touch works once and then fails on
-    /// every unattended reconnect, so it is refused up front (section 4.2).
+    /// every unattended reconnect, so it is refused up front (docs/design/secrets.md).
     static func stopFailure(_ result: AttemptResult) -> Failure? {
         if !result.touchRequiredKeys.isEmpty {
             return .needsAHumanEveryTime(
@@ -283,10 +284,10 @@ public enum AddFlow {
         }
     }
 
-    /// "`~/.ssh/id_ed25519_sk` needs a touch on every connection; run
-    /// `sshdrive add --identity ~/.ssh/id_nas nas` to authenticate with a different key"
-    /// (section 4.2). The fingerprint in the user-presence notice is matched against the
-    /// `identityfile` list the same `ssh -G` produced.
+    /// "`~/.ssh/id_ed25519_sk` needs a touch on every connection; run `sshdrive add
+    /// --identity ~/.ssh/id_nas nas` to authenticate with a different key"
+    /// (docs/design/secrets.md). The fingerprint in the user-presence notice is matched
+    /// against the `identityfile` list the same `ssh -G` produced.
     public static func identityHint(
         touchKeys: [String], identityFiles: [String], fingerprints: [String: String],
         destination: String

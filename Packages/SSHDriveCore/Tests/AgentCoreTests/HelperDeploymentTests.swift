@@ -1,8 +1,9 @@
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.4 tier 2, steps 1 and 2: which binary a server gets, whether the
-/// copy already there is ours, and what may be deleted from a directory two Macs share.
+/// Tier 2 deployment (docs/design/change-detection.md): which binary a server gets,
+/// whether the copy already there is ours, and what may be deleted from a directory two
+/// Macs share.
 final class HelperDeploymentTests: XCTestCase {
 
     private func manifest() -> HelperManifest {
@@ -27,7 +28,7 @@ final class HelperDeploymentTests: XCTestCase {
     /// The spellings real servers print, which are not the ones the build system uses:
     /// FreeBSD says `amd64`, macOS says `arm64`, a 32-bit Synology says `armv7l`. Getting
     /// this wrong leaves every NAS at the sweep tier silently.
-    func testUnameMapsOntoTheTargetsSection6_4Names() {
+    func testUnameMapsOntoTheTargetNames() {
         let cases: [(String, String, String)] = [
             ("Linux x86_64", "linux", "x86_64"),
             ("Linux aarch64", "linux", "aarch64"),
@@ -73,8 +74,8 @@ final class HelperDeploymentTests: XCTestCase {
     }
 
     /// A hash the *binary* computed of itself is the same claim as one `sha256sum` made
-    /// about it, which is what makes section 6.4's "size plus `--version`" fallback a real
-    /// check rather than a weaker one (2026-09-05, section 13).
+    /// about it, which is what makes the size-plus-`--version` fallback
+    /// (docs/design/change-detection.md) a real check rather than a weaker one.
     func testTheBinarysOwnDigestIsAcceptedWhereThereIsNoChecksumTool() {
         let evidence = HelperDeployment.RemoteEvidence(
             size: 440_000, sha256: nil, reportedDigest: linux.sha256, reportedVersion: "0.1.0")
@@ -185,16 +186,18 @@ final class HelperDeploymentTests: XCTestCase {
         }
     }
 
-    /// Section 5.5's temp-file shape, so a half-written helper looks like every other
-    /// half-written upload and the helper's own ignore list already covers it.
-    func testTheTemporaryNameIsSection5_5s() {
+    /// The upload protocol's temp-file shape (docs/design/writes.md), so a half-written
+    /// helper looks like every other half-written upload and the helper's own ignore list
+    /// already covers it.
+    func testTheTemporaryNameMatchesTheUploadProtocol() {
         let name = HelperDeployment.temporaryName(macID: "0123456789abcdef", uuid: "UUID")
         XCTAssertEqual(name, ".sshdrive-upload-01234567-UUID")
     }
 
-    // MARK: The permanence of a post-upload verification failure (2026-09-08)
+    // MARK: The permanence of a post-upload verification failure
 
-    /// A hash that came back and disagreed is section 6.4's "hash mismatch after redeploy".
+    /// A hash that came back and disagreed is a hash mismatch after redeploy
+    /// (docs/design/change-detection.md).
     func testAHashThatDisagreedIsPermanent() {
         XCTAssertTrue(
             HelperDeployment.uploadFailureIsPermanent(

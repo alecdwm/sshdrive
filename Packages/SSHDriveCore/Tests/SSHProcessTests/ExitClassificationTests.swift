@@ -1,8 +1,8 @@
 import XCTest
 @testable import SSHProcess
 
-/// DESIGN.md section 6.1's classification, which decides whether the agent reconnects,
-/// stops until the user acts, or waits for a key agent.
+/// The exit classification (docs/design/ssh.md) that decides whether the agent
+/// reconnects, stops until the user acts, or waits for a key agent.
 final class ExitClassificationTests: XCTestCase {
 
     private func classify(

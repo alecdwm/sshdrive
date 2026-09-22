@@ -3,10 +3,9 @@ import XCTest
 @testable import Secrets
 
 /// The prompt strings are not invented: every one below was captured from
-/// `OpenSSH_10.2p1, LibreSSL 3.3.6` on the build VM by pointing `SSH_ASKPASS` at a script
-/// that logged `argv[1]` and `SSH_ASKPASS_PROMPT`, running against the spike testbed
-/// (docs/spikes/results.md, "S2 askpass", 2026-09-04). The trailing spaces are real and
-/// are part of OpenSSH's own format strings.
+/// `OpenSSH_10.2p1, LibreSSL 3.3.6` by pointing `SSH_ASKPASS` at a script that logged
+/// `argv[1]` and `SSH_ASKPASS_PROMPT` against a real `ssh` (measured 2026-09-04). The
+/// trailing spaces are real and are part of OpenSSH's own format strings.
 final class AskpassPromptTests: XCTestCase {
 
     // MARK: the captured strings
@@ -73,11 +72,10 @@ final class AskpassPromptTests: XCTestCase {
             classified, .keyboardInteractiveChallenge(question: "Verification code: "))
     }
 
-    /// The finding that matters: section 4.2 and section 4.3 both say the host-key
-    /// question arrives with `SSH_ASKPASS_PROMPT=confirm`. On OpenSSH 10.2p1 it arrives
-    /// with the variable **unset**, so it is indistinguishable from a secret prompt by
-    /// the hint alone - and a classifier that trusted the hint would answer a stored
-    /// password to "Are you sure you want to continue connecting".
+    /// The host-key question has no reliable hint (docs/design/secrets.md): OpenSSH
+    /// 10.2p1 leaves `SSH_ASKPASS_PROMPT` **unset** for it, indistinguishable from a
+    /// secret prompt by the hint alone - so a classifier that trusted the hint would
+    /// answer a stored password to "Are you sure you want to continue connecting".
     func testHostKeyQuestionIsRecognisedWithNoHint() {
         let classified = AskpassPromptClassifier.classify(
             prompt: Self.hostKeyPrompt, promptKind: "")

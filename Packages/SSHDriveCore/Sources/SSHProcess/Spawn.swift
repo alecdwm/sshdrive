@@ -5,7 +5,7 @@ import Foundation
 /// group, and raw file descriptors for the channel's `ByteStream`.
 ///
 /// `argv[0]` matters because OpenSSH reuses it for any `ProxyJump` hop it builds itself
-/// (DESIGN.md section 6.1); the process group matters because the login-shell snapshot
+/// (docs/design/ssh.md); the process group matters because the login-shell snapshot
 /// has to kill a shell whose rc file left background children behind, and killing our own
 /// group would take the agent with it.
 public struct SpawnedProcess: @unchecked Sendable {

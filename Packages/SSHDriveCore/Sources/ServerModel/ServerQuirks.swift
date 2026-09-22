@@ -18,8 +18,8 @@ public struct ServerQuirkID: Sendable, Hashable, CustomStringConvertible,
 /// The `SQ-###` rows `ServerModel` implements, with the one-sentence statement from
 /// `docs/quirks/servers.md` beside each so a reader of the model never has to leave it.
 ///
-/// This is not a second source of truth: `docs/spikes/results.md` measures, the Markdown
-/// catalog records, and this enum only names. `ServerQuirks.implemented` is what
+/// This is not a second source of truth: the Markdown catalog records the measurement and
+/// this enum only names the row. `ServerQuirks.implemented` is what
 /// `ServerModelQuirkCoverageTests` checks against the Markdown file, so a row that loses
 /// its rule here is a test failure rather than a silent gap.
 public enum ServerQuirks {

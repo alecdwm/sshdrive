@@ -1,15 +1,16 @@
 import Foundation
 
-/// The "Server free space" line of DESIGN.md section 8.1, as a value taken at probe time.
+/// The "Server free space" line of `sshdrive status` (docs/design/cli.md), as a value
+/// taken at probe time.
 ///
 /// `statvfs@openssh.com` is a **wire call**, and `sshdrive status` may not make one: a
 /// status command that dialled a server the user has not touched would wait behind
-/// section 6.3's connect attempt - up to the 60 s authentication deadline - and, worse,
-/// *start* one where there was none. Section 8 gives `status --probe` as the way to ask
-/// for a connection on purpose, and nothing else in the command may.
+/// the breaker's connect attempt - up to the 60 s authentication deadline - and, worse,
+/// *start* one where there was none. `status --probe` is the way to ask for a connection
+/// on purpose, and nothing else in the command may.
 ///
 /// So the number is captured where a connection already exists and a round trip is
-/// already being spent - the capability probe of section 8.1, which runs on every
+/// already being spent - the capability probe, which runs on every
 /// connection and on `--probe` - and kept in `capabilities.json` beside the probe.
 /// `status` renders whatever is there, with its age when it is old enough for the age to
 /// matter, and "unknown" when no probe has ever run.
@@ -64,7 +65,7 @@ public struct ServerFreeSpace: Sendable, Equatable {
 
     /// The same shape the CLI prints a probe timestamp in ("probed 3m ago"), computed
     /// here so the agent owns every value in the report and `--json` and the text cannot
-    /// disagree (section 8.1).
+    /// disagree (docs/design/cli.md).
     public static func age(seconds: Double) -> String {
         let whole = Int(max(0, seconds.rounded()))
         if whole < 60 { return "\(whole)s ago" }

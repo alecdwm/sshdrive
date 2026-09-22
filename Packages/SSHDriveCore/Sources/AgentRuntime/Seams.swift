@@ -8,35 +8,36 @@ import SSHProcess
 import Secrets
 import XPCProtocols
 
-// The agent's seams (docs/testing-architecture.md section 2.3).
+// The agent's seams (docs/design/testing.md).
 //
 // Everything under `Apps/Agent` that names an Apple framework is one of these protocols.
 // The Darwin implementation stays in `Apps/Agent` as an adapter with no branch worth
 // testing; the Linux implementation is a fake in `AgentRuntimeTestSupport`, so every
 // decision above the seam runs on this box.
 //
-// Two deviations from the document's table, both forced and both deliberate:
+// Two deviations from the seam table, both forced and both deliberate:
 //
 // - the presence seam is `PresenceReporting`, not `PresenceReading`: `AgentCore` already
-//   owns a *value* called `PresenceReading` (section 4.2's two readings), and a protocol
-//   of the same name in a module that imports it would be ambiguous at every use;
-// - `ProcessAncestryReading` is `Secrets.ProcessAncestry`, which was already a protocol
-//   with a `/proc` implementation off Darwin (step 1.2), so nothing is redefined here.
+//   owns a *value* called `PresenceReading` (the two readings of the user's presence),
+//   and a protocol of the same name in a module that imports it would be ambiguous at
+//   every use;
+// - `ProcessAncestryReading` is `Secrets.ProcessAncestry`, a protocol with a `/proc`
+//   implementation off Darwin, so nothing is redefined here.
 
 // MARK: The replica
 
 /// Every call the agent makes into its own File Provider domains: the domain list, the
 /// signals, the replica enumerators, eviction, and the two lookups that turn an
-/// identifier into a file on disk (DESIGN.md sections 5.3, 6.5, 7, 7.1).
+/// identifier into a file on disk.
 ///
 /// The Darwin implementation is `NSFileProviderManager` in `Apps/Agent`; the failures it
-/// reports are dictionaries rather than typed errors on purpose - S4 measured that the
-/// codes say nothing about why (`MQ-017`, `MQ-018`, `MQ-019`), so nothing above this seam
-/// may branch on one.
+/// reports are dictionaries rather than typed errors on purpose, because the codes say
+/// nothing about why (`MQ-017`, `MQ-018`, `MQ-019`) and nothing above this seam may
+/// branch on one.
 public protocol ReplicaControlling: Sendable {
     /// Every domain the system holds for our provider, as `(identifier, displayName)`.
     func domains() async throws -> [ReplicaDomain]
-    /// `add(domain)`. The same identifier with a new display name renames in place (S9).
+    /// `add(domain)`. The same identifier with a new display name renames in place.
     func addDomain(_ domain: ReplicaDomain, testingModes: [String]) async throws
     func removeDomain(_ domain: ReplicaDomain) async throws
 
@@ -44,7 +45,7 @@ public protocol ReplicaControlling: Sendable {
     func signalErrorResolved(locationID: String) async throws
 
     /// `enumeratorForMaterializedItems()`, drained. Nil means there is no manager for the
-    /// domain, which is "no news" and never "the user evicted everything" (section 6.5).
+    /// domain, which is "no news" and never "the user evicted everything".
     func materializedIdentifiers(locationID: String) async -> [String]?
     /// `enumeratorForPendingItems()`, drained.
     func pendingIdentifiers(locationID: String) async -> [String]?
@@ -56,14 +57,14 @@ public protocol ReplicaControlling: Sendable {
     /// `getIdentifierForUserVisibleFile(at:)`, filtered to this domain.
     func identifierForUserVisibleFile(at url: URL, locationID: String) async -> String?
 
-    /// `lstat` of a replica path: the atime and mtime section 7's TTL rule reads before
-    /// anything is evicted, since an eviction moves atime (S4).
+    /// `lstat` of a replica path: the atime and mtime the TTL rule reads before anything
+    /// is evicted, since an eviction moves atime.
     func replicaTimes(url: URL) -> (atime: Double, mtime: Double)?
     /// The same `lstat` as a report, for `sshdrive debug replica`.
     func statReport(url: URL, readFirst: Bool) -> [String: Any]
 
     /// `NSFileProviderManager.waitForStabilization`, and the testing-operation hooks. Both
-    /// are spike scaffolding and both answer a dictionary, so a model can say "not here".
+    /// are diagnostic hooks and both answer a dictionary, so a model can say "not here".
     func stabilize(locationID: String) async throws -> [String: Any]
     func testingOperations(locationID: String, run: Bool) async throws -> [String: Any]
 
@@ -113,9 +114,9 @@ extension ReplicaControlling {
         }
     }
 
-    /// Section 5.5's conflict path: the eviction that has to follow the reply, which
-    /// cannot be done once. Without it the replica keeps the *local* bytes under the
-    /// *remote* version for ever, which is the whole reason the eviction is there.
+    /// The conflict path's eviction, which has to follow the reply and cannot be done
+    /// once (docs/design/writes.md). Without it the replica keeps the *local* bytes under
+    /// the *remote* version for ever, which is the whole reason the eviction is there.
     public func evictAfterConflict(
         locationID: String, identifier: String, attempts: Int = 7, sleeper: any AgentClock
     ) async {
@@ -135,12 +136,12 @@ extension ReplicaControlling {
         }
     }
 
-    /// Section 7.1 step 1's last step: **a lookup of the pinned path in the replica**.
+    /// The last step of storing a pin: **a lookup of the pinned path in the replica**.
     ///
-    /// S6 measured (2026-09-04) that reporting the ancestor rows through the working set
-    /// does not make the system ingest them, and neither does `signalEnumerator` on each
-    /// new ancestor's container. What starts it is this: `getUserVisibleURL` for the
-    /// pinned identifier followed by one `lstat` of the returned path.
+    /// Reporting the ancestor rows through the working set does not make the system ingest
+    /// them, and neither does `signalEnumerator` on each new ancestor's container
+    /// (measured 2026-09-04). What starts it is this: `getUserVisibleURL` for the pinned
+    /// identifier followed by one `lstat` of the returned path.
     @discardableResult
     public func lookUpInReplica(locationID: String, identifier: String) async -> [String: Any] {
         do {
@@ -158,9 +159,9 @@ extension ReplicaControlling {
         }
     }
 
-    /// `evictItem` with the doubling backoff section 5.5's conflict path needs and
-    /// `sshdrive evict <name> <path>` reuses (S3: an eviction issued straight after a
-    /// `modifyItem` reply is refused -2008 because the system is still finishing it).
+    /// `evictItem` with the doubling backoff the conflict path needs and
+    /// `sshdrive evict <name> <path>` reuses: an eviction issued straight after a
+    /// `modifyItem` reply is refused -2008, because the system is still finishing it.
     @discardableResult
     public func evictWithRetry(
         locationID: String, identifier: String, attempts: Int = 7, subject: String = "",
@@ -187,9 +188,9 @@ extension ReplicaControlling {
 
 // MARK: The login item and launchd
 
-/// `SMAppService.agent(plistName:)` (DESIGN.md section 10). Registration is idempotent and
-/// is done on every launch; only `unregister()` clears a record whose bundle was replaced
-/// (`MQ-062`).
+/// `SMAppService.agent(plistName:)` (docs/design/packaging.md). Registration is
+/// idempotent and is done on every launch; only `unregister()` clears a record whose
+/// bundle was replaced (`MQ-062`).
 public protocol LoginItemControlling: Sendable {
     func register() throws
     func unregister() throws
@@ -205,7 +206,7 @@ public protocol LaunchdControlling: Sendable {
 }
 
 extension LaunchdControlling {
-    /// Section 10's upgrade handover: `unregister()` returns, and `status` reports
+    /// The upgrade handover: `unregister()` returns, and `status` reports
     /// `notRegistered`, *before* launchd has dropped the job, and a `register()` inside
     /// that window leaves the job carrying the previous bundle's launch constraint and
     /// dying on a 10 s throttle for ever. So the unregister role waits for the job to go.
@@ -222,7 +223,7 @@ extension LaunchdControlling {
 
 // MARK: Power, network, presence and the screen lock
 
-/// `IORegisterForSystemPower` (section 6.1). The will-sleep message must be acknowledged,
+/// `IORegisterForSystemPower`. The will-sleep message must be acknowledged,
 /// and the adapter does that; what crosses the seam is only "the Mac is going to sleep,
 /// tell me when you are done" and "the Mac woke up".
 public protocol PowerObserving: Sendable {
@@ -232,25 +233,26 @@ public protocol PowerObserving: Sendable {
     var report: [String: Any] { get }
 }
 
-/// `NWPathMonitor` (section 6.3's first rule).
+/// `NWPathMonitor` (docs/design/offline.md).
 public protocol NetworkPathObserving: Sendable {
     func start(changed: @escaping @Sendable (Bool) async -> Void)
     var report: [String: Any] { get }
 }
 
-/// `CGEventSource.secondsSinceLastEventType` and `CGSSessionScreenIsLocked` (section 4.2).
+/// `CGEventSource.secondsSinceLastEventType` and `CGSSessionScreenIsLocked`
+/// (docs/design/secrets.md).
 ///
-/// Named `PresenceReporting` rather than the document's `PresenceReading` because
+/// Named `PresenceReporting` rather than `PresenceReading` because
 /// `AgentCore.PresenceReading` is the value it returns.
 public protocol PresenceReporting: Sendable {
     func read() -> PresenceReading
-    /// Whether the reading is a real one or the spike override, so a runbook can never
+    /// Whether the reading is a real one or the debug override, so a runbook can never
     /// mistake one for the other.
     var isOverridden: Bool { get }
 }
 
-/// `com.apple.screenIsUnlocked` / `com.apple.screenIsLocked` (section 4.2's first
-/// re-arm trigger).
+/// `com.apple.screenIsUnlocked` / `com.apple.screenIsLocked`, the first trigger that
+/// re-arms the authentication deadline (docs/design/secrets.md).
 public protocol ScreenLockObserving: Sendable {
     func start(
         unlocked: @escaping @Sendable () async -> Void,
@@ -260,14 +262,14 @@ public protocol ScreenLockObserving: Sendable {
 
 // MARK: Peers
 
-/// Which of our four executables a peer is (section 5.2). The code requirement is the
+/// Which of our four executables a peer is. The code requirement is the
 /// security boundary and is applied before this; this only says *which*.
 public protocol PeerIdentifying: Sendable {
     func executablePath(pid: Int32) -> String?
     func isCLI(pid: Int32) -> Bool
 }
 
-/// Every live File Provider extension connection, so section 5.3's restore can ask the
+/// Every live File Provider extension connection, so the index restore can ask the
 /// readers to close before the sidecars are truncated under them.
 public protocol IndexReaderPeering: Sendable {
     func closeReaders() async
@@ -278,11 +280,11 @@ public protocol IndexReaderPeering: Sendable {
 // MARK: The bundle
 
 /// What the agent can learn about the bundle it is running from: the quarantine xattr, the
-/// paths, the shipped helper binaries, and PlugInKit's view of the extension (section 10).
+/// paths, the shipped helper binaries, and PlugInKit's view of the extension.
 public protocol BundleInspecting: Sendable {
     var bundleURL: URL { get }
     var executableURL: URL { get }
-    /// `Contents/Resources/helper/`, where the tier-2 binaries ship (section 6.4).
+    /// `Contents/Resources/helper/`, where the tier-2 binaries ship.
     var helperResourcesURL: URL? { get }
     /// `com.apple.quarantine`'s value, or nil.
     func quarantineValue(atPath path: String) -> String?
@@ -291,11 +293,11 @@ public protocol BundleInspecting: Sendable {
     /// The running OS, for `doctor`'s minimum-version check.
     var operatingSystemVersion: (major: Int, minor: Int, patch: Int) { get }
     /// Whether a bundle at a path is a complete, readable replacement carrying our own
-    /// identifier - section 10.1's upgrade handover test.
+    /// identifier, which is what the upgrade handover checks before it hands over.
     func inode(ofPath path: String) -> UInt64?
     func bundleIdentifier(atPath path: String) -> String?
-    /// "readable" in section 10.1's sense: the file is there and this process can open it,
-    /// which is half of what stops a handover to a half-copied bundle.
+    /// "readable" means the file is there and this process can open it, which is half of
+    /// what stops a handover to a half-copied bundle.
     func isReadable(path: String) -> Bool
 }
 
@@ -305,26 +307,27 @@ public protocol BundleInspecting: Sendable {
 ///
 /// `SSHBackedTransport` is the only implementation that ships; a test hands out a double
 /// over the same `SFTPTransport` surface, and `execMaster` is nil there, which is exactly
-/// what "no exec channel" already means everywhere in section 6.4.
+/// what "no exec channel" already means everywhere in change detection.
 public protocol LiveConnection: SFTPTransport, Sendable {
     var budget: ChannelBudget { get }
     var probe: ServerProbe.Result { get }
     var transfersShareMetadataChannel: Bool { get }
     var uploadTag: String { get }
-    /// Every extension name the handshake recorded (section 8.1).
+    /// Every extension name the handshake recorded, for the capability report.
     var extensionNames: [String] { get async }
     /// The master an exec channel is opened on: the tier-1 sweep, the `id` probe and the
     /// helper's stream. Nil where there is no real `ssh`, which reads as "no exec channel".
     var execMaster: SSHMaster? { get }
     /// The metadata channel's client, for the one caller that addresses a path outside
-    /// every location root: the helper's deployment (section 6.4 tier 2).
+    /// every location root: the helper's deployment (docs/design/change-detection.md).
     var metadataTransport: RealSFTPTransport? { get }
     func shutdown() async
     func isMasterAlive() async -> Bool
 }
 
-/// What spawns `/usr/bin/ssh` (section 6.1). `SSHTransportLauncher` in `Apps/Agent` is the
-/// real one; `ServerModel.FakeSSH` and the in-process doubles stand in on Linux.
+/// What spawns `/usr/bin/ssh` (docs/design/ssh.md). `SSHTransportLauncher` in
+/// `Apps/Agent` is the real one; `ServerModel.FakeSSH` and the in-process doubles stand
+/// in on Linux.
 public protocol TransportLauncher: Sendable {
     func connect(
         location: Location, askpassPath: String?, askpass: (any AskpassTokenProviding)?,
@@ -334,7 +337,7 @@ public protocol TransportLauncher: Sendable {
 
 // MARK: The terminal
 
-/// The CLI, as the agent sees it (section 4.2): a line for the terminal while a long
+/// The CLI, as the agent sees it: a line for the terminal while a long
 /// command runs, and one prompt answered on it. Nothing the extension or a timer does can
 /// reach a terminal, so this only ever exists while a CLI command of the user's own making
 /// is in flight.
@@ -438,11 +441,11 @@ public struct AgentEnvironment: Sendable {
     }
 }
 
-// MARK: The keychain, as `doctor` and the spikes ask about it
+// MARK: The keychain, as `doctor` and the debug hooks ask about it
 
 /// Two questions about the keychain that are not "store this secret": can the agent reach
 /// it at all, and does one `SecItemAdd`/`CopyMatching`/`Delete` round trip work under the
-/// shared access group (S1 d2, DESIGN.md section 3.1)?
+/// shared access group (docs/design/components.md)?
 ///
 /// They are a seam of their own rather than methods on `SecretsStore` because both answer
 /// `OSStatus` detail that only Darwin has, and neither is on any path that stores or reads

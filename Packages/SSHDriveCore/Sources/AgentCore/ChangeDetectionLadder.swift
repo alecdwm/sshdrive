@@ -2,21 +2,22 @@ import Config
 import Foundation
 
 /// Which change-detection tier a location runs at, and why it is not higher
-/// (DESIGN.md section 6.4, reported by section 8.1).
+/// (docs/design/change-detection.md, reported by `sshdrive status`).
 ///
-/// Section 6.4: "`watchMode: auto` (the default) tries the tiers from the top: helper
-/// first, then sweep, then poll, settling on the first one that starts successfully ... A
-/// tier that fails at runtime (the helper's stream dies with a non-network error, `find`
-/// is missing) drops the location one tier down for the rest of the session and records
-/// why, which `sshdrive status` shows. Setting `watchMode` to a specific tier disables the
-/// fallback ladder except to `poll`, which always works."
+/// `watchMode: auto`, the default, tries the tiers from the top: helper first, then sweep,
+/// then poll, settling on the first one that starts successfully. A tier that fails at
+/// runtime (the helper's stream dies with a non-network error, `find` is missing) drops
+/// the location one tier down and records why, which `sshdrive status` shows. Setting
+/// `watchMode` to a specific tier disables the fallback ladder except to `poll`, which
+/// always works.
 ///
 /// The tier is a decision, not a connection, so this is a value with the clock passed in.
-/// Nothing on the File Provider side knows which tier is active; the version format of
-/// section 5.3 is the same at every tier so a tier change is invisible too.
+/// Nothing on the File Provider side knows which tier is active; the content version
+/// format (docs/design/item-index.md) is the same at every tier so a tier change is
+/// invisible too.
 public struct ChangeDetectionLadder: Sendable, Equatable {
 
-    /// The three tiers of section 6.4, ordered worst to best. `poll` is the floor: it
+    /// The three tiers, ordered worst to best. `poll` is the floor: it
     /// needs SFTP and nothing else, so it always works and nothing ever drops below it.
     public enum Tier: String, Sendable, Comparable, CaseIterable {
         case poll
@@ -43,7 +44,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         }
     }
 
-    /// What the probe measured about this server (section 8.1).
+    /// What the probe measured about this server (docs/design/cli.md).
     public struct ServerCapabilities: Sendable, Equatable {
         /// The account has shell (exec) access at all. False for a chrooted
         /// `internal-sftp` or a `ForceCommand internal-sftp` account, which is the one
@@ -51,7 +52,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         public var hasExecChannel: Bool
         public var hasFind: Bool
         /// False for every busybox build measured, which answers
-        /// `find: unrecognized: -cmin` (section 6.4).
+        /// `find: unrecognized: -cmin` (docs/design/change-detection.md).
         public var takesCmin: Bool
         public var takesPrintf: Bool
         /// False for a server that cannot run the helper: no writable executable
@@ -62,7 +63,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         public var helperEnabledForLocation: Bool
         /// What the deployment said when it refused, verbatim, so `status` prints the real
         /// reason - `cache directory is noexec`, `helper unsupported: Linux mips`, `helper
-        /// upload failed: …` - rather than a category (section 8.1).
+        /// upload failed: …` - rather than a category (docs/design/cli.md).
         public var helperBlockReason: String?
 
         public init(hasExecChannel: Bool = false, hasFind: Bool = false, takesCmin: Bool = false,
@@ -86,7 +87,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         public var at: Double
         /// Whether it cost the tier for the session or only for a backoff. `status` says
         /// so, because a transient downgrade the location has already climbed out of
-        /// otherwise reads as a tier it is still stuck at (2026-09-08).
+        /// otherwise reads as a tier it is still stuck at.
         public var permanence: Permanence
 
         public init(from: Tier, to: Tier, reason: String, at: Double,
@@ -99,16 +100,16 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         }
     }
 
-    /// Whether a runtime failure is one section 6.4 counts as permanent.
+    /// Whether a runtime failure is one docs/design/change-detection.md counts as
+    /// permanent.
     ///
-    /// Section 6.4 used to drop a tier "for the rest of the session" whatever went wrong,
-    /// and that read a *network outage* as a verdict about the server: the helper's stream
-    /// dies with every connection, so a tailnet that blinked left the location at sweep
-    /// until the agent was restarted (2026-09-08). The permanent list is now exactly the
-    /// things that will still be true on the next connection - no shell, no exec channel,
-    /// an unsupported architecture, a `noexec` directory, a hash that did not match after a
-    /// redeploy - and everything else is transient, held down for a bounded backoff and
-    /// then tried again.
+    /// The permanent list is exactly the things that will still be true on the next
+    /// connection - no shell, no exec channel, an unsupported architecture, a `noexec`
+    /// directory, a hash that did not match after a redeploy. Everything else is
+    /// transient, held down for a bounded backoff and then tried again. Dropping a tier
+    /// for the rest of the session whatever went wrong reads a *network outage* as a
+    /// verdict about the server: the helper's stream dies with every connection, so a
+    /// tailnet that blinks would leave the location at sweep until the agent restarted.
     public enum Permanence: String, Sendable, Equatable {
         case permanent
         case transient
@@ -125,7 +126,8 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
 
     public private(set) var tier: Tier
     public private(set) var downgrades: [Downgrade]
-    /// Why the tier is not `helper`, for section 8.1's `note:` line. Nil at the best tier.
+    /// Why the tier is not `helper`, for the `note:` line `sshdrive status` prints. Nil at
+    /// the best tier.
     public private(set) var note: String?
 
     /// What the last probe said, kept so a `status` line can explain the tier without the
@@ -156,7 +158,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
 
     // MARK: Selection
 
-    /// Section 6.4's ladder. `auto` walks down from the top and takes the first tier that
+    /// The ladder. `auto` walks down from the top and takes the first tier that
     /// can start; a specific `watchMode` takes that tier or falls straight to `poll`,
     /// never to the tier in between, because asking for the helper and silently getting a
     /// sweep is not what "set `watchMode` to a specific tier" means.
@@ -226,10 +228,10 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     /// server into a stream of failures instead of a working `poll`. A **transient** one -
     /// an outage, a channel that went with the connection, a helper that did not answer
     /// this time - holds the tier down for a bounded backoff (2 s, doubling to 60 s) and is
-    /// then tried again, because the alternative measured in production was a mount left at
-    /// the sweep tier by a network blink until something restarted the agent (2026-09-08).
+    /// then tried again, because the alternative is a mount left at the sweep tier by a
+    /// network blink until something restarts the agent.
     ///
-    /// Returns true when the tier actually moved; at `poll` there is nowhere to go, so the
+    /// Returns true when the tier changed; at `poll` there is nowhere to go, so the
     /// reason is kept for `status` and the answer is false.
     @discardableResult
     public mutating func recordRuntimeFailure(
@@ -274,7 +276,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
 
     /// Lets the tier climb back once a transient hold has expired. Called at the top of
     /// every detector cycle and on every reconnect. Returns true when the tier rose, which
-    /// is the detector's cue to start the stream the tier now names.
+    /// is the detector's cue to start the stream the new tier names.
     @discardableResult
     public mutating func climbBack(now: Double) -> Bool {
         guard transientCeiling != nil, now >= transientUntil else { return false }
@@ -285,11 +287,11 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         return tier > from
     }
 
-    /// A connection came up. Section 6.4's outage case ends here: the stream died with the
+    /// A connection came up. The outage case ends here: the stream died with the
     /// link, the link is back, so the hold is dropped and the backoff starts again from the
     /// bottom. A helper that then dies on this connection is a fresh transient failure and
     /// pays the 2 s hold again, and the connection itself is already bounded by the
-    /// breaker's own backoff (section 6.3), so nothing here can spin.
+    /// breaker's own backoff (docs/design/offline.md), so nothing here can spin.
     @discardableResult
     public mutating func noteConnected(now: Double) -> Bool {
         transientFailures = 0
@@ -347,14 +349,13 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     /// True when the sweep runs `-mmin` rather than `-cmin` and therefore misses `chmod`,
     /// `chown` and preserved-mtime writes (`rsync -t`, `cp -p`, `touch -r`).
     ///
-    /// Section 6.4: that fallback "is the ordinary path for every busybox server, a NAS
-    /// included, rather than a legacy fringe, so that note is a normal `status` line and
-    /// not an alarm."
+    /// That fallback is the ordinary path for every busybox server, a NAS included, rather
+    /// than a legacy fringe, so the note is a normal `status` line and not an alarm.
     ///
     /// It is gated on the tier because a location at `poll` runs no sweep at all, and a
     /// note about a sweep's blind spot on a location that has no sweep would be noise. The
-    /// helper tier is not excluded: section 6.4 still runs a sweep there every 30 minutes
-    /// as insurance, and that sweep has the same blind spot.
+    /// helper tier is not excluded: a sweep still runs there every 30 minutes as insurance,
+    /// and that sweep has the same blind spot.
     public var sweepUsesMmin: Bool { tier != .poll && !capabilities.takesCmin }
 
     /// One line for `sshdrive status`.

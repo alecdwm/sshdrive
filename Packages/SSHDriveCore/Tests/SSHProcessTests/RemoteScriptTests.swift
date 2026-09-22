@@ -1,7 +1,8 @@
 import XCTest
 @testable import SSHProcess
 
-/// The `sh -s` script (DESIGN.md section 9.2) and the heartbeat wrapper (section 6.4).
+/// The `sh -s` script (docs/design/security.md) and the heartbeat wrapper
+/// (docs/design/change-detection.md).
 final class RemoteScriptTests: XCTestCase {
 
     private let sentinel = Sentinel(hex: "0123456789abcdef0123456789abcdef")
@@ -39,7 +40,7 @@ final class RemoteScriptTests: XCTestCase {
 
     /// A compound command has to be parsed in full before any of it runs, which is what
     /// stops dash's block-buffered stdin reader swallowing the script's own tail once the
-    /// heartbeat loop starts reading (section 9.2).
+    /// heartbeat loop starts reading (docs/design/security.md).
     func testTheWholeScriptIsOneCompoundCommandEndingInAnExit() {
         for script in [
             RemoteScript(sentinel: sentinel, body: "true"),
@@ -62,10 +63,10 @@ final class RemoteScriptTests: XCTestCase {
         let text = script.text
         XCTAssertTrue(text.contains("} </dev/null &"), "the child never shares the script's stdin")
         XCTAssertTrue(text.contains("__sd_child=$!"))
-        // `IFS= read -r`, not a bare `read`: since milestone 9 the wrapper may relay the
-        // line it read to the helper, and `read` without -r eats backslashes while the
-        // default IFS strips leading and trailing spaces - both of which a JSON control
-        // line and a filename inside one need kept.
+        // `IFS= read -r`, not a bare `read`: the wrapper may relay the line it read to
+        // the helper, and `read` without -r eats backslashes while the default IFS
+        // strips leading and trailing spaces - both of which a JSON control line and
+        // a filename inside one need kept.
         XCTAssertTrue(text.contains("IFS= read -r -t 60 __sd_line || break"))
         XCTAssertTrue(text.contains("sleep 15"), "the dash branch's watchdog tick")
         XCTAssertTrue(text.contains("exec 7<&0") && text.contains("done <&7"),
@@ -76,11 +77,11 @@ final class RemoteScriptTests: XCTestCase {
         // which makes the watchdog kill a healthy child seconds after it started.
         XCTAssertEqual(text.components(separatedBy: "trap - EXIT").count - 1, 3,
                        "the child, the read -t probe and the reader all clear the EXIT trap")
-        // The group is named `-$$`, never `0`. `0` is "whatever group I am in", and a
-        // Tailscale SSH server puts every session in `tailscaled`'s group, so `kill 0`
-        // there killed the account's other sessions and the connection under them
-        // (2026-09-08). `-$$` is the same group wherever sshd gave us one and an ESRCH
-        // where it did not.
+        // The group is named `-$$`, never `0`. `0` means "whatever group I am in", and
+        // on a Tailscale SSH server, which puts every session in `tailscaled`'s shared
+        // group, `kill 0` kills the account's other sessions and the connection under
+        // them (gotcha 100). `-$$` is the same group wherever sshd gave us one, and a
+        // harmless ESRCH where it did not.
         XCTAssertFalse(text.contains("kill -TERM 0"), "never the ambient process group")
         XCTAssertFalse(text.contains("kill -KILL 0"), "never the ambient process group")
         XCTAssertTrue(text.contains("kill -TERM -$$"))
@@ -115,12 +116,13 @@ final class RemoteScriptTests: XCTestCase {
         ), script.text)
     }
 
-    // MARK: The helper's stdin relay (section 6.4 tier 2)
+    // MARK: The helper's stdin relay (docs/design/change-detection.md, tier 2)
 
-    /// Section 9.2 says background children never share the script's stdin, and section
-    /// 6.4 says the helper is fed its root set and its pings on stdin. Both cannot be the
-    /// channel's stdin. The wrapper stays the only reader and relays what it reads into a
-    /// FIFO the child is given instead.
+    /// Background children never share the script's stdin (docs/design/security.md),
+    /// and the helper is fed its root set and its pings on stdin
+    /// (docs/design/change-detection.md). Both cannot be the channel's stdin. The
+    /// wrapper stays the only reader and relays what it reads into a FIFO the child
+    /// is given instead.
     func testTheRelayMakesAFifoAndFeedsTheChildFromIt() {
         let script = RemoteScript(
             sentinel: sentinel, body: "exec helper", heartbeat: .standard,
@@ -148,8 +150,8 @@ final class RemoteScriptTests: XCTestCase {
         XCTAssertTrue(script.text.contains("\(RemoteScript.relayFlagVariable)=0"), script.text)
     }
 
-    /// Without a relay the wrapper is byte for byte what milestone 6 measured against
-    /// `deb`, `alp` and `bashbg`: `</dev/null`, no FIFO, no fd 8.
+    /// Without a relay the wrapper is unchanged from the plain form measured against
+    /// `deb`, `alp` and `bashbg` (2026-09-04): `</dev/null`, no FIFO, no fd 8.
     func testAScriptWithNoRelayIsUnchanged() {
         let script = RemoteScript(sentinel: sentinel, body: "find .", heartbeat: .standard)
         let text = script.text

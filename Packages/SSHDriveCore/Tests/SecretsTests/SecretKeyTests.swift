@@ -29,7 +29,8 @@ final class SecretKeyTests: XCTestCase {
     }
 
     func testTwoLocationsOnOneHostShareOneItem() {
-        // Section 4: the key carries no location id, which is what makes the item shared.
+        // The key carries no location id (docs/design/locations.md), which is what makes
+        // the item shared.
         let first = SecretKey.password(SSHDestination(user: "alec", hostname: "nas", port: 22))
         let second = SecretKey.password(SSHDestination(user: "alec", hostname: "NAS", port: 22))
         XCTAssertEqual(first, second)
@@ -38,7 +39,7 @@ final class SecretKeyTests: XCTestCase {
     func testEachProxyJumpHopGetsItsOwnItem() {
         let hopA = SecretKey.password(SSHDestination(user: "hop", hostname: "bastion", port: 2210))
         let hopB = SecretKey.password(SSHDestination(user: "hop", hostname: "bastion", port: 22))
-        XCTAssertNotEqual(hopA, hopB, "the port is in the key, section 4.2")
+        XCTAssertNotEqual(hopA, hopB, "the port is in the key (docs/design/secrets.md)")
     }
 
     func testNonsenseAccountsDoNotParse() {

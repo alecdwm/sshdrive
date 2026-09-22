@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.4's "Schedule for tiers 0 and 1".
+/// The schedule for tiers 0 and 1 (docs/design/change-detection.md).
 final class PollScheduleTests: XCTestCase {
 
     func testSixtySecondsInsideTheTouchWindow() {
@@ -45,7 +45,8 @@ final class PollScheduleTests: XCTestCase {
 
     /// Measured on a real install (2026-09-05): a sweep of a large home directory took
     /// 56.8 s of its own 60 s interval, so the location swept without pause and the exec
-    /// channel was never free. A cycle may have a third of its interval (section 6.4).
+    /// channel was never free. A cycle may have a third of its interval
+    /// (docs/design/change-detection.md).
     func testACycleThatConsumesItsIntervalBacksTheScheduleOff() {
         XCTAssertEqual(
             PollSchedule.interval(lastTouch: 990, now: 1000, lastCycleSeconds: 56.8),
@@ -67,7 +68,8 @@ final class PollScheduleTests: XCTestCase {
             1000 + 56.8 * 3, accuracy: 0.001)
     }
 
-    /// `status` has to say when the cadence is not the one section 6.4 advertises.
+    /// `status` has to say when the cadence is not the documented one
+    /// (docs/design/change-detection.md).
     func testTheBackoffIsReportedAndOnlyWhenItIsInForce() {
         XCTAssertNil(
             PollSchedule.backoffNote(lastTouch: 990, now: 1000, lastCycleSeconds: 1.2))
@@ -77,7 +79,7 @@ final class PollScheduleTests: XCTestCase {
         XCTAssertTrue(note!.contains("170s"), note ?? "")
     }
 
-    func testTheConstantsAreTheOnesSectionSixFourStates() {
+    func testTheConstantsAreTheDocumentedValues() {
         XCTAssertEqual(PollSchedule.activeInterval, 60)
         XCTAssertEqual(PollSchedule.idleInterval, 600)
         XCTAssertEqual(PollSchedule.touchWindow, 600)

@@ -2,9 +2,9 @@ import XCTest
 
 @testable import Secrets
 
-/// The token lifecycle and the section 4.2 answer table, driven through the same entry
-/// point the XPC service uses. No `ssh` is involved: `AskpassHarness` is the seam
-/// `SSHProcess` gets too.
+/// The token lifecycle and the answer table (docs/design/secrets.md), driven through the
+/// same entry point the XPC service uses. No `ssh` is involved: `AskpassHarness` is the
+/// seam `SSHProcess` gets too.
 final class AskpassBrokerTests: XCTestCase {
 
     private let nas = SSHDestination(user: "alec", hostname: "nas.example", port: 2222)
@@ -70,7 +70,7 @@ final class AskpassBrokerTests: XCTestCase {
         XCTAssertEqual(
             broker.answer(token: token, promptKind: "", prompt: "alec@nas.example's password: "),
             .answer("hunter2"))
-        clock.advance(2)  // past the 60 s deadline of section 4.2
+        clock.advance(2)  // past the 60 s deadline (docs/design/secrets.md)
         XCTAssertEqual(
             broker.answer(token: token, promptKind: "", prompt: "alec@nas.example's password: "),
             .refuse(reason: "expired token"))
@@ -105,7 +105,7 @@ final class AskpassBrokerTests: XCTestCase {
     }
 
     func testAProxyJumpHopsAskpassIsADescendantTwoLevelsDown() {
-        // master 900 -> ProxyCommand ssh -W 950 -> its askpass 951 (section 4.2).
+        // master 900 -> ProxyCommand ssh -W 950 -> its askpass 951 (docs/design/secrets.md).
         let ancestry = StaticProcessAncestry([951: 950, 950: 900])
         let (broker, _) = makeBroker(
             secrets: [SecretKey.password(nas).account: "hunter2"],
@@ -148,8 +148,8 @@ final class AskpassBrokerTests: XCTestCase {
     }
 
     func testAPassphraseWithNoStoredItemIsAnsweredEmptySoSSHMovesOn() {
-        // Section 4.2: ssh gives up on that key after its single attempt and moves on to
-        // the next identity, and nothing is stopped. Verified live against the testbed.
+        // ssh gives up on that key after its single attempt and moves on to the next
+        // identity, and nothing is stopped (docs/design/secrets.md).
         let (broker, _) = makeBroker()
         let harness = AskpassHarness(broker: broker, resolution: SSHResolution(destination: nas))
         XCTAssertEqual(
@@ -192,7 +192,7 @@ final class AskpassBrokerTests: XCTestCase {
     func testTheHostKeyQuestionIsRelayedDuringCollect() {
         let (broker, _) = makeBroker()
         broker.collectResponder = { request in
-            XCTAssertFalse(request.isSecret)  // read visible on the terminal (section 4.3)
+            XCTAssertFalse(request.isSecret)  // read visible on the terminal (docs/design/secrets.md)
             return "yes"
         }
         let harness = AskpassHarness(
@@ -249,7 +249,7 @@ final class AskpassBrokerTests: XCTestCase {
     }
 
     func testAnEmptyAnswerAtCollectIsARefusalOfThatPromptAndStoresNothing() throws {
-        // "press Enter to skip this and try your key agent instead" (section 4.2).
+        // "press Enter to skip this and try your key agent instead" (docs/design/secrets.md).
         let (broker, store) = makeBroker()
         broker.collectResponder = { _ in "" }
         let harness = AskpassHarness(
@@ -261,7 +261,7 @@ final class AskpassBrokerTests: XCTestCase {
 
     func testMaskingAStoredItemMakesThePromptReachTheTerminalAgain() {
         // The stale-password case: add repeats the collect connection with the stored
-        // items for that host masked (section 4.2).
+        // items for that host masked (docs/design/secrets.md).
         let (broker, _) = makeBroker(secrets: [SecretKey.password(nas).account: "stale"])
         broker.collectResponder = { _ in "fresh" }
         let token = broker.mint(

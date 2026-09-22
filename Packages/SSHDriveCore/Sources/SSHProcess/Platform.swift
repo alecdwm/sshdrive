@@ -9,8 +9,8 @@ import Foundation
 // The handful of libc calls this module makes by name. `Foundation` re-exports Darwin on
 // macOS and Glibc on Linux, but the call sites spelled `Darwin.read` to say "the syscall,
 // not the protocol method of the same name", and that spelling is Apple-only. These
-// wrappers keep the disambiguation and cost nothing (docs/testing-architecture.md
-// section 8, step 1.2). The Darwin path is the same call it always was.
+// wrappers keep the disambiguation and cost nothing, and let the module build on Linux
+// (docs/design/testing.md).
 
 @inline(__always)
 func sshRead(_ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int) -> Int {

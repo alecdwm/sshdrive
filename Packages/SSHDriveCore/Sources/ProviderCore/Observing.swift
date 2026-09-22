@@ -53,7 +53,8 @@ public final class SystemProviderClock: ProviderClock {
 /// `.serverUnreachable` backoff (`MQ-037`, and `MQ-005` for what the backoff costs).
 public protocol ProviderDomainSignalling: AnyObject {
     func signalErrorResolved(_ failure: ProviderFailure)
-    /// The one case where the extension, not the agent, changes domain state (section 3).
+    /// The one case where the extension, not the agent, changes domain state
+    /// (docs/design/components.md).
     func disconnect(reason: String)
     /// Lifts a disconnect a previous instance may have left behind (`MQ-074`).
     func reconnect()

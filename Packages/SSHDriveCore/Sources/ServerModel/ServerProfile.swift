@@ -18,7 +18,7 @@ public enum SFTPImplementation: String, Sendable, Equatable {
 }
 
 /// Which `find` the server has. `ServerModel` is the only place `.bsd` is ever exercised:
-/// the testbed has no BSD (`docs/testing-architecture.md` section 4.1).
+/// the testbed has no BSD (docs/design/testing.md).
 public enum ServerFindFlavour: String, Sendable, Equatable {
     /// GNU findutils: `-cmin` and `-printf` both work.
     case gnu
@@ -47,7 +47,7 @@ public enum ServerFindFlavour: String, Sendable, Equatable {
     ///
     /// `SQ-002`: busybox prints `find: unrecognized: --version` on **stderr** and exits
     /// **0**, so a probe keyed on the exit status calls every busybox server GNU. The
-    /// probe of section 8.1 reads the banner and the `-cmin` answer instead.
+    /// capability probe reads the banner and the `-cmin` answer instead.
     public var versionBanner: (line: String, exitStatus: Int32) {
         switch self {
         case .gnu: return ("find (GNU findutils) 4.9.0", 0)
@@ -70,7 +70,7 @@ public enum ServerFindFlavour: String, Sendable, Equatable {
 ///
 /// `SQ-015`: rc files print on non-interactive startup in **every** shape - `.bashrc` for
 /// bash, `.zshenv` for zsh (read for every invocation), `config.fish` for `fish -c`,
-/// `.cshrc` for tcsh. The exec channel still runs `sh -s` (section 9.2), so the login
+/// `.cshrc` for tcsh. The exec channel still runs `sh -s`, so the login
 /// shell decides only the noise; the *script* shell is `shellExecutable` below.
 public enum LoginShell: String, Sendable, Equatable, CaseIterable {
     case bashQuiet
@@ -119,11 +119,11 @@ public enum LoginShell: String, Sendable, Equatable, CaseIterable {
 
 /// Which real shell on this box runs a `ServerModel` script.
 ///
-/// The deliberate design choice of `docs/testing-architecture.md` section 4.2: the remote
-/// scripts are run against **real** shells, because three of this project's worst bugs
-/// lived exactly there - the `;;` dash rejects (`SQ-018`), the `{ … }` group the heartbeat
-/// reader would otherwise eat, and the `printf "\0<sentinel>"` that ate its own sentinel
-/// (`SQ-020`). A shell this box does not have is skipped by name, never faked.
+/// The deliberate design choice of the harness (docs/design/testing.md): the remote
+/// scripts are run against **real** shells, because that is where the shell-level failures
+/// live - the `;;` dash rejects (`SQ-018`), the `{ … }` group the heartbeat reader would
+/// otherwise eat, and the `printf "\0<sentinel>"` that eats its own sentinel (`SQ-020`).
+/// A shell this box does not have is skipped by name, never faked.
 public enum ScriptShell: String, Sendable, Equatable, CaseIterable {
     case dash
     case bash
@@ -294,8 +294,8 @@ public enum SFTPExtensionSets {
 
 /// One server, as a value.
 ///
-/// `docs/testing-architecture.md` section 4.1: "One value describes a server, and the
-/// testbed's twelve services are twelve constants." Every field is a row of
+/// One value describes a server, and the testbed's twelve services are twelve constants
+/// (docs/design/testing.md). Every field is a row of
 /// `docs/quirks/servers.md`, and every rule `FakeSFTPServer`, `FakeExecChannel` and
 /// `FakeSSH` apply cites the id it comes from.
 public struct ServerProfile: Sendable, Equatable {
@@ -336,7 +336,7 @@ public struct ServerProfile: Sendable, Equatable {
     public var auth: AuthShape
     /// The port the testbed publishes it on, where it has one.
     public var port: Int?
-    /// The `$HOME` the account spells (section 5.7).
+    /// The `$HOME` the account spells.
     public var home: String
     /// Every quirk row this profile is a carrier of, so a scenario can say which it
     /// exercises without repeating the list.
@@ -616,8 +616,8 @@ public extension ServerProfile {
             ServerQuirks.helperDiesWithTheRelay,
         ])
 
-    /// **The owner's own Debian server**, the one their first cask install added: OpenSSH
-    /// 9.2p1 Debian-2+deb12u10, GNU `find`, x86_64 (results 2026-09-05, 2026-09-08).
+    /// **The owner's own Debian server**: OpenSSH 9.2p1 Debian-2+deb12u10, GNU `find`,
+    /// x86_64 (measured 2026-09-05 and 2026-09-08).
     static let ownerDebian = ServerProfile(
         name: "owner-debian",
         sftp: .opensshInternal,
@@ -629,9 +629,9 @@ public extension ServerProfile {
         auth: .key,
         quirks: [ServerQuirks.opensshAdvertisesTheFullSet])
 
-    /// **The owner's own Tailscale SSH server** (x86_64 Debian), the one whose tier 2
-    /// stream died 255 fifteen seconds after `ready` (results 2026-09-08). The testbed's
-    /// `ts-ssh` exists to reproduce it; this constant is the server itself.
+    /// **The owner's own Tailscale SSH server** (x86_64 Debian), whose tier 2 stream dies
+    /// 255 fifteen seconds after `ready` (measured 2026-09-08). The testbed's `ts-ssh`
+    /// exists to reproduce it; this constant is the server itself.
     static let ownerTailscale = ServerProfile.tailscaleSSH
         .with(name: "owner-tailscale")
 
@@ -641,7 +641,7 @@ public extension ServerProfile {
         .with(name: "openssh-9.6", identificationString: "OpenSSH_9.6p1 Ubuntu-3ubuntu13.5")
 
     /// Not in the testbed at all: the model is the only coverage BSD will ever get
-    /// (`docs/testing-architecture.md` section 4.1). No `-printf`, no FreeBSD `rust-std`
+    /// (docs/design/testing.md). No `-printf`, no FreeBSD `rust-std`
     /// for the helper (`SQ-065`).
     static let freeBSD = ServerProfile(
         name: "freebsd",

@@ -6,13 +6,13 @@ import Logging
 
 /// Every live File Provider extension connection, so the agent can reach the readers.
 ///
-/// DESIGN.md section 5.3's restore has one step that needs this: when SQLite cannot open
-/// the index at all, the agent truncates the database and its `-wal`/`-shm` sidecars under
-/// their own inodes, and **the reader has to close first** - it holds the `-shm` mapped,
-/// and truncating a mapped file under a live process faults it on its next access. The
-/// callback interface for that (`closeIndexReader` / `reopenIndexReader`) is already on
-/// every extension connection; what was missing was a way to find those connections from
-/// outside the one that happens to be making the current call.
+/// The index restore has one step that needs this (`docs/design/item-index.md`): when
+/// SQLite cannot open the index at all, the agent truncates the database and its
+/// `-wal`/`-shm` sidecars under their own inodes, and **the reader has to close first** -
+/// it holds the `-shm` mapped, and truncating a mapped file under a live process faults
+/// it on its next access. The callback interface for that (`closeIndexReader` /
+/// `reopenIndexReader`) is on every extension connection; this table is what finds those
+/// connections from outside the one making the current call.
 ///
 /// Weak references and no ownership: the listener registers a connection when it accepts
 /// it and drops it in the invalidation handler, and a connection that dies in between is
@@ -49,7 +49,7 @@ final class ExtensionPeers: IndexReaderPeering, @unchecked Sendable {
     ///
     /// An extension that is not running cannot be waiting on anything, so a peer that does
     /// not answer inside the deadline is not a reason to abandon the restore - the agent
-    /// goes ahead. What it must never do is truncate *before* asking (section 5.3).
+    /// goes ahead. What it must never do is truncate *before* asking.
     func closeReaders() async { await closeReaders(timeout: 20) }
 
     func closeReaders(timeout: TimeInterval) async {

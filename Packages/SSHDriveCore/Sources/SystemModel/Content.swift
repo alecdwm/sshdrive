@@ -299,7 +299,7 @@ extension ModelDomain {
         }
     }
 
-    /// The agent's retried eviction of DESIGN.md section 5.5: a doubling backoff from
+    /// The agent's retried eviction (docs/design/writes.md): a doubling backoff from
     /// 0.25 s, given up after seven attempts. It is the agent's loop, not the system's,
     /// and it lives here so a scenario can drive it against the model's refusals - the
     /// shipping copy is `AgentRuntime`'s.

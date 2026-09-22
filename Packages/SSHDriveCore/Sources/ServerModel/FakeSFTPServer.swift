@@ -3,8 +3,8 @@ import SSHProcess
 
 /// A real SFTP v3 **wire** server over a `ByteStream`, driven by a `ServerProfile`.
 ///
-/// `docs/testing-architecture.md` section 4.2: "It speaks the protocol, not a mock of it."
-/// `SFTPClient` and `RealSFTPTransport` run against it unmodified, because an SFTP channel
+/// It speaks the protocol, not a mock of it (docs/design/testing.md): `SFTPClient` and
+/// `RealSFTPTransport` run against it unmodified, because an SFTP channel
 /// *is* a `ByteStream` - the same protocol a mux client's stdio satisfies - so every byte
 /// of the client's codec, its pipelining, its deadlines and its extension handling are
 /// exercised with no network and no server.
@@ -110,14 +110,14 @@ public final class FakeSFTPServer: @unchecked Sendable {
     }
 
     /// A symlink whose target is stored verbatim and never resolved on the server, exactly
-    /// as section 9.1 requires of the client's side too.
+    /// as path containment requires of the client's side too (docs/design/security.md).
     public func putSymlink(_ path: String, target: String) {
         lock.withLock {
             nodes[absolute(path)] = Node(type: .symlink, target: Data(target.utf8))
         }
     }
 
-    /// A name that need not be valid UTF-8 (section 5.4).
+    /// A name that need not be valid UTF-8.
     public func putRawName(_ name: Data, in directory: String = "", contents: Data = Data()) {
         lock.withLock {
             var path = absolute(directory)
@@ -151,7 +151,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
         }
     }
 
-    /// A FIFO or socket, which the enumerator drops: they get no row (section 5.4).
+    /// A FIFO or socket, which the enumerator drops: they get no row.
     public func putSpecial(_ path: String, type: SFTPNodeType) {
         lock.withLock { nodes[absolute(path)] = Node(type: type) }
     }
@@ -186,7 +186,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
 
     /// Every request the client has made, as `"opendir /home/alec/x"` lines. The order
     /// matters to the containment rule: a listing must `lstat` its own directory *before*
-    /// it `opendir`s it (`SQ-030`, section 9.1).
+    /// it `opendir`s it (`SQ-030`).
     public var requests: [String] { lock.withLock { requestLog } }
 
     public func clearRequestLog() { lock.withLock { requestLog.removeAll() } }
@@ -197,8 +197,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
     /// worth logging and a hundred of them would bury every other request in the log. The
     /// pipelining scenario is what reads it: a window deeper than the directory has pages
     /// over-issues by design, and what has to stay bounded is *how far* - at most one
-    /// window short of a wasted round trip, never a wasted round trip per page
-    /// (section 6.2).
+    /// window short of a wasted round trip, never a wasted round trip per page.
     public var readdirRequests: Int { lock.withLock { readdirRequestCount } }
 
     // MARK: - The stream
@@ -325,7 +324,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
 
     /// `SQ-030`: `opendir` follows a symlink. A directory swapped on the server for a link
     /// to `/etc` is read straight through, which is why every listing has to re-`lstat`
-    /// its own directory before `readdir` (section 9.1).
+    /// its own directory before `readdir` (docs/design/security.md).
     private func resolvingForOpendir(_ path: Data) -> Data {
         var current = path
         var hops = 0
@@ -362,7 +361,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
             let path = try reader.readString()
             log("\(type == .lstat ? "lstat" : "stat") \(text(path))")
             // lstat never follows; stat does, which is the only difference the client
-            // ever relies on (section 9.1).
+            // ever relies on.
             let target = type == .stat ? resolvingForOpendir(path) : path
             guard let node = lookup(target) else { throw SFTPWire.Status.noSuchFile }
             var writer = SFTPWire.Writer(.attrs, requestID: id)
@@ -427,12 +426,13 @@ public final class FakeSFTPServer: @unchecked Sendable {
                     throw SFTPWire.Status.noSuchFile
                 }
                 // `SQ-033`: a **create**'s attributes go through the server's umask too,
-                // exactly as `mkdir`'s do, which is why section 5.5's upload sets the mode
-                // back with a `setstat` after the rename rather than trusting the `open`.
+                // exactly as `mkdir`'s do, which is why an upload sets the mode back with
+                // a `setstat` after the rename rather than trusting the `open`
+                // (docs/design/writes.md).
                 // Confidence: the umask itself is measured (`deb`, 2026-09-05, on `mkdir`);
-                // that `open(O_CREAT)` takes the same filter is POSIX and is what DESIGN.md
-                // section 5.5 already assumes ("the server's umask still applies"), not a
-                // separate measurement.
+                // that `open(O_CREAT)` takes the same filter is POSIX and is what the
+                // write protocol already assumes ("the server's umask still applies"), not
+                // a separate measurement.
                 nodes[resolved] = Node(
                     type: .file,
                     mode: ((attributes.permissions ?? 0o644) & ~profile.umask) & 0o7777)
@@ -692,7 +692,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
 ///
 /// A `ByteStream` and nothing more, which is the whole point: `SFTPClient` cannot tell it
 /// from a mux client's stdio, so the codec, the pipelining and the deadlines all run
-/// unmodified (`docs/testing-architecture.md` section 4.2).
+/// unmodified (docs/design/testing.md).
 public final class FakeSFTPStream: ByteStream, @unchecked Sendable {
 
     private let server: FakeSFTPServer

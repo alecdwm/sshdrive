@@ -5,14 +5,14 @@ import SSHProcess
 import Secrets
 import XPCProtocols
 
-/// The agent's secrets store and its askpass broker (DESIGN.md section 4.2).
+/// The agent's secrets store and its askpass broker (docs/design/secrets.md).
 ///
 /// One broker for the whole agent: tokens are per spawn, but the table of live tokens, the
 /// misses each connection recorded and the answers a collect connection used all belong to
 /// the process. The *store* is a seam - `KeychainSecretsStore` on Darwin, where the agent
-/// is the only process with `keychain-access-groups` (section 3.1), and
-/// `InMemorySecretsStore` everywhere else - so the whole of section 4.2's flow runs on
-/// Linux without a keychain.
+/// is the only process with `keychain-access-groups` (docs/design/components.md), and
+/// `InMemorySecretsStore` everywhere else - so the whole askpass flow runs on Linux
+/// without a keychain.
 public final class AgentSecrets: Sendable {
     public let store: any SecretsStore
     public let broker: AskpassBroker
@@ -26,9 +26,9 @@ public final class AgentSecrets: Sendable {
         self.store = store
         // `SSHGResolver` is how the broker learns the destination of the `ssh` that is
         // asking - the one thing that tells a `ProxyJump` hop from the master whose token
-        // it inherited (section 4.2). It runs `/usr/bin/ssh -G` by default; a harness that
-        // has installed a stand-in `ssh` hands its own in, or the hops would be resolved
-        // by a binary that is not the one connecting.
+        // it inherited. It runs `/usr/bin/ssh -G` by default; a harness that has installed
+        // a stand-in `ssh` hands its own in, or the hops would be resolved by a binary
+        // that is not the one connecting.
         self.broker = resolver.map { AskpassBroker(store: store, resolver: $0) }
             ?? AskpassBroker(store: store)
         self.askpassPath = askpassPath
@@ -43,10 +43,8 @@ public final class AgentSecrets: Sendable {
 
 // MARK: - `sshdrive debug secrets`
 
-/// The milestone 2 hook set. `sshdrive debug keychain` proved the agent can reach the
-/// data-protection keychain at all (S1 d2); these drive the real `Secrets` store and the
-/// askpass path end to end from the launchd-started agent, which is the only place either
-/// can run. Documented in docs/skeleton-notes.md.
+/// The `sshdrive debug secrets` hooks drive the real `Secrets` store and the askpass path
+/// end to end from the launchd-started agent, which is the only place either can run.
 enum AgentSecretsDebug {
 
     static func run(_ arguments: [String: String], manager: DomainManager) async throws -> Data {
@@ -132,9 +130,9 @@ enum AgentSecretsDebug {
     }
 
     /// One real `ssh`, spawned from the agent's own environment with the askpass token
-    /// protocol armed - the S2 proof that a launchd-started agent authenticates from the
+    /// protocol armed, which is how a launchd-started agent authenticates from the
     /// keychain with no tty anywhere. The command line here is deliberately minimal; the
-    /// master and its mux clients are section 6.1's, in `SSHProcess`.
+    /// master and its mux clients are built in `SSHProcess`.
     private static func connect(
         _ arguments: [String: String], manager: DomainManager
     ) async throws -> Data {
@@ -167,17 +165,17 @@ enum AgentSecretsDebug {
             ]
         }
         if let jump = arguments["jump"], !jump.isEmpty {
-            // Section 6.1: ProxyJump is never handed to `ssh`. Each hop is rebuilt as the
-            // agent's own ProxyCommand by the one builder that knows the rules -
-            // ControlMaster=no *and* ControlPath=none, the nested percent doubling, the
-            // single quoting, and ProxyCommand written *before* ProxyJump=none.
+            // ProxyJump is never handed to `ssh`. Each hop is rebuilt as the agent's own
+            // ProxyCommand by the one builder that knows the rules - ControlMaster=no
+            // *and* ControlPath=none, the nested percent doubling, the single quoting,
+            // and ProxyCommand written *before* ProxyJump=none (docs/design/ssh.md).
             let hops = try JumpHop.parseChain(jump)
             if let proxy = ProxyChainBuilder.proxyCommand(for: hops, identityAgentNone: true) {
                 argv += ["-o", "ProxyCommand=\(proxy)", "-o", "ProxyJump=none"]
             }
         }
         if arguments["noAgent"] != "false" {
-            // Section 4.2: a first-pass location runs IdentityAgent=none for good.
+            // A first-pass location runs IdentityAgent=none for good.
             argv += ["-o", "IdentityAgent=none"]
         }
         argv.append("\(destination.user)@\(destination.hostname)")
@@ -191,18 +189,18 @@ enum AgentSecretsDebug {
             argv: argv)
         defer { secrets.broker.retire(token: token) }
 
-        // The same environment a master gets (section 6.1): launchd's, with `HOME`, and
-        // with `PATH` and `SSH_AUTH_SOCK` from the login shell snapshot. It matters here
-        // and not only for masters: a key that lives in a 1Password or Secretive agent
-        // whose socket is exported from `.zshrc` is invisible to launchd's own
-        // `SSH_AUTH_SOCK`, which always names Apple's `ssh-agent`.
+        // The same environment a master gets (docs/design/ssh.md): launchd's, with
+        // `HOME`, and with `PATH` and `SSH_AUTH_SOCK` from the login shell snapshot. It
+        // matters here and not only for masters: a key that lives in a 1Password or
+        // Secretive agent whose socket is exported from `.zshrc` is invisible to
+        // launchd's own `SSH_AUTH_SOCK`, which always names Apple's `ssh-agent`.
         let environment = AskpassEnvironment.environment(
             base: await AgentSSHEnvironment.shared.environment(),
             askpassPath: askpass, token: token)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: SSHProcess.sshBinaryPath)
-        // argv[0] is the absolute path, as section 6.1 requires.
+        // argv[0] is the absolute path to `ssh`, never a `PATH` lookup.
         process.arguments = Array(argv.dropFirst())
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
@@ -215,8 +213,8 @@ enum AgentSecretsDebug {
         try process.run()
         secrets.broker.attach(pid: process.processIdentifier, argv: argv, to: token)
 
-        // Section 4.2's authentication deadline, applied here as a plain wait: this hook
-        // has no control socket to watch for.
+        // The 60 s authentication deadline, applied here as a plain wait: this hook has
+        // no control socket to watch for.
         let killer = DispatchWorkItem { [weak process] in
             guard let process, process.isRunning else { return }
             process.terminate()

@@ -6,11 +6,12 @@ import SystemModel
 import XPCProtocols
 
 /// **Suite L - paths, names and attributes**, and `E3`, which is about the same blob
-/// (`docs/testing-architecture.md` section 5).
+/// (docs/design/testing.md).
 ///
-/// The whole of section 5.4's local-attribute design rests on three measurements that all
-/// cut the same way: the system decides what we are told (`MQ-044`), tags are not an xattr
-/// (`MQ-042`), and what we do not return we lose (`MQ-043`).
+/// The whole local-attribute design (docs/design/names-and-attributes.md) rests on three
+/// measurements that all cut the same way: the system decides what we are told
+/// (`MQ-044`), tags are not an xattr (`MQ-042`), and what we do not return we lose
+/// (`MQ-043`).
 final class AttributeScenarios: XCTestCase {
 
     // MARK: L3 - `displayName` is the bare nickname
@@ -38,7 +39,7 @@ final class AttributeScenarios: XCTestCase {
     /// **empty** `extendedAttributes` dictionary - it is never an xattr. The metadata
     /// version moves, because the blob it hashes moved. `MQ-043`: the tag survives the
     /// re-download **because the item returns it**; an item that returned nothing would
-    /// lose the user's tags, which is the S4 loss this design exists to prevent.
+    /// lose the user's tags, which is the loss this design exists to prevent.
     func testL4_ATagIsTagDataAndSurvivesAReDownloadBecauseWeReturnIt() throws {
         let harness = try ScenarioHarness()
         let file = try harness.serverCreates("tagged.txt")
@@ -74,7 +75,8 @@ final class AttributeScenarios: XCTestCase {
     }
 
     /// **The bite-proof for `MQ-043`.** The same round trip with an item that returns no
-    /// `tagData` - which is what section 5.4 said before S4 corrected it.
+    /// `tagData`: an item that does not return what it stored loses the tag on every
+    /// re-download.
     ///
     /// The tags xattr is gone after the re-download, and no error is raised anywhere: the
     /// user simply loses the colour on the next remote change.
@@ -179,7 +181,8 @@ final class AttributeScenarios: XCTestCase {
     /// `MQ-046`: a `.DS_Store` written into the mount **never reaches the extension** - no
     /// `createItem`, no `modifyItem`, no row. The system keeps it in the replica, reports
     /// it with `isUploaded = 0` and never asks anyone to upload it, which is why the
-    /// local-only row of section 5.4 exists for a different writer and not for this one.
+    /// local-only row (docs/design/names-and-attributes.md) exists for a different writer
+    /// and not for this one.
     func testL6_ADSStoreIsKeptByTheSystemAndNeverOffered() throws {
         let harness = try ScenarioHarness()
         let domain = try harness.addDomain()
@@ -199,11 +202,11 @@ final class AttributeScenarios: XCTestCase {
 
     /// A six-key `LocalAttributes`, encoded 200 times in one process.
     ///
-    /// `.sortedKeys` is load-bearing: section 5.3 hashes exactly this blob into the
-    /// metadata version, and without a promised key order the same attributes encode to
-    /// two byte strings, the hash moves, and the system re-reads every item it holds for no
-    /// reason. It was caught as a test failing about one run in three and had been read as
-    /// flakiness.
+    /// `.sortedKeys` is load-bearing (docs/design/item-index.md): it hashes exactly this
+    /// blob into the metadata version, and without a promised key order the same
+    /// attributes encode to two byte strings, the hash moves, and the system re-reads
+    /// every item it holds for no reason. Without this guarantee the failure looks like
+    /// flakiness, showing up about one run in three.
     func testE3_TheAttributesBlobIsByteIdenticalEveryTime() throws {
         let attributes = LocalAttributes(
             xattrs: [

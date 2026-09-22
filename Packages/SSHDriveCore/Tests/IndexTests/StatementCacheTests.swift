@@ -1,8 +1,8 @@
 import XCTest
 @testable import Index
 
-/// DESIGN.md section 5.2's prepared-statement cache, and the one-statement meta check
-/// that sits on top of it.
+/// The prepared-statement cache (docs/design/extension.md), and the one-statement meta
+/// check that sits on top of it.
 ///
 /// The index runs a very small, fixed set of statements over and over: a 10,000-entry
 /// listing is three of them ten thousand times, and the `item(for:)` storm the system
@@ -62,7 +62,7 @@ final class StatementCacheTests: XCTestCase {
 
     /// The `item(for:)` storm. **One** statement per call - the row, carrying the meta
     /// check as three scalar subqueries - and a constant number of compilations for the
-    /// whole storm, however long it runs (section 5.2).
+    /// whole storm, however long it runs (docs/design/extension.md).
     func testTheStormCostsOneStatementPerItemAndCompilesTwoInAll() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.ensureRoot()
@@ -198,7 +198,7 @@ final class StatementCacheTests: XCTestCase {
     /// Every check the collapsed `checkMeta` still makes, and in the order it made them:
     /// a schema newer than this build first, then a reconcile in progress. Both answer
     /// before any row is read, which is what stops a rebuild ever looking like a deletion
-    /// (section 5.3, gotchas 27 and 76).
+    /// (docs/design/item-index.md, gotchas 27 and 76).
     func testTheOneStatementMetaCheckKeepsEveryAnswerItHad() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.ensureRoot()

@@ -6,23 +6,23 @@ import SFTP
 import SSHProcess
 
 /// How many channels this server lets us hold at once, and what that costs
-/// (DESIGN.md sections 6.1 and 6.2).
+/// (docs/design/ssh.md, docs/design/sftp.md).
 ///
 /// The master is `ssh -N` and carries **no session** of its own, so `MaxSessions` counts
 /// exactly the mux clients: the metadata SFTP channel, the bulk SFTP channel, and the
-/// exec channels the capability probe, the `id` identity lookup, the tier-1 sweep and
-/// (milestone 9) the helper run on.
+/// exec channels the capability probe, the `id` identity lookup, the tier-1 sweep and the
+/// helper run on.
 ///
-/// Section 6.1 sets the budget: "the agent holds at most five per location (two SFTP, the
-/// helper stream, a sweep, a probe or delete walk)"; "at 2 the bulk SFTP channel is
-/// dropped, transfers share the metadata channel under the scheduler of section 6.2, and
-/// the helper gets the one exec channel"; "at 1 there is no exec channel at all, the
-/// location is SFTP-only in every respect".
+/// The agent holds at most five per location: two SFTP, the helper stream, a sweep, and a
+/// probe or delete walk. At 2 the bulk SFTP channel is dropped, transfers share the
+/// metadata channel under the transfer scheduler, and the helper gets the one exec
+/// channel. At 1 there is no exec channel at all and the location is SFTP-only in every
+/// respect.
 ///
 /// So the question the probe has to answer is not "what is `MaxSessions`" but "may I hold
 /// **three** at once" - metadata, bulk, and one exec - because that is the smallest budget
-/// under which the bulk channel is affordable. Two channel opens answer it, which is why
-/// this is not the ten opens section 6.1 warns against.
+/// under which the bulk channel is affordable. Two channel opens answer it, rather than
+/// the ten that measuring `MaxSessions` outright would cost.
 public struct ChannelBudget: Sendable, Equatable {
     /// The largest number of simultaneous channels the probe actually held. 3 means "3 or
     /// more": the probe stops there because nothing needs a fourth at the same time.
@@ -35,10 +35,9 @@ public struct ChannelBudget: Sendable, Equatable {
     /// needs and tier 1 does not: a sweep opens a channel, spends half a second on it and
     /// closes it, while the helper's stream lives as long as the location does. At a
     /// `MaxSessions` of 2 the one spare channel is shared by the probe and the sweep - and
-    /// section 6.4 still runs a sweep every 30 minutes as insurance even at tier 2 - so a
-    /// helper that never gave it back would cost the location the insurance sweep, the
-    /// re-probe and `sshdrive test`. It is refused there and `status` says why
-    /// (2026-09-05, section 13).
+    /// a sweep still runs every 30 minutes as insurance even at tier 2 - so a helper that
+    /// never gave it back would cost the location the insurance sweep, the re-probe and
+    /// `sshdrive test`. It is refused there and `status` says why.
     public var allowsPersistentExecChannel: Bool
     /// The sentence `sshdrive status` shows. Empty when nothing was forced.
     public var note: String
@@ -47,7 +46,7 @@ public struct ChannelBudget: Sendable, Equatable {
         concurrentChannels: 3, hasBulkChannel: true, allowsExecChannel: true,
         allowsPersistentExecChannel: true, note: "")
 
-    /// The three cases section 6.1 names.
+    /// The three cases: one channel, two, or three and up.
     public static func forConcurrentChannels(_ channels: Int) -> ChannelBudget {
         switch channels {
         case ...1:
@@ -102,7 +101,7 @@ public enum ChannelProbe {
     public struct Refusal: Error {
         public let diagnostics: String
         /// Whether the server refused a session or the connection died under the open.
-        /// Only the first may be turned into a cached budget (section 6.1, 2026-09-08).
+        /// Only the first may be turned into a cached budget.
         public let verdict: ChannelProbeVerdict
 
         public var connectionDied: Bool { verdict == .connectionDied }
@@ -143,15 +142,15 @@ public enum ChannelProbe {
         }
     }
 
-    /// The probe of section 6.1, run once per location and cached.
+    /// The probe, run once per location and cached.
     ///
     /// Returns the budget and, when the server allowed it, the bulk channel itself - the
     /// probe's second channel *is* the bulk channel, so nothing is opened twice.
     ///
     /// A **nil** budget means the connection died under the probe rather than the server
     /// refusing a session. Nothing is recorded then: the caller fails the connect attempt
-    /// and section 6.3's breaker tries again, because a budget measured on a dying
-    /// connection is cached for ever and there is nothing that re-probes (2026-09-08).
+    /// and the breaker tries again. A budget measured on a dying connection would be
+    /// cached with nothing left to re-probe it.
     public static func probe(
         master: SSHMaster, root: String, uploadTag: String, locationID: String
     ) async -> (budget: ChannelBudget?, bulk: Opened?) {
@@ -200,11 +199,11 @@ public enum ChannelProbe {
     }
 }
 
-/// `domains/<id>/capabilities.json`, section 8.1's cache.
+/// `domains/<id>/capabilities.json`, the capability report's cache.
 ///
 /// Read-modify-write of a JSON object, touching only the keys it is given, so that the
-/// capability report of section 8.1 and this file can each own their own keys without
-/// either overwriting the other.
+/// capability report and this file can each own their own keys without either overwriting
+/// the other.
 public enum CapabilityCache {
 
     public static func read(locationID: String) -> [String: Any] {
@@ -231,18 +230,17 @@ public enum CapabilityCache {
 
     /// The cached channel budget, or nil when it has never been probed.
     ///
-    /// Section 6.1 caches this "once per server banner" and re-probes only when the banner
-    /// changes. The agent never sees a banner: its `ssh` runs at `LogLevel=ERROR`, which
-    /// prints no remote version, and a mux client learns nothing at all because it speaks
-    /// to the master's socket rather than to the server. So the cache is keyed by the
-    /// location and invalidated only on request (2026-09-04, section 13).
+    /// The cache is keyed by the location rather than by the server banner, because the
+    /// agent never sees a banner: its `ssh` runs at `LogLevel=ERROR`, which prints no
+    /// remote version, and a mux client learns nothing at all because it speaks to the
+    /// master's socket rather than to the server.
     public static func channelBudget(locationID: String) -> ChannelBudget? {
         guard let stored = read(locationID: locationID)["channels"] as? [String: Any],
             let channels = stored["concurrentChannels"] as? Int
         else { return nil }
         // Measured while the connection was going away, or measured before one did: either
         // way it is not evidence any more, and the next connect re-probes. The values stay
-        // in the file so an offline `status` still has something to print (2026-09-08).
+        // in the file so an offline `status` still has something to print.
         if stored["suspect"] as? Bool == true { return nil }
         return ChannelBudget(
             concurrentChannels: channels,
@@ -260,14 +258,13 @@ public enum CapabilityCache {
         merge(locationID: locationID, ["channels": values])
     }
 
-    /// Marks the cached budget as no longer evidence, so the next connect probes again.
+    /// Marks the cached budget as suspect, so the next connect probes again.
     ///
     /// Called on every abrupt loss of a connection that was up - a master that died, two
-    /// consecutive deadline misses, a path that went away, the will-sleep drop. Section 6.1
-    /// says the cache's "only invalidation" is an explicit re-probe; that was written when
-    /// the only way to get a wrong answer was a server that changed its mind, and it left
-    /// a location that probed in a bad moment stuck at that answer for the life of the
-    /// install (2026-09-08). Two extra channel opens on the next connect is the whole cost.
+    /// consecutive deadline misses, a path that went away, the will-sleep drop. The only
+    /// other invalidation is an explicit re-probe, so without this a location that probed
+    /// in a bad moment keeps that answer for the life of the install. Two extra channel
+    /// opens on the next connect is the whole cost.
     public static func markChannelBudgetSuspect(locationID: String) {
         guard var channels = read(locationID: locationID)["channels"] as? [String: Any] else {
             return
@@ -277,10 +274,9 @@ public enum CapabilityCache {
         merge(locationID: locationID, ["channels": channels])
     }
 
-    /// Section 8.1's own half of the file: "the result is cached in
-    /// `domains/<id>/capabilities.json` with a timestamp and the server banner". The agent
-    /// never sees a banner (2026-09-04, section 6.1), so what is stored beside the
-    /// timestamp is `uname -sm`, which is the closest thing the probe can actually read.
+    /// The capability report's own half of the file. The agent never sees a server banner
+    /// on this path, so what is stored beside the timestamp is `uname -sm`, the closest
+    /// thing the probe can actually read.
     public static func storeProbe(
         _ probe: ServerProbe.Result, extensions: SFTPServerExtensions,
         advertised: [String] = [], locationID: String
@@ -308,14 +304,14 @@ public enum CapabilityCache {
                     "cacheNote": probe.cacheNote,
                     "sftpExtensions": SFTPExtensionNames.list(extensions),
                     // Everything the server offered, so a missing `fsync@openssh.com` can
-                    // be told from a client that failed to read one (2026-09-05).
+                    // be told from a client that failed to read one.
                     "sftpExtensionsAdvertised": advertised,
                 ] as [String: Any]
             ])
     }
 
-    /// The cached probe, for a `status` that has no live connection (section 8.1: "When
-    /// offline, the cached probe is shown with (cached; offline) and no guesses are made").
+    /// The cached probe, for a `status` that has no live connection: it is shown as
+    /// `(cached; offline)` and no guesses are made from it.
     public static func probe(locationID: String)
         -> (probe: ServerProbe.Result, extensions: SFTPServerExtensions, probedAt: Date)?
     {
@@ -346,9 +342,9 @@ public enum CapabilityCache {
         return (result, extensions, at)
     }
 
-    /// Section 8.1's "Server free space", taken at probe time.
+    /// The "Server free space" line of `status`, taken at probe time.
     ///
-    /// `statvfs` is a wire call and `status` may not make one (section 6.3's gate would
+    /// `statvfs` is a wire call and `status` may not make one (the connection gate would
     /// hold it behind a connect attempt, or start one), so the figure is captured where a
     /// connection already exists - the probe, on every connection and on `--probe` - and
     /// read from here afterwards. A `capabilities.json` with no free-space key yields no
@@ -385,9 +381,9 @@ public enum CapabilityCache {
         return nil
     }
 
-    /// The server's identification string, captured once by the collect connection of
-    /// section 4.2 (`add`, `passwd`, `set host|user|port|identity`), which is the only
-    /// `ssh` the agent runs that ever sees one (section 6.1, section 8.1; 2026-09-08).
+    /// The server's identification string, captured once by the collect connection
+    /// (`add`, `passwd`, `set host|user|port|identity`), which is the only `ssh` the agent
+    /// runs that ever sees one.
     public static func storeServerVersion(_ version: String?, locationID: String) {
         guard let version, !version.isEmpty else { return }
         merge(locationID: locationID, ["serverVersion": version])
@@ -397,7 +393,7 @@ public enum CapabilityCache {
         read(locationID: locationID)["serverVersion"] as? String
     }
 
-    /// Section 8.1's "name the server software": the captured banner plus the SFTP
+    /// What names the server software in `status`: the captured banner plus the SFTP
     /// extension fingerprint, which every connection has for free.
     public static func software(locationID: String) -> ServerSoftware {
         ServerSoftware(

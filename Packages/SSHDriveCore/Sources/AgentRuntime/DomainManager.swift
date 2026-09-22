@@ -12,7 +12,7 @@ import ProviderCore
 ///
 /// The agent is, with one exception, the only process that changes domain state through
 /// NSFileProviderManager: the extension calls `disconnect(reason:)` and `reconnect()` on
-/// its own domain when the agent cannot be reached (DESIGN.md sections 3, 5.2).
+/// its own domain when the agent cannot be reached (docs/design/extension.md).
 public actor DomainManager {
     /// The process-wide one, set by `AgentRuntimeBootstrap.install` from `main.swift`. It exists
     /// because the XPC command layer is reached from an object per connection and has
@@ -22,26 +22,26 @@ public actor DomainManager {
     nonisolated(unsafe) public static var shared = DomainManager(
         environment: AgentEnvironment.unconfigured)
 
-    /// Every seam this agent was built with (docs/testing-architecture.md section 2.3).
+    /// Every seam this agent was built with (docs/design/testing.md).
     public let environment: AgentEnvironment
-    /// The keychain and the askpass broker (section 4.2).
+    /// The keychain and the askpass broker (docs/design/secrets.md).
     public let secrets: AgentSecrets
 
     /// config.json, reached through a serial queue of its own. Nothing that blocks on a
     /// file ever runs on this actor's executor: see `ConfigAccess`.
     private let config: ConfigAccess?
     private var runtimes: [String: LocationRuntime] = [:]
-    /// Section 6.3's breaker and reconnection, one per `.sftp` location. Held here rather
+    /// The circuit breaker and reconnection, one per `.sftp` location. Held here rather
     /// than inside the runtime because sleep, wake, a path change and a screen unlock all
     /// arrive for every location at once and none of them wants the index actor.
     private var gates: [String: ConnectionGate] = [:]
-    /// Section 6.4's change detection, one per location. Held here rather than inside the
-    /// runtime because a cycle must never queue behind an `item(for:)` fallback or a
-    /// three-minute sweep of a large tree.
+    /// Change detection, one per location. Held here rather than inside the runtime
+    /// because a cycle must never queue behind an `item(for:)` fallback or a three-minute
+    /// sweep of a large tree.
     private var detectors: [String: ChangeDetector] = [:]
-    /// Section 6.6's other timer: section 7's TTL loop, one per location. Held here for
-    /// the same reason as the detector - an eviction pass makes a File Provider call per
-    /// file and must never queue behind the index.
+    /// The TTL eviction loop, one per location. Held here for the same reason as the
+    /// detector: an eviction pass makes a File Provider call per file and must never queue
+    /// behind the index.
     private var evictors: [String: CacheEvictor] = [:]
     private var started = false
 
@@ -67,14 +67,13 @@ public actor DomainManager {
             Log.agent.error("no app group container; the agent cannot serve any location")
             return
         }
-        // Section 6.1's sleep and wake, section 6.3's path gate, and section 4.2's
-        // screen-unlock re-arm. Started before any location, so a wake that lands during
-        // the first connect is not missed.
+        // Sleep and wake, the network path gate, and the screen-unlock re-arm. Started
+        // before any location, so a wake landing during the first connect is not missed.
         installSystemObservers()
 
-        // Section 6.1: orphans are not adopted. A master left behind by a crashed agent
-        // still owns its socket, and `ControlMaster=yes` against an existing socket
-        // disables multiplexing, so later mux clients would attach to the orphan.
+        // Orphans are not adopted. A master left behind by a crashed agent still owns
+        // its socket, and `ControlMaster=yes` against an existing socket disables
+        // multiplexing, so later mux clients would attach to the orphan.
         let swept = ControlSocket.sweepOrphans(environment: await AgentSSHEnvironment.shared.environment())
         if !swept.isEmpty {
             Log.ssh.notice("swept \(swept.count, privacy: .public) orphaned control socket(s)")
@@ -97,10 +96,9 @@ public actor DomainManager {
                     // enumerator is re-scheduled rather than un-throttled: only
                     // `signalErrorResolved` clears it. The agent starting is the one
                     // moment it can be cleared for a domain whose extension has not been
-                    // able to run a successful enumeration to clear it itself
-                    // (2026-09-08, section 5.6).
+                    // able to run a successful enumeration to clear it itself.
                     await signalErrorResolved(locationID: location.id)
-                    // Section 5.3's replica walk needs the domain to exist before
+                    // The replica walk needs the domain to exist before
                     // `getUserVisibleURL` and `getIdentifierForUserVisibleFile(at:)` can
                     // answer, so it runs here rather than inside `start()`. It clears
                     // `meta.reconciling`, which lifts the extension's stall.
@@ -119,16 +117,16 @@ public actor DomainManager {
         } catch {
             Log.agent.error("cannot read config.json: \(error, privacy: .public)")
             // No config at all - a `brew zap` deleted the group container, or this is a
-            // reinstall over a removal that never ran `sshdrive remove --all`. Section 10:
-            // the app on its first launch removes every domain of ours when the container
-            // is gone too, because nothing else can. A domain we cannot serve shows in the
-            // sidebar as unavailable for ever otherwise.
+            // reinstall over a removal that never ran `sshdrive remove --all`. The app on
+            // its first launch removes every domain of ours when the container is gone
+            // too, because nothing else can. A domain we cannot serve shows in the sidebar
+            // as unavailable for ever otherwise.
             await removeStrandedDomains(keeping: [])
         }
     }
 
-    /// Section 10: "when the app on its first launch removes every domain whose identifier
-    /// is not in `config.json`, or every domain of ours when the container is gone too".
+    /// On its first launch the app removes every domain whose identifier is not in
+    /// `config.json`, and every domain of ours when the container is gone too.
     ///
     /// `zap` runs after Homebrew has already deleted the app, so by then there is no
     /// `sshdrive` and no provider left to call `NSFileProviderManager.remove(domain)`, and
@@ -159,13 +157,13 @@ public actor DomainManager {
         }
     }
 
-    /// Section 6.1's sleep and wake, section 6.3's path gate, and section 4.2's
-    /// screen-unlock re-arm, all pointed at this agent.
+    /// Sleep and wake, the network path gate, and the screen-unlock re-arm, all pointed
+    /// at this agent.
     ///
     /// Named and separate because it is the whole of the wiring between the three system
     /// observers and the three handlers, and because a harness installs it without paying
     /// for the rest of `start()` - the login-shell snapshot, the orphan sweep and the
-    /// config walk (docs/testing-architecture.md section 2.3).
+    /// config walk (docs/design/testing.md).
     public func installSystemObservers() {
         environment.power.start(
             willSleep: { [weak self] in await self?.willSleep() },
@@ -187,13 +185,13 @@ public actor DomainManager {
     public func location(named name: String) async throws -> Location {
         guard let config else { throw GroupContainer.ContainerError.unavailable }
         let location = try await config.location(named: name)
-        // Section 6.4's cadence: "a File Provider request for it that was not a system
-        // request, **or a CLI command naming it**". Every user-facing command resolves
-        // through here, so this is the one place that rule needs to live. It matters more
-        // than it looks: a folder is enumerated once ever (section 6.5), so a user
-        // watching a mount from a terminal produces no File Provider traffic at all, and
-        // without this the location would sit at the ten-minute cadence while someone was
-        // plainly working on it.
+        // A touch, for the change-detection cadence: a File Provider request that was not
+        // a system request, **or a CLI command naming it**. Every user-facing command
+        // resolves through here, so this is the one place that rule needs to live. It
+        // matters more than it looks: a folder is enumerated once ever, so a user watching
+        // a mount from a terminal produces no File Provider traffic at all, and without
+        // this the location would sit at the ten-minute cadence while someone was plainly
+        // working on it.
         await detectors[location.id]?.noteTouch()
         return location
     }
@@ -211,18 +209,17 @@ public actor DomainManager {
         if let existing = runtimes[location.id] { return existing }
         try GroupContainer.createDomainDirectory(locationID: location.id)
         let transport: any SFTPTransport
-        // Section 5.5's `<mac8>`: the first eight hex digits of the identifier minted
-        // once per install, which names our upload temp files so every one of them says
-        // which Mac made it.
+        // The `<mac8>` in an upload temp file's name: the first eight hex digits of the
+        // identifier minted once per install, so every temp file says which Mac made it.
         let macID = String(((try? await config?.load())??.macID ?? "00000000").prefix(8))
         switch location.backend {
         case .fake:
             transport = FakeTransport(root: location.remotePath ?? "/srv/fake")
         case .sftp:
-            // Section 6.3: the breaker, not the connection, is what a location is made of
-            // now. The gate holds the `SSHBackedTransport` when there is one and answers
-            // every call while there is not, so a location whose server is down still
-            // mounts, still serves the replica and still queues writes (section 5.6).
+            // The breaker, not the connection, is what a location is made of. The gate
+            // holds the `SSHBackedTransport` when there is one and answers every call
+            // while there is not, so a location whose server is down still mounts, still
+            // serves the replica and still queues writes (docs/design/offline.md).
             let gate = ConnectionGate(
                 location: location,
                 askpassPath: secrets.askpassPath,
@@ -238,7 +235,7 @@ public actor DomainManager {
                     "\(id, privacy: .public) is offline: \(reason, privacy: .public)")
                 // The helper's exec channel went with the master. Letting the stream find
                 // out for itself leaves a dead channel held until its next read or ping,
-                // and `status` claiming a tier that is not running (section 6.4).
+                // and `status` claiming a tier that is not running.
                 await self?.connectionWentAway(locationID: id, reason: reason)
             }
             transport = ReconnectingTransport(gate: gate, locationID: location.id)
@@ -253,9 +250,9 @@ public actor DomainManager {
         try await runtime.start()
         runtimes[location.id] = runtime
 
-        // Section 6.4: change detection starts with the location and runs whether or not
-        // the server is reachable - the first cycle after a reconnect is the full sweep
-        // that catches everything done while we were away.
+        // Change detection starts with the location and runs whether or not the server is
+        // reachable: the first cycle after a reconnect is the full sweep that catches
+        // everything done while we were away.
         let detector = ChangeDetector(
             locationID: location.id, runtime: runtime, location: location,
             capabilities: await DomainManager.capabilities(of: runtime, location: location),
@@ -264,9 +261,9 @@ public actor DomainManager {
         await runtime.setWatchTier(await detector.currentTier().rawValue)
         await detector.start()
 
-        // Section 6.6: the eviction loop runs on a timer of its own, from the moment the
-        // location is up. A `cacheTTL` of `never` still starts it; the pass then decides
-        // nothing and costs one enumeration every five minutes, which is what makes
+        // The eviction loop runs on a timer of its own, from the moment the location is
+        // up. A `cacheTTL` of `never` still starts it; the pass then decides nothing and
+        // costs one enumeration every five minutes, which is what makes
         // `sshdrive set <name> cache-ttl` take effect without a restart.
         let evictor = CacheEvictor(
             locationID: location.id, runtime: runtime, ttl: location.cacheTTL,
@@ -278,14 +275,14 @@ public actor DomainManager {
 
     public func evictor(locationID: String) -> CacheEvictor? { evictors[locationID] }
 
-    /// `sshdrive set <name> cache-ttl <value>`, applied to the running loop (section 7).
+    /// `sshdrive set <name> cache-ttl <value>`, applied to the running eviction loop.
     public func applyCacheTTL(locationID: String, ttl: CacheTTL) async {
         await evictors[locationID]?.setTTL(ttl)
     }
 
-    /// What the ladder of section 6.4 decides on: whether there is an exec channel at all,
-    /// what `find` the probe found there, and whether the server looks able to run the
-    /// helper.
+    /// What the change-detection ladder decides on: whether there is an exec channel at
+    /// all, what `find` the probe found there, and whether the server looks able to run
+    /// the helper.
     ///
     /// "Looks able" is the honest word. `auto` "tries the tiers from the top", so the
     /// helper is offered whenever the probe leaves it possible - a supported `uname`, a
@@ -342,14 +339,14 @@ public actor DomainManager {
         return try await runtime(for: location)
     }
 
-    /// Every runtime that is already up. A cancel goes to all of them (section 5.2) and
-    /// must never be the thing that connects a location.
+    /// Every runtime that is already up. A cancel goes to all of them
+    /// (docs/design/extension.md) and must never be the thing that connects a location.
     public func startedRuntimes() -> [LocationRuntime] { Array(runtimes.values) }
 
     /// The runtime for a location **only if it is already up**. `list`, `show` and
     /// `status` use this rather than `runtime(for:)`: a status command that dialled every
-    /// server would take a minute on a laptop with no network, and section 8 gives
-    /// `status --probe` as the way to ask for a connection on purpose.
+    /// server would take a minute on a laptop with no network, and `status --probe` is
+    /// the way to ask for a connection on purpose.
     public func startedRuntime(locationID: String) -> LocationRuntime? { runtimes[locationID] }
 
     public func gate(locationID: String) -> ConnectionGate? { gates[locationID] }
@@ -364,19 +361,18 @@ public actor DomainManager {
         if let gate = gates.removeValue(forKey: locationID) { await gate.shutdown() }
         guard let runtime = runtimes.removeValue(forKey: locationID) else { return }
         // `-O exit` on the master and the channel with it, so removing a location does
-        // not leave an `ssh` behind (section 6.1).
+        // not leave an `ssh` behind.
         await runtime.shutdownTransport()
     }
 
     /// Everything this agent started on a server, shut down, before the process exits.
     ///
-    /// `sshdrive agent stop` used to exit 0.2 s after replying and leave every location's
-    /// `ssh -N` master behind: the next start's orphan sweep unlinked the stale socket but
-    /// had no pid to kill, so the old `ssh` held a connection open for ever against a
-    /// socket that no longer existed (docs/spikes/results.md, 2026-09-05). `remove`
-    /// already did this per location through `dropRuntime`; stop now does it for all of
-    /// them. The sweep's kill (`ControlSocket.sweepOrphans`) is the other half - this is
-    /// the clean exit, that is the crash.
+    /// `sshdrive agent stop` must not reply and exit while a location's `ssh -N` master
+    /// is still running: the next start's orphan sweep unlinks the stale socket but has no
+    /// pid to kill, so the old `ssh` would hold a connection open for ever against a
+    /// socket nothing can reach. `remove` does the same for one location through
+    /// `dropRuntime`. The sweep's kill (`ControlSocket.sweepOrphans`) is the other half -
+    /// this is the clean exit, that is the crash.
     ///
     /// Runs the locations concurrently, and each `-O exit` is bounded by `Spawn`'s own
     /// timeout, so a server that has stopped answering cannot hold the exit open.
@@ -408,8 +404,8 @@ public actor DomainManager {
         }
         // And whatever is left. `SSHMaster.shutdown()` kills the child it spawned, so this
         // finds only masters the agent had lost track of - a restarted location can hold
-        // two, and the second has no socket for the sweep to find on the next start
-        // (2026-09-05). Safe here and only here, because every transport above is down.
+        // two, and the second has no socket for the sweep to find on the next start. Safe
+        // here and only here, because every transport above is down.
         let strays = ControlSocket.killStrayMasters()
         if !strays.isEmpty {
             Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) on exit")
@@ -427,19 +423,19 @@ public actor DomainManager {
         public var gates: Int
         public var detectors: Int
         public var evictors: Int
-        /// Whether the argv sweep of section 6.1 ran at all. It is unconditional and runs
-        /// **after** every transport is down, which is the only place it is safe: a
+        /// Whether the argv sweep for stray masters ran at all. It is unconditional and
+        /// runs **after** every transport is down, which is the only place it is safe: a
         /// master this agent still means to use looks exactly like a stray one
         /// (`SQ-043`).
         public var straySweepRan: Bool
         public var strayMastersKilled: Int
     }
 
-    // MARK: Section 6.1's sleep and wake, section 6.3's path gate, section 4.2's re-arm
+    // MARK: Sleep and wake, the network path gate, the deadline re-arm
 
     /// `kIOMessageSystemWillSleep`: `-O exit` on every master before the Mac abandons the
-    /// connection (section 6.1). Runs them together, because the acknowledgement the
-    /// system is waiting for cannot be serialised behind eight `ssh` shutdowns.
+    /// connection. Runs them together, because the acknowledgement the system is waiting
+    /// for cannot be serialised behind eight `ssh` shutdowns.
     public func willSleep() async {
         let all = Array(gates.values)
         await withTaskGroup(of: Void.self) { group in
@@ -447,19 +443,19 @@ public actor DomainManager {
         }
     }
 
-    /// `kIOMessageSystemHasPoweredOn`. Section 5.6: the same path a returning network path
-    /// takes, because the masters were already dropped at the will-sleep message.
+    /// `kIOMessageSystemHasPoweredOn`. The same path a returning network path takes,
+    /// because the masters were already dropped at the will-sleep message.
     public func didWake(trigger: String) async {
         for gate in gates.values { await gate.didWake(trigger: trigger) }
-        // Section 6.4: a full sweep on the way back from any outage, so changes made while
-        // the Mac was asleep are caught rather than waiting for a file to be touched.
+        // A full sweep on the way back from any outage, so changes made while the Mac was
+        // asleep are caught rather than waiting for a file to be touched.
         for detector in detectors.values { await detector.requestFullSweep(reason: "wake") }
     }
 
     public func networkPathChanged(available: Bool) async {
         for gate in gates.values { await gate.setNetworkPath(available) }
         guard available else { return }
-        // "and immediately on network-up" (section 6.4's schedule).
+        // The poll schedule runs a cycle immediately on network-up.
         for detector in detectors.values {
             await detector.requestFullSweep(reason: "network up")
             await detector.noteTouch()
@@ -467,21 +463,21 @@ public actor DomainManager {
     }
 
     /// `com.apple.screenIsUnlocked`: one re-armed attempt per location stopped by the
-    /// authentication deadline (section 4.2).
+    /// authentication deadline (docs/design/secrets.md).
     public func screenUnlocked() async {
         for gate in gates.values { await gate.screenUnlocked() }
     }
 
-    /// Every File Provider request that reaches the agent for this domain. Section 4.2's
-    /// second re-arm trigger, behind the presence test and its once-a-minute rule, so this
-    /// is cheap enough to sit on the hot path.
+    /// Every File Provider request that reaches the agent for this domain. The second
+    /// re-arm trigger for the authentication deadline, behind the presence test and its
+    /// once-a-minute rule, so this is cheap enough to sit on the hot path.
     @discardableResult
     public nonisolated func noteFileProviderRequest(
         domainIdentifier: String, method: String = "request", subject: String = "",
         isSystemRequest: Bool = false
     ) -> CallTiming {
         Task { [self] in await fileProviderRequestArrived(domainIdentifier) }
-        // Section 6.4's cadence rides on the same call: a request that is not the
+        // The change-detection cadence rides on the same call: a request that is not the
         // system's own is a touch, and a touched domain is polled every 60 s rather than
         // every 10 minutes.
         noteDomainTouched(domainIdentifier, isSystemRequest: isSystemRequest)
@@ -493,9 +489,9 @@ public actor DomainManager {
         await gate.fileProviderRequestArrived()
     }
 
-    /// Section 6.4's cadence: "every 60 s while the user has touched the domain in the
-    /// last 10 minutes (a File Provider request for it that was not a system request, or a
-    /// CLI command naming it), every 10 min otherwise". A system request - the eager
+    /// The change-detection cadence: every 60 s while the user has touched the domain in
+    /// the last 10 minutes (a File Provider request for it that was not a system request,
+    /// or a CLI command naming it), every 10 min otherwise. A system request - the eager
     /// download of a pinned subtree, a Spotlight pass - is deliberately not a touch, or a
     /// background index of a large mount would hold every location at the fast cadence.
     public nonisolated func noteDomainTouched(
@@ -509,9 +505,9 @@ public actor DomainManager {
         await detectors[domainIdentifier]?.noteTouch()
     }
 
-    /// The extension told us the system's materialized set moved (section 6.5) - and it is
-    /// also section 7.2's safety net, because a kept file turning dataless without our
-    /// handler having run arrives here and nowhere else.
+    /// The extension told us the system's materialized set moved - and it is also the
+    /// re-assert net for pins, because a kept file turning dataless without our handler
+    /// having run arrives here and nowhere else.
     ///
     /// The enumeration is made once and handed to both: it is the system's own replica
     /// walk and there is no reason to pay for it twice.
@@ -521,19 +517,19 @@ public actor DomainManager {
         await detectors[locationID]?.materializedChanged(identifiers: identifiers)
         guard let runtime = runtimes[locationID] else { return }
         // A location with no detector still publishes it: `status` is the third reader of
-        // this set and the one that must not walk the replica for itself (section 8.1).
+        // this set and the one that must not walk the replica for itself.
         runtime.materialized.record(identifiers, at: environment.clock.now())
         let reasserted =
             (try? await runtime.reassertKeptItems(materializedIdentifiers: identifiers)) ?? []
         guard !reasserted.isEmpty else { return }
         // The pin is re-asserted, not read as an unpin: the metadata versions have moved,
         // so one working-set signal is what makes the system re-apply the eager policy and
-        // fetch the content again (section 7.2).
+        // fetch the content again (docs/design/pinning.md).
         await signalWorkingSet(locationID: locationID)
     }
 
     /// The extension handed out a fresh working-set anchor, or a connection came back:
-    /// either way one full sweep at once (sections 5.3, 6.4).
+    /// either way one full sweep at once (docs/design/change-detection.md).
     private func connectionWentAway(locationID: String, reason: String) async {
         await detectors[locationID]?.connectionWentAway(reason: reason)
     }
@@ -542,25 +538,24 @@ public actor DomainManager {
         await detectors[locationID]?.requestFullSweep(reason: reason)
     }
 
-    /// Section 5.6's "network returns" row, and the only place it lives.
+    /// What happens when the network returns, and the only place it lives.
     ///
     /// On success: re-derive the location's identity, channel budget and root row from the
     /// connection that just came up, then tell the system its error is resolved - which is
-    /// the cue to retry pending uploads and fetches - and signal the working set. S5
-    /// measures whether `signalErrorResolved` alone wakes the flush; `signalEnumerator` is
-    /// the documented fallback and is sent either way, since it costs one call and the
-    /// working set needs it regardless.
+    /// the cue to retry pending uploads and fetches - and signal the working set.
+    /// `signalErrorResolved` is the call that wakes the flush; `signalEnumerator` is sent
+    /// either way, since it costs one call and the working set needs it regardless.
     private func connectionCameUp(locationID: String, connected: ConnectionGate.Connected) async {
         let suppressed = await gates[locationID]?.suppressRecoverySignals ?? false
         if suppressed {
             Log.agent.notice(
                 "\(locationID, privacy: .public): recovery signals suppressed by a debug hook")
         }
-        // `ReconnectSequence` in `AgentCore` owns the order, because the order is the part
-        // that was wrong: section 6.4's helper stream runs on an exec channel opened
-        // against the master the SFTP channels sit on, so it is re-opened *after*
-        // `applyConnection`, and it is re-opened *here* rather than being left to the next
-        // poll cycle (2026-09-08).
+        // `ReconnectSequence` in `AgentCore` owns the order, and the order is load-bearing:
+        // the helper stream runs on an exec channel opened against the master the SFTP
+        // channels sit on, so it is re-opened *after* `applyConnection`, and it is
+        // re-opened *here* rather than left to the next poll cycle. Left to the poll cycle
+        // it costs a reconnected location up to ten minutes with no push detection.
         for step in ReconnectSequence.steps {
             switch step {
             case .applyConnection:
@@ -584,9 +579,9 @@ public actor DomainManager {
                     watchMode: runtime.location.watchMode)
             case .reopenHelperStream:
                 guard let detector = detectors[locationID] else { continue }
-                // Section 6.4: "On reconnect after any outage every tier first runs one
-                // full sweep so changes made while disconnected are caught, then resumes
-                // streaming." Both halves live in `connectionCameUp`.
+                // On reconnect after any outage every tier first runs one full sweep so
+                // changes made while disconnected are caught, then resumes streaming.
+                // Both halves live in `connectionCameUp`.
                 await detector.connectionCameUp()
                 await runtimes[locationID]?.setWatchTier(await detector.currentTier().rawValue)
             case .signalErrorResolved:
@@ -600,7 +595,7 @@ public actor DomainManager {
     }
 
     /// `NSFileProviderManager.signalErrorResolved(.serverUnreachable)`: the system's cue to
-    /// retry the uploads and fetches it queued while we were failing fast (section 5.6).
+    /// retry the uploads and fetches it queued while we were failing fast.
     public nonisolated func signalErrorResolved(locationID: String) async {
         let replica = environment.replica
         do {
@@ -616,24 +611,24 @@ public actor DomainManager {
 
     // MARK: Domains
 
-    /// One domain per location, identified by the location's UUID (section 4).
+    /// One domain per location, identified by the location's UUID (docs/design/locations.md).
     ///
-    /// Whether the display name should be "SSH Drive - nas" or just "nas" is what spike
-    /// S3 records, so that the sidebar does not read "SSH Drive - SSH Drive - nas"
-    /// (section 2). Milestone 1 passes the bare name and S3 compares.
+    /// The display name is the bare nickname. The system prepends the app name to the
+    /// mount directory and to the sidebar label itself, so passing "SSH Drive - nas" would
+    /// read as "SSH Drive - SSH Drive - nas".
     public nonisolated func addDomain(
         for location: Location, testingModes: [String] = []
     ) async throws {
-        // `testingModes` is only ever set by `sshdrive debug fake add --testing-modes`
-        // (spikes S4 and S6): `always` skips the user's approval, `interactive` hands the
-        // scheduler to `listAvailableTestingOperations`, and the appex's
+        // `testingModes` is only ever set by `sshdrive debug fake add --testing-modes`:
+        // `always` skips the user's approval, `interactive` hands the scheduler to
+        // `listAvailableTestingOperations`, and the appex's
         // com.apple.developer.fileprovider.testing-mode entitlement is what allows either.
         // A real location never asks for them.
         //
         // The adapter also clears `supportsSyncingTrash`, which defaults to YES: with it
         // the system draws a `.Trash` in the mount, syncs it to the extension, and loops
         // on materializing a container we do not serve; anything that stats `.Trash`, such
-        // as `ls -la`, waits on that loop (section 5.4, `MQ-008`/`MQ-009`).
+        // as `ls -la`, waits on that loop (`MQ-008`/`MQ-009`).
         let domain = ReplicaDomain(identifier: location.id, displayName: location.displayName)
         let replica = environment.replica
         do {
@@ -642,13 +637,13 @@ public actor DomainManager {
             }
         } catch {
             // `add(domain)` on an identifier the system already holds is how a location is
-            // renamed (S9, 2026-09-05), and it is also what runs on every start. Both
-            // reach fileproviderd while it is re-reading its domain list, and the reply can
-            // be lost even though the call landed: `NSCocoaErrorDomain 4099, "The
-            // connection to service named com.apple.FileProvider was invalidated"`. Seen
-            // during `set nickname` and again on the first location start after an upgrade
-            // (2026-09-05). The domain list is the authority, so ask it before believing
-            // the error; only a domain that really is not there is a failure.
+            // renamed, and it is also what runs on every start. Both reach fileproviderd
+            // while it is re-reading its domain list, and the reply can be lost even though
+            // the call landed: `NSCocoaErrorDomain 4099, "The connection to service named
+            // com.apple.FileProvider was invalidated"`. Seen during `set nickname` and
+            // again on the first location start after an upgrade (2026-09-05). The domain
+            // list is the authority, so ask it before believing the error; only a domain
+            // that really is not there is a failure.
             let domains = (try? await replica.domains()) ?? []
             guard domains.contains(where: {
                 $0.identifier == location.id && $0.displayName == location.displayName
@@ -672,16 +667,15 @@ public actor DomainManager {
     }
 
     /// Tells the system to re-ask for the working set, which is how every change the
-    /// agent found reaches Finder (sections 5.3, 6.4).
+    /// agent found reaches Finder (docs/design/change-detection.md).
     public nonisolated func signalWorkingSet(locationID: String) async {
         await signalEnumerator(locationID: locationID, container: .workingSet)
     }
 
     /// The same call for one container. Reporting a new row through the working set is not
-    /// enough to make the system ingest an item whose parent it has never enumerated: S6
-    /// found that a pin on such a path sits idle until something looks the chain up
-    /// (docs/spikes/results.md, 2026-09-04, s6-3). Signalling each new ancestor's own
-    /// enumerator is how the agent asks for that listing.
+    /// enough to make the system ingest an item whose parent it has never enumerated: a
+    /// pin on such a path sits idle until something looks the chain up. Signalling each
+    /// new ancestor's own enumerator is how the agent asks for that listing.
     public nonisolated func signalEnumerator(
         locationID: String, container: ProviderItemIdentifier
     ) async {
@@ -692,7 +686,7 @@ public actor DomainManager {
             }
             // At the default level, and not `debug`: this is the last thing the agent
             // does with a change it found, and when nothing reaches Finder the question
-            // is always whether the signal went out at all (2026-09-08).
+            // is always whether the signal went out at all.
             Log.agent.notice(
                 "\(locationID, privacy: .public): signalled \(container.rawValue, privacy: .public)"
             )

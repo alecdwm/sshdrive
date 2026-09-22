@@ -4,8 +4,9 @@ import Config
 import SFTP
 @testable import AgentCore
 
-/// DESIGN.md section 5.4's "permissions become capabilities" and "execute bits become
-/// `fileSystemFlags`", against a fixed identity.
+/// The names-and-attributes rules (docs/design/names-and-attributes.md) for
+/// "permissions become capabilities" and "execute bits become `fileSystemFlags`",
+/// against a fixed identity.
 final class PermissionMappingTests: XCTestCase {
 
     /// uid 1000, gid 1000, also in group 27. The testbed's `alec` account, roughly.
@@ -33,7 +34,7 @@ final class PermissionMappingTests: XCTestCase {
         XCTAssertTrue(capabilities.contains(.allowsWriting))
         XCTAssertTrue(capabilities.contains(.allowsRenaming))
         XCTAssertTrue(capabilities.contains(.allowsDeleting))
-        // No trash, ever (section 5.4).
+        // No trash, ever (docs/design/names-and-attributes.md).
         XCTAssertFalse(capabilities.contains(.allowsTrashing))
     }
 
@@ -115,7 +116,7 @@ final class PermissionMappingTests: XCTestCase {
     }
 
     /// A kept item drops `allowsEvicting` so Finder's own menu cannot undo the pin
-    /// (section 7.2).
+    /// (docs/design/pinning.md).
     func testKeptItemsDropAllowsEvicting() {
         XCTAssertTrue(capabilities(mode: 0o644, kept: false).contains(.allowsEvicting))
         XCTAssertFalse(capabilities(mode: 0o644, kept: true).contains(.allowsEvicting))
@@ -173,8 +174,8 @@ final class PermissionMappingTests: XCTestCase {
 
     // MARK: the metadata version
 
-    /// Section 5.3: the metadata version moves when the derived bitmasks, the owner, the
-    /// kept state or the xattrs move, and is stable across processes.
+    /// The metadata version (docs/design/item-index.md) moves when the derived bitmasks,
+    /// the owner, the kept state or the xattrs move, and is stable across processes.
     func testMetadataVersionMovesOnEveryInput() {
         func version(
             content: String = "10-20-0", mode: Int64 = 0o644, uid: Int64 = 1000,

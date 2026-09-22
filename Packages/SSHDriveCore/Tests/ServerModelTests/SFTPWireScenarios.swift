@@ -7,7 +7,7 @@ import SSHProcess
 @testable import ServerModel
 
 /// The server-side scenarios that run over the SFTP **wire**
-/// (`docs/testing-architecture.md` section 5). `FakeSFTPServer` speaks the protocol, so
+/// (`docs/design/testing.md`). `FakeSFTPServer` speaks the protocol, so
 /// `SFTPClient` and `RealSFTPTransport` run here unmodified: every byte of the codec, the
 /// pipelining and the extension handling is exercised with no network and no server.
 final class SFTPWireScenarios: XCTestCase {
@@ -175,14 +175,14 @@ final class SFTPWireScenarios: XCTestCase {
         XCTAssertEqual(narrow.readdirs, 102)
         XCTAssertEqual(narrow.roundTrips, 51, "which is fifty-one serial round trips")
 
-        // Section 6.2's sixteen: one window, seven waits.
+        // docs/design/sftp.md's sixteen: one window, seven waits.
         let wide = try await list(depth: 16, entries: 10_000)
         XCTAssertEqual(
             wide.fingerprint, narrow.fingerprint,
             "the same names in the same order, merged by page and not by arrival")
         XCTAssertEqual(
             wide.peakInFlight, 16,
-            "section 6.2's window, filled: sixteen readdirs outstanding on the one handle")
+            "docs/design/sftp.md's window, filled: sixteen readdirs outstanding on the one handle")
         XCTAssertEqual(
             wide.roundTrips, 7,
             "seven round trips for a hundred pages, not one per two pages")
@@ -225,10 +225,10 @@ final class SFTPWireScenarios: XCTestCase {
                        "SQ-030: opendir followed the link into /etc")
 
         // The containment rule: the listing's own `lstat` comes first and says symlink,
-        // which is what section 9.1 makes every enumeration do before it descends.
+        // which is what docs/design/security.md makes every enumeration do before it descends.
         let attributes = try await deb.lstat(try RelativePath(string: "projects"))
         XCTAssertEqual(attributes.type, .symlink,
-                       "section 9.1: the re-lstat before readdir is what catches the swap")
+                       "docs/design/security.md: the re-lstat before readdir is what catches the swap")
 
         // And the target escapes the root, so `SymlinkPolicy` omits it with a reason -
         // zero rows under the swapped path.
@@ -236,10 +236,10 @@ final class SFTPWireScenarios: XCTestCase {
         let decision = SymlinkPolicy.evaluate(
             target: target, linkDirectory: .root, roots: .init(canonical: server.root))
         guard case let .hide(reason) = decision else {
-            return XCTFail("section 9.1: a link out of the root is never shown: \(decision)")
+            return XCTFail("docs/design/security.md: a link out of the root is never shown: \(decision)")
         }
         XCTAssertTrue(reason.contains("outside this location"),
-                      "section 5.7: the reason names the escape: \(reason)")
+                      "docs/design/symlinks.md: the reason names the escape: \(reason)")
     }
 
     /// `SQ-031`: `readdir` carries attributes but **no** link target, so every symlink a
@@ -439,7 +439,7 @@ final class SFTPWireScenarios: XCTestCase {
                                     try await sftp.rename(source, to: destination))
                 XCTAssertEqual(server.contents(of: "b.txt"), Data("B".utf8),
                                "SQ-034: a refusing server left the incumbent alone")
-                // posix-rename is the one that always overwrites (section 5.5).
+                // posix-rename is the one that always overwrites (docs/design/writes.md).
                 try await sftp.posixRename(source, to: destination)
                 XCTAssertEqual(server.contents(of: "b.txt"), Data("A".utf8))
             }

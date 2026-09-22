@@ -5,7 +5,7 @@ import Index
 import Logging
 import XPCProtocols
 
-/// DESIGN.md section 7's TTL loop, and section 6.6's timer for it.
+/// The TTL cache-eviction loop and the timer that drives it (docs/design/eviction.md).
 ///
 /// One per location, beside the change detector and for the same reason: it makes File
 /// Provider calls that can take seconds (the materialized enumerator, a `getUserVisibleURL`
@@ -17,9 +17,9 @@ import XPCProtocols
 /// `never`, walk `enumeratorForMaterializedItems()`, `lstat` each replica file **before**
 /// deciding (an eviction moves atime), and `evictItem` anything whose last use is older
 /// than the TTL. Kept items are skipped by us; pending uploads are refused by the system,
-/// so they need no check of ours (S4, 2026-09-04).
+/// so they need no check of ours.
 public actor CacheEvictor {
-    /// "Every 5 minutes" (section 7 step 1).
+    /// Every 5 minutes.
     public static let interval: TimeInterval = 300
 
     public let locationID: String
@@ -34,11 +34,11 @@ public actor CacheEvictor {
     /// `sshdrive debug ttl <name> --seconds N`: the TTL in seconds, overriding the
     /// location's `cacheTTL` for this process only.
     ///
-    /// Section 7's shortest real value is `15m`, and a runbook that had to wait a quarter
-    /// of an hour per assertion would be run once and never again. The override changes the
+    /// The shortest real value is `15m`, and a runbook that had to wait a quarter of an
+    /// hour per assertion would be run once and never again. The override changes the
     /// number the rule is applied to and nothing else - the pass, the `stat`s, the
     /// `evictItem`s and every skip are the ordinary ones - which is the same bargain
-    /// `debug watch --clock-skew` makes for the sweep window (section 6.4).
+    /// `debug watch --clock-skew` makes for the sweep window.
     private var ttlOverrideSeconds: Double?
 
     public init(
@@ -116,8 +116,8 @@ public actor CacheEvictor {
     // MARK: One pass
 
     /// One walk of the materialized set. `force` ignores the TTL for the paths named,
-    /// which is what `sshdrive evict <name> <path>` does; with no paths it is section 7's
-    /// ordinary pass, which `sshdrive evict <name>` triggers on demand (step 4).
+    /// which is what `sshdrive evict <name> <path>` does; with no paths it is the ordinary
+    /// pass, which `sshdrive evict <name>` triggers on demand.
     @discardableResult
     public func runPass(
         reason: String, now: Double = Date().timeIntervalSince1970
@@ -131,7 +131,7 @@ public actor CacheEvictor {
             locationID: locationID)
         else {
             // No manager for the domain: it is being added or removed. "No news", never
-            // "the user evicted everything" (section 6.5).
+            // "the user evicted everything".
             return ["skipped": "the system has no domain for this location"]
         }
         runtime.materialized.record(identifiers, at: environment.clock.now())
@@ -150,8 +150,8 @@ public actor CacheEvictor {
                     "\(self.locationID, privacy: .public): evicted \(decision.candidate.path, privacy: .public), unused for \(Int(decision.ageSeconds), privacy: .public)s (atime \(Int(now - (decision.candidate.atime ?? 0)), privacy: .public)s ago, not decided on)"
                 )
             } else {
-                // Section 7 step 3: ignore the refusal, log and move on. The code says
-                // nothing about why (S4), and the pass comes round again in five minutes.
+                // Ignore the refusal, log and move on: the code says nothing about why,
+                // and the pass comes round again in five minutes.
                 var entry: [String: Any] = ["path": decision.candidate.path]
                 entry["error"] = report["errorDescription"] as? String ?? "refused"
                 entry["code"] = report["errorCode"] as? Int ?? 0
@@ -185,10 +185,9 @@ public actor CacheEvictor {
     /// `sshdrive evict <name> <path>`: this item now, whatever the TTL says.
     ///
     /// A kept item is refused with a sentence rather than left to fail opaquely: the eager
-    /// policy would refuse the call anyway (S6), and "unpin it first" is the answer
-    /// (section 7.2's division of labour). The retry with the doubling backoff is section
-    /// 5.5's, reused, because a user who has just unpinned is racing the same
-    /// still-finishing modification the conflict path races.
+    /// policy would refuse the call anyway, and "unpin it first" is the answer. The retry
+    /// with the doubling backoff is the conflict path's, reused, because a user who has
+    /// just unpinned is racing the same still-finishing modification that path races.
     public func evictPath(_ pathString: String) async throws -> [String: Any] {
         let (identifier, row) = try await runtime.identifier(forPath: pathString)
         if row.kept {
@@ -209,12 +208,12 @@ public actor CacheEvictor {
 
     /// `sshdrive evict <name> --all`.
     ///
-    /// With nothing pinned this is **one** `evictItem` on the root container: S4 measured
-    /// that it evicts the children recursively and then the container itself, so a walk
-    /// would only be slower (2026-09-04). With pins in place the same call would meet a
-    /// kept child and fail as a whole, so the unkept files are evicted one by one instead -
-    /// which is what section 7.1 step 5 means by "`evict --all` skips kept items too,
-    /// unless `--unpin-all` is passed, which removes every pin first".
+    /// With nothing pinned this is **one** `evictItem` on the root container: it evicts
+    /// the children recursively and then the container itself (measured 2026-09-04), so a
+    /// walk would only be slower. With pins in place the same call would meet a kept child
+    /// and fail as a whole, so the unkept files are evicted one by one instead: `evict
+    /// --all` skips kept items unless `--unpin-all` is passed, which removes every pin
+    /// first.
     public func evictAll(unpinAll: Bool) async throws -> [String: Any] {
         var report: [String: Any] = [:]
         var pinsRemoved = 0
@@ -235,8 +234,8 @@ public actor CacheEvictor {
         }
         report["pinsRemoved"] = pinsRemoved
 
-        // The one call on the root container is what section 7 wants, and S4 measured that
-        // it evicts the children recursively and then the container itself. It is used
+        // The one call on the root container evicts the children recursively and then
+        // the container itself, which is why it is preferred to a walk. It is used
         // only when nothing is or has just been pinned: with a pin still in place it meets
         // a kept child and fails as a whole, and straight after an `--unpin-all` it fails
         // too - as `NSCocoaErrorDomain` "The file couldn't be opened", which names no
@@ -316,12 +315,12 @@ public actor CacheEvictor {
     }
 
     /// The replica's atime and mtime, read **before** anything is evicted, since an
-    /// eviction moves atime (S4, 2026-09-04).
+    /// eviction moves atime (measured 2026-09-04).
     ///
     /// The mtime matters: a save in the mount moves the replica's before the upload
     /// finishes, and the row's only afterwards, so the later of the two is the save the
     /// TTL means. The atime is recorded for the log and decided on by nobody
-    /// (`EvictionPlan`, 2026-09-05).
+    /// (`EvictionPlan`).
     ///
     /// **There is deliberately no TCC guard here** (`MQ-060`). The `getUserVisibleURL`
     /// and the `lstat` below reach our *own* domain's mount under
@@ -329,7 +328,7 @@ public actor CacheEvictor {
     /// `kTCCServiceFileProviderDomain` with our domain as the indirect object and allows
     /// silently - no prompt, no `EPERM` - so a pre-flight check, a permission prompt or a
     /// fallback path would all be code defending against something that does not happen,
-    /// and `sshdrive doctor` carries no line for it either (section 7). A `stat` that does
+    /// and `sshdrive doctor` carries no line for it either. A `stat` that does
     /// fail for any reason is simply absent: the candidate keeps the index's own
     /// `last_fetch` and mtime and the TTL is decided from those, which is the same answer
     /// the loop gives for a file the system has not yet written to disk.
@@ -351,7 +350,7 @@ public actor CacheEvictor {
             {
                 candidate.atime = times.atime
                 // The replica's mtime is the one the user's saves move; the row's is the
-                // server's. The later of the two is the one section 7 wants.
+                // server's. The later of the two is the one the TTL rule wants.
                 candidate.mtime = max(candidate.mtime, times.mtime)
             }
             out.append(candidate)

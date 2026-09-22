@@ -29,9 +29,9 @@ final class IndexTests: XCTestCase {
             contentVersion: IndexItem.contentVersion(size: 10, mtime: 1_700_000_000, generation: 0))
     }
 
-    /// Section 7.1.1's three explicit states each have to reach the extension as a
-    /// different `contentPolicy`, and the excluded one is the whole reason S6 can check
-    /// that a lazy child overrides an eager ancestor.
+    /// Each of the three explicit pin states (docs/design/pinning.md) has to reach the
+    /// extension as a different `contentPolicy`; the excluded one is what lets a lazy
+    /// child override an eager ancestor.
     func testPinMarkerDecidesTheContentPolicy() throws {
         var row = item("id-p", "Projects", parent: IndexWriter.rootIdentifier)
         XCTAssertEqual(row.snapshot.contentPolicyRawValue, SSHDriveContentPolicy.unset.rawValue)
@@ -56,9 +56,10 @@ final class IndexTests: XCTestCase {
         XCTAssertEqual(root.identifier, IndexWriter.rootIdentifier)
         XCTAssertTrue(root.path.isEmpty)
         XCTAssertEqual(try writer.meta(IndexSchema.MetaKey.schemaVersion), String(IndexSchema.version))
-        // Version 3 is milestone 6: the roots rotation column and the sweep's server clock
-        // (sections 6.4, 6.5). A reader that finds a version it does not understand falls
-        // back to the agent, so the number has to move with the columns.
+        // Version 3 carries the roots rotation column and the sweep's server clock
+        // (docs/design/change-detection.md, docs/design/root-set.md). A reader that finds
+        // a version it does not understand falls back to the agent, so the number has to
+        // move with the columns.
         XCTAssertEqual(IndexSchema.version, 3)
         // The root row is permanent, so a second call must not duplicate it.
         _ = try writer.ensureRoot()
@@ -134,7 +135,8 @@ final class IndexTests: XCTestCase {
         XCTAssertEqual(changes.entries.map(\.identifier), ["id-1"])
         XCTAssertFalse(changes.hasMore)
 
-        // A rebuild, or pruning, is the only source of an expired anchor (section 5.3).
+        // A rebuild, or pruning, is the only source of an expired anchor
+        // (docs/design/item-index.md).
         try writer.expireAnchors()
         XCTAssertThrowsError(try reader.changes(since: start)) { error in
             XCTAssertEqual(error as? IndexError, .syncAnchorExpired)
@@ -170,13 +172,12 @@ final class IndexTests: XCTestCase {
     }
 }
 
-/// Nested transactions (DESIGN.md section 5.3).
+/// Nested transactions (docs/design/item-index.md).
 ///
-/// Section 5.3's "a directory listing is written in one transaction" put a `batch` around
-/// a loop whose body calls `appendAnchor` and `delete`, and both of those open a
-/// transaction of their own. SQLite has no nested `BEGIN`, so the inner one failed with
-/// "cannot start a transaction within a transaction" and took the listing with it - found
-/// on the first real `sshdrive add`, 2026-09-04.
+/// A directory listing is written in one transaction, which wraps a loop whose body calls
+/// `appendAnchor` and `delete` - both of which open a transaction of their own. SQLite has
+/// no nested `BEGIN`, so `batch` opens a `SAVEPOINT` rather than a second transaction when
+/// one is already running (gotcha 45).
 final class NestedTransactionTests: XCTestCase {
 
     private func writer() throws -> (IndexWriter, URL) {

@@ -11,7 +11,7 @@ import XCTest
 /// (192.168.64.1 is the Mac's vmnet gateway) and nothing else can reach it.
 ///
 /// Nothing here waits for EOF without a deadline: every request the client makes carries
-/// one (section 6.2), which is what the README's `bashbg` trap is about.
+/// one (docs/design/sftp.md), which is what the README's `bashbg` trap is about.
 final class SFTPIntegrationTests: XCTestCase {
 
     private static let debian = "spike-deb"
@@ -84,8 +84,8 @@ final class SFTPIntegrationTests: XCTestCase {
             print("[\(alias)] limits: \(String(describing: limits))")
 
             let extensions = await transport.extensions
-            // Section 6.2 names these five. They are what OpenSSH's own sftp-server
-            // offers, on Debian's 9.2 and Alpine's 9.7 alike.
+            // docs/design/sftp.md names these five. They are what OpenSSH's own
+            // sftp-server offers, on Debian's 9.2 and Alpine's 9.7 alike.
             XCTAssertTrue(extensions.contains(.posixRename), "\(alias) posix-rename")
             XCTAssertTrue(extensions.contains(.statvfs), "\(alias) statvfs")
             XCTAssertTrue(extensions.contains(.fsync), "\(alias) fsync")
@@ -141,15 +141,15 @@ final class SFTPIntegrationTests: XCTestCase {
         let renamed = try scratch.appending(component: "renamed.bin")
         try await transport.rename(file, to: renamed)
         await assertSFTPError(.noSuchFile) { _ = try await transport.lstat(file) }
-        // A plain rename onto an existing name must fail; that is what section 5.5's
-        // create path relies on.
+        // A plain rename onto an existing name must fail; the create path relies on
+        // that (docs/design/writes.md).
         try await transport.write(file, contents: Data("x".utf8), mode: 0o644)
         do {
             try await transport.rename(renamed, to: file)
             XCTFail("\(alias): a plain rename must not overwrite")
         } catch let error as SFTPError {
-            // OpenSSH reports EEXIST as a bare FAILURE (section 6.2), so this is all the
-            // wire can say. Asking a second question is what the agent does next.
+            // OpenSSH reports EEXIST as a bare FAILURE (docs/design/sftp.md), so this is
+            // all the wire can say. Asking a second question is what the agent does next.
             XCTAssertEqual(error, .failure("Failure"), "\(alias) rename onto existing")
         }
         // posix-rename does overwrite.
@@ -217,9 +217,10 @@ final class SFTPIntegrationTests: XCTestCase {
         let (transport, _) = try await connect(Self.debian)
         let entries = try await transport.readdir(RelativePath(string: "data/weird"))
         XCTAssertGreaterThanOrEqual(entries.count, 9)
-        // Every name the server reports must survive the section 9.1 constructor, and a
-        // name that is not valid UTF-8 must not have been mangled on the way (section
-        // 5.4). `latin1-caf\xff` is the one the testbed seeds for this.
+        // Every name the server reports must survive the `RelativePath` constructor
+        // (docs/design/security.md), and a name that is not valid UTF-8 must not have
+        // been mangled on the way (docs/design/names-and-attributes.md). `latin1-caf\xff`
+        // is the one the testbed seeds for this.
         var sawNonUTF8 = false
         var sawNewline = false
         for entry in entries {
@@ -238,7 +239,7 @@ final class SFTPIntegrationTests: XCTestCase {
         await transport.shutdown()
     }
 
-    // MARK: Throughput (spike S2)
+    // MARK: Throughput
 
     /// A large sequential read through the pipeline. Uses the opt-in `data/big/1g.bin`
     /// when it is there and a file of our own when it is not; the numbers go into the
@@ -286,15 +287,15 @@ final class SFTPIntegrationTests: XCTestCase {
                 format: "[deb] pipelined read %.0f MiB in %.2f s = %.1f MiB/s",
                 megabytes, elapsed, megabytes / max(elapsed, 0.001)))
 
-        // The same file through `sftp(1)`, over the same link, for spike S2's comparison.
-        // The 1 GB half of S2 needs the opt-in `data/big/1g.bin`; this is the part that
-        // runs on a default testbed. Recorded, never asserted (testbed/README.md: a
-        // container on the same Mac is a floor, not a NAS).
+        // The same file through `sftp(1)`, over the same link, for comparison. The 1 GB
+        // file needs the opt-in `data/big/1g.bin`; this is the part that runs on a
+        // default testbed. Recorded, never asserted (testbed/README.md: a container on
+        // the same Mac is a floor, not a NAS).
         let remote = String(decoding: target.bytes, as: UTF8.self)
         if let theirs = Self.timeSftpGet(remote) {
             print(
                 String(
-                    format: "[S2] %.0f MiB: sshdrive %.2f s (%.1f MiB/s); sftp(1) %.2f s (%.1f MiB/s)",
+                    format: "[deb] %.0f MiB: sshdrive %.2f s (%.1f MiB/s); sftp(1) %.2f s (%.1f MiB/s)",
                     megabytes, elapsed, megabytes / max(elapsed, 0.001),
                     theirs, megabytes / max(theirs, 0.001)))
         }
@@ -303,7 +304,7 @@ final class SFTPIntegrationTests: XCTestCase {
         await transport.shutdown()
     }
 
-    /// Spike S2's throughput comparison against `sftp(1)`, on the opt-in 1 GB file only.
+    /// A throughput comparison against `sftp(1)`, on the opt-in 1 GB file only.
     /// Recorded, never asserted.
     func testThroughputAgainstSftpOneGigabyteFile() async throws {
         try requireTestbed()
@@ -331,7 +332,7 @@ final class SFTPIntegrationTests: XCTestCase {
             ?? "did not run"
         let ourDescription = String(
             format: "%.1f s (%.1f MiB/s)", ours, megabytes / max(ours, 0.001))
-        print("[S2] 1 GB read: sshdrive \(ourDescription); sftp(1) \(theirsDescription)")
+        print("[deb] 1 GB read: sshdrive \(ourDescription); sftp(1) \(theirsDescription)")
     }
 
     /// `sftp -b - spike-deb` fetching the same file to /dev/null, timed.

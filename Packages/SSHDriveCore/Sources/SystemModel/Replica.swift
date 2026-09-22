@@ -216,10 +216,10 @@ public final class Replica {
         return chain
     }
 
-    /// Section 7.1.1's effective policy as the *system* resolves it: the nearest explicit
-    /// value at or above the item. `.unset` and `.inherited` are both "say nothing"
-    /// (`MQ-026`), and an explicit `.downloadLazily` on a child beats an eager ancestor
-    /// (`MQ-027`) because it is nearer.
+    /// The effective content policy as the *system* resolves it (docs/design/pinning.md):
+    /// the nearest explicit value at or above the item. `.unset` and `.inherited` are
+    /// both "say nothing" (`MQ-026`), and an explicit `.downloadLazily` on a child beats
+    /// an eager ancestor (`MQ-027`) because it is nearer.
     public func effectivePolicy(of identifier: ProviderItemIdentifier) -> ProviderContentPolicy {
         var cursor: ProviderItemIdentifier? = identifier
         while let current = cursor, let item = items[current] {

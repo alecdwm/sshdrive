@@ -1,22 +1,21 @@
 import Foundation
 
 /// Why a channel did not open, when the answer decides whether a `MaxSessions` budget may
-/// be recorded (DESIGN.md section 6.1).
+/// be recorded (docs/design/ssh.md).
 ///
-/// The probe of section 6.1 opens channels until one is refused and turns the count into
+/// The `MaxSessions` probe opens channels until one is refused and turns the count into
 /// the location's whole channel budget - two SFTP channels or one, an exec channel or
-/// none, a *held* exec channel for tier 2 or not - and caches it in
-/// `capabilities.json`, where "an explicit re-probe is its only invalidation".
+/// none, a *held* exec channel for tier 2 or not - and caches it in `capabilities.json`,
+/// where an explicit re-probe is its only invalidation.
 ///
 /// That is sound only while a channel that did not open means the **server** said no. It
 /// does not: `ssh` fails a channel open just as readily because the master it was speaking
 /// to has gone, and a measurement taken in that moment is cached as a fact about the
-/// server. Measured on a real install (2026-09-08): after `ssh` was killed under a running
-/// agent the location came up reporting "the server allows one channel at a time
-/// (MaxSessions 1) … SFTP-only", with no helper and no shell, against a `deb` whose sshd
-/// was healthy - and it stayed that way across restarts and reconnects, because nothing
-/// re-probes. So the probe has to tell the two apart, and record nothing when the
-/// connection is what failed.
+/// server. Killing `ssh` under a running agent brings the location up reporting "the
+/// server allows one channel at a time (MaxSessions 1) … SFTP-only", with no helper and no
+/// shell, against a server whose sshd is healthy, and it stays that way across restarts
+/// and reconnects, because nothing re-probes. So the probe has to tell the two apart, and
+/// record nothing when the connection is what failed.
 ///
 /// The default is `sessionRefused`, deliberately: an unfamiliar sshd that refuses a
 /// session with wording we have never seen must still produce a budget, or the location
@@ -26,8 +25,8 @@ public enum ChannelProbeVerdict: String, Sendable, Equatable {
     /// cached: `mux_client_request_session: session request failed`.
     case sessionRefused
     /// The connection went while the channel was being opened. This is a fact about the
-    /// moment and must not be cached; the connect attempt fails instead and section 6.3's
-    /// breaker tries again.
+    /// moment and must not be cached; the connect attempt fails instead and the breaker
+    /// tries again (docs/design/offline.md).
     case connectionDied
 
     /// Phrases `ssh` prints when the master, the mux socket or the TCP connection is what

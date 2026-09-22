@@ -2,8 +2,9 @@ import XCTest
 import SFTP
 @testable import AgentCore
 
-/// DESIGN.md section 5.4's name rules: case and normalisation collisions, names that are
-/// not valid UTF-8, and the four kinds of entry that get no row at all.
+/// The name-visibility rules (docs/design/names-and-attributes.md): case and
+/// normalisation collisions, names that are not valid UTF-8, and the four kinds of entry
+/// that get no row at all.
 final class NameVisibilityTests: XCTestCase {
 
     private func entry(_ name: String, type: SFTPFileType = .file) -> SFTPDirectoryEntry {
@@ -86,8 +87,8 @@ final class NameVisibilityTests: XCTestCase {
 
     /// "Sockets, FIFOs and device nodes that a readdir reports are never enumerated and
     /// never get a row"; a server-side `.DS_Store` is never enumerated; our own upload
-    /// temp files are never enumerated (section 5.5). None of the four gets a row at all,
-    /// which is what tells them apart from a hidden name.
+    /// temp files are never enumerated (docs/design/writes.md). None of the four gets a
+    /// row at all, which is what tells them apart from a hidden name.
     func testFourKindsOfEntryGetNoRow() {
         let result = NameVisibility.classify(
             entries: [
@@ -106,15 +107,15 @@ final class NameVisibilityTests: XCTestCase {
     }
 
     /// A dot-file is an ordinary item: it is shown, and the hidden *flag* rather than a
-    /// hidden *row* is what keeps it out of Finder's way (section 5.4).
+    /// hidden *row* is what keeps it out of Finder's way (docs/design/names-and-attributes.md).
     func testDotFilesAreShown() {
         let result = NameVisibility.classify(
             entries: [entry(".bashrc"), entry(".hidden", type: .directory)], visibleNames: [])
         XCTAssertEqual(shown(result), [".bashrc", ".hidden"])
     }
 
-    /// The section 9.1 chokepoint has the last word: a name it rejects can never be
-    /// addressed, so it gets no row.
+    /// The RelativePath chokepoint (docs/design/security.md) has the last word: a name it
+    /// rejects can never be addressed, so it gets no row.
     func testNamesTheChokepointRejectsGetNoRow() {
         let result = NameVisibility.classify(
             entries: [entry(bytes: Array("bad".utf8) + [0x00]), entry("fine")], visibleNames: [])

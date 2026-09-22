@@ -18,8 +18,8 @@ enum Testbed {
     static var environment: [String: String] { ProcessInfo.processInfo.environment }
 
     /// The stub askpass the two-hop tests arm, written into the test's own temp dir.
-    /// The real one is `sshdrive-askpass` with the token protocol of section 4.2, which
-    /// is the Secrets module's half of milestone 2.
+    /// The real one is `sshdrive-askpass` with the token protocol of
+    /// docs/design/secrets.md, which is the Secrets module's half.
     struct StubAskpass {
         let directory: URL
         let scriptPath: String
@@ -49,7 +49,7 @@ enum Testbed {
         }
 
         /// `SSH_ASKPASS_REQUIRE=force` is what makes ssh use the program with no tty and
-        /// no DISPLAY (section 4.2).
+        /// no DISPLAY (docs/design/secrets.md).
         var variables: [String: String] {
             [
                 AskpassEnvironment.askpassVariable: scriptPath,
@@ -119,9 +119,9 @@ enum Testbed {
         return (payload, channel.prefix)
     }
 
-    /// The testbed's `-W` children outlive a killed parent, exactly as section 6.1 says
-    /// our own masters' do. Ours are recognisable by `ControlPath=none`, which only a hop
-    /// carries.
+    /// The testbed's `-W` children outlive a killed parent, exactly as our own
+    /// masters' do (docs/design/ssh.md). Ours are recognisable by `ControlPath=none`,
+    /// which only a hop carries.
     static func reapHopChildren() {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")

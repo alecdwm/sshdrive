@@ -2,7 +2,8 @@ import FileProvider
 import Foundation
 import ProviderCore
 
-/// The `NSFileProviderEnumerator` adapters (DESIGN.md sections 5.1, 5.3).
+/// The `NSFileProviderEnumerator` adapters (`docs/design/extension.md`,
+/// `docs/design/item-index.md`).
 ///
 /// Both the container enumerator and the working set live in `ProviderCore` -
 /// `ContainerEnumeration` and `WorkingSetEnumeration` - because every branch in them is a

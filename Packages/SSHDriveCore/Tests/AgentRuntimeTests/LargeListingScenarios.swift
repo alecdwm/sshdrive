@@ -111,13 +111,14 @@ extension AgentScenarios {
             #expect(
                 items.count == Self.entryCount - 2,
                 "the two collision losers hold their names and are not enumerated")
-            #expect(pages.count == 5, "2,000 to a page (section 5.2)")
+            #expect(pages.count == 5, "2,000 to a page (docs/design/extension.md)")
             #expect(pages.dropLast().allSatisfy { $0.items.count == 2_000 })
             #expect(seen == items.count, "every identifier the listing handed out has a row")
             #expect(replayed == items.count, "and an anchor")
 
             // The wire. One `opendir` and one `lstat` of the container, a hundred pages
-            // asked for through section 6.2's window rather than one round trip each, and
+            // asked for through the window docs/design/sftp.md describes rather than one
+            // round trip each, and
             // one `readlink` per link - never a `stat` per entry.
             let opendirs = server.requests.filter { $0.hasPrefix("opendir") }
             #expect(opendirs.count == 1, "a listing opens its directory once")
@@ -126,7 +127,7 @@ extension AgentScenarios {
                 "SQ-051: a hundred pages cost a hundred readdirs and at most one window of over-issue")
             #expect(
                 server.requests.filter { $0.hasPrefix("lstat") }.count <= 2,
-                "section 9.1 re-lstats the container, and nothing else is stat'ed per entry")
+                "docs/design/security.md: re-lstats the container, and nothing else is stat'ed per entry")
             #expect(connection.readlinkCount == 20, "SQ-031: one readlink per link, and no more")
             // That they go out *concurrently* is `M2`'s assertion, not this one: with no
             // latency in the fake there is nothing to stop the scheduler answering each
@@ -144,7 +145,7 @@ extension AgentScenarios {
                 "E7: three statements an entry and a fixed overhead, and no fourth")
             #expect(
                 statements.all().filter { $0.sql.hasPrefix("BEGIN IMMEDIATE") }.count == 1,
-                "still one transaction (section 5.3)")
+                "still one transaction (docs/design/item-index.md)")
             #expect(statements.all().filter { $0.sql.hasPrefix("SAVEPOINT") }.isEmpty)
 
             // The extension's side: one statement per `item(for:)`, and a constant number

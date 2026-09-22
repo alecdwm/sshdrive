@@ -24,12 +24,12 @@ public struct ProviderItemPage: Equatable, Sendable {
     }
 }
 
-/// The extension's whole view of the agent (`docs/testing-architecture.md` section 2.2).
+/// The extension's whole view of the agent (docs/design/testing.md).
 ///
 /// Three implementations: the real NSXPC proxy in `Apps/FileProvider`, an in-process
-/// loopback onto the agent (step 8), and the `SystemModel`'s scripted one. Failure is a
-/// `ProviderFailure` in every case, so the mapping from the agent's own error codes
-/// happens once, at the edge, and the decisions above it are written against one type.
+/// loopback onto the agent, and the `SystemModel`'s scripted one. Failure is a
+/// `ProviderFailure` in every case, so the mapping from the agent's own error codes happens
+/// once, at the edge, and the decisions above it are written against one type.
 ///
 /// An agent that cannot be reached at all answers `.serverUnreachable` - and that is the
 /// only thing that may: a reader that is merely not ready has the agent to fall back on,
@@ -39,9 +39,9 @@ public protocol AgentChannel: AnyObject {
 
     // MARK: Handshake
 
-    /// `true` ready, `false` not ready, `nil` the agent could not be reached at all -
-    /// which leaves the instance free to open the reader, since a missing agent is the
-    /// case the direct reader exists for (section 5.2).
+    /// `true` ready, `false` not ready, `nil` the agent could not be reached at all - which
+    /// leaves the instance free to open the reader, since a missing agent is the case the
+    /// direct reader exists for.
     func indexReady(_ completion: @escaping (Bool?) -> Void)
 
     // MARK: Enumeration
@@ -56,7 +56,7 @@ public protocol AgentChannel: AnyObject {
 
     /// The fallback path for the working set, used whenever the extension's own reader is
     /// not usable. Both sides run `IndexChangeStream`, so the reader's answer and the
-    /// agent's cannot drift (section 5.2).
+    /// agent's cannot drift.
     func enumerateWorkingSetChanges(
         anchor: ProviderSyncAnchor,
         _ completion: @escaping (Result<ProviderItemPage, ProviderFailure>) -> Void)
@@ -102,16 +102,16 @@ public protocol AgentChannel: AnyObject {
 
     // MARK: Signals to the agent
 
-    /// Forwarded so the agent can refresh its root set (section 6.5) and the pin safety
-    /// net (section 7.2).
+    /// Forwarded so the agent can refresh its root set (docs/design/root-set.md) and the
+    /// pin safety net (docs/design/pinning.md).
     func materializedItemsDidChange()
 
     /// The extension answered `.syncAnchorExpired` and handed out a fresh anchor. The
-    /// agent's response is one full sweep of the root set (section 5.3).
+    /// agent's response is one full sweep of the root set (docs/design/item-index.md).
     func workingSetAnchorExpired(freshAnchor: String)
 
-    /// Section 7.2's two Finder entries. The extension holds no state and cannot write the
-    /// index, so the action is forwarded to the one writer.
+    /// The two Finder entries (docs/design/pinning.md). The extension holds no state and
+    /// cannot write the index, so the action is forwarded to the one writer.
     func performAction(
         actionIdentifier: String, itemIdentifiers: [ProviderItemIdentifier],
         _ completion: @escaping (ProviderFailure?) -> Void)

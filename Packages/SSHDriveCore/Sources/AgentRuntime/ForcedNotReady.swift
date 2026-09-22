@@ -1,8 +1,8 @@
 import Foundation
 
 /// `sshdrive debug reader <name> --not-ready <seconds>`: while this is in the future the
-/// agent answers `indexReady` no, so the extension's readiness race of DESIGN.md
-/// section 5.2 can be reproduced on purpose rather than waited for.
+/// agent answers `indexReady` no, so the extension's readiness race can be reproduced on
+/// purpose rather than waited for (docs/design/extension.md).
 ///
 /// Process-lifetime only, and a decision rather than an adapter: the XPC method in
 /// `Apps/Agent` asks it and does nothing else with the answer. It is what suite A's

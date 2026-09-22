@@ -7,7 +7,7 @@ import XPCProtocols
 import Logging
 import ProviderCore
 
-/// DESIGN.md sections 7.1, 7.1.1 and 7.1.2: the pin half of the runtime.
+/// The pin half of the runtime (docs/design/pinning.md).
 ///
 /// The index is the only authority for markers (`pin_state`), and the agent is its only
 /// writer, so every pin change - from the CLI or from Finder's context menu - lands here.
@@ -22,13 +22,13 @@ extension LocationRuntime {
     ///
     /// The bit is not what refuses an eviction - the eager `contentPolicy` is, and
     /// `allowsEvicting` is deprecated since macOS 13 and reported by the system from
-    /// `isDownloaded` rather than from us (S6, 2026-09-04, section 7.2). It is served
+    /// `isDownloaded` rather than from us (measured 2026-09-04). It is served
     /// truthfully anyway, because it costs nothing and the header still documents it.
     public static let evictingBit = Int64(ProviderCapabilities.allowsEvicting.rawValue)
 
     // MARK: Reading the markers
 
-    /// Every explicit marker in this location, as the value section 7.1.1's rules are
+    /// Every explicit marker in this location, as the value `PinPolicy`'s rules are
     /// written against.
     public func pinMarkers() throws -> PinMarkerSet {
         PinMarkerSet(rows: try index.pinMarkerRows())
@@ -36,8 +36,8 @@ extension LocationRuntime {
 
     /// `sshdrive pins`: the marker tree with what each subtree costs.
     ///
-    /// Section 7.1 renders exclusions indented under the pin they sit in, with the cached
-    /// size and file count, "so the user can see what they've signed up for".
+    /// Exclusions are rendered indented under the pin they sit in, with the cached size
+    /// and file count, so the user can see what they have signed up for.
     /// `materialized` is the system's own set; without it the report still shows what is on
     /// the server and says nothing about what is downloaded.
     public func pinsReport(materialized: Set<String>? = nil) throws -> [[String: Any]] {
@@ -47,7 +47,7 @@ extension LocationRuntime {
             var rows = try index.items(under: path)
             if let own = try index.item(path: path) { rows.append(own) }
             // One definition of what a pin row says, shared with the read-only reader
-            // `status` uses (section 8): two copies would drift, and the numbers here are
+            // `status` uses: two copies would drift, and the numbers here are
             // what the user is told a subtree costs.
             out.append(
                 StatusIndexReader.pinEntry(
@@ -58,7 +58,7 @@ extension LocationRuntime {
     }
 
     /// `sshdrive pins --export`: the markers as JSON, for anyone who rebuilds an index or
-    /// moves to a new Mac (section 7.1).
+    /// moves to a new Mac.
     public func exportPins() throws -> [[String: Any]] {
         try index.pinMarkerRows().map {
             ["path": String(decoding: $0.path, as: UTF8.self), "state": $0.marker == 1 ? "pinned" : "excluded"]
@@ -66,7 +66,7 @@ extension LocationRuntime {
     }
 
     /// `pins.json` beside the index: "a write-only copy for recovery, never read while the
-    /// index is healthy" (section 7.1). Rewritten after every marker change.
+    /// index is healthy". Rewritten after every marker change.
     public func writePinsSidecar() {
         guard let url = try? GroupContainer.pinsURL(locationID: location.id),
             let rows = try? exportPins()
@@ -82,24 +82,24 @@ extension LocationRuntime {
         try? data.write(to: url, options: .atomic)
     }
 
-    // MARK: The pin change itself (section 7.1 steps 1, 2, 4)
+    // MARK: The pin change itself (steps 1, 2 and 4)
 
     /// One `pin` or `unpin`, on exactly the path named (invariant 1).
     ///
-    /// The five steps of section 7.1, in order:
+    /// The five steps of a pin change, in order:
     ///
     /// 1. **Store the pin.** From Finder the row always exists. From the CLI the path may
     ///    never have been enumerated, so each missing ancestor is `readdir`ed into the
     ///    index from the nearest known one; a path that is not on the server, or is a
-    ///    symlink, is refused (section 5.7 - a link is never followed, so "keep the folder
-    ///    it points at" is not a thing a pin can mean).
+    ///    symlink, is refused: a link is never followed, so "keep the folder it points
+    ///    at" is not a thing a pin can mean.
     /// 2. **Declare the policy.** The marker is written, every explicit state beneath it is
     ///    deleted (invariant 2), and the row *and every known descendant row* get their
     ///    `kept`, `capabilities` and metadata version rewritten in one transaction with an
     ///    anchor each. The descendants are not optional: `contentPolicy` is inherited by
     ///    the system, but `userInfo.kept`, the badge and the capabilities are per item and
     ///    cached until that item's own metadata version moves.
-    /// 3. **Keep it current** is the root set (section 6.5): a pin root joins it, watched
+    /// 3. **Keep it current** is the root set: a pin root joins it, watched
     ///    recursively, and leaves it when the pin goes.
     /// 4. The working-set signal and the **replica lookup** are the caller's, because both
     ///    are File Provider calls and nothing that talks to the system should run while
@@ -124,7 +124,7 @@ extension LocationRuntime {
         guard row.type != "symlink" else {
             throw SSHDriveAgentError.notImplemented.asNSError(
                 "\(path.description) is a symbolic link. Links are never followed, so pin "
-                    + "what the link points at instead (section 5.7).")
+                    + "what the link points at instead.")
         }
 
         var markers = try pinMarkers()
@@ -165,7 +165,7 @@ extension LocationRuntime {
     }
 
     /// The write half of a marker change, shared by `pin`/`unpin`, by Finder's two
-    /// entries and by the `debug policy` hook that spike S6 is written against.
+    /// entries and by the `debug policy` hook.
     ///
     /// Invariant 2 first: every explicit state beneath the path is deleted, which is what
     /// makes the rewrite below a single value rather than a per-row ancestor walk - after
@@ -195,7 +195,7 @@ extension LocationRuntime {
                 rewritten += 1
             }
 
-            // Section 6.5: a pin root is in the root set, watched recursively; a path that
+            // A pin root is in the root set, watched recursively; a path that
             // has stopped being one leaves, and so does every pin the change cleared.
             for cleared in clearedPins {
                 try index.removeRoot(path: cleared, reason: RootReason.pinned.rawValue)
@@ -208,16 +208,16 @@ extension LocationRuntime {
         }
 
         // Directories under a pin root take neither the `viewed` nor the `materialized`
-        // reason: the recursive watch already covers them (section 6.5).
+        // reason: the recursive watch already covers them.
         _ = try? refreshRootSet(materializedIdentifiers: nil)
         writePinsSidecar()
         return (clearedPins, clearedExclusions, rewritten)
     }
 
-    /// `sshdrive debug policy <name> <path> eager-keep|lazy|inherit`: the raw marker, which
-    /// spike S6 drives the content policy with. `pin` and `unpin` are the user-facing pair
-    /// (section 7.1.1's invariant 3); this writes whichever of the three states is named and
-    /// then does exactly what they do to the subtree.
+    /// `sshdrive debug policy <name> <path> eager-keep|lazy|inherit`: the raw marker, for
+    /// driving the content policy from a runbook. `pin` and `unpin` are the user-facing
+    /// pair (invariant 3); this writes whichever of the three states is named and then
+    /// does exactly what they do to the subtree.
     @discardableResult
     public func setPinState(pathString: String, marker rawMarker: Int64) async throws -> [String: Any] {
         let path = try LocationRuntime.pinPath(pathString)
@@ -252,7 +252,7 @@ extension LocationRuntime {
     ///
     /// Only `allowsEvicting` and the metadata version move: every other derived field is a
     /// function of the mode and the parent's mode, which a pin does not touch. The metadata
-    /// version has to move or the system will not re-read the item at all (section 5.3).
+    /// version has to move or the system will not re-read the item at all.
     private func applyKept(_ row: inout IndexItem, kept: Bool) throws {
         row.kept = kept
         row.capabilities =
@@ -268,21 +268,21 @@ extension LocationRuntime {
         try index.appendAnchor(identifier: row.identifier, kind: .modified)
     }
 
-    /// `/` and `.` both name the location root (section 7.1.2); everything else is an
-    /// ordinary relative path through the one chokepoint (section 9.1).
+    /// `/` and `.` both name the location root; everything else is an ordinary relative
+    /// path through the one chokepoint (docs/design/security.md).
     public static func pinPath(_ text: String) throws -> RelativePath {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed == "/" || trimmed == "." { return .root }
         return try RelativePath(string: trimmed)
     }
 
-    // MARK: What the pin costs the watcher (sections 6.5, 7.1.1)
+    // MARK: What the pin costs the watcher
 
     /// Every known directory inside a kept subtree, which is what tier 0 lists on top of
-    /// the root set: "a pinned root puts the whole location into the recursive part of the
-    /// root set ... at tier 0 that is a `readdir` of every directory in the location per
-    /// cycle" (section 7.1.2). Excluded subtrees are skipped, since the recursive watch of
-    /// a kept subtree skips them (section 7.1.1).
+    /// the root set: a pinned root puts the whole location into the recursive part of the
+    /// root set, and at tier 0 that is a `readdir` of every directory in the location per
+    /// cycle. Excluded subtrees are skipped, since the recursive watch of a kept subtree
+    /// skips them.
     ///
     /// Tier 1 needs none of this: the pin roots go to `find` as recursive roots and the
     /// exclusions go with them as `-path ... -prune` globs.
@@ -304,7 +304,7 @@ extension LocationRuntime {
         try pinMarkers().prunedExclusions().compactMap(LocationRuntime.utf8Root)
     }
 
-    // MARK: Section 7.2's safety net
+    // MARK: The safety net for kept items
 
     /// A kept file that turned dataless without our handler having run is **re-asserted**,
     /// not read as an unpin: the agent bumps its metadata version and signals the working
@@ -354,7 +354,7 @@ extension LocationRuntime {
         return reasserted
     }
 
-    // MARK: What the eviction loop reads (section 7)
+    // MARK: What the eviction loop reads
 
     /// The index's half of one TTL pass: the rows behind the identifiers the system says
     /// it holds content for. The replica `stat` and the `evictItem` are the loop's, made
@@ -383,7 +383,7 @@ extension LocationRuntime {
         }
     }
 
-    /// Section 8.1's Cache line, and what `evict --all` needs to know before it runs.
+    /// The Cache line of `status`, and what `evict --all` needs to know before it runs.
     public func cacheReport(candidates: [EvictionPlan.Candidate]) -> [String: Any] {
         let totals = EvictionPlan.totals(candidates)
         return [

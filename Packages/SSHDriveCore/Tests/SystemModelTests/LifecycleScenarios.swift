@@ -5,7 +5,7 @@ import ProviderCore
 import SystemModel
 
 /// **Suite C - extension lifecycle**, the system half of **suite P - packaging and
-/// lifecycle**, and `H9`'s system half (`docs/testing-architecture.md` section 5).
+/// lifecycle**, and `H9`'s system half (docs/design/testing.md).
 ///
 /// `P1` and `P2` have an agent-side row each in `Tests/AgentRuntimeTests`, asserting what
 /// the *agent* decides against `FakeLoginItem`/`FakeLaunchd`. These are the other half:
@@ -94,11 +94,11 @@ final class LifecycleScenarios: XCTestCase {
 
     /// A location watched only from a terminal.
     ///
-    /// `MQ-001` and `MQ-039` between them are why section 6.5 has to count a CLI command
-    /// as a touch: a folder is enumerated **once, ever**, and a `readdir`/`lstat` walk is
-    /// answered from the replica and reaches the extension **not at all**. So a person can
-    /// browse a mount all day and nothing in the system tells the agent that anyone is
-    /// looking - the `viewed` reason has no other source.
+    /// `MQ-001` and `MQ-039` between them are why the root set (docs/design/root-set.md)
+    /// has to count a CLI command as a touch: a folder is enumerated **once, ever**, and
+    /// a `readdir`/`lstat` walk is answered from the replica and reaches the extension
+    /// **not at all**. So a person can browse a mount all day and nothing in the system
+    /// tells the agent that anyone is looking - the `viewed` reason has no other source.
     func testH9_LookingAtAMountTellsTheAgentNothing() throws {
         let harness = try ScenarioHarness()
         let folder = try harness.serverCreatesDirectory("Documents")

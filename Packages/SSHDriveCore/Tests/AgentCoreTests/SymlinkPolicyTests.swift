@@ -3,8 +3,9 @@ import SFTP
 
 @testable import AgentCore
 
-/// DESIGN.md section 5.7's table, line by line, plus the two directions section 5.7 adds
-/// on top of it: what `createItem` accepts from the Mac, and what a move re-checks.
+/// The symlink policy table (docs/design/symlinks.md), line by line, plus the two
+/// directions it adds on top of it: what `createItem` accepts from the Mac, and what a
+/// move re-checks.
 final class SymlinkPolicyTests: XCTestCase {
 
     private let roots = SymlinkPolicy.Roots(
@@ -12,7 +13,7 @@ final class SymlinkPolicyTests: XCTestCase {
 
     private func path(_ text: String) throws -> RelativePath { try RelativePath(string: text) }
 
-    // MARK: The four rows of section 5.7's table
+    // MARK: The four rows of the symlink policy table
 
     func testRelativeTargetInsideTheRootKeepsItsOwnString() throws {
         let decision = SymlinkPolicy.evaluate(
@@ -27,7 +28,7 @@ final class SymlinkPolicyTests: XCTestCase {
     }
 
     func testAbsoluteTargetInsideTheRootIsRewrittenRelative() throws {
-        // The NAS case section 5.7 names: `media -> /volume1/media` under a root of
+        // The NAS case the symlink policy covers: `media -> /volume1/media` under a root of
         // `/volume1`. Here the link lives two levels down, so the rewrite climbs.
         let decision = SymlinkPolicy.evaluate(
             target: "/var/home/alec/Media/clip.mov",
@@ -92,7 +93,8 @@ final class SymlinkPolicyTests: XCTestCase {
 
     func testAnAbsoluteTargetThatClimbsAboveSlashIsClampedNotResolved() {
         // `..` above `/` is `/` on every Unix; the point is that nothing here asks the
-        // server, so a target full of `..` cannot steer a remote operation (section 9.1).
+        // server, so a target full of `..` cannot steer a remote operation
+        // (docs/design/security.md).
         XCTAssertNil(
             SymlinkPolicy.componentsInsideRoot(absolute: "/../../etc", roots: roots))
     }
@@ -107,7 +109,7 @@ final class SymlinkPolicyTests: XCTestCase {
 
     func testCreateRefusesAnAbsoluteTargetEvenInsideTheMount() throws {
         // An absolute target from the Mac is a *Mac* path and means nothing on the server,
-        // so it is refused even when it points inside the mount (section 5.7).
+        // so it is refused even when it points inside the mount (docs/design/symlinks.md).
         XCTAssertThrowsError(
             try SymlinkPolicy.targetForCreate(
                 "/var/home/alec/Media", in: try path("Documents"), roots: roots)

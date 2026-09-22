@@ -4,20 +4,19 @@ import Logging
 /// A ring of the last few hundred File Provider calls that reached the agent, with the
 /// wall-clock time each arrived and what it answered.
 ///
-/// It exists for spike S5, which is almost entirely questions of the form "how long does
-/// the system wait before calling again" and "does anything reach the extension while
-/// every call fails fast". Neither can be answered from `os_log`, because the agent does
-/// not log a line per call and would not be allowed to on the hot path anyway; and neither
-/// can be answered from the system side at all, since `fileproviderctl` reports state, not
-/// traffic.
+/// It answers questions of the form "how long does the system wait before calling again"
+/// and "does anything reach the extension while every call fails fast". Neither can be
+/// answered from `os_log`, because the agent does not log a line per call and would not be
+/// allowed to on the hot path anyway; and neither can be answered from the system side at
+/// all, since `fileproviderctl` reports state, not traffic.
 ///
 /// Bounded, lock-guarded and off every allocation path that matters: one append of a small
 /// struct per XPC method. `sshdrive debug calls <name>` prints it with the gap since the
-/// previous call of the same kind, which is the number S5 is actually after.
+/// previous call of the same kind, which is the number those questions want.
 public final class CallJournal: @unchecked Sendable {
     public static let shared = CallJournal()
 
-    /// Enough to hold a ten-minute retry storm at the rates measured in milestone 4.
+    /// Enough to hold a ten-minute retry storm at the rates the system retries writes at.
     public static let capacity = 2000
 
     public struct Entry: Sendable {
@@ -106,8 +105,8 @@ public final class CallTiming: @unchecked Sendable {
         self.domain = domain
         self.method = method
         self.subject = subject
-        // Arrival is recorded straight away, because the gap between arrivals is what S5
-        // measures and a call that never returns would otherwise never appear.
+        // Arrival is recorded straight away, because the gap between arrivals is what
+        // the journal is for and a call that never returns would otherwise never appear.
         CallJournal.shared.record(
             domain: domain, method: method, subject: subject, outcome: "arrived",
             milliseconds: 0)

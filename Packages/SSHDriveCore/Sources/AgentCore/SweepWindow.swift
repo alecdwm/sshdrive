@@ -1,14 +1,14 @@
 import Foundation
 
-/// How far back one tier 1 sweep looks (DESIGN.md section 6.4).
+/// How far back one tier 1 sweep looks (docs/design/change-detection.md).
 ///
 /// The whole of this type exists to keep one rule: the window is computed from the
-/// **server's** clock and never the Mac's. Section 6.4: "every sweep script prints
-/// `date +%s` first, the agent stores it once the sweep's results have been applied to the
-/// index, never before, and the next sweep's `N` is the minutes between the stored value
-/// and the new one, rounded up, plus one minute of overlap. Measured on the Mac's clock, a
-/// server running a few minutes behind would silently miss every change until the
-/// 30-minute insurance sweep."
+/// **server's** clock and never the Mac's. Every sweep script prints `date +%s` first,
+/// the agent stores it once the sweep's results have been applied to the index, never
+/// before, and the next sweep's `N` is the minutes between the stored value and the new
+/// one, rounded up, plus one minute of overlap. Measured on the Mac's clock, a server
+/// running a few minutes behind would silently miss every change until the 30-minute
+/// insurance sweep.
 public struct SweepWindow: Equatable, Sendable {
 
     /// `N` for `-cmin -N`. Nil is unbounded: the `-cmin`/`-mmin` test is dropped entirely
@@ -27,21 +27,21 @@ public struct SweepWindow: Equatable, Sendable {
     }
 
     /// The unbounded window: a fresh or rebuilt index has no stamp to open back to, so the
-    /// sweep reports everything under the roots. That is section 6.4's full sweep "with its
-    /// window opened back to the last server timestamp the index recorded, unbounded when
-    /// there is none".
+    /// sweep reports everything under the roots. A full sweep opens its window back to
+    /// the last server timestamp the index recorded, and is unbounded when there is
+    /// none.
     public static let unbounded = SweepWindow(minutes: nil)
 
-    /// Section 6.4's arithmetic.
+    /// The window arithmetic.
     ///
     /// `full` is taken and recorded by the caller rather than changing the answer: a full
     /// sweep differs in *which* stamp is passed here (the last one the index recorded
     /// rather than the last applied sweep's) and in the tier 0 rotation being suspended,
     /// not in how minutes are counted. It is a parameter so the call site reads as what
-    /// section 6.4 describes, and so a later rule that does depend on it has somewhere to
-    /// go.
+    /// docs/design/change-detection.md describes, and so a later rule that does depend on
+    /// it has somewhere to go.
     ///
-    /// Duplicates are harmless - "the result is diffed anyway" - so the extra minute of
+    /// Duplicates are harmless, since the result is diffed anyway, so the extra minute of
     /// overlap costs nothing and covers the rounding at both ends.
     public static func compute(lastAppliedServerTime: Int64?, serverNow: Int64, full: Bool) -> SweepWindow {
         guard let stored = lastAppliedServerTime else { return .unbounded }
@@ -72,15 +72,15 @@ public struct SweepWindow: Equatable, Sendable {
     /// step with us. Measuring a server timestamp against our own wall clock instead folds
     /// the entire skew into the window: a server running ahead is swept with a window of
     /// nothing until the 30-minute insurance pass, and one running behind is swept with a
-    /// window twice as wide as it needs (section 6.4).
+    /// window twice as wide as it needs (docs/design/change-detection.md).
     ///
     /// `clockSkewSeconds` is `sshdrive debug`'s deliberate offset of the stored stamp and
     /// is zero everywhere else; it is applied to the stamp, never to the elapsed time.
     ///
-    /// Confidence: the arithmetic is DESIGN.md section 6.4's, and the ordinary path is
-    /// measured (milestone 6 ran real sweeps against `deb` and `alp`). What has never been
-    /// measured against a real server is the skew itself - Docker has no time namespace
-    /// (`SQ-054`) - so a clock-skewed server is modelled and will only ever be modelled.
+    /// Confidence: the ordinary path is measured, with real sweeps against `deb` and
+    /// `alp`. What has never been measured against a real server is the skew itself -
+    /// Docker has no time namespace (`SQ-054`) - so a clock-skewed server is modelled and
+    /// will only ever be modelled.
     public static func forCycle(
         lastAppliedServerTime: Int64?,
         takenAt: TimeInterval?,

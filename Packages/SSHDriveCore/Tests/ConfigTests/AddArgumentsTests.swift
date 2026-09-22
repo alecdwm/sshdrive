@@ -2,9 +2,9 @@ import XCTest
 
 @testable import Config
 
-/// `sshdrive add`'s destination sugar and `sshdrive set`'s key table (DESIGN.md sections
-/// 4, 8). Both live in the package so the whole surface can be checked without an XPC
-/// connection, a keychain or a server.
+/// `sshdrive add`'s destination sugar and `sshdrive set`'s key table
+/// (docs/design/locations.md, docs/design/cli.md). Both live in the package so the whole
+/// surface can be checked without an XPC connection, a keychain or a server.
 final class AddArgumentsTests: XCTestCase {
 
     // MARK: [user@]host[:port]
@@ -22,7 +22,7 @@ final class AddArgumentsTests: XCTestCase {
 
     func testAliasKeepsItsShape() throws {
         // A `~/.ssh/config` alias is passed through untouched, which is what makes the
-        // host block apply (section 4.1).
+        // host block apply (docs/design/locations.md).
         let parsed = try LocationDestination.parse("spike-inner")
         XCTAssertEqual(parsed.host, "spike-inner")
         XCTAssertNil(parsed.user)
@@ -82,12 +82,11 @@ final class AddArgumentsTests: XCTestCase {
         XCTAssertEqual(try LocationSettingKey.named("identityFile"), .identity)
     }
 
-    /// S9 (2026-09-05) measured that `add(domain)` with an identifier the system already
-    /// holds and a new `displayName` renames the domain in place: the mount directory is
-    /// renamed, nothing is re-fetched, and an upload the system was holding is still
-    /// pending and still flushes. So the nickname half of section 13's data-loss caveat is
-    /// gone, and only remote-path re-creates the domain - a new root invalidates every
-    /// path in the index, so there is nothing there to keep.
+    /// `add(domain)` with an identifier the system already holds and a new `displayName`
+    /// renames the domain in place: the mount directory is renamed, nothing is
+    /// re-fetched, and an upload the system was holding stays pending and still flushes.
+    /// Only remote-path re-creates the domain - a new root invalidates every path in the
+    /// index, so there is nothing there to keep.
     func testNicknameRenamesInPlaceAndOnlyRemotePathRecreatesTheDomain() {
         XCTAssertTrue(LocationSettingKey.nickname.renamesDomainInPlace)
         XCTAssertFalse(LocationSettingKey.nickname.recreatesDomain)
@@ -108,7 +107,8 @@ final class AddArgumentsTests: XCTestCase {
         })
     }
 
-    /// The domain's `displayName` is the bare nickname (section 4), so what `set nickname`
+    /// The domain's `displayName` is the bare nickname (docs/design/locations.md), so what
+    /// `set nickname`
     /// hands `add(domain)` is exactly what `displayName` computes - there is no second
     /// place that decides the sidebar name.
     func testTheNicknameIsTheDisplayNameTheRenameWillUse() throws {
@@ -155,8 +155,9 @@ final class AddArgumentsTests: XCTestCase {
     }
 
     func testIdentityAlsoWritesIdentitiesOnly() throws {
-        // Section 4: `--identity` means the override *plus* `IdentitiesOnly=yes`, so a
-        // touch-required FIDO key sitting in `~/.ssh` never gets its turn first (4.2).
+        // `--identity` means the override *plus* `IdentitiesOnly=yes`
+        // (docs/design/locations.md), so a touch-required FIDO key sitting in `~/.ssh`
+        // never gets its turn first (docs/design/secrets.md).
         var location = self.location()
         try LocationSettingKey.identity.apply("~/.ssh/id_nas", to: &location)
         XCTAssertEqual(location.identityFile, (("~/.ssh/id_nas") as NSString).expandingTildeInPath)

@@ -4,11 +4,10 @@ import XPCProtocols
 /// A bounded wait for a call that has no timeout of its own.
 ///
 /// `NSFileProviderManager.remove(domain)` on a user-disabled domain did not return within
-/// three minutes during S1 (`docs/spikes/results.md`, 2026-09-04), and neither the CLI nor
-/// the extension has any way to tell "still working" from "wedged". Every call the agent
-/// makes into File Provider therefore runs under a deadline, so the caller gets a sentence
-/// naming the operation instead of the CLI's own timeout and a wrong "cannot reach the
-/// agent".
+/// three minutes when it was measured on 2026-09-04, and neither the CLI nor the extension
+/// has any way to tell "still working" from "wedged". Every call the agent makes into File
+/// Provider therefore runs under a deadline, so the caller gets a sentence naming the
+/// operation instead of the CLI's own timeout and a wrong "cannot reach the agent".
 ///
 /// The stalled call is abandoned rather than killed: `NSFileProviderManager`'s completion
 /// handlers do not observe cancellation, so the child task is left to finish on its own.
@@ -18,8 +17,8 @@ public enum Deadline {
     /// 30 s wait, so the CLI receives this error rather than timing out itself.
     static let fileProviderSeconds: Double = 20
 
-    /// How long `sshdrive status` waits for one location's section (section 8). Well
-    /// inside the CLI's own 120 s overall timeout, so a wedged location costs the user a
+    /// How long `sshdrive status` waits for one location's section. Well inside the CLI's
+    /// own 120 s overall timeout, so a wedged location costs the user a
     /// note on that row rather than the whole command: a report about four locations is
     /// worth having when the fourth is the one that has gone.
     public static let statusSeconds: Double = 20
@@ -62,7 +61,7 @@ public enum Deadline {
     ///
     /// `status` runs one of these per location, and a scenario that had to live through
     /// twenty real seconds to see a stuck location print its note would not be written
-    /// (docs/testing-architecture.md section 3.1: there is no real sleeping in the suite).
+    /// (docs/design/testing.md: there is no real sleeping in the suite).
     /// `SystemAgentClock.sleep` is `Task.sleep`, so a shipping agent behaves exactly as
     /// the task-group form above.
     ///

@@ -8,12 +8,12 @@ import Foundation
 /// value provider registered for that error's concrete type, and the receiving process
 /// has no such provider. So `ConfigStoreError.unknownLocation("nas")` reached the CLI as
 /// `Config.ConfigStoreError error 1` instead of `No location matches "nas".`
-/// (`docs/spikes/results.md`, 2026-09-04).
+/// (measured on macOS 26.4, 2026-09-04).
 ///
 /// Every error the agent hands back to a peer goes through here first: the localized
 /// strings are written into `userInfo` as plain strings, and the domain and the code are
 /// preserved so the extension's mapping to `NSFileProviderError` (`SSHDriveAgentError`,
-/// DESIGN.md section 5.1) still works. Values that are neither strings nor a nested error
+/// docs/design/extension.md) still works. Values that are neither strings nor a nested error
 /// are dropped rather than risking an encoding failure that would lose the whole reply.
 public func sshDriveXPCError(_ error: Error) -> NSError {
     let nsError = error as NSError

@@ -1,9 +1,9 @@
 import XCTest
 @testable import SSHProcess
 
-/// The login shell snapshot (DESIGN.md section 6.1). The command has to be valid in every
-/// shell, so its shape is asserted here and its behaviour against fish, tcsh and an rc
-/// file that holds stdout open is an integration test.
+/// The login shell snapshot (docs/design/ssh.md). The command has to be valid in
+/// every shell, so its shape is asserted here and its behaviour against fish, tcsh
+/// and an rc file that holds stdout open is an integration test.
 final class LoginShellSnapshotTests: XCTestCase {
 
     private let sentinel = Sentinel(hex: "0123456789abcdef0123456789abcdef")
@@ -108,7 +108,7 @@ final class LoginShellSnapshotTests: XCTestCase {
 }
 
 /// The snapshot against the machine's own login shell. Not testbed-gated: it needs only a
-/// Mac, and it is the half of section 6.1 that no server can exercise.
+/// Mac, and it is the half of docs/design/ssh.md that no server can exercise.
 final class LoginShellSnapshotLiveTests: XCTestCase {
 
     func testSnapshotOfTheRealLoginShell() async throws {

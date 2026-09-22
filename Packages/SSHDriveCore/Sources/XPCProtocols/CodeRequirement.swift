@@ -1,9 +1,10 @@
 import Foundation
 
-/// The code requirement the agent's listener applies to every peer (DESIGN.md section 5.2):
-/// signed through Apple's chain for team RWGDZAYBM8 and carrying one of the four signing
-/// identifiers in section 3.1, listed explicitly because the requirement language matches
-/// identifiers exactly and has no prefix form.
+/// The code requirement the agent's listener applies to every peer
+/// (docs/design/extension.md): signed through Apple's chain for team RWGDZAYBM8 and
+/// carrying one of the four signing identifiers listed in
+/// docs/design/components.md, spelled out one by one because the requirement language
+/// matches identifiers exactly and has no prefix form.
 ///
 /// Release builds are Developer ID signed; debug builds carry an Apple Development
 /// certificate. The two differ only in the leaf certificate's marker OID, so the
@@ -46,27 +47,28 @@ public enum SSHDriveCodeRequirement {
         and (\(identifierClause))
         """
 
-    /// A debug build lets a spike replace the requirement, either with `SSHDRIVE_PEER_REQUIREMENT` in
-    /// the environment or with the one-line file `~/.sshdrive-spike-peer-requirement`.
-    /// That exists for one reason: a Mac with no signing identity can only produce an
-    /// ad-hoc signature, which has no Apple anchor and no team OU and therefore satisfies
-    /// neither form above, so the whole of S1 (a) and (c) would be untestable there.
-    /// Restrict the replacement as far as the build allows: `identifier
-    /// "org.shirls.sshdrive.cli"` and friends still discriminate under an ad-hoc
-    /// signature. Expect the loud log line. The file is read rather than only the
+    /// A debug build lets the requirement be replaced, either with
+    /// `SSHDRIVE_PEER_REQUIREMENT` in the environment or with the one-line file
+    /// `~/.sshdrive-peer-requirement-override`. That exists for one reason: a Mac with no
+    /// signing identity can only produce an ad-hoc signature, which has no Apple anchor
+    /// and no team OU and therefore satisfies neither form above, so nothing about peer
+    /// admission could be exercised there. Restrict the replacement as far as the build
+    /// allows: `identifier "org.shirls.sshdrive.cli"` and friends still discriminate under
+    /// an ad-hoc signature. Expect the loud log line. The file is read rather than only the
     /// environment because launchd hands an `SMAppService` job a scrubbed environment and
     /// `launchctl setenv` does not reach it. Release builds ignore both, so a shipped
     /// agent cannot be talked into a weaker requirement.
-    public static let spikeOverrideFile = ".sshdrive-spike-peer-requirement"
+    public static let peerRequirementOverrideFile = ".sshdrive-peer-requirement-override"
 
-    private static var spikeOverride: String? {
+    private static var peerRequirementOverride: String? {
         #if DEBUG
         if let value = ProcessInfo.processInfo.environment["SSHDRIVE_PEER_REQUIREMENT"],
             !value.isEmpty
         {
             return value
         }
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(spikeOverrideFile)
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(peerRequirementOverrideFile)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -78,12 +80,12 @@ public enum SSHDriveCodeRequirement {
     /// The requirement this build applies.
     public static var current: String {
         #if DEBUG
-        return spikeOverride ?? appleDevelopment
+        return peerRequirementOverride ?? appleDevelopment
         #else
         return developerID
         #endif
     }
 
-    /// True when `current` came from a spike override, so the agent can say so.
-    public static var isOverridden: Bool { spikeOverride != nil }
+    /// True when `current` came from an override, so the agent can say so.
+    public static var isOverridden: Bool { peerRequirementOverride != nil }
 }

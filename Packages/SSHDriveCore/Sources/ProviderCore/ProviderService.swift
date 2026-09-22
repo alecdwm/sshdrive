@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import XPCProtocols
 
-/// Everything the File Provider extension decides (DESIGN.md section 5).
+/// Everything the File Provider extension decides (docs/design/extension.md).
 ///
 /// One instance per domain, exactly as `NSFileProviderReplicatedExtension` is: the system
 /// may host several in one process, so nothing here is global. It holds no state of its
@@ -39,20 +39,20 @@ public final class ProviderService {
     }
 
     /// The instance's one piece of start-up work, run from the adapter's `init`
-    /// (section 5.3).
+    /// (docs/design/item-index.md).
     ///
-    /// How the store asks the agent whether the index is ready to be read. It is asked
-    /// once at launch and again by any read that finds the answer was no, rate limited: a
+    /// How the store asks the agent whether the index is ready to be read. It is asked once
+    /// at launch and again by any read that finds the answer was no, rate limited: a
     /// `false` covers a window - a domain restart, an agent mid-restore - and an instance
     /// that could never ask again would answer the working set nothing for the rest of its
-    /// life (2026-09-08).
+    /// life.
     public func start() {
         reader.askAgent = { [weak self] done in
             guard let self else { return done(nil) }
             self.agent.indexReady { ready in
                 // A reply of any kind is proof the agent is there, so lift a disconnect a
-                // previous instance may have left on the domain (section 5.2). `nil` is
-                // not a reply: it is the agent being out of reach.
+                // previous instance may have left on the domain. `nil` is not a reply: it
+                // is the agent being out of reach.
                 if ready != nil { self.noteAgentReachable() }
                 done(ready)
             }
@@ -71,13 +71,13 @@ public final class ProviderService {
     private let reachabilityLock = NSLock()
     private var disconnected = false
 
-    /// A call to the agent failed. The one case where the extension, not the agent,
-    /// changes domain state (section 3).
+    /// A call to the agent failed. The one case where the extension, not the agent, changes
+    /// domain state (docs/design/components.md).
     ///
     /// A dropped connection is *not* on its own a missing agent: the system kills an idle
-    /// extension instance (`MQ-073`) and the invalidation that follows our own teardown
-    /// used to disconnect the domain on the way out, which answered every later request
-    /// `.serverUnreachable` for good.
+    /// extension instance (`MQ-073`), and disconnecting the domain from the invalidation
+    /// that follows our own teardown would answer every later request `.serverUnreachable`
+    /// for good.
     public func noteAgentUnreachable() {
         reachabilityLock.lock()
         let already = disconnected
@@ -148,25 +148,26 @@ public final class ProviderService {
         }
     }
 
-    /// The extension tells the agent it has answered `.syncAnchorExpired` and handed out
-    /// a fresh anchor, one call per expiry (section 5.3).
+    /// The extension tells the agent it has answered `.syncAnchorExpired` and handed out a
+    /// fresh anchor, one call per expiry (docs/design/item-index.md).
     public func reportAnchorExpired(freshAnchor: String) {
         agent.workingSetAnchorExpired(freshAnchor: freshAnchor)
     }
 
     // MARK: item(for:)
 
-    /// Answered from the index by the extension itself, with no agent involved, because
-    /// the system issues this in bulk and it must be answered from local state
-    /// (sections 2, 5.2).
+    /// Answered from the index by the extension itself, with no agent involved, because the
+    /// system issues this in bulk and it must be answered from local state
+    /// (docs/design/platform.md).
     public func item(
         for identifier: ProviderItemIdentifier,
         _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
     ) {
-        // No trash (section 5.4). Answered here, from nothing, so that neither the reader
-        // nor the agent is asked for a row that can never exist: a domain added before
-        // `supportsSyncingTrash = false` still has a trash the system may stat (`MQ-008`,
-        // `MQ-075`), and a slow answer to that is what a `ls -la` waits on.
+        // No trash (docs/design/names-and-attributes.md). Answered here, from nothing, so
+        // that neither the reader nor the agent is asked for a row that can never exist: a
+        // domain added before `supportsSyncingTrash = false` still has a trash the system
+        // may stat (`MQ-008`, `MQ-075`), and a slow answer to that is what a `ls -la` waits
+        // on.
         if identifier == .trashContainer {
             completion(.failure(.noSuchItem))
             return
@@ -183,21 +184,20 @@ public final class ProviderService {
             completion(.failure(.serverUnreachable))
             return
         }
-        // No reader, or a schema this build does not understand: ask the agent
-        // (section 5.2).
+        // No reader, or a schema this build does not understand: ask the agent.
         agent.item(identifier: identifier, completion)
     }
 
     // MARK: Enumeration
 
-    /// The trash contract of section 5.4, in one place.
+    /// The trash contract (docs/design/names-and-attributes.md), in one place.
     ///
-    /// `NSFeatureUnsupportedError` is what `NSFileProviderReplicatedExtension.h`
-    /// prescribes for an extension that does not support trashing. It must not be
-    /// `.noSuchItem`: the system reads that as "the container was deleted", tries to
-    /// delete it from disk, fails because the trash is its own, and retries about once a
-    /// second for ever (`MQ-009`), which is the hang `ls -la` used to sit in. The feature
-    /// error makes it give up after two attempts and remove `.Trash` (`MQ-010`).
+    /// `NSFeatureUnsupportedError` is what `NSFileProviderReplicatedExtension.h` prescribes
+    /// for an extension that does not support trashing. It must not be `.noSuchItem`: the
+    /// system reads that as "the container was deleted", tries to delete it from disk,
+    /// fails because the trash is its own, and retries about once a second for ever
+    /// (`MQ-009`), which hangs `ls -la` on the mount. The feature error makes it give up
+    /// after two attempts and remove `.Trash` (`MQ-010`).
     public func enumerator(for container: ProviderItemIdentifier) throws -> ProviderEnumerating {
         if container == .workingSet {
             return WorkingSetEnumeration(service: self)
@@ -216,9 +216,9 @@ public final class ProviderService {
         transferID: String,
         _ completion: @escaping (Result<ItemView, ProviderFailure>) -> Void
     ) {
-        // Section 6.2's two classes travel to the agent unchanged: a file-viewer request,
-        // or anything that is not a system request, is the user or an app opening the file
-        // and goes in the foreground.
+        // The transfer scheduler's two classes travel to the agent unchanged: a file-viewer
+        // request, or anything that is not a system request, is the user or an app opening
+        // the file and goes in the foreground (docs/design/sftp.md).
         agent.fetchContents(
             identifier: identifier, requestedVersion: requestedVersion,
             isFileViewerRequest: isFileViewerRequest, isSystemRequest: isSystemRequest,
@@ -236,8 +236,8 @@ public final class ProviderService {
     }
 
     /// The range widened to the alignment the system asked for, which is what lets it
-    /// stitch neighbouring windows together rather than re-fetching them (section 5.1).
-    /// A decision, and a pure one, so it is here and not in the adapter.
+    /// stitch neighbouring windows together rather than re-fetching them. A decision, and a
+    /// pure one, so it is here and not in the adapter.
     public static func alignedRange(location: Int, length: Int, alignment: Int)
         -> (location: Int, length: Int)
     {
@@ -255,7 +255,8 @@ public final class ProviderService {
     ) {
         // With `supportsSyncingTrash = false` the system decides how to handle a trashing
         // operation, and the header does not guarantee what it decides. Whatever it is, it
-        // is not a `.Trash` directory of ours on someone's server (section 5.4).
+        // is not a `.Trash` directory of ours on someone's server
+        // (docs/design/names-and-attributes.md).
         if template.parentIdentifier == .rootContainer,
             SSHDriveTrash.isTrash(filename: template.filename)
         {
@@ -286,18 +287,18 @@ public final class ProviderService {
 
     // MARK: Signals and actions
 
-    /// Forwarded so the agent can refresh its root set (section 6.5) and the pin safety
-    /// net (section 7.2).
+    /// Forwarded so the agent can refresh its root set (docs/design/root-set.md) and the
+    /// pin safety net (docs/design/pinning.md).
     public func materializedItemsDidChange() {
         agent.materializedItemsDidChange()
     }
 
-    /// "Keep Downloaded" and "Don't Keep Downloaded" (section 7.2).
+    /// "Keep Downloaded" and "Don't Keep Downloaded" (docs/design/pinning.md).
     ///
     /// The extension does nothing of its own: it holds no state and cannot write the index
-    /// (section 3), so the action is forwarded to the agent, which is where every pin
-    /// change from the CLI lands too - one writer, one code path, no second store to keep
-    /// in sync.
+    /// (docs/design/components.md), so the action is forwarded to the agent, which is where
+    /// every pin change from the CLI lands too - one writer, one code path, no second store
+    /// to keep in sync.
     public func performAction(
         actionIdentifier: String, itemIdentifiers: [ProviderItemIdentifier],
         _ completion: @escaping (ProviderFailure?) -> Void

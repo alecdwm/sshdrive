@@ -4,8 +4,8 @@ import Foundation
     import Darwin
 #endif
 
-/// "An askpass invocation ... whose caller is not a descendant of the `ssh` it was issued
-/// to gets no answer" (DESIGN.md section 4.2).
+/// An askpass invocation whose caller is not a descendant of the `ssh` the token was
+/// issued to gets no answer (docs/design/secrets.md).
 ///
 /// `ssh` forks the askpass directly, so the caller's parent is normally the `ssh` the
 /// token was minted for; a `ProxyJump` hop is a grandchild, and its askpass a

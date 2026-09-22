@@ -3,7 +3,7 @@ import XPCInterfaces
 import XPCProtocols
 import Logging
 
-// sshdrive-askpass: the program ssh calls for every prompt (DESIGN.md section 4.2).
+// sshdrive-askpass: the program ssh calls for every prompt (docs/design/secrets.md).
 //
 // The agent runs ssh with no tty and with
 //
@@ -14,7 +14,7 @@ import Logging
 // so every prompt, including host-key confirmations and user-presence notices, arrives
 // here. ssh tags a notification with SSH_ASKPASS_PROMPT=none and a permission question
 // with "confirm"; a secret carries no tag - and neither does the host-key question, so
-// the agent classifies by the text (section 4.2, and the S2 askpass capture).
+// the agent classifies by the text.
 //
 // This program knows nothing and holds nothing. It forwards four things to the agent -
 // the token, the prompt, SSH_ASKPASS_PROMPT, and the argv of its parent ssh, which is how
@@ -31,7 +31,7 @@ import Logging
 //   non-zero               no answer: ssh fails the prompt, and with it the connection
 
 let environment = ProcessInfo.processInfo.environment
-// The variable name is section 4.2's, and the agent's AskpassEnvironment builds it.
+// The agent's AskpassEnvironment builds this variable.
 let token = environment["SSHDRIVE_ASKPASS_TOKEN"] ?? ""
 let promptKind = environment["SSH_ASKPASS_PROMPT"] ?? ""
 let prompt = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
@@ -40,14 +40,14 @@ Log.askpass.notice(
     "askpass invoked, kind \(promptKind.isEmpty ? "secret" : promptKind, privacy: .public)")
 
 guard !token.isEmpty else {
-    // No token means we were not started by an ssh the agent spawned. Answer nothing:
-    // "an askpass invocation with no token ... gets no answer" (section 4.2).
+    // No token means we were not started by an ssh the agent spawned. An askpass
+    // invocation with no token gets no answer (docs/design/secrets.md).
     Log.askpass.error("no SSHDRIVE_ASKPASS_TOKEN in the environment; refusing to answer")
     exit(1)
 }
 
 // The parent is the ssh that invoked us. Its argv carries the destination and, for a
-// ProxyJump hop, that hop's own -p and -W (section 6.1).
+// ProxyJump hop, that hop's own -p and -W (docs/design/ssh.md).
 let parentArguments = SSHDriveProcessArguments.parentArguments()
 
 let connection = NSXPCConnection(
@@ -79,8 +79,8 @@ if let proxy {
     semaphore.signal()
 }
 
-// ssh's own authentication deadline is 60 s from spawn (section 4.2); waiting longer here
-// would only keep a process alive that the agent has already killed.
+// ssh's own authentication deadline is 60 s from spawn (docs/design/secrets.md); waiting
+// longer here would only keep a process alive that the agent has already killed.
 if semaphore.wait(timeout: .now() + 55) == .timedOut {
     Log.askpass.error("the agent did not answer within the deadline")
     answer = nil
@@ -88,8 +88,8 @@ if semaphore.wait(timeout: .now() + 55) == .timedOut {
 connection.invalidate()
 
 if let answer {
-    // An empty answer prints an empty line on purpose: that is the "skip this identity"
-    // of section 4.2, and the acknowledgement of a notification.
+    // An empty answer prints an empty line on purpose: that is "skip this identity",
+    // and the acknowledgement of a notification.
     print(answer)
     exit(0)
 }

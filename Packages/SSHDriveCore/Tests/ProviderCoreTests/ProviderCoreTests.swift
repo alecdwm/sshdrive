@@ -2,8 +2,8 @@ import XCTest
 import ProviderCore
 import XPCProtocols
 
-/// The decisions that used to live in `Apps/FileProvider` and could not be tested at all
-/// because `swift test` never built that directory.
+/// The decisions behind the File Provider extension, kept in `ProviderCore` so
+/// `swift test` can exercise them without building `Apps/FileProvider`.
 final class ProviderCoreTests: XCTestCase {
 
     private func snapshot(
@@ -37,8 +37,9 @@ final class ProviderCoreTests: XCTestCase {
         XCTAssertNil(view.documentSize, "a folder has no document size")
     }
 
-    /// Section 5.4's content type: a directory is a folder, a symlink is a symlink
-    /// (section 5.7), and everything else is named by its extension.
+    /// The content type (docs/design/names-and-attributes.md): a directory is a folder,
+    /// a symlink is a symlink (docs/design/symlinks.md), and everything else is named by
+    /// its extension.
     func testTheContentTypeHintFollowsTheRow() {
         XCTAssertEqual(
             ItemView(snapshot: snapshot(), rootDisplayName: "nas").contentTypeHint,
@@ -56,9 +57,9 @@ final class ProviderCoreTests: XCTestCase {
         XCTAssertEqual(link.symlinkTargetPath, "../lib")
     }
 
-    /// Section 7.2's badge follows the *kept* state, not the marker, and its identifier is
-    /// the one declared in the appex's Info.plist - an item that returns any other gets no
-    /// badge and no error (`MQ-056`).
+    /// The badge (docs/design/pinning.md) follows the *kept* state, not the marker, and
+    /// its identifier is the one declared in the appex's Info.plist - an item that
+    /// returns any other gets no badge and no error (`MQ-056`).
     func testTheDecorationFollowsTheKeptState() {
         XCTAssertEqual(ItemView(snapshot: snapshot(), rootDisplayName: "nas").decorations, [])
         let kept = ItemView(
@@ -72,7 +73,8 @@ final class ProviderCoreTests: XCTestCase {
     // MARK: Errors
 
     /// Every agent error has one answer, and a connection failure is `.serverUnreachable`
-    /// so the system queues and retries rather than showing an error (section 5.1).
+    /// so the system queues and retries rather than showing an error
+    /// (docs/design/extension.md).
     func testEveryAgentErrorMapsToOneFailure() {
         XCTAssertEqual(ProviderFailure(agentError: .serverUnreachable), .serverUnreachable)
         XCTAssertEqual(ProviderFailure(agentError: .interfaceVersionMismatch), .serverUnreachable)
@@ -90,7 +92,7 @@ final class ProviderCoreTests: XCTestCase {
     }
 
     /// `.syncAnchorExpired` off the working-set fallback is already the answer and has to
-    /// survive the trip back through the adapter (section 5.3).
+    /// survive the trip back through the adapter (docs/design/item-index.md).
     func testFailureCodesRoundTrip() {
         for failure: ProviderFailure in [
             .serverUnreachable, .noSuchItem, .cannotSynchronize, .syncAnchorExpired,
@@ -106,7 +108,8 @@ final class ProviderCoreTests: XCTestCase {
     // MARK: Ranges
 
     /// The range is widened to the alignment the system asked for, which is what lets it
-    /// stitch neighbouring windows together rather than re-fetching them (section 5.1).
+    /// stitch neighbouring windows together rather than re-fetching them
+    /// (docs/design/extension.md).
     func testAPartialFetchIsWidenedToTheAlignment() {
         let widened = ProviderService.alignedRange(
             location: 5_000, length: 100, alignment: 4_096)
@@ -126,8 +129,9 @@ final class ProviderCoreTests: XCTestCase {
 
     // MARK: The trash contract
 
-    /// Section 5.4 in three places: the enumerator refusal (`MQ-009`/`MQ-010`), the
-    /// `item(for:)` refusal, and a `.Trash` create under the root.
+    /// The trash contract (docs/design/names-and-attributes.md) in three places: the
+    /// enumerator refusal (`MQ-009`/`MQ-010`), the `item(for:)` refusal, and a `.Trash`
+    /// create under the root.
     func testTheTrashContract() {
         let service = ProviderService(
             domainIdentifier: "d", displayName: "nas", reader: UnusableReader(),

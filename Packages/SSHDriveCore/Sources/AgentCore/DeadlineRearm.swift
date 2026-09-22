@@ -1,7 +1,7 @@
 import Foundation
 import SSHProcess
 
-/// What the Mac says about whether a human is at it (DESIGN.md section 4.2).
+/// What the Mac says about whether a human is at it (docs/design/secrets.md).
 ///
 /// `secondsSinceLastInputEvent` is
 /// `CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .any)`,
@@ -17,14 +17,14 @@ public struct PresenceReading: Sendable, Equatable {
         self.screenLocked = screenLocked
     }
 
-    /// Section 4.2: "must be under 30 s, and the screen must be unlocked".
+    /// Input idle must be under 30 s, and the screen must be unlocked.
     public var userIsPresent: Bool {
         !screenLocked && secondsSinceLastInputEvent < DeadlineRearmState.presenceIdleLimitSeconds
     }
 }
 
-/// DESIGN.md section 4.2's re-arm after an authentication-deadline stop, as a pure state
-/// machine.
+/// The re-arm after an authentication-deadline stop (docs/design/secrets.md), as a pure
+/// state machine.
 ///
 /// A location stopped by the 60 s deadline is re-armed **for one attempt** when a human
 /// is demonstrably present. Two things do it, and each fires exactly once per stop:
@@ -44,9 +44,9 @@ public struct PresenceReading: Sendable, Equatable {
 /// rather than a bare "it stopped".
 public struct DeadlineRearmState: Sendable {
 
-    /// Section 4.2: input idle must be under 30 s.
+    /// Input idle must be under 30 s.
     public static let presenceIdleLimitSeconds: TimeInterval = 30
-    /// Section 4.2: "evaluated at most once a minute so the test itself costs nothing".
+    /// Evaluated at most once a minute, so the test itself costs nothing.
     public static let requestEvaluationIntervalSeconds: TimeInterval = 60
 
     /// Set while a deadline stop is outstanding. Nothing else arms it.
@@ -57,8 +57,8 @@ public struct DeadlineRearmState: Sendable {
     /// When the presence test was last actually read, so it is not read again for a
     /// minute.
     public private(set) var lastPresenceEvaluation: TimeInterval?
-    /// How many times the presence test was read, for the spike and for the debug hook:
-    /// this is the number section 4.2's "costs nothing" claim is about.
+    /// How many times the presence test was read, for the debug hook: this is the number
+    /// the "costs nothing" claim above is about.
     public private(set) var presenceEvaluations = 0
 
     public init() {}

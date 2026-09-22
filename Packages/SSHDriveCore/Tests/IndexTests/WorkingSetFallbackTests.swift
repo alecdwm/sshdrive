@@ -3,16 +3,17 @@ import XCTest
 import Config
 import XPCProtocols
 
-/// The 2026-09-08 defect and its fix (DESIGN.md sections 5.2, 5.3).
+/// Working-set readiness and its fallback (docs/design/extension.md,
+/// docs/design/item-index.md).
 ///
 /// The working set is the only enumeration the extension answers from its own read-only
-/// reader, and it had exactly one answer for a reader it could not use:
-/// `.serverUnreachable`. Readiness was a `Bool` decided once per extension instance, so an
-/// `indexReady` answered "no" during a domain restart held for the whole life of that
-/// instance; fileproviderd throttles a change enumeration that keeps failing, and the
-/// domain's event stream backed off to tens of minutes while every other path kept
-/// working. Two things had to change and both are covered here: readiness is a window with
-/// a retry behind it, and there is a second source for the same change stream.
+/// reader, and it has exactly one answer for a reader it cannot use:
+/// `.serverUnreachable`. Readiness is a window, not a one-time verdict: latching an
+/// `indexReady` "no" for the life of the extension instance would hold it there for as
+/// long as a domain restart takes, and fileproviderd throttles a change enumeration that
+/// keeps failing, backing the domain's event stream off to tens of minutes while every
+/// other path keeps working. So readiness is a window with a retry behind it, and there
+/// is a second source for the same change stream; both are covered here.
 final class WorkingSetFallbackTests: XCTestCase {
 
     private var directory: URL!
@@ -30,7 +31,7 @@ final class WorkingSetFallbackTests: XCTestCase {
     }
 
     /// A row and its anchor, the way every caller in the agent writes one: `upsert` does
-    /// not write an anchor of its own, the caller does (section 5.3).
+    /// not write an anchor of its own, the caller does (docs/design/item-index.md).
     private func write(_ writer: IndexWriter, _ identifier: String, _ path: String) throws {
         try writer.upsert(item(identifier, path))
         try writer.appendAnchor(identifier: identifier, kind: .modified)
@@ -49,8 +50,8 @@ final class WorkingSetFallbackTests: XCTestCase {
 
     // MARK: Readiness is a window, not a verdict
 
-    /// The defect itself. A "no" used to be finished; now the next read past the retry
-    /// interval asks again, and a later "yes" makes the reader usable.
+    /// A "no" answer does not latch: the next read past the retry interval asks again,
+    /// and a later "yes" makes the reader usable.
     func testANoAnswerDoesNotLatchForTheInstancesLife() {
         var readiness = IndexReaderReadiness(retryInterval: 2)
         XCTAssertTrue(readiness.shouldAsk(at: 0))
@@ -68,7 +69,7 @@ final class WorkingSetFallbackTests: XCTestCase {
     }
 
     /// An agent that cannot be reached at all is not a "no": a missing agent is the case
-    /// the direct reader exists for (section 5.2).
+    /// the direct reader exists for (docs/design/extension.md).
     func testAnUnreachableAgentLeavesTheReaderUsable() {
         var readiness = IndexReaderReadiness()
         readiness.answered(nil, at: 0)
@@ -179,7 +180,7 @@ final class WorkingSetFallbackTests: XCTestCase {
     }
 
     /// While a reconcile runs neither source answers with rows: the stall is the point
-    /// (section 5.3), and the fallback must not be a way around it.
+    /// (docs/design/item-index.md), and the fallback must not be a way around it.
     func testTheFallbackStallsWithTheReaderDuringAReconcile() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.ensureRoot()

@@ -1,8 +1,9 @@
 import XCTest
 @testable import Index
 
-/// The change-detection root set (DESIGN.md section 6.5), the mass-deletion guard's held
-/// table (section 6.4), and the restore-into-the-live-database half of section 5.3.
+/// The change-detection root set (docs/design/root-set.md), the mass-deletion guard's
+/// held table (docs/design/change-detection.md), and the restore-into-the-live-database
+/// half of docs/design/item-index.md.
 final class RootsAndHeldTests: XCTestCase {
 
     private var directory: URL!
@@ -23,9 +24,9 @@ final class RootsAndHeldTests: XCTestCase {
 
     // MARK: migration
 
-    /// Writes the version 2 shape by hand: the tables as they were before milestone 6,
-    /// with rows in them, and `meta.schema_version` at 2. The connection is local so it is
-    /// closed by the time the writer opens the same file.
+    /// Writes the version 2 schema by hand, with rows already in the tables and
+    /// `meta.schema_version` at 2. The connection is local so it is closed by the time the
+    /// writer opens the same file.
     private func makeVersion2Database() throws {
         let connection = try SQLiteConnection(path: indexPath, mode: .readWrite)
         try connection.execute("""
@@ -62,7 +63,7 @@ final class RootsAndHeldTests: XCTestCase {
 
     /// `CREATE TABLE IF NOT EXISTS` does not alter a table that is already there, so the
     /// added columns have to be applied explicitly - and the rows have to survive, since
-    /// the index is the only copy of the identifiers we hold (section 5.3).
+    /// the index is the only copy of the identifiers we hold (docs/design/item-index.md).
     func testAVersion2DatabaseIsMigratedInPlaceAndKeepsItsRows() throws {
         try makeVersion2Database()
 
@@ -104,7 +105,7 @@ final class RootsAndHeldTests: XCTestCase {
         XCTAssertEqual(try writer.rootRows().count, 2)
         XCTAssertEqual(Set(try writer.rootRows().map(\.path)), [bytes("Photos")])
 
-        // One reason at a time leaves the directory in the set (section 6.5).
+        // One reason at a time leaves the directory in the set (docs/design/root-set.md).
         try writer.removeRoot(path: bytes("Photos"), reason: "viewed")
         XCTAssertEqual(try writer.rootRows().map(\.reason), ["materialized"])
 
@@ -130,7 +131,7 @@ final class RootsAndHeldTests: XCTestCase {
     }
 
     /// `status` reports the rotation period from the `materialized` count, which is
-    /// `ceil(M / 64)` cycles (section 6.5).
+    /// `ceil(M / 64)` cycles (docs/design/root-set.md).
     func testRootCountCountsOneReasonOnly() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.addRoot(path: bytes("a"), reason: "materialized")
@@ -152,7 +153,8 @@ final class RootsAndHeldTests: XCTestCase {
     }
 
     /// A directory move rewrites `path` on the matching rows of `roots` and `held` in one
-    /// transaction (section 5.3), and must carry the version 3 columns across with them.
+    /// transaction (docs/design/item-index.md), and must carry the version 3 columns
+    /// across with them.
     func testMovingADirectoryKeepsTheRotationKeyAndTheHoldsClock() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.ensureRoot()
@@ -196,7 +198,7 @@ final class RootsAndHeldTests: XCTestCase {
         XCTAssertEqual(row?.reason, "Photos emptied")
         XCTAssertEqual(try writer.heldCount(), 1)
 
-        // It reappeared, so nothing was ever reported (section 6.4).
+        // It reappeared, so nothing was ever reported (docs/design/change-detection.md).
         try writer.releaseHold(path: bytes("Photos/a.jpg"))
         XCTAssertNil(try writer.heldRow(path: bytes("Photos/a.jpg")))
         XCTAssertEqual(try writer.heldCount(), 0)
@@ -251,8 +253,9 @@ final class RootsAndHeldTests: XCTestCase {
         XCTAssertEqual(try writer.heldRows().count, 3)
     }
 
-    /// Containment is decided on bytes: server names need not be UTF-8 (section 5.4), and
-    /// the separator is required, so "photos2" is not under "photos".
+    /// Containment is decided on bytes: server names need not be UTF-8
+    /// (docs/design/names-and-attributes.md), and the separator is required, so
+    /// "photos2" is not under "photos".
     func testReleasingASubtreeTakesNonUTF8NamesAndSparesAPrefixSibling() throws {
         let writer = try IndexWriter(path: indexPath)
         let invalid = bytes("photos/") + Data([0xFF, 0xFE, 0x80])
@@ -269,7 +272,8 @@ final class RootsAndHeldTests: XCTestCase {
             [bytes("photos2/a.jpg"), bytes("photosaurus")])
     }
 
-    /// The location root is the empty path, and it contains everything (section 5.3).
+    /// The location root is the empty path, and it contains everything
+    /// (docs/design/item-index.md).
     func testTheEmptyRootContainsEveryHeldPath() throws {
         let writer = try IndexWriter(path: indexPath)
         try writer.hold(path: bytes("a"), dir: bytes(""), firstMissing: 0, recheckAt: 300, reason: "")
@@ -280,7 +284,8 @@ final class RootsAndHeldTests: XCTestCase {
 
     // MARK: restore
 
-    /// The restore goes **into** the live database (section 5.3): the same `IndexWriter`
+    /// The restore goes **into** the live database (docs/design/item-index.md): the same
+    /// `IndexWriter`
     /// instance, holding the same connection, sees the restored rows, and the file keeps
     /// its inode. A replace of the file at the path would satisfy neither, and the
     /// extension's reader - which holds the database open across calls - would go on
@@ -342,8 +347,9 @@ final class RootsAndHeldTests: XCTestCase {
     }
 
     /// The sidecars go with the database, because a zero-length database with a surviving
-    /// WAL would have that WAL replayed into it on the next open (section 5.3), and each
-    /// is truncated under its own inode. Run against plain files rather than a live index:
+    /// WAL would have that WAL replayed into it on the next open (docs/design/item-index.md),
+    /// and each is truncated under its own inode. Run against plain files rather than a
+    /// live index:
     /// the whole point of the close-first rule is that truncating the `-shm` under a
     /// process that has it mapped faults that process, and a test that did it to its own
     /// connection would be testing the crash.
@@ -370,7 +376,7 @@ final class RootsAndHeldTests: XCTestCase {
     }
 }
 
-// MARK: the pin queries (DESIGN.md section 7.1)
+// MARK: the pin queries (docs/design/pinning.md)
 
 /// `pin_state` is the sole authority for markers, and the two queries the pin machinery
 /// asks of it: which paths carry a marker, and which rows a marker change has to rewrite.

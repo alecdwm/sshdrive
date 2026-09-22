@@ -2,7 +2,7 @@ import Foundation
 
 /// A finished item, as it crosses XPC and as it is stored on an index row.
 ///
-/// "A row is a finished item" (DESIGN.md section 5.2): everything derived rather than
+/// "A row is a finished item" (docs/design/extension.md): everything derived rather than
 /// observed is computed by the agent when it writes the row, so both the extension's
 /// direct index reader and the XPC fallback path produce an NSFileProviderItem by a
 /// field-by-field copy with no ancestor walk and no second copy of the rules in
@@ -15,14 +15,16 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
     public let identifier: String
     public let parentIdentifier: String
     /// The name as the system sees it. Server names are bytes and need not be UTF-8
-    /// (section 5.4); a name that is not valid UTF-8 is hidden and never reaches here.
+    /// (docs/design/names-and-attributes.md); a name that is not valid UTF-8 is hidden and
+    /// never reaches here.
     public let filename: String
     /// Path relative to the location root, as raw server bytes.
     public let pathBytes: Data
 
     public let isDirectory: Bool
     public let isSymlink: Bool
-    /// Mac-side symlink target after the relative rewrite (section 5.7); nil otherwise.
+    /// Mac-side symlink target after the relative rewrite (docs/design/symlinks.md); nil
+    /// otherwise.
     public let linkTarget: String?
 
     public let size: Int64
@@ -32,32 +34,34 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
     public let uid: Int32
     public let gid: Int32
 
-    /// "size-mtime-generation" (section 5.3).
+    /// "size-mtime-generation" (docs/design/item-index.md).
     public let contentVersion: String
     /// Content version plus mode, owner, the derived bitmasks, the effective kept state
-    /// and a hash of the xattrs blob (section 5.3).
+    /// and a hash of the xattrs blob (docs/design/item-index.md).
     public let metadataVersion: String
 
-    /// NSFileProviderItemCapabilities bitmask, derived by the agent (section 5.4).
+    /// NSFileProviderItemCapabilities bitmask, derived by the agent
+    /// (docs/design/names-and-attributes.md).
     public let capabilities: UInt64
-    /// NSFileProviderFileSystemFlags bitmask, derived by the agent (section 5.4).
+    /// NSFileProviderFileSystemFlags bitmask, derived by the agent
+    /// (docs/design/names-and-attributes.md).
     public let fileSystemFlags: UInt64
 
-    /// Effective kept state (section 7.1.1), not the marker.
+    /// Effective kept state (docs/design/pinning.md), not the marker.
     public let kept: Bool
-    /// Which content policy the extension should set on the item (section 7.1.1).
+    /// Which content policy the extension should set on the item (docs/design/pinning.md).
     /// Carried as an integer of our own rather than NSFileProviderContentPolicy's raw
     /// value, because this module is linked by the CLI and askpass, which do not link
     /// FileProvider at all.
     public let contentPolicyRawValue: Int
 
-    /// Extended attributes, stored locally only (section 5.4).
+    /// Extended attributes, stored locally only (docs/design/names-and-attributes.md).
     public let extendedAttributes: [String: Data]
 
-    /// Finder tags, stored locally only (section 5.4). They never arrive as an xattr:
-    /// they are the item's own `tagData`, and the system rebuilds the tags xattr from it
-    /// on every update, so an item that returns none loses the user's tags on the next
-    /// re-download (S4, 2026-09-04).
+    /// Finder tags, stored locally only (docs/design/names-and-attributes.md). They never
+    /// arrive as an xattr: they are the item's own `tagData`, and the system rebuilds the
+    /// tags xattr from it on every update, so an item that returns none loses the user's tags
+    /// on the next re-download.
     public let tagData: Data?
 
     public init(
@@ -191,7 +195,7 @@ public final class SSHDriveItemSnapshot: NSObject, NSSecureCoding {
     }
 }
 
-/// The content policy an item asks for (DESIGN.md section 7.1.1). The extension maps
+/// The content policy an item asks for (docs/design/pinning.md). The extension maps
 /// these to NSFileProviderContentPolicy; nothing else in the project names that type.
 public enum SSHDriveContentPolicy: Int, Sendable {
     /// Do not set a policy at all; the system's default applies.
@@ -201,8 +205,9 @@ public enum SSHDriveContentPolicy: Int, Sendable {
     case downloadEagerlyAndKeepDownloaded = 2
 }
 
-/// One page of an enumeration. `nextPageToken` is nil on the last page (section 5.2:
-/// directory listings travel as XPC values, paged for large directories).
+/// One page of an enumeration. `nextPageToken` is nil on the last page. Directory
+/// listings travel as XPC values, paged for large directories
+/// (docs/design/extension.md).
 public final class SSHDriveItemPage: NSObject, NSSecureCoding {
     public static var supportsSecureCoding: Bool { true }
 

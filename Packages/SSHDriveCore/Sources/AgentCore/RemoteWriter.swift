@@ -4,17 +4,18 @@ import Logging
 import SFTP
 
 /// Errors that are ours rather than the wire's. The SFTP status reply carries no errno
-/// (section 6.2), so every one of these is the answer to a *second* question the writer
-/// asked - an `lstat` of a destination, a `readdir` of a directory - and not a status
+/// (docs/design/sftp.md), so every one of these is the answer to a *second* question the
+/// writer asked - an `lstat` of a destination, a `readdir` of a directory - and not a status
 /// code read off the wire.
 public enum RemoteWriteError: Error, Equatable, LocalizedError {
     /// The destination name is taken. Confirmed with an `lstat` after the rename's bare
-    /// `FAILURE` (section 5.5), or found by the preflight on a server whose plain
+    /// `FAILURE` (docs/design/writes.md), or found by the preflight on a server whose plain
     /// `rename` overwrites.
     case filenameCollision(String)
-    /// A non-empty directory the system did not ask to remove recursively (section 5.5).
+    /// A non-empty directory the system did not ask to remove recursively
+    /// (docs/design/writes.md).
     case deletionRejected(String)
-    /// A symlink target that leaves the share (section 5.7).
+    /// A symlink target that leaves the share (docs/design/symlinks.md).
     case escapingSymlinkTarget
 
     public var errorDescription: String? {
@@ -29,32 +30,32 @@ public enum RemoteWriteError: Error, Equatable, LocalizedError {
     }
 }
 
-/// The server half of DESIGN.md section 5.5: the temp-file-plus-rename upload protocol,
+/// The server half of docs/design/writes.md: the temp-file-plus-rename upload protocol,
 /// the conflict check that sits between the bytes landing and the rename, the conflict
 /// copy, the stale-temp-file rule, and the delete rules.
 ///
-/// It owns the transport and the **in-flight set**, and nothing else. In particular it
-/// never touches the index: the agent reads the row, hands the writer the three fields
-/// the conflict check needs, and writes the result back itself, so there is exactly one
-/// writer of the index and it is still `LocationRuntime` (section 5.3). That is also
-/// what makes every rule here testable against `FakeTransport` with no database at all.
+/// It owns the transport and the **in-flight set**, and nothing else. In particular it never
+/// touches the index: the agent reads the row, hands the writer the three fields the conflict
+/// check needs, and writes the result back itself, so there is exactly one writer of the
+/// index and it is still `LocationRuntime` (docs/design/item-index.md). That is also what
+/// makes every rule here testable against `FakeTransport` with no database at all.
 public actor RemoteWriter {
 
     public struct Options: Sendable {
-        /// The first eight hex digits of the identifier minted once per install and kept
-        /// at the top level of `config.json` (section 5.5), so every temp file says which
-        /// Mac made it.
+        /// The first eight hex digits of the identifier minted once per install and kept at
+        /// the top level of `config.json` (docs/design/writes.md), so every temp file says
+        /// which Mac made it.
         public var macID: String
         /// This Mac's `LocalHostName`. It is the Mac's content that is being set aside,
-        /// so it is the Mac that names the conflict copy (section 5.5).
+        /// so it is the Mac that names the conflict copy (docs/design/writes.md).
         public var localHostName: String
         /// `sshdrive set <name> create-check lstat` forces the preflight on a server the
-        /// user does not trust to refuse an overwriting `rename` (section 5.5).
+        /// user does not trust to refuse an overwriting `rename` (docs/design/writes.md).
         public var createCheck: CreateCheck
         /// A debug hold between the bytes landing in the temp file and the destination
-        /// `lstat` - which is exactly section 5.5's conflict window. `sshdrive debug
-        /// fault --upload-delay MS` opens it so a spike can change the file on the server
-        /// inside it and get a real conflict rather than a simulated one. Zero in
+        /// `lstat` - which is exactly the conflict window. `sshdrive debug fault
+        /// --upload-delay MS` opens it so the file can be changed on the server inside it
+        /// and produce a real conflict rather than a simulated one. Zero in
         /// ordinary use.
         public var conflictWindowHoldMilliseconds: Int
 
@@ -69,9 +70,9 @@ public actor RemoteWriter {
         }
     }
 
-    /// What the conflict check of section 5.5 compares against: size and mtime from the
+    /// What the conflict check compares against: size and mtime from the
     /// `baseVersion` the system passed us, and `generation` from the row, because the
-    /// wire cannot carry a generation (section 5.3).
+    /// wire cannot carry a generation (docs/design/item-index.md).
     public struct BaseVersion: Equatable, Sendable {
         public var size: Int64
         public var mtime: Int64
@@ -84,9 +85,9 @@ public actor RemoteWriter {
         }
 
         /// Parses `"size-mtime-generation"`, the one version format at every tier
-        /// (section 5.3). Nil for anything else, which is how a version we did not write
-        /// - a reconciled row, a build that changed the format - skips the check rather
-        /// than reporting a conflict against a string it cannot read.
+        /// (docs/design/item-index.md). Nil for anything else, which is how a version
+        /// we did not write - a reconciled row, a build that changed the format - skips
+        /// the check rather than reporting a conflict against a string it cannot read.
         public init?(contentVersion: String) {
             let parts = contentVersion.split(separator: "-", omittingEmptySubsequences: false)
             guard parts.count == 3,
@@ -103,13 +104,13 @@ public actor RemoteWriter {
     public enum UploadOutcome: Sendable {
         /// The bytes took the destination's name. The attributes are the post-upload
         /// `lstat`, which is what the row's content version must be built from: a version
-        /// we invent is a version the next sweep will not recognise (section 5.5).
+        /// we invent is a version the next sweep will not recognise (docs/design/writes.md).
         case landed(SFTPFileAttributes)
         /// The remote changed underneath the user. The temp file, which already holds the
         /// local content, was renamed beside the original and the destination was left
         /// alone. The caller returns the **remote** item and then evicts it, because the
-        /// system believes whatever version a `modifyItem` reply carries (S3,
-        /// 2026-09-04).
+        /// system believes whatever version a `modifyItem` reply carries (measured on
+        /// macOS 26.4, 2026-09-04).
         case conflicted(
             copy: RelativePath, copyAttributes: SFTPFileAttributes, remote: SFTPFileAttributes)
     }
@@ -117,14 +118,14 @@ public actor RemoteWriter {
     private let transport: any SFTPTransport
     private var options: Options
 
-    /// Section 5.5's in-flight set: "every path with an upload in flight sits in a
-    /// per-location in-flight set; the differ skips dirty paths in it". It also
+    /// The in-flight set: every path with an upload in flight sits in a per-location
+    /// in-flight set and the differ skips dirty paths in it (docs/design/writes.md). It also
     /// serialises two saves of one file in quick succession, so the second
     /// `modifyItem`'s conflict check runs against the first's result rather than racing
     /// it, and it is what tells a live temp file from a stale one.
     private var inFlight: Set<Data> = []
     /// Temp files this process currently has open, by path bytes. A temp name in here is
-    /// live; any other of ours is stale by definition (section 5.5).
+    /// live; any other of ours is stale by definition (docs/design/writes.md).
     private var liveTemporaries: Set<Data> = []
     /// Continuations waiting for a path to leave the in-flight set.
     private var waiters: [Data: [CheckedContinuation<Void, Never>]] = [:]
@@ -132,7 +133,7 @@ public actor RemoteWriter {
     /// Whether a plain `rename` refuses an existing name on this server. Nil until the
     /// probe has run. OpenSSH implements `rename` as `link` + `unlink` and refuses;
     /// servers that are not OpenSSH may overwrite, and where they do, every create and
-    /// rename gets an `lstat` preflight instead (section 5.5).
+    /// rename gets an `lstat` preflight instead (docs/design/writes.md).
     private var renameRefusesExisting: Bool?
 
     public init(transport: any SFTPTransport, options: Options) {
@@ -145,7 +146,7 @@ public actor RemoteWriter {
     // MARK: The in-flight set
 
     /// The paths change detection must skip, so our own writes never come back as remote
-    /// changes (section 5.5).
+    /// changes (docs/design/writes.md).
     public func inFlightPaths() -> Set<Data> { inFlight }
 
     public func isInFlight(_ path: RelativePath) -> Bool { inFlight.contains(path.bytes) }
@@ -169,7 +170,7 @@ public actor RemoteWriter {
 
     // MARK: Names
 
-    /// `.sshdrive-upload-<mac8>-<uuid>` (section 5.5).
+    /// `.sshdrive-upload-<mac8>-<uuid>` (docs/design/writes.md).
     public func temporaryName() -> String {
         ".sshdrive-upload-\(options.macID)-\(UUID().uuidString.lowercased())"
     }
@@ -184,7 +185,7 @@ public actor RemoteWriter {
         name.hasPrefix(".sshdrive-upload-\(options.macID)-")
     }
 
-    /// `<name> (conflicted copy from <Mac name> <date>).<ext>` (section 5.5).
+    /// `<name> (conflicted copy from <Mac name> <date>).<ext>` (docs/design/writes.md).
     public static func conflictCopyName(
         for filename: String, hostName: String, date: Date,
         calendar: TimeZone = TimeZone.current
@@ -213,7 +214,7 @@ public actor RemoteWriter {
 
     // MARK: The upload protocol
 
-    /// Section 5.5, end to end.
+    /// The upload protocol of docs/design/writes.md, end to end.
     ///
     /// 1. Stream the bytes into `.sshdrive-upload-<mac8>-<uuid>` beside the destination,
     ///    opened with the Mac file's permission bits as `sftp put` does.
@@ -272,8 +273,9 @@ public actor RemoteWriter {
         }
         let existing = try? await transport.lstat(path)
 
-        // Step 3. The conflict check compares all three fields, but from two sources:
-        // size and mtime from this `lstat`, and generation from the row (section 5.3).
+        // Step 3. The conflict check compares all three fields, but from two sources: size
+        // and mtime from this `lstat`, and generation from the row
+        // (docs/design/item-index.md).
         if let base, let existing, existing.type != .directory {
             let moved =
                 existing.size != base.size || existing.mtime != base.mtime
@@ -310,11 +312,11 @@ public actor RemoteWriter {
         return .landed(try await transport.lstat(path))
     }
 
-    /// The create half of step 4: a plain, non-overwriting `rename`. OpenSSH implements
-    /// it as `link` + `unlink`, so it fails atomically if anything now holds the name.
-    /// The refusal arrives as a bare `FAILURE` (section 6.2), so it is confirmed with an
-    /// `lstat` of the destination before it is reported as a collision, and reported as
-    /// an ordinary sync error when nothing is there.
+    /// The create half of step 4: a plain, non-overwriting `rename`. OpenSSH implements it as
+    /// `link` + `unlink`, so it fails atomically if anything holds the name. The refusal
+    /// arrives as a bare `FAILURE` (docs/design/sftp.md), so it is confirmed with an `lstat`
+    /// of the destination before it is reported as a collision, and reported as an ordinary
+    /// sync error when nothing is there.
     private func claim(
         _ temporary: RelativePath, as path: RelativePath, knownExisting: SFTPFileAttributes?
     ) async throws {
@@ -338,7 +340,7 @@ public actor RemoteWriter {
 
     /// The overwrite half of step 4. `posix-rename@openssh.com` is `rename(2)` and is
     /// atomic; without it there is `remove` + `rename`, a non-atomic window that
-    /// `status` reports as a degraded capability (sections 5.5, 8.1).
+    /// `status` reports as a degraded capability (docs/design/writes.md, docs/design/cli.md).
     private func replace(_ temporary: RelativePath, with path: RelativePath) async throws {
         if await transport.extensions.contains(.posixRename) {
             try await transport.posixRename(temporary, to: path)
@@ -384,9 +386,9 @@ public actor RemoteWriter {
 
     // MARK: The rename-semantics probe
 
-    /// Section 5.5: "Servers that are not OpenSSH may overwrite on a plain `rename`; the
-    /// probe tests this once, in the location root, and where it overwrites every create
-    /// and rename gets an `lstat` preflight instead." Two temp files of our own, one
+    /// Servers that are not OpenSSH may overwrite on a plain `rename`. The probe tests this
+    /// once, in the location root, and where it overwrites every create and rename gets an
+    /// `lstat` preflight instead (docs/design/writes.md). Two temp files of our own, one
     /// renamed over the other, and both removed afterwards whatever happens.
     @discardableResult
     public func probeRenameSemantics() async -> Bool {
@@ -421,7 +423,7 @@ public actor RemoteWriter {
         renameRefusesExisting = refuses
         if !refuses {
             Log.agent.notice(
-                "this server's plain rename overwrites; every create and rename gets an lstat preflight (section 5.5)"
+                "this server's plain rename overwrites; every create and rename gets an lstat preflight (docs/design/writes.md)"
             )
         }
         return refuses
@@ -433,15 +435,15 @@ public actor RemoteWriter {
         return !(renameRefusesExisting ?? true)
     }
 
-    /// For `status` (section 8.1) and the debug hooks: what the probe found, without
+    /// For `status` (docs/design/cli.md) and the debug hooks: what the probe found, without
     /// running it.
     public func renameSemantics() -> Bool? { renameRefusesExisting }
 
     // MARK: Stale temp files
 
-    /// Section 5.5: "A temp file carrying this Mac's `<mac8>` that is not in the in-flight
-    /// set is stale by definition and is removed as soon as the agent lists its
-    /// directory, however new it is. A temp file from another Mac is left alone until it
+    /// A temp file carrying this Mac's `<mac8>` that is not in the in-flight set is stale
+    /// by definition and is removed as soon as the agent lists its directory, however new
+    /// it is. A temp file from another Mac is left alone until it
     /// is 30 days old."
     ///
     /// This is the only cleanup there is for an upload that died with a connection or an
@@ -482,7 +484,8 @@ public actor RemoteWriter {
         do {
             try await transport.mkdir(path, mode: mode)
         } catch let error as SFTPError {
-            // mkdir's EEXIST is a bare FAILURE too (section 6.2); ask the second question.
+            // mkdir's EEXIST is a bare FAILURE too (docs/design/sftp.md); ask the second
+            // question.
             if case .failure = error, (try? await transport.lstat(path)) != nil {
                 throw RemoteWriteError.filenameCollision(path.description)
             }
@@ -490,7 +493,8 @@ public actor RemoteWriter {
         }
     }
 
-    /// Section 5.7: `ln -s` inside the mount arrives here, and the target is accepted
+    /// `ln -s` inside the mount arrives here (docs/design/symlinks.md), and the target is
+    /// accepted
     /// only if it passes the lexical inside-the-share check. Otherwise it is refused,
     /// because the resulting link would be hidden the moment it was created.
     public func makeSymlink(
@@ -517,7 +521,7 @@ public actor RemoteWriter {
     /// A rename or move of an existing item. Always the plain, non-overwriting `rename`,
     /// with the case-only exception below.
     ///
-    /// **Case-only renames** (section 5.5). `Makefile` to `makefile` is an ordinary
+    /// **Case-only renames** (docs/design/writes.md). `Makefile` to `makefile` is an ordinary
     /// rename on a case-sensitive server. On a case-insensitive one - macOS, or a
     /// Samba-backed share - `link` fails with `EEXIST`, the confirming `lstat` finds a
     /// file at the destination, and the rule above would report a collision for a
@@ -565,7 +569,8 @@ public actor RemoteWriter {
     }
 
     /// The case-only rename itself. `posix-rename@openssh.com` is `rename(2)`; where the
-    /// server lacks it the rename goes through a temporary third name (section 5.5).
+    /// server lacks it the rename goes through a temporary third name
+    /// (docs/design/writes.md).
     private func renameInPlace(_ source: RelativePath, to destination: RelativePath) async throws {
         if await transport.extensions.contains(.posixRename) {
             try await transport.posixRename(source, to: destination)
@@ -582,7 +587,7 @@ public actor RemoteWriter {
         }
     }
 
-    /// Section 5.5's deletes.
+    /// The deletes of docs/design/writes.md.
     ///
     /// - A non-empty directory is refused with `.deletionRejected` unless the system
     ///   passed the recursive option. `ENOTEMPTY` arrives as a bare `FAILURE`, so the
@@ -590,7 +595,8 @@ public actor RemoteWriter {
     /// - The recursive walk comes from the **server**, not the index: folders Finder
     ///   never opened have no rows, and an index-driven `rmdir` would fail on the first
     ///   unexplored subfolder. Every directory is re-`lstat`ed before descending, so one
-    ///   replaced by a symlink after it was enumerated is noticed first (section 9.1).
+    ///   replaced by a symlink after it was enumerated is noticed first
+    ///   (docs/design/security.md).
     /// - Deleting something already gone succeeds: `ENOENT` is reported as success, so a
     ///   user who deletes a ghost gets what they asked for rather than an error.
     public func delete(_ path: RelativePath, isDirectory: Bool, recursive: Bool) async throws {
@@ -645,7 +651,7 @@ public actor RemoteWriter {
     /// A `modifyItem` whose `changedFields` carries `.fileSystemFlags` - a `chmod +x`
     /// inside the mount - sets or clears the execute bits and re-records the mode. The
     /// read and write bits are never changed that way, since `allowsWriting` already
-    /// expresses them (section 5.4).
+    /// expresses them (docs/design/names-and-attributes.md).
     public static func modeAfterExecutableChange(current: UInt32, userExecutable: Bool) -> UInt32 {
         let executeBits: UInt32 = 0o111
         if userExecutable {

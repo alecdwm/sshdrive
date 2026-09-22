@@ -1,21 +1,21 @@
 import Foundation
 
-/// The SFTP surface the rest of the app talks to (DESIGN.md section 6.2).
+/// The SFTP surface the rest of the app talks to (docs/design/sftp.md).
 ///
 /// Every method takes a `RelativePath`; the transport joins it to the canonical root
-/// itself (section 9.1). Two implementations exist: `FakeTransport` from milestone 1,
-/// which stays as the test double for every later milestone, and the real SFTP v3 wire
-/// client over the ssh process's stdio, which arrives in milestone 2.
+/// itself (docs/design/security.md). Two implementations exist: `FakeTransport`, the
+/// test double, and the real SFTP v3 wire client over the ssh process's stdio.
 public protocol SFTPTransport: AnyObject, Sendable {
 
     /// Which OpenSSH extensions the server offered.
     var extensions: SFTPServerExtensions { get async }
 
     /// SFTP realpath, used at add time to canonicalise the root and on every connection
-    /// to confirm it has not moved (section 9.1).
+    /// to confirm it has not moved (docs/design/security.md).
     func realpath(_ path: RelativePath) async throws -> String
 
-    /// lstat semantics: links are leaf items and are never followed (section 9.1).
+    /// lstat semantics: links are leaf items and are never followed
+    /// (docs/design/security.md).
     func lstat(_ path: RelativePath) async throws -> SFTPFileAttributes
 
     /// One directory listing. Pages are requested back to back by the real client; the
@@ -27,7 +27,7 @@ public protocol SFTPTransport: AnyObject, Sendable {
 
     /// Streams a byte range to `receiver` without ever holding the whole file, at
     /// `window` requests in flight - the scheduler's share of the pipelined window
-    /// (section 6.2). Returns the number of bytes delivered.
+    /// (docs/design/sftp.md). Returns the number of bytes delivered.
     func readStreaming(
         _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int,
         receiver: @escaping @Sendable (UInt64, Data) async -> Void
@@ -35,26 +35,28 @@ public protocol SFTPTransport: AnyObject, Sendable {
 
     /// Streams to `path`, pulling at most `chunk` bytes at a time from `source` until it
     /// returns an empty `Data`. `progress` is called with the running total. The upload
-    /// still goes through a temp file and a rename (section 5.5); what this adds over
-    /// `write` is that a 64 MiB upload never sits in the agent's memory.
+    /// still goes through a temp file and a rename (docs/design/writes.md); what this
+    /// adds over `write` is that a 64 MiB upload never sits in the agent's memory.
     func writeStreaming(
         _ path: RelativePath, mode: UInt32, window: Int,
         source: @Sendable @escaping () throws -> Data,
         progress: @escaping @Sendable (Int64) -> Void
     ) async throws
 
-    /// Writes whole contents, through the temp-file plus rename dance of section 5.5 in
-    /// the real client. `mode` is the permission bits the temp file is opened with.
+    /// Writes whole contents, through the temp file plus rename
+    /// (docs/design/writes.md) in the real client. `mode` is the permission bits the temp
+    /// file is opened with.
     func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws
 
     /// Creates `path` and streams `source` into it, failing if the name is already taken.
     ///
-    /// This is the *primitive* the upload protocol of section 5.5 is built from, not the
-    /// protocol itself: the agent picks the `.sshdrive-upload-<mac8>-<uuid>` name, writes
-    /// the bytes here, makes its conflict check against a fresh `lstat` of the
-    /// destination, and only then chooses between a non-overwriting `rename` (create)
-    /// and `posix-rename@openssh.com` (overwrite). The check has to sit between the
-    /// bytes landing and the rename, which is why the transport cannot own both halves.
+    /// This is the *primitive* the upload protocol (docs/design/writes.md) is built
+    /// from, not the protocol itself: the agent picks the
+    /// `.sshdrive-upload-<mac8>-<uuid>` name, writes the bytes here, makes its conflict
+    /// check against a fresh `lstat` of the destination, and only then chooses between a
+    /// non-overwriting `rename` (create) and `posix-rename@openssh.com` (overwrite). The
+    /// check has to sit between the bytes landing and the rename, which is why the
+    /// transport cannot own both halves.
     ///
     /// Exclusive because the name is a fresh UUID: anything already there is either
     /// another Mac's collision, which must not be overwritten, or a bug.
@@ -70,20 +72,22 @@ public protocol SFTPTransport: AnyObject, Sendable {
     func remove(_ path: RelativePath) async throws
 
     /// Fails when the directory is not empty; the caller confirms with a readdir, since
-    /// the wire carries no ENOTEMPTY (section 6.2).
+    /// the wire carries no ENOTEMPTY (docs/design/sftp.md).
     func rmdir(_ path: RelativePath) async throws
 
-    /// The plain, non-overwriting SFTP rename that section 5.5 relies on.
+    /// The plain, non-overwriting SFTP rename the create path relies on
+    /// (docs/design/writes.md).
     func rename(_ source: RelativePath, to destination: RelativePath) async throws
 
-    /// posix-rename@openssh.com: overwrites. Used for content replacement (section 5.5).
+    /// posix-rename@openssh.com: overwrites. Used for content replacement
+    /// (docs/design/writes.md).
     func posixRename(_ source: RelativePath, to destination: RelativePath) async throws
 
     func setstat(_ path: RelativePath, mode: UInt32?, mtime: Int64?) async throws
 
     /// OpenSSH's SSH2_FXP_SYMLINK takes targetpath first, then linkpath, the opposite
-    /// order from the draft (section 6.2). That is the transport's problem, not this
-    /// protocol's: the arguments here are named.
+    /// order from the draft (docs/design/sftp.md). That is the transport's problem, not
+    /// this protocol's: the arguments here are named.
     func symlink(target: String, at path: RelativePath) async throws
 
     func readlink(_ path: RelativePath) async throws -> String

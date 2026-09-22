@@ -7,11 +7,11 @@ import SSHProcess
 import Secrets
 import XPCProtocols
 
-// The rest of `docs/testing-architecture.md` section 2.3's table, in memory: a fake login
-// item and launchd, scriptable power, network path, presence and screen lock, scripted
-// peers, a recording reader table, a fake bundle and a fake transport launcher.
+// The rest of the agent's seams (docs/design/testing.md), in memory: a fake login item
+// and launchd, scriptable power, network path, presence and screen lock, scripted peers,
+// a recording reader table, a fake bundle and a fake transport launcher.
 
-// MARK: The login item and launchd (section 10)
+// MARK: The login item and launchd
 
 /// Records `register`/`unregister` and answers a status a scenario set.
 ///
@@ -172,7 +172,7 @@ public final class ScriptedNetwork: NetworkPathObserving, @unchecked Sendable {
     }
 }
 
-/// Section 4.2's two readings, set by a scenario. The default is the honest one for a
+/// The two presence readings, set by a scenario. The default is the honest one for a
 /// machine nobody is at: idle for ever, screen locked.
 public final class ScriptedPresence: PresenceReporting, @unchecked Sendable {
     private let lock = NSLock()
@@ -192,7 +192,8 @@ public final class ScriptedPresence: PresenceReporting, @unchecked Sendable {
         lock.unlock()
     }
 
-    /// The reading section 4.2 calls "a human is demonstrably present".
+    /// The reading that counts as "a human is demonstrably present"
+    /// (docs/design/secrets.md).
     public func setPresent() { set(idleSeconds: 1, screenLocked: false) }
 
     public func read() -> PresenceReading {
@@ -248,7 +249,7 @@ public final class ScriptedScreenLock: ScreenLockObserving, @unchecked Sendable 
 
 // MARK: Peers
 
-/// Which executable a pid is, from a table a scenario wrote (section 5.2).
+/// Which executable a pid is, from a table a scenario wrote.
 public struct ScriptedPeers: PeerIdentifying {
     public var paths: [Int32: String]
     public init(paths: [Int32: String] = [:]) { self.paths = paths }
@@ -259,9 +260,9 @@ public struct ScriptedPeers: PeerIdentifying {
     }
 }
 
-/// The extension readers section 5.3's restore has to ask to close before it truncates the
-/// sidecars under them. Records both calls; a scenario asserts the *order* against the
-/// truncate.
+/// The extension readers an index restore has to ask to close before it truncates the
+/// sidecars under them (docs/design/item-index.md). Records both calls; a scenario asserts
+/// the *order* against the truncate.
 public final class RecordingReaderPeers: IndexReaderPeering, @unchecked Sendable {
     public enum Call: Equatable, Sendable { case close, reopen }
 
@@ -321,9 +322,10 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
         lock.lock(); plugIn = line; lock.unlock()
     }
 
-    /// The two facts section 10.1's handover reads: the executable's inode and the
-    /// bundle's `CFBundleIdentifier`. Setting them is how a scenario stages a half-copied
-    /// bundle, a replaced one, and a `brew reinstall` of the same version.
+    /// The two facts the upgrade handover reads (docs/design/packaging.md): the
+    /// executable's inode and the bundle's `CFBundleIdentifier`. Setting them is how a
+    /// scenario stages a half-copied bundle, a replaced one, and a `brew reinstall` of
+    /// the same version.
     public func setInode(_ inode: UInt64?, atPath path: String) {
         lock.lock()
         if let inode { inodes[path] = inode } else { inodes.removeValue(forKey: path) }
@@ -408,8 +410,7 @@ public final class RecordingEndpoint: AgentEndpoint, @unchecked Sendable {
 
 // MARK: The terminal
 
-/// The tty `add`, `passwd` and `set` relay their prompts and notes to (section 4.2,
-/// section 8), as a recorder.
+/// The tty `add`, `passwd` and `set` relay their prompts and notes to, as a recorder.
 ///
 /// `P9` asserts the **order** of what `add` printed: the upload sentence before the
 /// report, because the sentence describes what is about to happen and the report

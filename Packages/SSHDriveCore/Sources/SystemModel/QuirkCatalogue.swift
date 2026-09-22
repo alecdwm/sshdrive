@@ -21,7 +21,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-8; gotcha 62")
+                    source: "measured 2026-09-04; gotcha 62")
             ]),
         Quirk(
             id: .filenameCollisionRetriedForEver,
@@ -31,7 +31,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-4; gotcha 30")
+                    source: "measured 2026-09-04; gotcha 30")
             ]),
         Quirk(
             id: .filenameCollisionRetrySchedule,
@@ -42,8 +42,8 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .durations([0, 0.04, 5, 15]),
                     source:
-                        "results 2026-09-04 evening, s3-4 (one run; the model doubles the last "
-                        + "interval past the fourth - confidence: measured to 15 s only)")
+                        "measured 2026-09-04 (one run; the model doubles the last interval past "
+                        + "the fourth - confidence: measured to 15 s only)")
             ]),
         Quirk(
             id: .finderResolvesCollisionsItself,
@@ -53,7 +53,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-4")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .pendingEditOnAGoneItemIsReOfferedAsACreate,
@@ -63,7 +63,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-7; DESIGN.md section 6.4's guard")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .queuedWriteRetrySchedule,
@@ -75,8 +75,8 @@ extension QuirkTable {
                     versions: bothVersions,
                     value: .durations([5.50, 10.56, 20.30, 43.03, 79.36, 153.23, 331.30]),
                     source:
-                        "results 2026-09-04 (M5) s5-1; gotcha 59 (ten minutes of one outage; the "
-                        + "model doubles past the seventh - confidence: no ceiling was reached)")
+                        "measured 2026-09-04; gotcha 59 (ten minutes of one outage; the model "
+                        + "doubles past the seventh - confidence: no ceiling was reached)")
             ]),
         Quirk(
             id: .noFetchRetry,
@@ -86,7 +86,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-4; gotcha 59")
+                    source: "measured 2026-09-04; gotcha 59")
             ]),
         Quirk(
             id: .atomicSaveKeepsTheIdentifier,
@@ -96,7 +96,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-8")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .renameIsOneModifyItem,
@@ -104,7 +104,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(0x2),
-                    source: "results 2026-09-04 evening, \"Also recorded\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .chmodIsFileSystemFlags,
@@ -114,7 +114,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(0x100),
-                    source: "results 2026-09-04 evening, s3-5")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .walkIsServedFromTheReplica,
@@ -124,7 +124,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-9")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .disconnectWorksFromTheExtension,
@@ -135,7 +135,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M5) s5-5; gotcha 61")
+                    source: "measured 2026-09-04; gotcha 61")
             ]),
     ]
 
@@ -150,7 +150,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-1")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .evictAfterAModifyIsRefused,
@@ -161,9 +161,9 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
                     source:
-                        "results 2026-09-04 (M4) \"Three assumptions that failed\"; gotcha 49 "
-                        + "(the window itself was never measured - confidence: the model refuses "
-                        + "exactly the first call after a reply, which is what was seen)")
+                        "measured 2026-09-04; gotcha 49 (the window itself was never measured - "
+                        + "confidence: the model refuses exactly the first call after a reply, "
+                        + "which is what was seen)")
             ]),
         Quirk(
             id: .nonEvictableSaysNothingAboutWhy,
@@ -173,7 +173,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-3, s6-5; gotcha 82")
+                    source: "measured 2026-09-04; gotcha 82")
             ]),
         Quirk(
             id: .parentOfAPendingItemFailsOpaquely,
@@ -183,7 +183,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(4101),
-                    source: "results 2026-09-04 s4-3")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .evictionMovesAtime,
@@ -191,7 +191,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-1")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .atimeIsAdvancedDeferred,
@@ -203,9 +203,9 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(257),
                     source:
-                        "results 2026-09-05 (M7/8) \"The assumption that failed: atime\"; gotcha "
-                        + "80 (one file, one reading - confidence: the model schedules a single "
-                        + "advance 257 s after the fetch, which is the one gap measured)")
+                        "measured 2026-09-05; gotcha 80 (one file, one reading - confidence: "
+                        + "the model schedules a single advance 257 s after the fetch, which is "
+                        + "the one gap measured)")
             ]),
         Quirk(
             id: .atimeFollowsRelatime,
@@ -215,7 +215,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-2; results 2026-09-05 (M7/8)")
+                    source: "measured 2026-09-04 and 2026-09-05")
             ]),
         Quirk(
             id: .policyRefusesNotTheCapability,
@@ -225,7 +225,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-5; gotcha 23")
+                    source: "measured 2026-09-04; gotcha 23")
             ]),
         Quirk(
             id: .systemPutsAllowsEvictingBack,
@@ -235,7 +235,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening s6-7; results 2026-09-04 late s6-7")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .inheritedIsTheNeutralPolicy,
@@ -245,7 +245,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-12")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .explicitLazyBeatsAnEagerAncestor,
@@ -255,7 +255,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-6")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .eagerPullsNeverEnumeratedSubfolders,
@@ -266,7 +266,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-1, s6-2")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .ancestorsAreNotIngestedFromTheWorkingSet,
@@ -276,7 +276,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-3; gotcha 25 (reproduced three times)")
+                    source: "measured 2026-09-04; gotcha 25 (reproduced three times)")
             ]),
         Quirk(
             id: .eagerOnTheRootDownloadsEverything,
@@ -286,7 +286,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s6-9")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .concurrentFetchCeiling,
@@ -296,7 +296,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(6),
-                    source: "results 2026-09-04 s6-11")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .foregroundOpensAreAllAdmitted,
@@ -306,7 +306,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(8),
-                    source: "results 2026-09-04 (M3 part 1); gotcha 42")
+                    source: "measured 2026-09-04; gotcha 42")
             ]),
         Quirk(
             id: .rootEvictFailsWholeWhileAnythingIsKept,
@@ -317,7 +317,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-05 (M7/8) \"Two smaller things\"; gotcha 82")
+                    source: "measured 2026-09-05; gotcha 82")
             ]),
         Quirk(
             id: .unpinSettleWindow,
@@ -329,8 +329,8 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(10),
                     source:
-                        "results 2026-09-05 (M7/8); gotcha 82 (\"5-10 s\" for a single file - "
-                        + "confidence: the model takes the upper bound)")
+                        "measured 2026-09-05; gotcha 82 (for a single file - confidence: the "
+                        + "model takes the upper bound)")
             ]),
         Quirk(
             id: .unpinSettleWindowForTheRoot,
@@ -340,8 +340,8 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(60),
                     source:
-                        "results 2026-09-05 (M7/8) (one observation, bounded below only - "
-                        + "confidence: the model refuses the root for the whole minute measured)")
+                        "measured 2026-09-05 (one observation, bounded below only - confidence: "
+                        + "the model refuses the root for the whole minute measured)")
             ]),
     ]
 
@@ -356,7 +356,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(0x10),
-                    source: "results 2026-09-04 (M4) \"S10\"; results 2026-09-04 s4-4; gotchas 26, 51")
+                    source: "measured 2026-09-04; gotchas 26, 51")
             ]),
         Quirk(
             id: .tagsAreWipedOnReDownload,
@@ -366,7 +366,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-4")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .aFrozenMetadataVersionStillEndsTheModify,
@@ -377,7 +377,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M4) \"S10\", debug fault --frozen-metadata on")
+                    source: "measured 2026-09-04, debug fault --frozen-metadata on")
             ]),
         Quirk(
             id: .onlySyncableXattrsReachTheExtension,
@@ -388,7 +388,9 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .text("#S"),
-                    source: "results 2026-09-04 s4-4 (org.sshdrive.spike2#S arrived; org.sshdrive.spike did not)")
+                    source:
+                        "measured 2026-09-04 (org.sshdrive.spike2#S arrived; org.sshdrive.spike "
+                        + "did not)")
             ]),
         Quirk(
             id: .xattrsSurviveAnEviction,
@@ -398,7 +400,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 s4-4")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .dsStoreNeverReachesTheExtension,
@@ -409,7 +411,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M4) \"Three assumptions that failed\"; gotcha 52")
+                    source: "measured 2026-09-04; gotcha 52")
             ]),
         Quirk(
             id: .displayNameIsTheBareNickname,
@@ -420,7 +422,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 evening, s3-2; gotcha 28")
+                    source: "measured 2026-09-04; gotcha 28")
             ]),
         Quirk(
             id: .addDomainRenamesInPlace,
@@ -431,7 +433,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-05 (M10) \"S9\"")
+                    source: "measured 2026-09-05")
             ]),
         Quirk(
             id: .addDomainMayReport4099AfterLanding,
@@ -440,7 +442,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(4099),
-                    source: "results 2026-09-05 (M10), S9; gotcha 95")
+                    source: "measured 2026-09-05; gotcha 95")
             ]),
         Quirk(
             id: .finderEntriesFollowIsDownloaded,
@@ -451,7 +453,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 late, s6-7 (screenshots); gotcha 32")
+                    source: "measured 2026-09-04 (screenshots); gotcha 32")
             ]),
         Quirk(
             id: .customActionsAreTopLevelOneOfAPair,
@@ -462,7 +464,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 late, s6-8, s6-10 (screenshots); gotcha 32")
+                    source: "measured 2026-09-04 (screenshots); gotcha 32")
             ]),
         Quirk(
             id: .activationRuleBindsFileproviderItems,
@@ -473,7 +475,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .text("fileproviderItems"),
-                    source: "results 2026-09-04 evening, s6-8; gotcha 31")
+                    source: "measured 2026-09-04; gotcha 31")
             ]),
         Quirk(
             id: .decorationKeysAreTheBareFour,
@@ -484,7 +486,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-05 (M7/8) \"Two smaller things\"; gotcha 81")
+                    source: "measured 2026-09-05; gotcha 81")
             ]),
         Quirk(
             id: .systemMakesRealSymlinksUnderCloudStorage,
@@ -495,7 +497,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M4) \"S8 - symlinks\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .aDanglingSymlinkPresentsIdentically,
@@ -505,7 +507,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 (M4) \"S8 - symlinks\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .aRefusedCreateSurfacesAsUploadingError,
@@ -515,7 +517,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(-2005),
-                    source: "results 2026-09-04 (M4) \"S8 - symlinks\"")
+                    source: "measured 2026-09-04")
             ]),
     ]
 
@@ -530,7 +532,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 \".Trash hang\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .systemCreatesTheTrashNode,
@@ -540,7 +542,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 \".Trash hang\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .noSuchItemOnTheTrashLoopsForEver,
@@ -551,7 +553,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(1),
-                    source: "results 2026-09-04 \".Trash hang\"; results 2026-09-04 S1 signed pass")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .featureUnsupportedRetiresTheTrash,
@@ -561,7 +563,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .int(2),
-                    source: "results 2026-09-04 \".Trash hang\", \"Which half of the fix did the work\"")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .quarantineBlocksPluginRegistration,
@@ -573,13 +575,12 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: [.v26_6], value: .bool(true),
                     source:
-                        "results 2026-09-05 (M10) addendum; gotcha 99. A quarantined fresh-user "
-                        + "install on 26.4 had passed, so the 26.4 column is deliberately the "
-                        + "other value - confidence: which half of that difference matters is "
-                        + "not claimed"),
+                        "measured 2026-09-05; gotcha 99. A quarantined fresh-user install on "
+                        + "26.4 had passed, so the 26.4 column is deliberately the other value - "
+                        + "confidence: which half of that difference matters is not claimed"),
                 QuirkMeasurement(
                     versions: [.v26_4], value: .bool(false),
-                    source: "results 2026-09-05 (M10) addendum: the 26.4 fresh-user install passed"),
+                    source: "measured 2026-09-05: the 26.4 fresh-user install passed"),
             ]),
         Quirk(
             id: .registerDoesNotRepairAReplacedBundle,
@@ -590,7 +591,7 @@ extension QuirkTable {
             measurements: [
                 QuirkMeasurement(
                     versions: bothVersions, value: .bool(true),
-                    source: "results 2026-09-04 S1 ad-hoc, f2")
+                    source: "measured 2026-09-04")
             ]),
         Quirk(
             id: .unregisterReturnsBeforeLaunchdDrops,
@@ -603,9 +604,9 @@ extension QuirkTable {
                 QuirkMeasurement(
                     versions: bothVersions, value: .duration(10),
                     source:
-                        "results 2026-09-05 (M10) \"The upgrade path\"; gotcha 93 (five seconds "
-                        + "between the commands worked first time - confidence: the window "
-                        + "itself was never measured, only bracketed)")
+                        "measured 2026-09-05; gotcha 93 (five seconds between the commands "
+                        + "worked first time - confidence: the window itself was never measured, "
+                        + "only bracketed)")
             ]),
     ]
 }
@@ -623,7 +624,6 @@ extension QuirkID {
     public static let chmodIsFileSystemFlags: QuirkID = "MQ-047"
     public static let renameIsOneModifyItem: QuirkID = "MQ-048"
     public static let atomicSaveKeepsTheIdentifier: QuirkID = "MQ-049"
-    /// New with this step: `s5-7`, which had no catalogue row of its own.
     public static let pendingEditOnAGoneItemIsReOfferedAsACreate: QuirkID = "MQ-080"
 
     // Eviction, content policy and pinning
@@ -660,8 +660,6 @@ extension QuirkID {
     public static let customActionsAreTopLevelOneOfAPair: QuirkID = "MQ-054"
     public static let activationRuleBindsFileproviderItems: QuirkID = "MQ-055"
     public static let decorationKeysAreTheBareFour: QuirkID = "MQ-056"
-    /// New with this step: S8's three symlink answers and S10's frozen-version one, none
-    /// of which had a catalogue row.
     public static let systemMakesRealSymlinksUnderCloudStorage: QuirkID = "MQ-076"
     public static let aDanglingSymlinkPresentsIdentically: QuirkID = "MQ-077"
     public static let aRefusedCreateSurfacesAsUploadingError: QuirkID = "MQ-078"

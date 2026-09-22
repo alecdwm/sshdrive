@@ -3,22 +3,22 @@ import Config
 import Index
 import Logging
 
-/// The extension's own read-only view of the domain's index (DESIGN.md section 5.2).
+/// The extension's own read-only view of the domain's index (docs/design/extension.md).
 ///
-/// One rule governs every failure here: any SQLite error, a corrupt page, a
-/// not-a-database header during the truncate window, a missing table, is answered as
-/// "ask the agent", never as noSuchItem, so a rebuild in progress can never look like a
-/// deletion (section 5.3).
+/// One rule governs every failure here: any SQLite error, a corrupt page, a not-a-database
+/// header during the truncate window, a missing table, is answered as "ask the agent",
+/// never as noSuchItem, so a rebuild in progress can never look like a deletion
+/// (docs/design/item-index.md).
 ///
-/// **Readiness is not a latch.** It used to be: an instance asked the agent `indexReady`
-/// once in its `init`, and a `false` - which the agent answers for any location whose
-/// runtime is not up yet, and for any index it cannot read at that instant - left that
-/// instance answering the working set `.serverUnreachable` for the whole of its life,
-/// with nothing that would ever re-ask. fileproviderd throttles a change enumeration that
-/// keeps failing (`MQ-005`), so a few seconds of "not ready" during a domain restart became
-/// an event stream backed off to tens of minutes and a mount that took no server-side
-/// change at all (2026-09-08). The rule lives in `IndexReaderReadiness`, which is a value
-/// and has tests; here it is wired to an XPC round trip and to the file `doctor` reads.
+/// **Readiness is not a latch.** The agent answers `indexReady` false for any location
+/// whose runtime is not up yet and for any index it cannot read at that instant, so an
+/// instance that asked once in its `init` and kept the answer would serve the working set
+/// `.serverUnreachable` for the whole of its life with nothing to re-ask. fileproviderd
+/// throttles a change enumeration that keeps failing (`MQ-005`), which turns a few seconds
+/// of "not ready" during a domain restart into an event stream backed off to tens of
+/// minutes and a mount that takes no server-side change at all. The rule lives in
+/// `IndexReaderReadiness`, which is a value and has tests; here it is wired to an XPC round
+/// trip and to the file `doctor` reads.
 public final class IndexReaderStore: ReaderStoring {
     private let locationID: String
     private let rootDisplayName: String
@@ -137,8 +137,7 @@ public final class IndexReaderStore: ReaderStoring {
         do {
             let reader = try open()
             // One meta read and one row read, and no third statement for the generation:
-            // the meta check has already read it, and `item(for:)` arrives in bulk
-            // (section 5.2).
+            // the meta check has already read it, and `item(for:)` arrives in bulk.
             let (row, generation) = try reader.itemAndGeneration(identifier: identifier.rawValue)
             lastGeneration = generation
             return ItemView(snapshot: row.snapshot, rootDisplayName: rootDisplayName)
@@ -152,7 +151,7 @@ public final class IndexReaderStore: ReaderStoring {
             return nil
         } catch IndexError.reconciling {
             // Not an error to the system from here: the agent knows it is reconciling and
-            // refuses the call itself, with the message section 5.3 wants shown.
+            // refuses the call itself, with the message it wants shown.
             failed(IndexError.reconciling)
             return nil
         } catch {
@@ -183,8 +182,8 @@ public final class IndexReaderStore: ReaderStoring {
                 case .deleted:
                     deleted.append(ProviderItemIdentifier(entry.identifier))
                 case .modified:
-                    // An anchor whose identifier no longer has a row is reported as a
-                    // deletion: only a deletion removes a row (section 5.3).
+                    // An anchor whose identifier has no row is reported as a deletion: only
+                    // a deletion removes a row (docs/design/item-index.md).
                     if let row = try? reader.item(identifier: entry.identifier) {
                         items.append(
                             ItemView(snapshot: row.snapshot, rootDisplayName: rootDisplayName))
@@ -228,7 +227,7 @@ public final class IndexReaderStore: ReaderStoring {
         }
     }
 
-    // MARK: The test seam of section 5.2's statement cache
+    // MARK: The test seam of the statement cache
 
     /// `IndexReader.observeStatements` and `.observeCompilations`, reachable from a
     /// scenario, and kept here so a reader opened later in the store's life is observed
@@ -255,7 +254,7 @@ public final class IndexReaderStore: ReaderStoring {
     // MARK: The state file
 
     /// What the extension knows about its own reader, written where `sshdrive doctor` can
-    /// read it (section 5.2).
+    /// read it.
     ///
     /// This is the one thing the extension writes into the group container besides the
     /// `-shm` its read-only connection needs, and it is deliberately a file rather than an

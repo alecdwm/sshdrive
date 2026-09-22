@@ -81,10 +81,10 @@ public final class AgentHarness: @unchecked Sendable {
             clock: clock)
         configure(&environment)
         self.environment = environment
-        // Section 4.2's askpass broker and keychain. The default one is built from the
-        // environment's own store with no askpass program and no `ssh` to resolve with,
-        // which is right for every scenario that never spawns one; a scenario that drives
-        // `add` end to end hands in its own (see `AddFlowScenarios`).
+        // The askpass broker and keychain (docs/design/secrets.md). The default one is
+        // built from the environment's own store with no askpass program and no `ssh` to
+        // resolve with, which is right for every scenario that never spawns one; a
+        // scenario that drives `add` end to end hands in its own (see `AddFlowScenarios`).
         self.manager = DomainManager(environment: environment, secrets: secrets)
     }
 
@@ -154,8 +154,8 @@ public final class AgentHarness: @unchecked Sendable {
     }
 
     /// The same call with a terminal attached: `add` and a re-keying `set` are the two
-    /// commands that relay a prompt to the CLI (section 4.2), and `TerminalRelaying` is
-    /// the seam they reach it through.
+    /// commands that relay a prompt to the CLI (docs/design/secrets.md), and
+    /// `TerminalRelaying` is the seam they reach it through.
     public func control(
         _ command: String, _ arguments: [String: String], relay: any TerminalRelaying
     ) async throws -> [String: Any] {
@@ -166,10 +166,10 @@ public final class AgentHarness: @unchecked Sendable {
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
-    /// Section 6.1's sleep and wake, section 6.3's path gate and section 4.2's
-    /// screen-unlock re-arm, wired to this agent the way `DomainManager.start()` wires
-    /// them - without paying for the rest of `start()`, which takes a login-shell snapshot
-    /// and sweeps `$TMPDIR` for orphaned control sockets.
+    /// Sleep and wake, the network path gate and the screen-unlock re-arm, wired to this
+    /// agent the way `DomainManager.start()` wires them - without paying for the rest of
+    /// `start()`, which takes a login-shell snapshot and sweeps `$TMPDIR` for orphaned
+    /// control sockets.
     public func installSystemObservers() async {
         await manager.installSystemObservers()
     }

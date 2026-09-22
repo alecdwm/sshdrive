@@ -39,7 +39,7 @@ public enum ModelCall: Equatable, Sendable {
     case domainRenamedInPlace(from: String, to: String)
 }
 
-/// The simulated fileproviderd (`docs/testing-architecture.md` section 3).
+/// The simulated fileproviderd (docs/design/testing.md).
 ///
 /// It owns the domains and their replicas and drives `ProviderCore` through exactly the
 /// protocols `Apps/FileProvider` implements, so a scenario exercises the shipping decision
@@ -86,11 +86,8 @@ public final class FileProviderD {
     public var nextAddReportsError: DomainError?
 
     /// `add(domain)`. The system creates the domain, launches a provider instance and asks
-    /// the working-set enumerator for the anchor it should start from.
-    ///
-    /// Not modelled here and deliberately: the trash node the system creates for itself at
-    /// this point (`MQ-075`) and the two questions it then asks about it (`MQ-009`,
-    /// `MQ-010`). Those are suite B, at step 3 of the migration.
+    /// the working-set enumerator for the anchor it should start from, and it creates the
+    /// trash node and asks about it (`MQ-075`, `MQ-009`, `MQ-010`).
     @discardableResult
     public func addDomain(
         identifier: String, displayName: String, supportsSyncingTrash: Bool? = nil,
@@ -163,7 +160,7 @@ public final class ModelDomain: ProviderDomainSignalling {
     /// is created and asked about either way.
     public let supportsSyncingTrash: Bool
 
-    /// Finder, the user. Section 3.1's second part of the model.
+    /// Finder, the user.
     public private(set) lazy var finder = Finder(domain: self)
 
     // MARK: The write queue (`MQ-035`, `MQ-014`, `MQ-003`)
@@ -437,7 +434,7 @@ public final class ModelDomain: ProviderDomainSignalling {
     }
 
     /// The system re-attempting a change enumeration on the instance it already has,
-    /// which is what the backoff schedules and what the 2026-09-08 trace shows: one
+    /// which is what the backoff schedules and what was measured on 2026-09-08: one
     /// instance answered `reader=not-ready` from the agent, then answered from its own
     /// reader once the window closed, with no restart and no signal from anyone.
     ///

@@ -3,8 +3,8 @@ import Foundation
 import Logging
 import ProviderCore
 
-/// The system's side of every File Provider call the agent makes, in memory
-/// (docs/testing-architecture.md section 2.3's `ReplicaControlling` row).
+/// The system's side of every File Provider call the agent makes, in memory (the
+/// `ReplicaControlling` seam, docs/design/testing.md).
 ///
 /// It is deliberately not a fileproviderd: `SystemModel.FileProviderD` is that, and it
 /// drives `ProviderCore`. This is the *agent's* view - the domain list, the two
@@ -40,20 +40,20 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     private var _times: [String: (atime: Double, mtime: Double)] = [:]
     private var _evictionRefusals: [String: [String: Any]] = [:]
     /// How many more times each staged refusal answers before the item becomes evictable.
-    /// Nil is "for ever", which is what `refuseEviction` used to mean and still does.
-    /// A finite count is `MQ-017`/`MQ-034`'s shape: the system is still finishing a
-    /// modification, or has not yet re-read a row whose policy just changed, and the same
-    /// call a moment later succeeds - which is what the doubling backoff is for.
+    /// Nil is "for ever", which is what `refuseEviction` means. A finite count is
+    /// `MQ-017`/`MQ-034`'s shape: the system is still finishing a modification, or has not
+    /// yet re-read a row whose policy just changed, and the same call a moment later
+    /// succeeds - which is what the doubling backoff is for.
     private var _refusalsRemaining: [String: Int] = [:]
-    /// `MQ-060`, scripted the other way round. **Measured** (S4, 2026-09-04, macOS 26.4):
+    /// `MQ-060`, scripted the other way round. **Measured** on macOS 26.4, 2026-09-04:
     /// a launchd agent's `stat` and `open` under its *own* domain's mount draw no TCC
     /// prompt and no `EPERM`, because the access is evaluated as
     /// `kTCCServiceFileProviderDomain` with our domain as the indirect object. The rule in
     /// the model is therefore a **no-op**: nothing is gated, and `false` here is the
     /// measured world. `true` is the counterfactual - "TCC would deny it" - which no
-    /// scenario may treat as measured behaviour (TCC is VM-only,
-    /// `docs/testing-architecture.md` section 7); it exists so a scenario can pin down
-    /// what our code *does* if that rule ever changes, which is the thing we control.
+    /// scenario may treat as measured behaviour (TCC is VM-only, docs/design/testing.md);
+    /// it exists so a scenario can pin down what our code *does* if that rule ever
+    /// changes, which is the thing we control.
     private var _tccDenied = false
     /// A hook on `pendingIdentifiers`; see `setOnPendingIdentifiers`.
     private var _onPending: (@Sendable (String) -> Void)?
@@ -61,9 +61,9 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     private var _onMaterialized: (@Sendable (String) async -> Void)?
     private var _evicted: [String] = []
     /// A domain the system has no manager for: every call for it answers "no news"
-    /// (section 6.5), which is never "the user evicted everything".
+    /// (docs/design/root-set.md), which is never "the user evicted everything".
     private var _unmanaged: Set<String> = []
-    /// What `add(domain)` throws, if anything - S9's 4099 that arrives *after* the call
+    /// What `add(domain)` throws, if anything - the 4099 that arrives *after* the call
     /// landed is staged by throwing while still recording the domain.
     private var _addFailure: (error: Error, landsAnyway: Bool)?
     /// Where the mount lives, so `getUserVisibleURL` answers something a `stat` can be
@@ -121,8 +121,8 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         lock.lock(); _pending[locationID] = identifiers; lock.unlock()
     }
 
-    /// The replica's own atime and mtime for one item, which is what section 7's TTL rule
-    /// reads before deciding (S4: an eviction moves atime, so it is read first).
+    /// The replica's own atime and mtime for one item, which the TTL rule reads before
+    /// deciding (docs/design/eviction.md; an eviction moves atime, so it is read first).
     public func setReplicaTimes(
         identifier: String, atime: Double, mtime: Double, locationID: String
     ) {
@@ -170,7 +170,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
             ])
     }
 
-    /// No manager for this domain: it is being added or removed (section 6.5).
+    /// No manager for this domain: it is being added or removed.
     public func setUnmanaged(_ locationID: String, _ value: Bool = true) {
         lock.lock()
         if value { _unmanaged.insert(locationID) } else { _unmanaged.remove(locationID) }
@@ -250,7 +250,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         // Awaited with the lock down, exactly like `pendingIdentifiers`' hook. This is the
         // one File Provider call `status` can still make for a location whose materialized
         // set nothing has published recently, so it is where `N10` parks a location to
-        // watch the per-location deadline fire (section 8).
+        // watch the per-location deadline fire (docs/design/cli.md).
         await hook?(locationID)
         return unmanaged ? nil : answer
     }

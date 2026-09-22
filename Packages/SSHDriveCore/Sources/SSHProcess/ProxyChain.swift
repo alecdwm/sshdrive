@@ -6,7 +6,7 @@ import Foundation
 /// User and port stay separate from the host because `ssh` does not parse the
 /// `user@host:port` form itself — `ssh -G alec@10.0.0.1:2222` resolves the host to the
 /// literal `10.0.0.1:2222` — so the agent splits it and passes `-l` and `-p`
-/// (DESIGN.md section 6.1). When the entry names an alias with neither, the alias is
+/// (docs/design/ssh.md). When the entry names an alias with neither, the alias is
 /// passed through untouched so the hop's own host block still applies, exactly as it
 /// would under `ssh -J`.
 public struct JumpHop: Sendable, Equatable {
@@ -69,7 +69,7 @@ public struct JumpHop: Sendable, Equatable {
     }
 }
 
-/// Builds the agent's own `ProxyCommand` for a `ProxyJump` chain (DESIGN.md section 6.1).
+/// Builds the agent's own `ProxyCommand` for a `ProxyJump` chain (docs/design/ssh.md).
 ///
 /// `ssh` is never given the `ProxyJump`: left to itself it spawns the hop as
 /// `<argv[0]> -W '[%h]:%p' … <jump>`, and that child reads the config files but receives
@@ -112,7 +112,7 @@ public enum ProxyChainBuilder {
             // This hop is reached through the one before it. Cancel any ProxyJump its own
             // host block may carry, since we are supplying the route - and put the
             // ProxyCommand first, because `ProxyJump=none` ahead of it drops it (see
-            // SSHCommandBuilder.master and section 13).
+            // SSHCommandBuilder.master and docs/design/ssh.md).
             arguments += ["-o", "ProxyCommand=\(innerProxyCommand)", "-o", "ProxyJump=none"]
         }
         if let user = hop.user { arguments += ["-l", user] }
@@ -127,9 +127,9 @@ public enum ProxyChainBuilder {
     /// `ssh` percent-expands the **whole** `ProxyCommand` string before handing it to
     /// `/bin/sh -c`, including the `%h:%p` belonging to a hop nested inside it, so an
     /// unescaped two-hop chain has hop 1 dialling the *destination's* host and port
-    /// instead of hop 2's: measured against the testbed on 2026-09-04, where hop 2 then
-    /// found itself talking to `inner` while checking `bastion-b`'s host key and failed
-    /// with "REMOTE HOST IDENTIFICATION HAS CHANGED". Every embedding doubles again, so a
+    /// instead of hop 2's. Measured against the testbed, 2026-09-04: hop 2 found itself
+    /// talking to `inner` while checking `bastion-b`'s host key and failed with "REMOTE
+    /// HOST IDENTIFICATION HAS CHANGED". Every embedding doubles again, so a
     /// three-hop chain's innermost `-W` is written `%%%%h:%%%%p`.
     static func escapingPercentsForOneExpansion(_ command: String) -> String {
         command.replacingOccurrences(of: "%", with: "%%")
@@ -139,9 +139,9 @@ public enum ProxyChainBuilder {
     /// there is no chain at all.
     ///
     /// `ssh` runs a `ProxyCommand` through `/bin/sh -c`, so every element is
-    /// single-quoted (section 9.2's rule), and the nested `ProxyCommand` of an inner hop
-    /// is quoted again as it is embedded — which is what makes an identity path
-    /// containing a space and a quote survive two levels of shell — and percent-escaped
+    /// single-quoted (docs/design/security.md), and the nested `ProxyCommand` of an
+    /// inner hop is quoted again as it is embedded, which is what makes an identity path
+    /// containing a space and a quote survive two levels of shell, and percent-escaped
     /// once more for each level it descends.
     public static func proxyCommand(
         for hops: [JumpHop], identityAgentNone: Bool, hostKeyChecking: String = "yes"
@@ -162,7 +162,8 @@ public enum ProxyChainBuilder {
     /// agent applies: that inner `ssh` is found through `PATH`, reads the config
     /// unmodified, attaches to any `ControlMaster auto` socket for the bastion, and signs
     /// through the key agent during the `IdentityAgent=none` collect pass. `add` detects
-    /// it, says so, and recommends `ProxyJump`; the location is still created (section 6.1).
+    /// it, says so, and recommends `ProxyJump`; the location is still created
+    /// (docs/design/ssh.md).
     public static func isHandWrittenSSHProxyCommand(_ resolved: String?) -> Bool {
         guard let resolved else { return false }
         let trimmed = resolved.trimmingCharacters(in: .whitespaces)

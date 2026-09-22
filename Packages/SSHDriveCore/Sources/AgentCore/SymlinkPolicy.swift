@@ -1,19 +1,20 @@
 import Foundation
 import SFTP
 
-/// DESIGN.md section 5.7's lexical inside-the-share check, and nothing else.
+/// The lexical inside-the-share check (docs/design/symlinks.md), and nothing else.
 ///
 /// Remote symlinks are never followed. A link is shown only if its target stays inside
 /// the location's root, and the check is **lexical**: it resolves the target string
 /// against the link's own directory, collapses `.` and `..`, and never touches the
-/// server. Section 9.1 depends on that: "the target string of a link is checked lexically
-/// once and otherwise handed to the Mac verbatim; it is never joined to a remote path or
-/// resolved on the server, so a `..` inside a target cannot steer a remote operation".
+/// server. Path containment depends on that (docs/design/security.md): the target string
+/// of a link is checked lexically once and otherwise handed to the Mac verbatim; it is
+/// never joined to a remote path or resolved on the server, so a `..` inside a target
+/// cannot steer a remote operation.
 ///
-/// "The root" has two spellings and either is accepted (section 5.7): the canonical path
-/// `realpath` returned at `add`, and the path as the user typed it - or, for the default
-/// root, the `$HOME` the probe read. On a host where `/home` is itself a symlink the
-/// canonical root is `/var/home/alec` while every absolute link says `/home/alec/…`, and
+/// "The root" has two spellings and either is accepted (docs/design/symlinks.md): the
+/// canonical path `realpath` returned at `add`, and the path as the user typed it - or, for
+/// the default root, the `$HOME` the probe read. On a host where `/home` is itself a symlink
+/// the canonical root is `/var/home/alec` while every absolute link says `/home/alec/…`, and
 /// checked against the canonical spelling alone all of them would be hidden.
 public enum SymlinkPolicy {
 
@@ -21,7 +22,7 @@ public enum SymlinkPolicy {
     public enum Decision: Equatable, Sendable {
         /// Shown, as a native symlink whose Mac-side target is this string. For a
         /// relative target that is the server's own string; for an absolute one inside
-        /// the root it is the rewritten relative form (section 5.7).
+        /// the root it is the rewritten relative form (docs/design/symlinks.md).
         case show(macTarget: String)
         /// Omitted from enumeration entirely, logged at debug level, otherwise ignored.
         case hide(reason: String)
@@ -29,7 +30,8 @@ public enum SymlinkPolicy {
 
     /// The two spellings of the root a target may be measured against.
     public struct Roots: Equatable, Sendable {
-        /// The canonical absolute path `realpath` returned at `add` (section 9.1).
+        /// The canonical absolute path `realpath` returned at `add`
+        /// (docs/design/security.md).
         public var canonical: String
         /// The path as the user typed it, or `$HOME` for the default root. Nil when it
         /// is the same string as the canonical one, or when no probe ever ran.
@@ -42,7 +44,7 @@ public enum SymlinkPolicy {
         }
     }
 
-    /// The message section 5.7 requires for a target that would leave the share. It is
+    /// The message for a target that would leave the share. It is
     /// shown to the user through the sync error list, so it says what to do.
     public static let escapingTargetMessage =
         "The target of a symbolic link must be a relative path that stays inside this location."
@@ -65,7 +67,7 @@ public enum SymlinkPolicy {
         if target.hasPrefix("/") {
             // Absolute. It is shown only if it lands inside the root under one of the two
             // spellings, and then the Mac-side target is rewritten relative to the link's
-            // own directory - the server keeps the absolute string (section 5.7).
+            // own directory - the server keeps the absolute string (docs/design/symlinks.md).
             guard let inside = componentsInsideRoot(absolute: target, roots: roots) else {
                 return .hide(
                     reason: "the target \(target) is outside this location")
@@ -82,8 +84,9 @@ public enum SymlinkPolicy {
         return .show(macTarget: target)
     }
 
-    /// The check as `createItem` applies it (section 5.7, "Creating symlinks from the
-    /// Mac"). Stricter than `evaluate`: an absolute target from the Mac is a *Mac* path
+    /// The check as `createItem` applies it, for a symlink created from the Mac
+    /// (docs/design/symlinks.md). Stricter than `evaluate`: an absolute target from the
+    /// Mac is a *Mac* path
     /// (`/Users/…/CloudStorage/…`), meaningless on the server, and is refused even when
     /// it points inside the mount. Returns the string to hand SFTP `symlink` unchanged.
     public static func targetForCreate(
@@ -95,13 +98,12 @@ public enum SymlinkPolicy {
         return target
     }
 
-    /// The check as a rename or move applies it (section 5.7): a relative target is
-    /// re-checked from the **destination** directory, and an absolute target inside the
+    /// The check as a rename or move applies it (docs/design/symlinks.md): a relative target
+    /// is re-checked from the **destination** directory, and an absolute target inside the
     /// root stays inside wherever the link lives. Allowing the move and then hiding the
     /// result would be a way to plant an escaping link on the server through the mount.
-    /// Returns the Mac-side target for the link's new home, which for an absolute
-    /// in-root target is a different relative spelling and therefore a new metadata
-    /// version.
+    /// Returns the Mac-side target for the link's new home, which for an absolute in-root
+    /// target is a different relative spelling and therefore a new metadata version.
     public static func targetForMove(
         _ target: String, to destinationDirectory: RelativePath, roots: Roots
     ) throws -> String {
@@ -111,7 +113,7 @@ public enum SymlinkPolicy {
         }
     }
 
-    /// EINVAL with section 5.7's message. `Refusal` rather than an `SFTPError` because
+    /// EINVAL with `escapingTargetMessage`. `Refusal` rather than an `SFTPError` because
     /// nothing on the wire refused anything: this is our own rule.
     public struct Refusal: Error, LocalizedError, Equatable {
         public init() {}
@@ -127,7 +129,7 @@ public enum SymlinkPolicy {
     }
 
     /// Resolves a relative target against `base`, collapsing `.` and `..`. Nil when it
-    /// climbs above the root, which is exactly the case section 5.7 hides.
+    /// climbs above the root, which is exactly the case a listing hides.
     static func resolve(relative target: String, from base: RelativePath) -> [String]? {
         var stack = base.components.map { String(decoding: $0, as: UTF8.self) }
         for component in split(target) {
@@ -169,8 +171,8 @@ public enum SymlinkPolicy {
     }
 
     /// The relative path from `directory` to `target`, both given relative to the root.
-    /// This is the rewrite section 5.7 asks for: "the target rewritten as the relative
-    /// path from the link's directory to the resolved location".
+    /// This is the rewrite docs/design/symlinks.md asks for: the target rewritten as the
+    /// relative path from the link's directory to the resolved location.
     static func relativeSpelling(from directory: RelativePath, to target: [String]) -> String {
         let here = directory.components.map { String(decoding: $0, as: UTF8.self) }
         var common = 0

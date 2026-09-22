@@ -8,10 +8,10 @@ import XPCProtocols
 /// `KeychainSecretsStore` itself cannot be tested here. The data-protection keychain under
 /// `RWGDZAYBM8.org.shirls.sshdrive` needs the `keychain-access-groups` entitlement, which
 /// needs an embedded provisioning profile, which only the app bundle has - so only the
-/// signed agent can reach it (DESIGN.md section 3.1, and S1 d2). A `swift test` binary
-/// gets `errSecMissingEntitlement`. The equivalent round trip on the VM is
+/// signed agent can reach it (docs/design/components.md). A `swift test` binary gets
+/// `errSecMissingEntitlement`. The equivalent round trip on the VM is
 /// `sshdrive debug secrets store|lookup|delete|list`, run against the launchd-started
-/// agent; see docs/skeleton-notes.md.
+/// agent.
 final class SecretsStoreContractTests: XCTestCase {
 
     func testStoreLookupDeleteList() throws {
@@ -36,7 +36,7 @@ final class SecretsStoreContractTests: XCTestCase {
     func testKeysSkipsAccountsThatAreNotOurs() throws {
         let store = InMemorySecretsStore([
             "passphrase:/k": "x",
-            "spike:s1d2": "left over from the S1 hook",
+            "other:not-ours": "an account this store does not manage",
         ])
         XCTAssertEqual(try store.keys(), [.passphrase(path: "/k")])
         XCTAssertEqual(try store.accounts().count, 2)

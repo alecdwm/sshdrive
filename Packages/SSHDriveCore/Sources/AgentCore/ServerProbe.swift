@@ -4,33 +4,32 @@ import Logging
 import SFTP
 import SSHProcess
 
-/// The capability probe of DESIGN.md section 8.1, run on every connection.
+/// The capability probe (docs/design/cli.md), run on every connection.
 ///
-/// "It consists of the SFTP `extensions` list from the SFTP init reply, whether that reply
-/// arrived clean or behind rc-file output (section 9.2), whether an exec channel opens and
-/// delivers its sentinel, and one shell script (section 9.2) that reports `uname -sm`,
-/// `id -u` and `id -G` (two commands: POSIX `id` accepts only one of `-u`, `-g`, `-G` per
-/// invocation), `$HOME` as the account spells it (section 5.7), the `find` flavour and
-/// whether it takes `-cmin`, the presence of `sha256sum`/`shasum`, and a writable,
-/// executable cache directory."
+/// It consists of the SFTP `extensions` list from the SFTP init reply, whether that reply
+/// arrived clean or behind rc-file output (docs/design/security.md), whether an exec
+/// channel opens and delivers its sentinel, and one shell script
+/// (docs/design/security.md) that reports `uname -sm`, `id -u` and `id -G` (two commands:
+/// POSIX `id` accepts only one of `-u`, `-g`, `-G` per invocation), `$HOME` as the account
+/// spells it (docs/design/symlinks.md), the `find` flavour and whether it takes `-cmin`,
+/// the presence of `sha256sum`/`shasum`, and a writable, executable cache directory.
 ///
 /// One exec channel and one script for all of it, because an exec channel is the scarcest
-/// thing the channel budget has (section 6.1): on a `MaxSessions 2` server there is
+/// thing the channel budget has (docs/design/ssh.md): on a `MaxSessions 2` server there is
 /// exactly one, and the sweep and the helper want it too.
 ///
 /// Where there is no shell - a `ForceCommand internal-sftp` account, or a `MaxSessions 1`
 /// server that cannot afford the channel at all - everything below `uname` stays unknown
-/// and section 5.4's SFTP-only rule applies: full capabilities, and permission errors
-/// learned from the sync error list.
+/// and the SFTP-only rule applies (docs/design/names-and-attributes.md): full
+/// capabilities, and permission errors learned from the sync error list.
 public enum ServerProbe {
 
-    /// What the probe found. The identity half is section 5.4's; the rest is section 8.1's
-    /// capability report.
+    /// What the probe found. The identity half feeds the permissions mapping; the rest
+    /// feeds the capability report.
     public struct Result: Sendable {
         public init() {}
         public var identity: ServerIdentity = .unknown
-        /// What the account printed before our sentinel, which section 9.2 says `status`
-        /// shows.
+        /// What the account printed before our sentinel, which `status` shows.
         public var shellPrefix: String = ""
         /// Empty when the probe worked. Non-empty means no shell access.
         public var failure: String = ""
@@ -39,7 +38,7 @@ public enum ServerProbe {
 
         /// `uname -s` and `uname -m`, e.g. "Linux x86_64". Empty when there is no shell.
         public var uname: String = ""
-        /// `$HOME` as the account spells it (section 5.7).
+        /// `$HOME` as the account spells it (docs/design/symlinks.md).
         public var home: String = ""
         /// "gnu", "busybox", "bsd" or "" - what `find` is.
         public var findFlavour: String = ""
@@ -105,10 +104,10 @@ public enum ServerProbe {
         do {
             channel = try await master.openExecChannel(script: remote, readinessDeadline: timeout)
         } catch let error as SSHProcessError {
-            // Section 9.2: a ForceCommand account answers with a plain sentence or with
-            // SFTP framing, and is reported as "no shell access", never as unusable
-            // output. Either way the identity is unknown and section 5.4's SFTP-only rule
-            // takes over.
+            // A ForceCommand account answers with a plain sentence or with SFTP framing,
+            // and is reported as "no shell access", never as unusable output
+            // (docs/design/security.md). Either way the identity is unknown and the
+            // SFTP-only rule takes over.
             result.failure = "\(error.localizedDescription)"
             return result
         } catch {
@@ -172,9 +171,9 @@ public enum ServerProbe {
     }
 
     /// GNU `find` prints `find (GNU findutils) 4.x`; busybox prints its own banner and no
-    /// `--version` at all. No busybox build has `-cmin` (2026-09-04, testbed, section 6.4),
-    /// so "no `--version` and no `-cmin`" is the busybox signature and everything else
-    /// without a GNU banner is treated as BSD.
+    /// `--version` at all. No busybox build has `-cmin`, so "no `--version` and no
+    /// `-cmin`" is the busybox signature and everything else without a GNU banner is
+    /// treated as BSD.
     public static func flavour(fromVersionText text: String, takesCmin: Bool) -> String {
         let lower = text.lowercased()
         if lower.contains("gnu findutils") { return "gnu" }

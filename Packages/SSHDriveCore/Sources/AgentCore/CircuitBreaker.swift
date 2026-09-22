@@ -1,15 +1,15 @@
 import Foundation
 import SSHProcess
 
-/// DESIGN.md section 6.3's per-location circuit breaker, as a pure state machine.
+/// The per-location circuit breaker (docs/design/offline.md), as a pure state machine.
 ///
 /// It is a `struct` and it takes the time as an argument rather than reading a clock, so
-/// every rule in section 6.3 - the 2 s doubling to 60 s, the bounded wait during an
+/// every rule - the 2 s doubling to 60 s, the bounded wait during an
 /// attempt, the fail-fast for everything else, the stop on an auth or host-key failure
 /// and the one re-armed attempt after a deadline stop - is a unit test with no sleeping
 /// in it. `ConnectionGate` is what owns one, runs the attempts and does the waiting.
 ///
-/// The four rules of section 6.3, in the order the section states them:
+/// The four rules, in the order docs/design/offline.md states them:
 ///
 /// 1. **No path at all is `.serverUnreachable` immediately.** `NWPathMonitor` says so and
 ///    nothing else needs to be consulted; `setNetworkPath(false)` is that gate.
@@ -17,7 +17,8 @@ import SSHProcess
 ///    to 60 s - during which every call fails fast without touching the network. A path
 ///    change, wake from sleep or `sshdrive test` resets it.
 /// 3. **While an attempt is in progress, calls wait for it,** bounded by the attempt's own
-///    remaining deadline: at most the 60 s authentication deadline of section 4.2,
+///    remaining deadline: at most the 60 s authentication deadline
+///    (docs/design/secrets.md),
 ///    measured from the spawn of `ssh`, which already contains the 15 s `ConnectTimeout`.
 ///    Waiting rather than failing is deliberate: the first enumeration after login or
 ///    wake arrives during the connect, and the system never retries an enumeration on its
@@ -25,14 +26,14 @@ import SSHProcess
 ///    the user clicked again.
 /// 4. **Auth and host-key failures do not go through the breaker at all:** they stop
 ///    reconnection until the user acts, or - for a deadline stop only - until the
-///    screen-unlock or present-user re-arm of section 4.2 (`DeadlineRearmState`).
+///    screen-unlock or present-user re-arm (`DeadlineRearmState`, docs/design/secrets.md).
 public struct CircuitBreaker: Sendable {
 
-    /// Section 6.3: "after a failed connection attempt the location is marked down for a
-    /// backoff interval (2 s, doubling to 60 s)".
+    /// After a failed connection attempt the location is marked down for a backoff
+    /// interval: 2 s, doubling to 60 s.
     public static let firstBackoffSeconds: TimeInterval = 2
-    /// Section 4.2 and 6.3: the authentication deadline, measured from the spawn, is the
-    /// longest a call may be held during an attempt.
+    /// The authentication deadline, measured from the spawn, is the longest a call may be
+    /// held during an attempt.
     public static let authenticationDeadlineSeconds: TimeInterval = 60
 
     /// What a caller should do with the call it is holding.
@@ -88,8 +89,8 @@ public struct CircuitBreaker: Sendable {
         case up
         /// Open. Every call fails fast until `until`, then one half-open probe is let out.
         case backingOff(until: TimeInterval)
-        /// Section 6.1: reconnection has stopped until the user acts, or until the
-        /// re-arm of section 4.2 for a deadline stop.
+        /// Reconnection has stopped until the user acts, or until the re-arm
+        /// (docs/design/secrets.md) for a deadline stop.
         case stopped(SSHExitClassification)
     }
 
@@ -101,11 +102,11 @@ public struct CircuitBreaker: Sendable {
     /// its own connect anything, it only stops the immediate refusal and resets rule 2.
     public private(set) var hasNetworkPath = true
     /// The cap the last failure asked for: 60 s normally, 300 s for a key agent that is
-    /// not ready, since a locked key agent stays locked for hours (section 6.1).
+    /// not ready, since a locked key agent stays locked for hours (docs/design/ssh.md).
     public private(set) var backoffCapSeconds: TimeInterval = 60
 
-    /// Multiplies the computed backoff. Section 6.1 says "jittered backoff"; a test
-    /// injects `{ _ in 1 }` and gets exact numbers.
+    /// Multiplies the computed backoff, which is jittered. A test injects `{ _ in 1 }`
+    /// and gets exact numbers.
     private let jitter: @Sendable (TimeInterval) -> TimeInterval
 
     public init(jitter: @escaping @Sendable (TimeInterval) -> TimeInterval = CircuitBreaker.defaultJitter) {
@@ -156,7 +157,7 @@ public struct CircuitBreaker: Sendable {
 
     /// Reports the attempt's outcome. The classification decides between rule 2 and rule
     /// 4; it is the same `SSHExitClassifier` answer the master's exit produced, so there
-    /// is one definition of "does this stop reconnection" and not two (section 6.1).
+    /// is one definition of "does this stop reconnection" and not two (docs/design/ssh.md).
     public mutating func attemptFailed(_ classification: SSHExitClassification, now: TimeInterval) {
         if classification.stopsReconnection {
             state = .stopped(classification)
@@ -187,8 +188,8 @@ public struct CircuitBreaker: Sendable {
         state = .idle
     }
 
-    /// A path change, wake from sleep, or `sshdrive test` (section 6.3). Clears a backoff
-    /// but never a stop: an auth failure is still an auth failure after a Wi-Fi hop.
+    /// A path change, wake from sleep, or `sshdrive test` (docs/design/offline.md). Clears a
+    /// backoff but never a stop: an auth failure is still an auth failure after a Wi-Fi hop.
     public mutating func reset() {
         consecutiveFailures = 0
         backoffCapSeconds = 60
@@ -200,7 +201,8 @@ public struct CircuitBreaker: Sendable {
         }
     }
 
-    /// Section 4.2's re-arm: exactly one attempt after a deadline stop. Refusals are
+    /// The re-arm (docs/design/secrets.md): exactly one attempt after a deadline stop.
+    /// Refusals are
     /// never re-armed, so a `stopped(.authenticationFailed)` is left alone.
     @discardableResult
     public mutating func rearmOneAttempt() -> Bool {
@@ -213,7 +215,7 @@ public struct CircuitBreaker: Sendable {
     }
 
     /// `sshdrive test`, `passwd`, or a change to the location's settings: the only things
-    /// that clear a refusal (section 6.1).
+    /// that clear a refusal (docs/design/ssh.md).
     public mutating func clearStop() {
         if case .stopped = state { state = .idle }
         consecutiveFailures = 0
@@ -222,7 +224,7 @@ public struct CircuitBreaker: Sendable {
 
     /// Rule 1. Losing the path does not disturb an attempt that is running - it will fail
     /// on its own - but it does make every later call refuse at once. Gaining one resets
-    /// the backoff, which is section 6.3's "a path change … resets the breaker".
+    /// the backoff: a path change resets the breaker.
     public mutating func setNetworkPath(_ available: Bool) {
         let had = hasNetworkPath
         hasNetworkPath = available

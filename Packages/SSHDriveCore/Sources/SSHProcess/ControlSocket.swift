@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-/// The mux socket path and the orphan sweep (DESIGN.md section 6.1).
+/// The mux socket path and the orphan sweep (docs/design/ssh.md).
 public enum ControlSocket {
     public static let namePrefix = "sshdrive-"
 
@@ -40,17 +40,17 @@ public enum ControlSocket {
     ///
     /// The name alone is not enough: `$TMPDIR` is a shared directory and the prefix is not
     /// ours exclusively - the package's own tests write `sshdrive-nested-<uuid>.sqlite`
-    /// there, and its `-wal` and `-shm` sidecars were counted as six orphaned control
-    /// sockets by `sshdrive doctor`, which reported a healthy install as failing
-    /// (2026-09-04). So the type is checked too: `S_IFSOCK` with `lstat`, never following
-    /// a link, and a non-socket with our prefix is left alone rather than deleted.
+    /// there, and a name-only match counts its `-wal` and `-shm` sidecars as orphaned
+    /// control sockets, which makes `sshdrive doctor` report a healthy install as
+    /// failing. So the type is checked too: `S_IFSOCK` with `lstat`, never following a
+    /// link, and a non-socket with our prefix is left alone rather than deleted.
     public static func existingSockets() -> [String] {
         existingSockets(in: temporaryDirectory())
     }
 
     /// The same scan against a named directory, so a test can hold its own `$TMPDIR`
     /// rather than sweeping the shared one out from under whatever else is running
-    /// (`docs/testing-architecture.md` section 5, K5).
+    /// (scenario `K5`).
     public static func existingSockets(in directory: String) -> [String] {
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         return entries.filter { $0.hasPrefix(namePrefix) }
@@ -64,8 +64,7 @@ public enum ControlSocket {
     ///
     /// `SQ-074`: the answer for a clean install is the empty list even when `$TMPDIR` is
     /// full of `sshdrive-nested-<uuid>.sqlite` sidecars, because a candidate is a socket
-    /// or it is not a candidate. A name-only version of this reported six orphans on a
-    /// healthy install (2026-09-04).
+    /// or it is not a candidate.
     public static func orphanedSockets(
         inUse: Set<String>, in directory: String = temporaryDirectory()
     ) -> [String] {
@@ -79,7 +78,8 @@ public enum ControlSocket {
     }
 
     /// `lstat` rather than `stat`: a symlink at that name is not our socket, and following
-    /// it would let anything in a shared directory decide what we unlink (section 9.1).
+    /// it would let anything in a shared directory decide what we unlink
+    /// (docs/design/security.md).
     public static func isSocket(_ path: String) -> Bool {
         var info = stat()
         guard lstat(path, &info) == 0 else { return false }
@@ -96,10 +96,10 @@ public enum ControlSocket {
     /// a master whose socket has already been unlinked - or one that has stopped serving
     /// it - cannot be asked to leave at all, and unlinking the socket only makes it
     /// unreachable: the `ssh` stays, holding a TCP connection to the server, a mux client
-    /// or two, and its share of the server's `MaxSessions`, for ever. Milestone 7/8 left
-    /// one behind on four install cycles out of four (docs/spikes/results.md, 2026-09-05).
-    /// So the sweep takes the pid `-O check` prints, and if that process is still alive
-    /// after the exit request it gets a TERM and then, a moment later, a KILL.
+    /// or two, and its share of the server's `MaxSessions`, for ever. Measured on macOS
+    /// 26.4, 2026-09-05: without the kill, four install cycles out of four left one
+    /// behind. So the sweep takes the pid `-O check` prints, and if that process is still
+    /// alive after the exit request it gets a TERM and then, a moment later, a KILL.
     @discardableResult
     public static func sweepOrphans(
         environment: [String: String], in directory: String = temporaryDirectory()
@@ -174,8 +174,7 @@ public enum ControlSocket {
 
     /// `KERN_PROC_PID` rather than `ps`: no subprocess, and the answer is the kernel's.
     ///
-    /// **A zombie is not alive** (`SQ-075`, measured 2026-09-04; this implementation of
-    /// the rule is inferred from the row rather than re-measured). An `ssh` mux client
+    /// **A zombie is not alive** (`SQ-075`, measured 2026-09-04). An `ssh` mux client
     /// killed with `-9` stays in `pgrep -f` output, and in `kill(pid, 0)`, as `Z` until
     /// it is reaped - and every master the agent starts is a child of the agent, so the
     /// unreaped state is the ordinary one between the kill and the `waitpid`. Reading the
@@ -240,7 +239,7 @@ public enum ControlSocket {
     /// the second finds the first's socket in place, prints "ControlSocket already exists,
     /// disabling multiplexing" and runs without one - and `SSHMaster.shutdown()` unlinks
     /// the path on the way out, so a master the agent lost track of is left with no socket
-    /// at all. Two of them survived an `agent stop` on 2026-09-05 for exactly that reason.
+    /// at all. Two such masters survive an `agent stop` without this scan.
     ///
     /// The match is deliberately tight: a process named `ssh`, owned by this uid, whose
     /// argv contains `ControlPath=<our $TMPDIR>/sshdrive-`. `$TMPDIR` is per-user and
@@ -250,8 +249,8 @@ public enum ControlSocket {
     /// to ours, which is the shipping behaviour and the only one `agent stop` ever uses; a
     /// test passes its **own** directory so that a sweep it runs cannot reach a master
     /// another suite is holding. `swift test` runs the swift-testing suites concurrently
-    /// with XCTest in one process, and `K6` sweeping the shared `$TMPDIR` killed suite Q's
-    /// live stubs mid-`add` (2026-09-08).
+    /// with XCTest in one process, and `K6` sweeping the shared `$TMPDIR` would kill
+    /// suite Q's live stubs mid-`add`.
     public static func liveMasterPIDs(in directory: String = temporaryDirectory()) -> [pid_t] {
         let needle = "ControlPath=\((directory as NSString).appendingPathComponent(namePrefix))"
         // Read once: `masterProcessName` is a harness seam and another suite's stub can
@@ -295,8 +294,8 @@ public enum ControlSocket {
     }
 
     /// `KERN_PROCARGS2`, the same call askpass uses to read its parent `ssh`'s argv
-    /// (section 4.2). Returned as one string with NULs turned into spaces, because all
-    /// this needs is a substring test.
+    /// (docs/design/secrets.md). Returned as one string with NULs turned into spaces,
+    /// because all this needs is a substring test.
     static func commandLine(of pid: pid_t) -> String? {
         #if canImport(Darwin)
             var size = 0

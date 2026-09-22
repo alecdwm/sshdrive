@@ -1,9 +1,9 @@
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 10: `doctor`'s "quarantine" check. The xattr read is a function the
-/// test supplies, so the decision and the sentence it prints can be exercised without a
-/// quarantined bundle.
+/// The packaging rules (docs/design/packaging.md) for `doctor`'s "quarantine" check. The
+/// xattr read is a function the test supplies, so the decision and the sentence it prints
+/// can be exercised without a quarantined bundle.
 final class BundleQuarantineTests: XCTestCase {
 
     private let bundlePath = "/Applications/SSH Drive.app"

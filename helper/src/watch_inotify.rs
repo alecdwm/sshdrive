@@ -1,15 +1,15 @@
-//! The Linux watcher: inotify, used directly (DESIGN.md section 6.4 tier 2).
+//! The Linux watcher: inotify, used directly (docs/design/change-detection.md).
 //!
-//! Directly rather than through `inotifywait`, which is what section 14 describes and
-//! deliberately did not build: the tool is not installed on most NAS boxes, and it does
-//! not expose the rename cookie, so it cannot report a rename at all. Reading the
+//! Directly rather than through `inotifywait`, the alternative
+//! docs/design/future-work.md sketches: the tool is not installed on most NAS boxes, and
+//! it does not expose the rename cookie, so it cannot report a rename at all. Reading the
 //! descriptor ourselves gives us the cookie, the queue-overflow signal, and one process
 //! instead of two.
 //!
 //! Three details are not optional:
 //!
 //! - **`IN_DONT_FOLLOW`**, so a directory replaced by a symlink to `/etc` is not watched
-//!   through (section 9.1 - the same trap SFTP `opendir` walked into, 2026-09-04).
+//!   through (docs/design/security.md; SFTP `opendir` follows a symlink the same way).
 //! - **`IN_EXCL_UNLINK`**, so an editor holding a deleted file open stops producing
 //!   events for a path that no longer exists.
 //! - **`IN_MODIFY` is left out.** `IN_CLOSE_WRITE` reports the finished write; watching
@@ -72,8 +72,8 @@ impl Watcher {
         self.watched.len()
     }
 
-    /// Replaces the scope. Section 6.4: "When it changes, the helper (tier 2) is sent the
-    /// new set on its stdin and applies it live."
+    /// Replaces the scope. When the root set changes, the agent sends the new one on
+    /// stdin and it is applied live.
     ///
     /// Rebuilt rather than diffed. A root set arrives at most once a cycle, an
     /// `inotify_add_watch` on a path already watched returns the same descriptor rather
@@ -111,9 +111,8 @@ impl Watcher {
         let wd = unsafe { libc::inotify_add_watch(self.fd, c.as_ptr(), MASK) };
         if wd < 0 {
             let error = std::io::Error::last_os_error();
-            // ENOSPC is `max_user_watches`, which is the failure section 6.4 cares about:
-            // the location keeps running, but the agent is told to sweep because the
-            // watch set is no longer complete.
+            // ENOSPC is `max_user_watches`. The location keeps running, but the agent
+            // is told to sweep, because the watch set is then incomplete.
             if self.complaint.is_none() {
                 self.complaint = Some(format!(
                     "could not watch {}: {}",
@@ -152,7 +151,7 @@ impl Watcher {
     }
 
     /// The inotify record is a fixed header followed by a NUL-padded name. It is read as
-    /// bytes: a filename is bytes (section 5.4).
+    /// bytes: a filename is bytes.
     fn decode(&mut self, mut data: &[u8], out: &mut Coalescer) {
         const HEADER: usize = 16;
         while data.len() >= HEADER {
@@ -175,8 +174,8 @@ impl Watcher {
 
     fn handle(&mut self, wd: i32, mask: u32, cookie: u32, name: &[u8], out: &mut Coalescer) {
         if mask & libc::IN_Q_OVERFLOW != 0 {
-            // Section 6.4's `overflow` event: the agent runs a sweep rather than silently
-            // missing changes.
+            // The `overflow` event: the agent runs a sweep rather than silently missing
+            // changes.
             out.push_overflow("the kernel event queue overflowed");
             return;
         }
@@ -208,7 +207,7 @@ impl Watcher {
         if mask & libc::IN_MOVED_TO != 0 {
             let meta = self.meta_of(&relative);
             match self.pending_moves.remove(&cookie) {
-                // Section 6.4: "real rename events with identifiers preserved".
+                // A real rename, with the identifier preserved on the agent's side.
                 Some(from) => out.push_rename(from, relative.clone(), meta),
                 // A move in from outside the watched set is a create, not a rename: there
                 // is no identifier on our side to preserve.

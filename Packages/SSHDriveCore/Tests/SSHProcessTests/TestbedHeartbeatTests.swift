@@ -1,10 +1,10 @@
 import XCTest
 @testable import SSHProcess
 
-/// Spike S7's half of milestone 2: nothing we start on a server outlives the connection
-/// by more than a minute (DESIGN.md section 6.4). `ClientAliveInterval` is unset
-/// everywhere but `deb`, so sshd itself will not notice for hours; the wrapper is what
-/// kills the child. Run under bash, dash and busybox ash.
+/// Nothing we start on a server outlives the connection by more than a minute
+/// (docs/design/change-detection.md). `ClientAliveInterval` is unset everywhere but
+/// `deb`, so sshd itself will not notice for hours; the wrapper is what kills the
+/// child. Run under bash, dash and busybox ash.
 final class TestbedHeartbeatTests: XCTestCase {
 
     private var masters: [SSHMaster] = []
@@ -73,7 +73,7 @@ final class TestbedHeartbeatTests: XCTestCase {
 
     /// `deb`, whose accounts log in with bash - but an exec channel runs `sh -s`, and
     /// Debian's `/bin/sh` is dash, so this is the sleep-and-mtime watchdog branch. That is
-    /// the ordinary Linux case, not a fringe one (section 6.4).
+    /// the ordinary Linux case, not a fringe one (docs/design/change-detection.md).
     func testHeartbeatWrapperOnDebianWhereShIsDash() async throws {
         try Testbed.skipUnlessEnabled()
         try await assertSleeperDies(host: "spike-deb", marker: marker())
@@ -131,13 +131,13 @@ final class TestbedHeartbeatTests: XCTestCase {
         XCTAssertEqual(remaining, 0, "silence alone must kill the child")
     }
 
-    /// Milestone 9: the wrapper's stdin relay, under a **real** `sh`.
+    /// The wrapper's stdin relay, under a **real** `sh`.
     ///
-    /// The shape assertions in `RemoteScriptTests` are not enough here, and this test
-    /// exists because they were not: the first relay wrapper put a `;` after
-    /// `relayWrite`, which already ends in one, and dash answered
-    /// `Syntax error: ";;" unexpected` at line 31 - the channel died on the spot and the
-    /// ladder read it as a helper that would not start (2026-09-05, `deb`).
+    /// The shape assertions in `RemoteScriptTests` are not enough here: the relay
+    /// fragment already ends in a `;`, so a relay write followed by another `;`
+    /// produces `;;`, which dash answers with `Syntax error: ";;" unexpected`,
+    /// killing the channel on the spot - the ladder then reads it as a helper that
+    /// would not start.
     ///
     /// So this runs the wrapper on Debian's dash and on Alpine's busybox ash, feeds a
     /// line down the channel exactly as the agent feeds the root set, and requires the

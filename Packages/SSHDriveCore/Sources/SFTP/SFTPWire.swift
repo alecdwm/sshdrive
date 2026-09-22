@@ -1,12 +1,13 @@
 import Foundation
 
 // The SFTP version 3 wire format (draft-ietf-secsh-filexfer-02), plus the two packet
-// types the OpenSSH extensions ride on. DESIGN.md section 6.2: we implement the protocol
-// ourselves rather than take a library, so this file is the whole of the framing.
+// types the OpenSSH extensions ride on. The protocol is implemented here rather than
+// taken from a library (docs/design/sftp.md), so this file is the whole of the framing.
 //
 // Everything here is byte-level and deliberately String-free: server names need not be
-// valid UTF-8 (section 5.4), so a `string` on the wire is a `Data`, never a `String`,
-// except for the few fields the protocol defines as UTF-8 text (status messages).
+// valid UTF-8 (docs/design/names-and-attributes.md), so a `string` on the wire is a
+// `Data`, never a `String`, except for the few fields the protocol defines as UTF-8
+// text (status messages).
 
 // MARK: - Packet types
 
@@ -41,7 +42,7 @@ enum SFTPPacketType: UInt8 {
 }
 
 /// The nine status codes SFTP v3 carries. There is no errno on the wire: OpenSSH's
-/// `errno_to_portable` folds whole families into each of these (DESIGN.md section 6.2).
+/// `errno_to_portable` folds whole families into each of these (docs/design/sftp.md).
 enum SFTPStatusCode: UInt32 {
     case ok = 0
     case endOfFile = 1
@@ -90,7 +91,7 @@ public struct SFTPOpenFlags: OptionSet, Sendable {
     public static let create = SFTPOpenFlags(rawValue: 0x0000_0008)
     public static let truncate = SFTPOpenFlags(rawValue: 0x0000_0010)
     /// With `create`, fails when the path exists. This is what makes an upload's temp
-    /// file safe to open (section 5.5).
+    /// file safe to open (docs/design/writes.md).
     public static let exclusive = SFTPOpenFlags(rawValue: 0x0000_0020)
 }
 
@@ -111,7 +112,7 @@ enum SFTPFileModeBits {
     }
 }
 
-// MARK: - The OpenSSH extension names section 6.2 lists
+// MARK: - The OpenSSH extension names
 
 enum SFTPExtensionName {
     static let posixRename = "posix-rename@openssh.com"
@@ -152,8 +153,8 @@ struct SFTPRawAttributes {
             uid: uid ?? 0,
             gid: gid ?? 0,
             // SFTP v3 has whole-second times only. Nanoseconds and inode come from the
-            // sweep or the helper (section 5.3), never from here, and nil means
-            // "record whatever comes next without comparing".
+            // sweep or the helper (docs/design/item-index.md), never from here, and
+            // nil means "record whatever comes next without comparing".
             mtimeNanoseconds: nil,
             inode: nil,
             symlinkTarget: symlinkTarget)

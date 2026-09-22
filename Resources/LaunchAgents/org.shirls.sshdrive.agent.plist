@@ -4,7 +4,8 @@
 <dict>
 	<!--
 	  Registered through SMAppService.agent from the app's own bundle, which looks for it
-	  at Contents/Library/LaunchAgents/<this file's name> (DESIGN.md sections 3, 10).
+	  at Contents/Library/LaunchAgents/<this file's name> (docs/design/components.md,
+	  docs/design/packaging.md).
 
 	  RunAtLoad so the agent runs from login rather than from the first mach lookup: the
 	  poll schedule, the eviction loop, the kept-subtree refresh and the wake handler are
@@ -13,10 +14,9 @@
 	  KeepAlive with SuccessfulExit false, not plain true: a clean exit stays down until
 	  the next mach lookup, so `sshdrive agent stop` can stop something and an upgrade
 	  does not get the old bundle relaunched the instant it exits; a crash is restarted at
-	  once (sections 3, 10).
+	  once.
 
-	  The mach service is app-group prefixed so the sandboxed extension may connect
-	  (section 3.1).
+	  The mach service is app-group prefixed so the sandboxed extension may connect.
 	-->
 	<key>Label</key>
 	<string>org.shirls.sshdrive.agent</string>

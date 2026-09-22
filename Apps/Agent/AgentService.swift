@@ -11,7 +11,7 @@ import Logging
 
 /// The object exported on every accepted XPC connection. One instance per connection, so
 /// the agent can call back on that connection (transfer progress, the close-and-reopen
-/// protocol of DESIGN.md section 5.3) without a lookup.
+/// protocol of `docs/design/item-index.md`) without a lookup.
 final class AgentService: NSObject, SSHDriveAgentProtocol {
     private weak var connection: NSXPCConnection?
     private let manager: DomainManager
@@ -42,12 +42,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             return
         }
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "indexReady", subject: "")
             do {
@@ -60,7 +59,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             } catch {
                 // An agent mid-restore, or one that cannot open the index at all, answers
                 // no and the instance falls back to asking us for everything. It asks
-                // again, so this is a window and not a verdict (section 5.2).
+                // again, so this is a window and not a verdict.
                 call.finish(error: error)
                 Log.agent.notice(
                     "\(domainIdentifier, privacy: .public): indexReady -> no: \(String(describing: error), privacy: .public)"
@@ -77,17 +76,16 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "enumerateItems", subject: containerIdentifier)
             do {
                 let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
-                // Section 5.2: paged for directories with tens of thousands of entries.
+                // Paged, for directories with tens of thousands of entries.
                 // A page token is an offset into a listing the agent already holds, so a
                 // second page never re-lists the directory.
                 let page = try await runtime.enumerateItems(
@@ -110,12 +108,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "enumerateChanges", subject: containerIdentifier)
             do {
@@ -135,12 +132,12 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     }
 
     /// The working-set change stream, answered from the agent's own connection when the
-    /// extension's reader cannot answer it (section 5.2).
+    /// extension's reader cannot answer it (`docs/design/extension.md`).
     ///
-    /// The extension used to have no fallback here at all: any reader that was not usable
-    /// meant `.serverUnreachable`, and fileproviderd throttles a change enumeration that
-    /// keeps failing until the domain takes no server-side change at all (2026-09-08).
-    /// Both sides run `IndexChangeStream` so the two answers cannot drift.
+    /// Without this fallback an unusable reader means `.serverUnreachable`, and
+    /// fileproviderd throttles a change enumeration that keeps failing until the domain
+    /// takes no server-side change at all. Both sides run `IndexChangeStream` so the two
+    /// answers cannot drift.
     func enumerateWorkingSetChanges(
         domainIdentifier: String, anchor: String,
         reply: @escaping (SSHDriveItemPage?, Error?) -> Void
@@ -158,7 +155,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     // The one index error the system understands for itself. It has to
                     // cross as an NSFileProviderError, not as one of ours, or the
                     // extension would map it to serverUnreachable and the fresh anchor
-                    // would never be handed out (section 5.3).
+                    // would never be handed out.
                     call.finish("syncAnchorExpired")
                     Log.agent.notice(
                         "\(domainIdentifier, privacy: .public): the working set from \(anchor, privacy: .public) is expired"
@@ -202,12 +199,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "item", subject: itemIdentifier)
             do {
@@ -231,12 +227,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "fetchContents", subject: itemIdentifier,
                 isSystemRequest: isSystemRequest)
@@ -258,10 +253,10 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         }
     }
 
-    /// Section 6.2: "foreground transfers come first: a `fetchContents` whose
-    /// `NSFileProviderRequest` is a file-viewer request or is not a system request (an app
-    /// or the user opening the file...)". Everything else - the eager downloads of a kept
-    /// subtree (section 7.1) and anything the system issues on its own - is background.
+    /// Foreground transfers come first: a `fetchContents` whose `NSFileProviderRequest`
+    /// is a file-viewer request, or is not a system request, is an app or the user opening
+    /// the file (`docs/design/sftp.md`). Everything else - the eager downloads of a kept
+    /// subtree and anything the system issues on its own - is background.
     static func transferClass(isFileViewerRequest: Bool, isSystemRequest: Bool)
         -> TransferScheduler.Kind
     {
@@ -269,7 +264,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     }
 
     /// Byte counts through the callback on the extension's exported object, which the
-    /// extension forwards to the `Progress` it returned to the system (section 5.2).
+    /// extension forwards to the `Progress` it returned to the system.
     private func progressReporter(transferID: String) -> @Sendable (Int64, Int64) -> Void {
         let peer = self.peer
         return { completed, total in
@@ -284,12 +279,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "fetchPartialContents", subject: itemIdentifier)
             do {
@@ -315,12 +309,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "createItem", subject: filename)
             do {
@@ -355,12 +348,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (SSHDriveItemSnapshot?, Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "modifyItem", subject: itemIdentifier)
             do {
@@ -381,15 +373,16 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                     progress: progressReporter(transferID: transferID))
                 call.finish(result.evictAfterReply ? "conflict copy" : "modified")
                 reply(result.snapshot, nil)
-                // Section 5.5, and S3's finding that a `modifyItem` reply is believed: a
-                // conflict copy is only half done when the remote item has been returned.
+                // The system believes whatever version a `modifyItem` reply carries, so
+                // a conflict copy is only half done when the remote item has been
+                // returned (docs/design/writes.md).
                 // The eviction is what makes the next open download the remote content,
                 // and it must come *after* the reply, or the system records the version
                 // it was about to evict.
                 if result.evictAfterReply {
                     // The conflict copy is a new sibling with an anchor of its own; the
                     // signal is what makes the system read that anchor, so Finder shows
-                    // the copy at once rather than at the next enumeration (section 5.5).
+                    // the copy at once rather than at the next enumeration.
                     await manager.signalWorkingSet(locationID: domainIdentifier)
                     await manager.environment.replica.evictAfterConflict(
                         locationID: domainIdentifier, identifier: itemIdentifier,
@@ -407,12 +400,11 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         reply: @escaping (Error?) -> Void
     ) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "deleteItem", subject: itemIdentifier)
             do {
@@ -432,7 +424,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
             // A transfer id is a fresh UUID per call and the XPC method carries no domain,
             // so the cancel goes to every started runtime; each scheduler ignores an id it
             // does not hold. Only runtimes that are already up are asked, so a cancel
-            // never connects a location (section 5.2).
+            // never connects a location.
             for runtime in await manager.startedRuntimes() {
                 await runtime.cancel(transferID: transferID)
             }
@@ -442,32 +434,29 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
     // MARK: Signals
 
     func materializedItemsDidChange(domainIdentifier: String) {
-        // Section 6.5: the `materialized` reason is "every directory that contains at
-        // least one materialized file, from enumeratorForMaterializedItems() refreshed on
-        // materializedItemsDidChange". Milestone 8's pin safety net (section 7.2) hangs
-        // off the same signal.
+        // The root set's `materialized` reason is every directory that contains at least
+        // one materialized file, read from enumeratorForMaterializedItems() and refreshed
+        // on this signal (docs/design/root-set.md). The pin safety net hangs off it too.
         Log.agent.debug("materializedItemsDidChange for \(domainIdentifier, privacy: .public)")
         Task { await manager.materializedItemsChanged(locationID: domainIdentifier) }
     }
 
     func workingSetAnchorExpired(domainIdentifier: String, freshAnchor: String) {
         Task {
-            // Section 4.2's second re-arm trigger: a File Provider request for this
-            // domain. Behind the presence test and its once-a-minute rule, so it is
-            // cheap enough to sit on every request. The `CallTiming` it hands back is
-            // spike S5's journal: arrival, outcome and the gap since the previous call
-            // of the same kind, which is what every "how long does the system wait"
-            // question in the S5 row is asking for.
+            // The authentication deadline's second re-arm trigger is a File Provider
+            // request for this domain (docs/design/secrets.md). It sits behind the
+            // presence test and its once-a-minute rule, so it is cheap enough on every
+            // request. The `CallTiming` it hands back records arrival, outcome and the
+            // gap since the previous call of the same kind.
             let call = manager.noteFileProviderRequest(
                 domainIdentifier: domainIdentifier, method: "workingSetAnchorExpired", subject: freshAnchor)
             do {
                 let runtime = try await manager.runtime(domainIdentifier: domainIdentifier)
-                // Section 5.3: "the agent treats handing out a fresh working-set anchor
-                // exactly as it treats a reconnect: it runs one full sweep of the root set
-                // at once, and every difference from the index becomes an anchor after the
-                // fresh one". The detector's next cycle is that sweep; the catch-up walk
-                // below is the immediate half, so a fresh anchor is never left waiting for
-                // the cadence.
+                // Handing out a fresh working-set anchor is treated exactly like a
+                // reconnect: one full sweep of the root set at once, and every difference
+                // from the index becomes an anchor after the fresh one. The detector's
+                // next cycle is that sweep; the catch-up walk below is the immediate half,
+                // so a fresh anchor is never left waiting for the cadence.
                 await manager.requestFullSweep(
                     locationID: domainIdentifier, reason: "working-set anchor expired")
                 let changes = try await runtime.runCatchUpSweep()
@@ -484,7 +473,8 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         }
     }
 
-    /// Section 7.2's two context-menu entries, forwarded by the extension.
+    /// The two context-menu entries, forwarded by the extension
+    /// (`docs/design/pinning.md`).
     ///
     /// Each acts only on the items it applies to: "Keep Downloaded" pins every selected
     /// item that is not kept and skips the rest, "Don't Keep Downloaded" unpins every
@@ -530,8 +520,8 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
                 if changed {
                     await manager.signalWorkingSet(locationID: domainIdentifier)
                     // The rows always exist here - Finder is acting on items it is showing -
-                    // but the eager download still needs the replica lookup of section 7.1
-                    // step 1 for a subtree the system has not enumerated below the pin.
+                    // but the eager download still needs the replica lookup for a
+                    // subtree the system has not enumerated below the pin.
                     for identifier in lookUp {
                         await manager.environment.replica.lookUpInReplica(
                             locationID: domainIdentifier, identifier: identifier)
@@ -550,7 +540,7 @@ final class AgentService: NSObject, SSHDriveAgentProtocol {
         command: String, arguments: [String: String], reply: @escaping (Data?, Error?) -> Void
     ) {
         // The terminal, captured while the method is still on the connection: `add` and
-        // `passwd` relay the collect connection's prompts back along it (section 4.2).
+        // `passwd` relay the collect connection's prompts back along it.
         let relay = CLIRelay(connection: connection)
         let manager = self.manager
         Task {

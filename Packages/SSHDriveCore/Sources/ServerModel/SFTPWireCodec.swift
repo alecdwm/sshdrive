@@ -4,9 +4,9 @@ import Foundation
 ///
 /// Deliberately a second implementation rather than a reuse of `SFTP`'s own codec: a wire
 /// server that shares the client's encoder can only ever agree with it, and the point of
-/// `FakeSFTPServer` (`docs/testing-architecture.md` section 4.2) is that it "speaks the
-/// protocol, not a mock of it". Everything here is byte-level and String-free, because a
-/// server's names need not be valid UTF-8 (section 5.4).
+/// `FakeSFTPServer` (docs/design/testing.md) is that it speaks the protocol, not a mock of
+/// it. Everything here is byte-level and String-free, because a server's names need not be
+/// valid UTF-8.
 enum SFTPWire {
 
     enum PacketType: UInt8 {

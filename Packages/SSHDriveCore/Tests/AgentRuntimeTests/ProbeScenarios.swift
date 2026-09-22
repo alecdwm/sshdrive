@@ -5,7 +5,7 @@ import Config
 import Foundation
 import Testing
 
-/// Suite K's channel-budget half on the agent's side (`docs/testing-architecture.md`
+/// Suite K's channel-budget half on the agent's side (`docs/design/testing.md`
 /// section 5): what a refused channel is evidence of, and what is done with the cache when
 /// a connection dies.
 extension AgentScenarios {
@@ -14,7 +14,7 @@ extension AgentScenarios {
 
         /// **K13** - a dying connection records no budget.
         ///
-        /// The probe of section 6.1 opens channels until one is refused and turns the count
+        /// The probe (docs/design/ssh.md) opens channels until one is refused and turns the count
         /// into the location's whole channel budget, cached in `capabilities.json` where "an
         /// explicit re-probe is its only invalidation". That is sound only while a channel that
         /// did not open means the *server* said no. Measured 2026-09-08: after `ssh` was killed
@@ -50,8 +50,8 @@ extension AgentScenarios {
                 ChannelProbeVerdict.classify(diagnostics: "channel 2: open failed", masterIsRunning: true)
                     == .sessionRefused)
 
-            // Nothing was probed, so nothing is cached: the connect attempt fails and section
-            // 6.3's breaker tries again.
+            // Nothing was probed, so nothing is cached: the connect attempt fails and
+            // docs/design/offline.md's breaker tries again.
             #expect(CapabilityCache.channelBudget(locationID: location.id) == nil)
             CapabilityCache.store(.forConcurrentChannels(2), locationID: location.id)
             #expect(CapabilityCache.channelBudget(locationID: location.id)?.concurrentChannels == 2)
@@ -59,13 +59,13 @@ extension AgentScenarios {
 
         /// **K14** - an abrupt loss makes the cached budget suspect.
         ///
-        /// Section 6.1 says the cache's "only invalidation" is an explicit re-probe; that was
-        /// written when the only way to get a wrong answer was a server that changed its mind,
-        /// and it left a location that probed in a bad moment stuck at that answer for the life
-        /// of the install. Every abrupt loss of a connection that was up - a master that died,
-        /// two consecutive deadline misses, a path that went away, the will-sleep drop - now
-        /// marks it suspect, and the next connect probes again. Two extra channel opens is the
-        /// whole cost, and the values stay in the file so an offline `status` still prints
+        /// docs/design/ssh.md's cache invalidates only on an explicit re-probe, which assumes
+        /// the only way to get a wrong answer is a server that changes its mind - so a location
+        /// that probed in a bad moment would otherwise be stuck at that answer for the life of
+        /// the install. Every abrupt loss of a connection that was up - a master that died, two
+        /// consecutive deadline misses, a path that went away, the will-sleep drop - marks the
+        /// cached budget suspect, and the next connect probes again. Two extra channel opens is
+        /// the whole cost, and the values stay in the file so an offline `status` still prints
         /// something.
         @Test func k14AnAbruptLossMakesTheCachedBudgetSuspect() async throws {
             let harness = try AgentHarness()

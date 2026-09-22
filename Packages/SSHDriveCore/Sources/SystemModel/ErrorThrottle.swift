@@ -2,18 +2,17 @@ import Foundation
 
 /// fileproviderd's throttle on a change enumeration that keeps failing (`MQ-005`).
 ///
-/// This is the mechanism the 0.1.2 field failure ran into, and the reason `A2` exists.
-/// Two points were measured on the same backoff, both in `results.md` 2026-09-08:
+/// This is what `A2` drives. Two points were measured on the same backoff, 2026-09-08:
 ///
-/// - the field failure: **27 consecutive errors, next retry 47 minutes** (`count:27`,
+/// - on a real install: **27 consecutive errors, next retry 47 minutes** (`count:27`,
 ///   `next:'28min45s'` with `last:'-18min9s'`), `error generation: 14`;
-/// - the VM reproduction: **7 consecutive errors, next retry 1 min 34 s** (`count:7`,
+/// - on the VM: **7 consecutive errors, next retry 1 min 34 s** (`count:7`,
 ///   `next:'1min34s'`), `error generation: 7`.
 ///
 /// A geometric backoff of 30 s x 1.18^n passes through both (95 s at 7, 48.7 min at 27), so
 /// that is the schedule the model applies; the value the catalogue holds at n = 27 is the
-/// measured 47 minutes and the model clamps to it, so a scenario asserting the field number
-/// sees exactly the field number rather than a curve fit.
+/// measured 47 minutes and the model clamps to it, so a scenario asserting that number
+/// sees exactly it rather than a curve fit.
 ///
 /// Nothing here is our code: it is what the system does to us. The whole point of the model
 /// is that a provider which answers `.serverUnreachable` for a reader it could merely not

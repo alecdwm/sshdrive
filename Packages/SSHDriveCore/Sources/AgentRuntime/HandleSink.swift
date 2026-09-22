@@ -2,12 +2,12 @@ import Foundation
 import Logging
 
 /// Writes a transfer's chunks into the file handle the extension opened on its temp file
-/// (DESIGN.md section 5.2).
+/// (docs/design/extension.md).
 ///
-/// Chunks arrive in whatever order the pipelined reads land (section 6.2), so each one is
-/// written at its own offset rather than appended. The handle belongs to the extension and
-/// crosses XPC; the agent never resolves, and is never allowed to reach, a path inside the
-/// extension's container.
+/// Chunks arrive in whatever order the pipelined reads land, so each one is written at its
+/// own offset rather than appended. The handle belongs to the extension and crosses XPC;
+/// the agent never resolves, and is never allowed to reach, a path inside the extension's
+/// container.
 final class HandleSink: @unchecked Sendable {
     private let handle: FileHandle
     private let lock = NSLock()
@@ -63,8 +63,7 @@ final class HandleSink: @unchecked Sendable {
 }
 
 /// Reads an upload's bytes out of the file handle the extension opened on the new
-/// contents, a chunk at a time, so a large upload never sits in the agent's memory
-/// (section 6.2).
+/// contents, a chunk at a time, so a large upload never sits in the agent's memory.
 final class HandleSource: @unchecked Sendable {
     private let handle: FileHandle
     private let chunk: Int

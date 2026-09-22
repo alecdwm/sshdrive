@@ -79,7 +79,7 @@ fi
 
 # ------------------------------------------------------------- find shim ----
 # Emulates a busybox older than 1.34 (as shipped by some Synology DSM builds):
-# no -cmin, no -printf, so the sweep has to fall back to -mmin (DESIGN 6.4).
+# no -cmin, no -printf, so the sweep has to fall back to -mmin (docs/design/change-detection.md).
 if [ "${FIND_SHIM:-0}" = "1" ]; then
 	rm -f /usr/bin/find                    # it is a busybox symlink; do not write through it
 	cat >/usr/bin/find <<'SHIM'
@@ -178,7 +178,7 @@ line/inside.txt"
 }
 
 # --------------------------------------------------------------- rc files ---
-# The point of these is DESIGN 9.2: rc output lands in front of the script's
+# The point of these is the sentinel rule of docs/design/security.md: rc output lands in front of the script's
 # own bytes, and the sentinel is what discards it.
 write_rc() {
 	u="$1"; sh_path="$2"; mode="$3"

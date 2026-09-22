@@ -29,7 +29,7 @@ final class ServerProfileScenarios: XCTestCase {
 
     /// Every id `ServerModel` keys a rule on is a row of the Markdown catalog. This is
     /// `scripts/check-quirks.sh`'s first assertion, run from the suite so it cannot rot
-    /// while the script is still to be written (`docs/testing-architecture.md` step 11).
+    /// while the script is still to be written (`docs/design/testing.md`).
     func testEveryQuirkTheModelImplementsIsARowOfTheCatalog() throws {
         let text = try catalog
         var missing: [String] = []
@@ -55,7 +55,7 @@ final class ServerProfileScenarios: XCTestCase {
     }
 
     /// The testbed's twelve services are twelve constants
-    /// (`docs/testing-architecture.md` section 4.1), and the ports are `testbed/README.md`'s.
+    /// (`docs/design/testing.md`), and the ports are `testbed/README.md`'s.
     func testTheTwelveTestbedServicesAreTwelveProfiles() {
         XCTAssertEqual(ServerProfile.testbed.count, 12)
         let published = ServerProfile.testbed.compactMap(\.port).sorted()
@@ -66,8 +66,8 @@ final class ServerProfileScenarios: XCTestCase {
     }
 
     /// The owner's **two real server shapes**: a Debian running OpenSSH 9.2p1 (their first
-    /// cask install, results 2026-09-05) and a Tailscale SSH node on x86_64 Debian, whose
-    /// tier 2 stream died 255 fifteen seconds after `ready` (results 2026-09-08). The
+    /// cask install, measured 2026-09-05) and a Tailscale SSH node on x86_64 Debian, whose
+    /// tier 2 stream died 255 fifteen seconds after `ready` (measured 2026-09-08). The
     /// testbed's `ts-ssh` exists to reproduce the second.
     func testTheOwnersTwoServersAreModelledAndDifferInEveryWayThatMatters() {
         XCTAssertEqual(ServerProfile.ownerDebian.identificationString,

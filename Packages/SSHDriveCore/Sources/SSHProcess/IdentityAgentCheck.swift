@@ -1,7 +1,7 @@
 import Foundation
 import Logging
 
-/// The pre-spawn key-agent socket check (DESIGN.md section 6.1).
+/// The pre-spawn key-agent socket check (docs/design/ssh.md).
 ///
 /// `agent refused operation` on stderr is what 1Password and Secretive produce between
 /// login and their first unlock. A socket that does not exist yet, because the key

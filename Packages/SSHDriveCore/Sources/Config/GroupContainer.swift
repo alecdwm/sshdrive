@@ -2,7 +2,7 @@ import Foundation
 import Logging
 
 /// The app-group container, the one place all four processes share
-/// (DESIGN.md section 3):
+/// (docs/design/components.md):
 ///
 ///     config.json                  schema version, the install's macId, locations
 ///     domains/<location-id>/index.sqlite
@@ -10,22 +10,22 @@ import Logging
 ///     domains/<location-id>/pins.json
 ///     domains/<location-id>/capabilities.json
 ///
-/// These paths stay where section 3 puts them, at the root of the group container, and
-/// are deliberately *not* moved somewhere "outside" the extension's
+/// These paths sit at the root of the group container, and are deliberately *not*
+/// moved somewhere "outside" the extension's
 /// `NSExtensionFileProviderDocumentGroup`. There is nowhere to move them to: the document
 /// group is the app group identifier, so its path is this container, and fileproviderd's
 /// own replica lives in a subdirectory of it (`File Provider Storage`, which is what
 /// `fileproviderctl dump` reports as the extension storage URL). Everything we write is
 /// already a sibling of that directory, and any other subdirectory would still be inside
-/// the same coordinated container. Section 5.2 also pins the index here on purpose: the
+/// the same coordinated container. The index belongs here for a second reason: the
 /// read-only WAL reader in the sandboxed extension is possible *because* the index sits
-/// in the group container, which the extension may write `-shm` into.
+/// in the group container, which the extension may write `-shm` into
+/// (docs/design/extension.md).
 ///
-/// The three-minute `config.json` write seen during S1 (docs/spikes/results.md,
-/// 2026-09-04) was file coordination on the container, not the choice of subdirectory, so
-/// it is fixed where it belongs: the blocking I/O runs off the agent's actors
-/// (`Apps/Agent/ConfigAccess.swift`) and every File Provider call is bounded
-/// (`Apps/Agent/Deadline.swift`).
+/// A write in this container can block on file coordination for minutes - a `config.json`
+/// write took three (measured 2026-09-04) - and no choice of subdirectory avoids it. So
+/// the blocking I/O runs off the agent's actors (`Apps/Agent/ConfigAccess.swift`) and
+/// every File Provider call is bounded (`Apps/Agent/Deadline.swift`).
 public enum GroupContainer {
     public static let identifier = "RWGDZAYBM8.org.shirls.sshdrive"
 
@@ -95,8 +95,8 @@ public enum GroupContainer {
     }
 
     /// What the File Provider extension last knew about its own read-only index reader
-    /// (section 5.2). The one file the extension writes here, and the only evidence
-    /// `sshdrive doctor` has about a process it cannot ask.
+    /// (docs/design/extension.md). The one file the extension writes here, and the only
+    /// evidence `sshdrive doctor` has about a process it cannot ask.
     public static func readerStateURL(locationID: String) throws -> URL {
         try domainURL(locationID: locationID).appendingPathComponent("reader-state.json")
     }

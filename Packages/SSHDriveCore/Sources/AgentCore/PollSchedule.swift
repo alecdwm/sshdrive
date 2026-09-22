@@ -1,11 +1,11 @@
 import Foundation
 
-/// DESIGN.md section 6.4's "Schedule for tiers 0 and 1".
+/// The schedule for tiers 0 and 1 (docs/design/change-detection.md).
 ///
-/// "Every 60 s while the user has touched the domain in the last 10 minutes (a File
+/// Every 60 s while the user has touched the domain in the last 10 minutes (a File
 /// Provider request for it that was not a system request, or a CLI command naming it),
 /// every 10 min otherwise, and immediately on network-up. The helper replaces the schedule
-/// with events; a sweep still runs every 30 min as insurance against missed events."
+/// with events; a sweep still runs every 30 min as insurance against missed events.
 ///
 /// What counts as a touch is the caller's classification - only it can see whether an
 /// `NSFileProviderRequest` was a system request - and this type only ever takes the
@@ -48,10 +48,10 @@ public struct PollSchedule: Sendable, Equatable {
 
     /// The cycle length, backed off when the last one consumed most of it.
     ///
-    /// Measured on a real 26.6.2 install (2026-09-05): a home directory whose sweep took
-    /// 56.8 s against a 60 s interval, so the location swept without pause. The rule is
-    /// "a cycle may have a third of its own interval", capped, and `sshdrive status` says
-    /// when it is in force (section 6.4).
+    /// Measured on macOS 26.6.2, 2026-09-05: a home directory whose sweep took 56.8 s
+    /// against a 60 s interval, so the location swept without pause. The rule is that a
+    /// cycle may have a third of its own interval, capped, and `sshdrive status` says when
+    /// it is in force (docs/design/change-detection.md).
     public static func interval(
         lastTouch: Double?, now: Double, lastCycleSeconds: Double = 0
     ) -> TimeInterval {
@@ -62,18 +62,18 @@ public struct PollSchedule: Sendable, Equatable {
 
     /// Whether a finished cycle's own duration is allowed to pace the next interval.
     ///
-    /// Section 6.4's rule - "a cycle may take at most a third of its own interval" - is
-    /// evidence about how long the *server* takes to answer, so only a cycle that went to
+    /// The rule - a cycle may take at most a third of its own interval - is evidence
+    /// about how long the *server* takes to answer, so only a cycle that went to
     /// the server may produce it. At tier 2 an ordinary cycle refreshes the root set,
     /// pushes it to the helper's stdin and touches nothing on the wire; timing that and
     /// feeding it back into the schedule would pace a location on the cost of a local
     /// index read. A tier-2 cycle that *did* run the insurance sweep went to the server
     /// like any other and counts.
     ///
-    /// Inferred, not measured: the 56.8 s figure below was measured at tier 1 on a real
-    /// install (2026-09-05), and no measurement of a tier-2 cycle's own duration exists.
-    /// The rule is the design's sentence, kept here so it can be asserted rather than
-    /// read out of a condition in the middle of a cycle (`H10`).
+    /// Inferred, not measured: the 56.8 s figure above was measured at tier 1 (macOS
+    /// 26.6.2, 2026-09-05), and no measurement of a tier-2 cycle's own duration exists.
+    /// The rule lives here so it can be asserted rather than read out of a condition in
+    /// the middle of a cycle (`H10`).
     public static func paces(handledByHelper: Bool, ranFullSweep: Bool) -> Bool {
         !handledByHelper || ranFullSweep
     }
@@ -103,7 +103,8 @@ public struct PollSchedule: Sendable, Equatable {
 
     /// True when the 30-minute insurance full sweep is due. It runs whatever the tier: at
     /// tier 2 it is what catches the changes no facility reported - a directory that is
-    /// itself an NFS or FUSE mount on the server produces no events at all (section 6.4).
+    /// itself an NFS or FUSE mount on the server produces no events at all
+    /// (docs/design/change-detection.md).
     public static func insuranceDue(lastFullSweep: Double, now: Double) -> Bool {
         now - lastFullSweep >= insuranceInterval
     }

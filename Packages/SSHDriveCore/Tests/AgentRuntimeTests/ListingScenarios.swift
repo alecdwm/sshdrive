@@ -9,7 +9,7 @@ import ServerModel
 import Testing
 import XPCProtocols
 
-/// Suite E's listing half (`docs/testing-architecture.md` section 5): what one directory
+/// Suite E's listing half (`docs/design/testing.md` section 5): what one directory
 /// listing writes, and what its transaction holds while it writes it.
 extension AgentScenarios {
 
@@ -38,7 +38,7 @@ extension AgentScenarios {
             let before = try await Self.rowsByPath(runtime)
             let link = try #require(before["link"])
             #expect(link.type == "symlink", "the link is a native item, never followed")
-            #expect(link.hidden == 0, "a link to a sibling inside the root is shown (section 5.7)")
+            #expect(link.hidden == 0, "a link to a sibling inside the root is shown (docs/design/symlinks.md)")
             #expect(link.linkTarget == Data("keep.txt".utf8))
             let anchorsBefore = try await runtime.dumpAnchors(limit: 500).count
 
@@ -65,7 +65,7 @@ extension AgentScenarios {
 
             // The rows nothing changed are the same rows: same identifier, and the same
             // versions, which is what stops the system re-reading every item in a
-            // directory each time it is listed (section 5.3).
+            // directory each time it is listed (docs/design/item-index.md).
             for path in ["keep.txt", "dir", "link"] {
                 #expect(after[path] == before[path], "E2: \(path) was not rewritten")
             }
@@ -90,7 +90,7 @@ extension AgentScenarios {
         /// **E2**, the transaction half - one `BEGIN IMMEDIATE`, and the writes alone
         /// inside it.
         ///
-        /// Section 5.3 wants the listing written atomically; what it does not want is the
+        /// docs/design/item-index.md wants the listing written atomically; what it does not want is the
         /// row building held inside the write lock, because `LocationRuntime` is an actor
         /// and everything else about the location - `sshdrive status` included - waits
         /// behind it. The per-entry read (`SELECT ... WHERE path = ?1`) is the marker:
@@ -137,8 +137,8 @@ extension AgentScenarios {
         /// The rows are the contract above; this is the price of writing them. Compiled
         /// per execution, a listing of 2,000 entries is 8,006 compilations - the incumbent
         /// read, the row, the anchor and a `SELECT last_insert_rowid()` for every entry -
-        /// plus a `SAVEPOINT` opened and released per anchor. The statement cache of
-        /// section 5.2 makes the compilations a constant, the C API answers the rowid, and
+        /// plus a `SAVEPOINT` opened and released per anchor. The statement cache
+        /// (docs/design/extension.md) makes the compilations a constant, the C API answers the rowid, and
         /// an anchor inside the listing's own transaction takes no savepoint, since a
         /// throw fails the whole batch either way.
         @Test func e2ALargeListingCompilesAConstantNumberOfStatements() async throws {
@@ -178,8 +178,8 @@ extension AgentScenarios {
                 "E2: three statements an entry - the incumbent read, the row, the anchor")
         }
 
-        /// **M2** (`SQ-031`): the links in one listing are read through section 6.2's
-        /// window, not one at a time.
+        /// **M2** (`SQ-031`): the links in one listing are read through the window described
+        /// in docs/design/sftp.md, not one at a time.
         ///
         /// SFTP v3's `readdir` carries attributes but no link target, so a directory of
         /// links is a `readlink` per link however it is written. What this pins is that
@@ -190,7 +190,7 @@ extension AgentScenarios {
         /// window, with fifteen in flight.
         ///
         /// And the rows are the contract, not the speed: the same rows, in the same
-        /// order, with a dangling link shown (section 5.7 draws it as an alias, dangling
+        /// order, with a dangling link shown (docs/design/symlinks.md draws it as an alias, dangling
         /// or not), an escaping one hidden, and a link whose `readlink` was refused hidden
         /// too - one refusal cannot fail the listing it was found in.
         @Test func m2ALinkHeavyListingReadsItsTargetsThroughTheWindow() async throws {
@@ -225,7 +225,7 @@ extension AgentScenarios {
             #expect(connection.readlinkCount == 15, "SQ-031: one readlink per link, and no more")
             #expect(
                 connection.peakReadlinksInFlight == 15,
-                "section 6.2: they go out through the window, not one at a time")
+                "docs/design/sftp.md: they go out through the window, not one at a time")
             #expect(
                 connection.peakReadlinksInFlight <= LocationRuntime.readlinkWindow,
                 "and never more than the window")
@@ -236,7 +236,7 @@ extension AgentScenarios {
             var expected = Set((0 ..< 12).map { String(format: "link-%02d", $0) })
             expected.insert("note.txt")
             expected.insert("dangling")
-            #expect(shown == expected, "section 5.7: the escaping and the unreadable link are omitted")
+            #expect(shown == expected, "docs/design/symlinks.md: the escaping and the unreadable link are omitted")
 
             let rows = try await Self.rowsByPath(runtime)
             #expect(rows["link-00"]?.linkTarget == Data("note.txt".utf8))

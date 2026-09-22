@@ -2,14 +2,14 @@ import Foundation
 import XPCProtocols
 
 /// Every answer the extension may give the system, as a platform-free value
-/// (`docs/testing-architecture.md` section 2.2).
+/// (docs/design/testing.md).
 ///
-/// **Which error** is a rule, not an adapter detail, and the 0.1.2 field failure was
-/// exactly a wrong value of this type: the working set answered `.serverUnreachable` for
-/// any reader it could not use, and fileproviderd throttles a change enumeration that
-/// keeps failing (`MQ-005`). Every rule in DESIGN.md about which error to return is a rule
-/// about `ProviderFailure`, and each case carries the Apple domain and code the adapter
-/// must produce, so a drift is one assert away in `MirroredProviderConstantsTests`.
+/// **Which error** is a rule, not an adapter detail. Answering `.serverUnreachable` from
+/// the working set for any reader it cannot use is enough to take a mount's change stream
+/// out for tens of minutes, because fileproviderd throttles a change enumeration that keeps
+/// failing (`MQ-005`). Every rule about which error to return is a rule about
+/// `ProviderFailure`, and each case carries the Apple domain and code the adapter must
+/// produce, so a drift is one assert away in `MirroredProviderConstantsTests`.
 public enum ProviderFailure: Error, Equatable, Hashable, Sendable {
     /// The one honest "there is nothing to say": the agent could not be reached at all.
     /// Never for a reader that is merely not ready - see `MQ-005`.
@@ -31,13 +31,14 @@ public enum ProviderFailure: Error, Equatable, Hashable, Sendable {
     /// nothing about why (`MQ-018`).
     case nonEvictable
     /// A delete the agent will not perform - a non-empty directory the system did not ask
-    /// to remove recursively (section 5.5).
+    /// to remove recursively (docs/design/writes.md).
     case deletionRejected
     case excludedFromSync
-    /// `NSCocoaErrorDomain` / `NSFeatureUnsupportedError`. The trash contract of
-    /// section 5.4: answering `.noSuchItem` to `enumerator(for: .trashContainer)` makes
-    /// the system delete, fail, re-materialize and ask again for ever (`MQ-009`), while
-    /// this one makes it give up after two attempts and remove `.Trash` (`MQ-010`).
+    /// `NSCocoaErrorDomain` / `NSFeatureUnsupportedError`. The trash contract
+    /// (docs/design/names-and-attributes.md): answering `.noSuchItem` to
+    /// `enumerator(for: .trashContainer)` makes the system delete, fail, re-materialize
+    /// and ask again for ever (`MQ-009`), while this one makes it give up after two
+    /// attempts and remove `.Trash` (`MQ-010`).
     case featureUnsupported
 
     /// The error domain the adapter must raise this in.
@@ -68,10 +69,10 @@ public enum ProviderFailure: Error, Equatable, Hashable, Sendable {
         }
     }
 
-    /// The agent's own error codes, mapped once (section 5.1). A connection failure is
-    /// `.serverUnreachable`, so the system queues and retries rather than showing an
-    /// error; everything the agent cannot do becomes `.cannotSynchronize`, which leaves
-    /// the item in place.
+    /// The agent's own error codes, mapped once. A connection failure is
+    /// `.serverUnreachable`, so the system queues and retries rather than showing an error;
+    /// everything the agent cannot do becomes `.cannotSynchronize`, which leaves the item
+    /// in place.
     public init(agentError: SSHDriveAgentError) {
         switch agentError {
         case .serverUnreachable, .interfaceVersionMismatch, .unknownDomain:
@@ -88,8 +89,8 @@ public enum ProviderFailure: Error, Equatable, Hashable, Sendable {
 
     /// The reverse trip: an error the agent raised in the system's own domain - the
     /// `.syncAnchorExpired` that comes back off the working-set fallback - is already the
-    /// answer and must survive the crossing (section 5.3). Anything unrecognised becomes
-    /// `.cannotSynchronize`, which leaves the item in place.
+    /// answer and must survive the crossing (docs/design/item-index.md). Anything
+    /// unrecognised becomes `.cannotSynchronize`, which leaves the item in place.
     public init(appleErrorCode code: Int) {
         switch code {
         case -1000: self = .notAuthenticated

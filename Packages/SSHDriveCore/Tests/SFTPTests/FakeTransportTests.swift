@@ -28,7 +28,7 @@ final class FakeTransportTests: XCTestCase {
             try await transport.rename(source, to: destination)
             XCTFail("a plain rename must not overwrite")
         } catch let error as SFTPError {
-            // EEXIST reaches the wire as a bare FAILURE (section 6.2).
+            // EEXIST reaches the wire as a bare FAILURE (docs/design/sftp.md).
             XCTAssertEqual(error, .failure("Failure"))
         }
         // posix-rename does overwrite.
@@ -65,7 +65,7 @@ final class FakeTransportTests: XCTestCase {
         try await transport.apply(.rewriteInvisibly(path: path, contents: replacement))
         let after = try await transport.lstat(path)
         // This is exactly the change SFTP cannot see, and the reason for the generation
-        // column (section 5.3).
+        // column (docs/design/item-index.md).
         XCTAssertEqual(after.size, before.size)
         XCTAssertEqual(after.mtime, before.mtime)
         XCTAssertNotEqual(after.mtimeNanoseconds, before.mtimeNanoseconds)

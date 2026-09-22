@@ -2,8 +2,9 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 7.1.1's one rule, its three invariants and its five-situation table.
-/// No index, no clock, no File Provider: the markers are a value and the answers are exact.
+/// The pin policy's one rule, its three invariants and its five-situation table
+/// (docs/design/pinning.md). No index, no clock, no File Provider: the markers are a
+/// value and the answers are exact.
 final class PinPolicyTests: XCTestCase {
 
     private func path(_ text: String) -> Data { Data(text.utf8) }
@@ -36,8 +37,9 @@ final class PinPolicyTests: XCTestCase {
     }
 
     func testExclusionsNest() {
-        // Section 7.1.1: "pin Projects, exclude Projects/archive, re-pin
-        // Projects/archive/2026. Each level wins over the one above it."
+        // The pinning rule (docs/design/pinning.md): "pin Projects, exclude
+        // Projects/archive, re-pin Projects/archive/2026. Each level wins over the one
+        // above it."
         let markers = set([
             ("Projects", .pinned),
             ("Projects/archive", .excluded),
@@ -49,8 +51,8 @@ final class PinPolicyTests: XCTestCase {
     }
 
     func testAPinnedRootKeepsTheWholeLocation() {
-        // Section 7.1.2: the root is an item like any other, and everything below it is
-        // then situation C.
+        // The root is an item like any other (docs/design/pinning.md), and everything
+        // below it is then situation C.
         let markers = set([("", .pinned)])
         XCTAssertTrue(markers.isKept(path("")))
         XCTAssertTrue(markers.isKept(path("Videos/big.mov")))
@@ -208,8 +210,8 @@ final class PinPolicyTests: XCTestCase {
     }
 
     func testUnpinningTheRootClearsEveryMarkerInTheLocation() {
-        // Section 7.1.2: "unpinning the root is situation B and, by invariant 2, clears
-        // every marker in the location."
+        // Unpinning the root is situation B and, by invariant 2, clears every marker in
+        // the location (docs/design/pinning.md).
         var markers = set([("", .pinned), ("Videos", .excluded), ("a/b", .excluded)])
         let change = markers.plan(.dontKeep, at: Data())
         XCTAssertEqual(change.situation, .pinRoot)
@@ -217,7 +219,7 @@ final class PinPolicyTests: XCTestCase {
         XCTAssertTrue(markers.isEmpty)
     }
 
-    // MARK: What the recursive watch prunes (sections 6.5, 7.1.1)
+    // MARK: What the recursive watch prunes (docs/design/root-set.md, docs/design/pinning.md)
 
     func testPrunedExclusionsAreOnlyTheOnesInsideAPin() {
         let markers = set([

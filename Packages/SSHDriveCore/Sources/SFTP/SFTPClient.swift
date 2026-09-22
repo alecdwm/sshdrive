@@ -4,12 +4,12 @@ import SSHProcess
 
 /// An absolute path on the server, in server bytes.
 ///
-/// It exists so that DESIGN.md section 9.1's chokepoint holds at the type level: the
+/// It exists so that the path chokepoint (docs/design/security.md) holds at the type
+/// level: the
 /// initialiser is internal, so no module outside `SFTP` can make one, and inside `SFTP`
 /// the only thing that makes one is `RealSFTPTransport`, by joining a validated
 /// `RelativePath` to the canonical root. The wire client therefore has no API that takes
-/// a string path, exactly as section 9.1 requires, while still being a complete SFTP
-/// client underneath.
+/// a string path, while still being a complete SFTP client underneath.
 public struct SFTPServerPath: Sendable, Hashable, CustomStringConvertible {
     public let bytes: Data
 
@@ -25,7 +25,7 @@ public struct SFTPFileHandle: Sendable, Hashable {
 }
 
 /// The reply to `limits@openssh.com`, which is what sizes the pipelining window
-/// (section 6.2).
+/// (docs/design/sftp.md).
 public struct SFTPLimits: Sendable, Equatable {
     public var maxPacketLength: UInt64
     public var maxReadLength: UInt64
@@ -33,32 +33,33 @@ public struct SFTPLimits: Sendable, Equatable {
     public var maxOpenHandles: UInt64
 }
 
-/// The SFTP version 3 wire client (DESIGN.md section 6.2).
+/// The SFTP version 3 wire client (docs/design/sftp.md).
 ///
 /// Owns one byte stream, one request-id space and one pipeline. Requests are matched to
 /// replies by id, so several may be outstanding at once; the pipelining window is
 /// bounded, every request carries a deadline, and a request that misses its deadline
 /// takes the whole channel down with it, because a channel that missed one deadline has
-/// nothing useful left to say (section 6.2, section 6.1's exit classification).
+/// nothing useful left to say (docs/design/sftp.md, and the exit classification in
+/// docs/design/ssh.md).
 public actor SFTPClient {
 
     public struct Configuration: Sendable {
-        /// Section 6.2: 20 s for metadata.
+        /// 20 s for metadata.
         public var metadataDeadline: Duration = .seconds(20)
         /// The fixed part of a transfer deadline, before the size scaling.
         public var transferBaseDeadline: Duration = .seconds(20)
         /// The size scaling: a request for N bytes gets `base + N / this` extra. Slow
         /// enough to survive a bad link, and re-armed by every chunk that lands, which is
-        /// section 6.2's "extended while bytes keep arriving".
+        /// the deadline is "extended while bytes keep arriving".
         public var transferBytesPerSecond: Int = 32 * 1024
-        /// Section 6.2's conservative window when the server offers no
-        /// `limits@openssh.com`: 32 KB x 16.
+        /// The conservative window when the server offers no `limits@openssh.com`:
+        /// 32 KB x 16.
         public var fallbackChunkSize = 32 * 1024
         public var windowRequests = 16
         /// A ceiling on everything outstanding on this channel at once, whatever the
         /// callers ask for. Soft: it is a gate on new requests, not a hard reservation.
         public var maxOutstandingRequests = 64
-        /// How many `readdir` pages are asked for back to back (section 6.2): the same
+        /// How many `readdir` pages are asked for back to back: the same
         /// sixteen-request window a transfer uses, because `limits@openssh.com` sizes the
         /// *request* and says nothing at all about how many may be outstanding
         /// (`SQ-027`), and a directory handle is no different from a file handle in that
@@ -101,7 +102,7 @@ public actor SFTPClient {
     /// A pipeline's depth is invisible in its results - the same names come back either
     /// way - so this is what a test can assert on, and what a slow listing can be
     /// diagnosed with: a `readdir` window of one is a directory read one round trip per
-    /// page (section 6.2).
+    /// page.
     public private(set) var peakOutstandingRequests = 0
 
     private var inbound = [UInt8]()
@@ -119,14 +120,15 @@ public actor SFTPClient {
     /// sent for the way every other reply is. It can therefore land while `connect` is
     /// still suspended inside the write of SSH_FXP_INIT, in which case there is no
     /// continuation to resume yet and the version has to be kept until there is. Losing
-    /// it looked exactly like a server that never answered the handshake.
+    /// it is indistinguishable from a server that never answers the handshake.
     private var receivedVersion: UInt32?
 
     private var deathError: SFTPError?
     private var handshakeDone = false
 
     public private(set) var serverVersion: UInt32 = 0
-    /// Every extension name the server advertised, for the section 8.1 capability report.
+    /// Every extension name the server advertised, for the capability report
+    /// (docs/design/cli.md).
     public private(set) var serverExtensionNames: [String] = []
     public private(set) var extensions: SFTPServerExtensions = []
     public private(set) var limits: SFTPLimits?
@@ -237,9 +239,9 @@ public actor SFTPClient {
         }
     }
 
-    /// Section 6.2: a request that misses its deadline fails and reports its channel
-    /// dead. The agent maps that to `.serverUnreachable` and drops the master (section
-    /// 6.1); nothing here knows about masters.
+    /// A request that misses its deadline fails and reports its channel dead. The agent
+    /// maps that to `.serverUnreachable` and drops the master (docs/design/ssh.md);
+    /// nothing here knows about masters.
     private func expireOverdueRequests() {
         let now = ContinuousClock.now
         if let versionDeadline, now >= versionDeadline {
@@ -259,7 +261,7 @@ public actor SFTPClient {
         log.error("SFTP request deadline missed; the channel is dead")
         // The request that missed reports `.deadlineExceeded` to its own caller, which
         // the agent turns into `.serverUnreachable`; everything after it sees a dead
-        // channel, which is what section 6.2 means by "reports its channel dead".
+        // channel.
         die(with: .connectionLost)
     }
 
@@ -456,7 +458,7 @@ public actor SFTPClient {
         recordingWireOrder: Bool = false
     ) async throws -> SFTPReply {
         if let deathError { throw deathError }
-        // Section 5.2: cancelling the extension's `Progress` cancels the transfer's Task,
+        // Cancelling the extension's `Progress` cancels the transfer's Task,
         // and the agent abandons the SFTP requests in flight. A request already on the
         // wire is answered and dropped - the channel is shared and the wire has no
         // cancel - but nothing new is sent, which for a pipelined transfer means the
@@ -564,7 +566,7 @@ public actor SFTPClient {
         try reply.expectOK()
     }
 
-    /// The plain, non-overwriting rename of section 5.5.
+    /// The plain, non-overwriting rename (docs/design/writes.md).
     public func rename(_ source: SFTPServerPath, to destination: SFTPServerPath) async throws {
         let reply = try await metadataRequest(.rename) {
             $0.writeString(source.bytes)
@@ -590,7 +592,7 @@ public actor SFTPClient {
         return first.filename
     }
 
-    /// Section 6.2: OpenSSH's SSH2_FXP_SYMLINK takes `targetpath` first and `linkpath`
+    /// OpenSSH's SSH2_FXP_SYMLINK takes `targetpath` first and `linkpath`
     /// second, the opposite order from the draft that defines it. A client that talks to
     /// `sftp-server` has to match OpenSSH, so that is what goes on the wire here, and it
     /// is the one place in this file where the draft is deliberately disobeyed.
@@ -602,8 +604,8 @@ public actor SFTPClient {
         try reply.expectOK()
     }
 
-    /// `statvfs@openssh.com`. This is the second question section 6.2 says to ask when a
-    /// bare FAILURE might have been ENOSPC or EDQUOT.
+    /// `statvfs@openssh.com`. This is the second question to ask when a bare FAILURE
+    /// might have been ENOSPC or EDQUOT (docs/design/sftp.md).
     public func statvfs(_ path: SFTPServerPath) async throws -> SFTPFilesystemStats {
         guard extensions.contains(.statvfs) else { throw SFTPError.operationUnsupported }
         let reply = try await metadataRequest(.extended) {
@@ -625,7 +627,7 @@ public actor SFTPClient {
     }
 
     /// `fsync@openssh.com`, on an open handle. Used at the end of an upload so the
-    /// rename that follows cannot promote a half-written file (section 5.5).
+    /// rename that follows cannot promote a half-written file (docs/design/writes.md).
     public func fsync(_ handle: SFTPFileHandle) async throws {
         guard extensions.contains(.fsync) else { throw SFTPError.operationUnsupported }
         let reply = try await metadataRequest(.extended) {
@@ -699,7 +701,7 @@ public actor SFTPClient {
         return (order, try reply.expectNames())
     }
 
-    /// The whole of a directory. Pages are asked for back to back (section 6.2), and
+    /// The whole of a directory. Pages are asked for back to back, and
     /// `.` and `..` are dropped here rather than by every caller.
     public func listDirectory(_ path: SFTPServerPath) async throws -> [SFTPDirectoryEntry] {
         let handle = try await opendir(path)
@@ -729,9 +731,9 @@ public actor SFTPClient {
     ///   tasks, and which of them reaches the outbox first is the scheduler's business.
     ///   Merging in completion order really does shuffle a listing (measured against
     ///   `FakeSFTPServer`), and a listing's order is not ours to shuffle:
-    ///   section 5.4 breaks a collision between two *new* names by the order the listing
-    ///   reported them, so the shown name would flip between two listings of a directory
-    ///   nothing has touched.
+    ///   a collision between two *new* names is broken by the order the listing reported
+    ///   them (docs/design/names-and-attributes.md), so the shown name would flip between
+    ///   two listings of a directory nothing has touched.
     /// - **The over-issue past EOF is the price of the window and is bounded by it.** The
     ///   last batch of a directory is answered with EOF - a status, not a failure, and
     ///   dropped here - at most `depth - 1` times.
@@ -832,7 +834,7 @@ public actor SFTPClient {
         receiver: (UInt64, Data) async -> Void
     ) async throws -> UInt64 {
         let chunk = readChunkSize
-        // Section 6.2: transfers interleave on the bulk channel and the scheduler splits
+        // Transfers interleave on the bulk channel and the scheduler splits
         // the pipelined window between them, so a running transfer is told its share
         // rather than taking all sixteen.
         let window = max(1, min(requestedWindow ?? configuration.windowRequests, configuration.windowRequests))
@@ -920,7 +922,7 @@ public actor SFTPClient {
     }
 
     /// Pipelined write, `windowRequests` chunks in flight, or the scheduler's share of
-    /// them (section 6.2).
+    /// them.
     public func write(
         handle: SFTPFileHandle, offset: UInt64, data: Data, window requestedWindow: Int? = nil
     ) async throws {

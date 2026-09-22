@@ -1,7 +1,7 @@
 import Foundation
 
-/// The neutral half of the File Provider vocabulary (DESIGN.md section 5,
-/// `docs/testing-architecture.md` section 2.2).
+/// The neutral half of the File Provider vocabulary (docs/design/extension.md,
+/// docs/design/testing.md).
 ///
 /// Everything the extension decides is expressed in these types, so the decision compiles
 /// and is tested off Darwin; `Apps/FileProvider` is the only place that names an Apple
@@ -10,10 +10,9 @@ import Foundation
 
 // MARK: Identifiers
 
-/// `NSFileProviderItemIdentifier`. The three well-known identifiers are string literals
-/// in the framework, and both sides of the mount have always had to spell them the same
-/// way: the index's root row carries the root literal, and the trash refusal of
-/// section 5.4 is keyed on the trash one.
+/// `NSFileProviderItemIdentifier`. The three well-known identifiers are string literals in
+/// the framework, and both sides of the mount must spell them the same way: the index's
+/// root row carries the root literal, and the trash refusal is keyed on the trash one.
 public struct ProviderItemIdentifier: RawRepresentable, Hashable, Sendable,
     ExpressibleByStringLiteral, CustomStringConvertible
 {
@@ -33,11 +32,11 @@ public struct ProviderItemIdentifier: RawRepresentable, Hashable, Sendable,
 
 /// A page token as the agent understands it: nil is "the first page". The system's two
 /// well-known first-page constants are not tokens of ours and never travel past the
-/// adapter (section 5.2).
+/// adapter.
 public typealias ProviderPageToken = String
 
-/// `NSFileProviderSyncAnchor`, which is a byte string; ours is always the decimal
-/// spelling of an index sequence number (section 5.3).
+/// `NSFileProviderSyncAnchor`, which is a byte string; ours is always the decimal spelling
+/// of an index sequence number (docs/design/item-index.md).
 public struct ProviderSyncAnchor: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
@@ -54,11 +53,11 @@ public struct ProviderSyncAnchor: RawRepresentable, Hashable, Sendable, CustomSt
 
 /// `NSFileProviderItemCapabilities`, as a value with no Apple framework behind it.
 ///
-/// The bits are Apple's, mirrored here so the derivation of DESIGN.md section 5.4 - which
-/// is a decision, not an adapter - compiles and is tested off Darwin. The extension turns
-/// a row's raw value straight back into `NSFileProviderItemCapabilities`, so the numbers
-/// must not drift; `MirroredProviderConstantsTests` asserts each one against Apple's on
-/// macOS, which is step 4's `AppleConstantsTests` in miniature.
+/// The bits are Apple's, mirrored here so the mode-to-capabilities derivation
+/// (docs/design/names-and-attributes.md) - which is a decision, not an adapter - compiles
+/// and is tested off Darwin. The extension turns a row's raw value straight back into
+/// `NSFileProviderItemCapabilities`, so the numbers must not drift;
+/// `MirroredProviderConstantsTests` asserts each one against Apple's on macOS.
 public struct ProviderCapabilities: OptionSet, Sendable, Hashable {
     public let rawValue: UInt
     public init(rawValue: UInt) { self.rawValue = rawValue }
@@ -111,7 +110,7 @@ public struct ProviderItemFields: OptionSet, Sendable, Hashable {
     public static let typeAndCreator = ProviderItemFields(rawValue: 1 << 10)
 }
 
-/// `NSFileProviderContentPolicy` (DESIGN.md section 7.1.1). `.unset` is ours: it means
+/// `NSFileProviderContentPolicy` (docs/design/pinning.md). `.unset` is ours: it means
 /// "serve no policy at all", which is not the same as `.inherited`, the neutral value the
 /// system itself uses (`MQ-026`).
 public enum ProviderContentPolicy: Int, Sendable, Hashable {
@@ -122,9 +121,9 @@ public enum ProviderContentPolicy: Int, Sendable, Hashable {
 }
 
 /// What the system should be told an item *is*. `UTType` is Apple's and stays in the
-/// adapter; the decision - a directory is a folder, a symlink is a symlink, everything
-/// else is named by its extension and falls back to raw data - is section 5.4's and is
-/// here.
+/// adapter; the decision - a directory is a folder, a symlink is a symlink, everything else
+/// is named by its extension and falls back to raw data - is ours
+/// (docs/design/names-and-attributes.md).
 public enum ProviderContentTypeHint: Equatable, Sendable {
     case folder
     case symbolicLink

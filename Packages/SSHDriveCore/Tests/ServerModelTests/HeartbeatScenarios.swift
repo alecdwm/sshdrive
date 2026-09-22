@@ -6,7 +6,7 @@ import SSHProcess
 
 /// Suite J's teardown scenarios: what happens to the things we start on a server when the
 /// client goes away, and the process-group regression that made a Tailscale SSH node kill
-/// its own sibling sessions (`docs/testing-architecture.md` section 5).
+/// its own sibling sessions (`docs/design/testing.md`).
 ///
 /// Every one of these runs a real shell in a real process group, because the whole
 /// question is which processes a signal reaches.
@@ -113,7 +113,7 @@ final class HeartbeatScenarios: XCTestCase {
 
     // MARK: - J1: the Tailscale `kill -TERM 0` regression
 
-    /// The wrapper as it stood **before 2026-09-08**, naming `0` instead of `-$$`.
+    /// The legacy wrapper, naming `0` instead of `-$$` (gotcha 100).
     ///
     /// A copy lives here and nowhere in `Sources/`, exactly as `SystemModelTests` keeps a
     /// copy of the 0.1.2 working-set enumerator: a regression scenario is only worth
@@ -185,7 +185,7 @@ final class HeartbeatScenarios: XCTestCase {
                                        timeout: 20)
         XCTAssertTrue(
             childGone,
-            "section 6.4: nothing we started outlives the connection, shared group or not")
+            "docs/design/change-detection.md: nothing we started outlives the connection, shared group or not")
         XCTAssertTrue(
             FakeSSHD.isAlive(bystander.pid),
             "SQ-010: and the sibling session survives, which is the whole fix")
@@ -193,8 +193,8 @@ final class HeartbeatScenarios: XCTestCase {
     }
 
     /// **J1** (`SQ-012`): on an OpenSSH server the session *is* its own process group, so
-    /// `-$$` and `0` name the same set - which is why the bug above was invisible for four
-    /// milestones. The same wrapper still takes the child and everything it started.
+    /// `-$$` and `0` name the same set, and either spelling takes the same child and
+    /// everything it started.
     func testJ1_onOpenSSHTheSameWrapperStillTakesTheChildAndItsChildren() async throws {
         let server = try sshd(.debian)
         let victim = marker()
@@ -226,7 +226,7 @@ final class HeartbeatScenarios: XCTestCase {
                         ServerProfile.debianShells.with(loginShell: .bashQuiet)] {  // unset
             let server = try sshd(profile)
             let survivor = marker()
-            // Bare: no wrapper, no heartbeat - the shape section 6.4 measured.
+            // Bare: no wrapper, no heartbeat - see docs/design/change-detection.md.
             let script = RemoteScript(
                 body: "sleep \(survivor) </dev/null & printf '%s\\000' started")
             let channel = try await server.openExecChannel(script: script, readinessDeadline: 10)

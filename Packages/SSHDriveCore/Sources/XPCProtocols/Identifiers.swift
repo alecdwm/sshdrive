@@ -1,6 +1,6 @@
 import Foundation
 
-/// Every fixed identifier in the project, from DESIGN.md section 3.1. Nothing derives one
+/// Every fixed identifier in the project (docs/design/components.md). Nothing derives one
 /// of these at runtime; they are the strings that entitlements, the launchd plist and the
 /// signing settings also carry, and they must be edited together.
 public enum SSHDriveIdentifiers {
@@ -32,15 +32,16 @@ public enum SSHDriveIdentifiers {
     /// extension is allowed to look it up.
     public static let machServiceName = "\(teamID).org.shirls.sshdrive.agent"
 
-    /// The two Finder context-menu actions of DESIGN.md section 7.2, declared in the
+    /// The two Finder context-menu actions (docs/design/pinning.md), declared in the
     /// appex's `NSExtensionFileProviderActions` and handed back to the extension by
     /// `performAction(identifier:onItemsWithIdentifiers:)`. The strings are in the
     /// Info.plist as well and must be edited together.
     public static let pinActionID = "org.shirls.sshdrive.action.pin"
     public static let unpinActionID = "org.shirls.sshdrive.action.unpin"
 
-    /// The pin badge of section 7.2, declared under `NSFileProviderDecorations` in the
-    /// same dictionary and attached to a kept item through `NSFileProviderItemDecorating`.
+    /// The pin badge (docs/design/pinning.md), declared under `NSFileProviderDecorations`
+    /// in the same dictionary and attached to a kept item through
+    /// `NSFileProviderItemDecorating`.
     public static let keptDecorationID = "org.shirls.sshdrive.decoration.kept"
 
     /// Every signing identifier admitted by the agent's listener.

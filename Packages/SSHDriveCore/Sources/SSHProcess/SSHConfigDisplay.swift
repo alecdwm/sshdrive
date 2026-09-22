@@ -1,7 +1,8 @@
 import Foundation
 
 /// The "what does this host resolve to" display `sshdrive add` shows before it connects,
-/// and `sshdrive show` prints afterwards (DESIGN.md sections 4.1, 6.1, 8).
+/// and `sshdrive show` prints afterwards (docs/design/locations.md,
+/// docs/design/ssh.md, docs/design/cli.md).
 ///
 /// `ssh -G` prints resolved values only, with no indication of where each came from, so
 /// the attribution is the diff against `ssh -F /dev/null -G`: a value that differs between
@@ -29,8 +30,8 @@ public struct SSHConfigDisplay: Sendable, Equatable {
         public var keyword: String
         public var value: String
         public var source: Source
-        /// True for a keyword the agent forces regardless (section 6.1), which is printed
-        /// separately so the user can see it was overridden.
+        /// True for a keyword the agent forces regardless (docs/design/ssh.md), which is
+        /// printed separately so the user can see it was overridden.
         public var overriddenByUs: Bool
 
         public init(keyword: String, value: String, source: Source, overriddenByUs: Bool = false) {
@@ -53,10 +54,10 @@ public struct SSHConfigDisplay: Sendable, Equatable {
         }
     }
 
-    /// The keywords `add` shows by default, in the order section 8.1's example prints
-    /// them. `identityfile` repeats, and every repetition is shown, because the order is
-    /// the offer order and a touch-required FIDO key sitting first is exactly what
-    /// section 4.2's refusal is about.
+    /// The keywords `add` shows by default, in the order `sshdrive status` prints them
+    /// (docs/design/cli.md). `identityfile` repeats, and every repetition is shown,
+    /// because the order is the offer order and a touch-required FIDO key sitting first
+    /// is exactly what the touch-key refusal is about (docs/design/secrets.md).
     public static let displayedKeywords = [
         "user", "hostname", "port", "identityfile", "identitiesonly", "identityagent",
         "proxyjump", "proxycommand", "preferredauthentications", "pubkeyauthentication",
@@ -65,10 +66,11 @@ public struct SSHConfigDisplay: Sendable, Equatable {
     ]
 
     public var lines: [Line]
-    /// Keywords the agent always overrides that a config file had set (section 6.1).
+    /// Keywords the agent always overrides that a config file had set
+    /// (docs/design/ssh.md).
     public var overridden: [Line]
     /// A hand-written `ProxyCommand` that invokes `ssh` escapes every override we apply
-    /// (section 6.1); `add` says so and recommends `ProxyJump`.
+    /// (docs/design/ssh.md); `add` says so and recommends `ProxyJump`.
     public var handWrittenProxyCommand: String?
     /// The chain the agent will rebuild as its own `ProxyCommand`.
     public var jumpChain: [JumpHop]

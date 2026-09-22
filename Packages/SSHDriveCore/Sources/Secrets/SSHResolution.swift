@@ -15,7 +15,7 @@ public struct SSHResolution: Equatable, Sendable {
     }
 }
 
-/// Resolving the asking `ssh`'s destination (DESIGN.md section 4.2). The master's own
+/// Resolving the asking `ssh`'s destination (docs/design/secrets.md). The master's own
 /// destination is known to the agent, which spawned it; this exists for the `ProxyJump`
 /// hops, which the agent never sees start and tells apart from the master by the argv the
 /// askpass sends.
@@ -114,7 +114,7 @@ public final class SSHGResolver: SSHResolving, @unchecked Sendable {
         }
 
         // Bounded: nothing on this path may hang the askpass reply, which ssh is waiting
-        // on inside the 60 s authentication deadline (section 4.2).
+        // on inside the 60 s authentication deadline.
         let deadline = DispatchWorkItem { [weak process] in
             guard let process, process.isRunning else { return }
             Log.ssh.error("ssh -G did not finish within the deadline; killing it")

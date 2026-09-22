@@ -3,11 +3,10 @@ import SSHProcess
 
 /// An exec channel whose remote end is **a real POSIX shell on this Linux box**.
 ///
-/// `docs/testing-architecture.md` section 4.2 calls this the deliberate design choice of
-/// the whole harness: "the shell scripts are tested against real shells, because that is
-/// where three of our worst bugs lived" - the `;;` dash rejected (`SQ-018`), the `{ … }`
-/// group the heartbeat reader would otherwise eat, and the `printf "\0<sentinel>"` that
-/// ate its own sentinel (`SQ-020`).
+/// The shell scripts are tested against real shells, which is the deliberate design
+/// choice of the whole harness (docs/design/testing.md): the `;;` dash rejects
+/// (`SQ-018`), the `{ … }` group the heartbeat reader would otherwise eat, and the
+/// `printf "\0<sentinel>"` that eats its own sentinel (`SQ-020`) are all reachable here.
 ///
 /// The channel picks the profile's shell, puts the profile's rc-file noise in front of the
 /// sentinel (`SQ-015`), leaves a background child holding stdout where the profile says so
@@ -22,7 +21,7 @@ import SSHProcess
 public final class FakeExecChannel: @unchecked Sendable {
 
     public let stream: PipeByteStream
-    /// What the account printed before the sentinel, which `status` shows (section 9.2).
+    /// What the account printed before the sentinel, which `status` shows.
     public let prefix: Data
     public let sentinel: Sentinel
     public let pid: pid_t
@@ -47,7 +46,7 @@ public final class FakeExecChannel: @unchecked Sendable {
     }
 
     /// One heartbeat line. The agent writes one every 15 s; 60 s of silence, or EOF, and
-    /// the wrapper on the server kills its child (section 6.4).
+    /// the wrapper on the server kills its child (docs/design/change-detection.md).
     public func sendHeartbeat() async throws {
         try await stream.write(RemoteScript.heartbeatLine)
     }
@@ -139,7 +138,7 @@ public final class FakeSSHD: @unchecked Sendable {
     /// Why this profile cannot be run on this box, or nil.
     ///
     /// A scenario that needs a shell the box does not have **skips with a named reason
-    /// rather than pretending** (`docs/testing-architecture.md` section 4.2).
+    /// rather than pretending** (docs/design/testing.md).
     public static func unavailabilityReason(for profile: ServerProfile) -> String? {
         switch profile.loginShell {
         case .fish:
@@ -158,7 +157,7 @@ public final class FakeSSHD: @unchecked Sendable {
     }
 
     /// Opens an exec channel: `sh -s` with the script on stdin, and the read that discards
-    /// everything up to and including the sentinel (section 9.2).
+    /// everything up to and including the sentinel (docs/design/security.md).
     ///
     /// Every refusal here is one `ssh` really prints:
     /// - over `MaxSessions`, the mux client's `mux_client_request_session: session request
@@ -218,7 +217,7 @@ public final class FakeSSHD: @unchecked Sendable {
             }
             // The whole script in a single write, exactly as `SSHMaster` does it: dash
             // reads its stdin in blocks, so anything written while the shell was still
-            // parsing would vanish into its buffer (section 9.2).
+            // parsing would vanish into its buffer.
             try await stream.write(script.data)
         } catch {
             stream.close()
@@ -323,8 +322,8 @@ public final class FakeSSHD: @unchecked Sendable {
     /// Returns the pgid every session must join, or nil where each session gets its own.
     ///
     /// `SQ-012`: OpenSSH's sshd gives each session a session and process group of its own,
-    /// so `kill … 0` has a blast radius of exactly that session - which is why the bug in
-    /// `SQ-010` was invisible for four milestones.
+    /// so `kill … 0` has a blast radius of exactly that session, which is what hides
+    /// `SQ-010` on every server but the one that has it.
     ///
     /// `SQ-010`: `tailscaled` puts every session of every client in **its own** process
     /// group, so `kill -TERM 0` from one session signals all of them and the connections
@@ -544,7 +543,7 @@ public final class FakeSSHD: @unchecked Sendable {
     /// The profile's own clock, as a `date` on the session's `PATH` (`SQ-054`).
     ///
     /// Only `date +%s` is shifted, because that is the only spelling anything of ours ever
-    /// runs: the sweep script prints `"$(date +%s)"` before its first `find` (section 6.4)
+    /// runs: the sweep script prints `"$(date +%s)"` before its first `find`
     /// and the helper deployment asks for the same thing. Every other invocation falls
     /// through to the real `date` rather than being answered with an invention.
     ///
@@ -588,8 +587,8 @@ public final class FakeSSHD: @unchecked Sendable {
         if profile.loginShell.holdsStdoutOpen {
             // `SQ-016`: the rc file leaves a background child holding stdout, so EOF never
             // arrives on the channel and only the closing sentinel ends the read. Any
-            // reader that waits for EOF hangs - which is the case section 9.2's sentinel
-            // exists for.
+            // reader that waits for EOF hangs - which is the case the sentinel exists
+            // for (docs/design/security.md).
             body += "( sleep 120 & )\n"
         }
         return body
@@ -623,7 +622,7 @@ public struct ForceCommandRefusal: Error {
     }
 }
 
-/// The account as the **login-shell snapshot** meets it (DESIGN.md section 6.1).
+/// The account as the **login-shell snapshot** meets it (docs/design/ssh.md).
 ///
 /// A generated `HOME` whose rc files print the profile's noise and export a `PATH` and an
 /// `SSH_AUTH_SOCK`, so `LoginShellSnapshotReader` can be run against a real shell shape.
@@ -651,7 +650,7 @@ public struct LoginShellAccount: Sendable {
 extension FakeSSHD {
 
     /// Builds the account's login-shell shape: an rc file that prints the profile's noise
-    /// and exports a `PATH` and an `SSH_AUTH_SOCK` (DESIGN.md section 6.1, `SQ-015`).
+    /// and exports a `PATH` and an `SSH_AUTH_SOCK` (docs/design/ssh.md, `SQ-015`).
     ///
     /// A **different mechanism** from the exec channel's above, deliberately. An exec
     /// channel runs `sh -s` non-interactively, where bash reads `BASH_ENV`; the snapshot
@@ -751,9 +750,10 @@ extension FakeSSHD {
     ///
     /// A server may have neither `sha256sum` nor `shasum`, which is why the helper's
     /// verification falls back to the remote file's size plus running the binary with
-    /// `--version` (section 6.4 tier 2). The model cannot uninstall coreutils, so it takes
-    /// the tools off `PATH` instead and the shell really does find none - *inferred*
-    /// staging of a **measured** row (2026-09-05), and the only kind this box can offer.
+    /// `--version` (docs/design/change-detection.md). The model cannot uninstall
+    /// coreutils, so it takes the tools off `PATH` instead and the shell really does find
+    /// none - *inferred* staging of a row measured 2026-09-05, and the only kind this box
+    /// can offer.
     public func emptyToolDirectory() throws -> String {
         let empty = directory.appendingPathComponent("no-tools")
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)

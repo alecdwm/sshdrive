@@ -6,13 +6,12 @@ import SFTP
 import XPCProtocols
 import Logging
 
-/// The milestone 3 debug hooks: the transfer scheduler of DESIGN.md section 6.2, the
-/// channel budget of section 6.1 and the name rules of section 5.4, driven from the CLI
-/// without Finder in the way.
+/// The transport debug hooks: the transfer scheduler (docs/design/sftp.md), the channel
+/// budget (docs/design/ssh.md) and the name rules (docs/design/names-and-attributes.md),
+/// driven from the CLI without Finder in the way.
 ///
-/// They are here, in a file of their own, for the same reason the S4/S6 hooks are in
-/// `SpikeHooks.swift`: the agent is the process that makes these calls for real, and
-/// `sshdrive status` (milestone 3's other half) reports the same values.
+/// They are here, in a file of their own, because the agent is the process that makes
+/// these calls for real, and `sshdrive status` reports the same values.
 public enum TransportDebug {
 
     public static func run(command: String, arguments: [String: String]) async throws -> Data {
@@ -36,7 +35,7 @@ public enum TransportDebug {
         }
     }
 
-    /// Section 5.5's rename-semantics probe: does this server's plain `rename` refuse a
+    /// The rename-semantics probe: does this server's plain `rename` refuse a
     /// name that is already taken? OpenSSH implements it as `link` + `unlink` and does;
     /// a server that overwrites instead makes every create and rename take an `lstat`
     /// preflight, and `sshdrive set <name> create-check lstat` forces that anyway. Two
@@ -85,7 +84,7 @@ public enum TransportDebug {
 
     private static func reprobe(_ arguments: [String: String]) async throws -> Data {
         let location = try await AgentCommandContext.manager.location(named: arguments["name"] ?? "")
-        // Section 6.1 caches the channel budget and re-probes it on demand; the agent
+        // The channel budget is cached per location and re-probed on demand; the agent
         // never sees a server banner, so "on demand" is the only invalidation there is.
         CapabilityCache.forgetChannelBudget(locationID: location.id)
         await AgentCommandContext.manager.dropRuntime(locationID: location.id)
@@ -112,7 +111,7 @@ public enum TransportDebug {
     // MARK: Transfers
 
     /// One fetch, straight through the scheduler, so the queue can be driven without
-    /// Finder. `--background` puts it in section 6.2's background class, `--cancel-after`
+    /// Finder. `--background` puts it in the background transfer class, `--cancel-after`
     /// cancels it mid-way, and `--partial` makes it a range request.
     private static func fetch(_ arguments: [String: String]) async throws -> Data {
         let location = try await AgentCommandContext.manager.location(named: arguments["name"] ?? "")
@@ -186,7 +185,7 @@ public enum TransportDebug {
         ])
     }
 
-    /// The section 9.1 chokepoint, exercised where the system's own filenames arrive:
+    /// The path-containment chokepoint, exercised where the system's own filenames arrive:
     /// `createItem` with a filename of our choosing, and with a symlink target of our
     /// choosing. Nothing here goes near a string path - that is the point - so the only
     /// question is what the `RelativePath` constructor does with what it is handed.

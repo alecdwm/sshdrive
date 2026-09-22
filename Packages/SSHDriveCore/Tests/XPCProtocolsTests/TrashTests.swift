@@ -4,16 +4,15 @@
 import XCTest
 @testable import XPCProtocols
 
-/// SSH Drive has no trash (DESIGN.md section 5.4). The system gives a replicated domain
-/// one anyway unless it is told otherwise, and the extension's answers about it are what
-/// decide whether a `stat` of `.Trash` returns or loops (docs/spikes/results.md,
-/// 2026-09-04).
+/// SSH Drive has no trash (docs/design/names-and-attributes.md). The system gives a
+/// replicated domain one anyway unless it is told otherwise, and the extension's answers
+/// about it are what decide whether a `stat` of `.Trash` returns or loops.
 final class TrashTests: XCTestCase {
 
     /// The identifier is written out in XPCProtocols so the module does not link
     /// FileProvider. If Apple ever changes the constant, this is what says so. macOS
-    /// only: it is an assertion about Apple's constant, which is step 4's
-    /// `AppleConstantsTests` (docs/testing-architecture.md section 8).
+    /// only: it is an assertion about Apple's constant, which is `AppleConstantsTests`
+    /// (docs/design/testing.md).
     #if canImport(FileProvider)
         func testContainerIdentifierMatchesTheFrameworkConstant() {
             XCTAssertEqual(
@@ -43,9 +42,9 @@ final class TrashTests: XCTestCase {
         }
     #endif
 
-    /// The local replica is case-insensitive and normalisation-insensitive (section 5.4),
-    /// so every spelling that would land on the system's own `.Trash` is refused, and
-    /// nothing else is.
+    /// The local replica is case-insensitive and normalisation-insensitive
+    /// (docs/design/names-and-attributes.md), so every spelling that would land on the
+    /// system's own `.Trash` is refused, and nothing else is.
     func testTrashNameIsRefusedHoweverItIsSpelled() {
         XCTAssertTrue(SSHDriveTrash.isTrash(filename: ".Trash"))
         XCTAssertTrue(SSHDriveTrash.isTrash(filename: ".trash"))

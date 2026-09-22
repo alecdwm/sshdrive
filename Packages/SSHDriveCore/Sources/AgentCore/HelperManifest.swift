@@ -1,13 +1,15 @@
 import Foundation
 
-/// The manifest that ships beside the helper binaries in
-/// `SSH Drive.app/Contents/Resources/helper/` (DESIGN.md sections 3 and 10.1).
+/// The manifest that ships beside the helper binaries in `SSH
+/// Drive.app/Contents/Resources/helper/` (docs/design/components.md,
+/// docs/design/packaging.md).
 ///
-/// Section 10.1: CI "collects the Linux job's artifacts, and records every hash into the
-/// app's manifest". Section 6.4 then uses those hashes to decide whether the copy on the
-/// server is ours before anything is started from it, and section 9 makes that a security
-/// property rather than a convenience: the binary "is verified before every launch, by
-/// SHA-256 against a hash embedded in the app".
+/// CI collects the cross-compiled artifacts and records every hash into the app's
+/// manifest (docs/design/packaging.md). The deployment uses those hashes to decide whether
+/// the copy on the server is ours before anything is started from it
+/// (docs/design/change-detection.md), which is a security property rather than a
+/// convenience: the binary is verified before every launch, by SHA-256 against a hash
+/// embedded in the app (docs/design/security.md).
 public struct HelperManifest: Codable, Equatable, Sendable {
 
     public struct Binary: Codable, Equatable, Sendable {
@@ -17,7 +19,7 @@ public struct HelperManifest: Codable, Equatable, Sendable {
         public var arch: String
         /// The file name inside `Contents/Resources/helper/`, which is also the name the
         /// binary is given on the server: `sshdrive-helper-<version>-<os>-<arch>`
-        /// (section 3).
+        /// (docs/design/components.md).
         public var file: String
         public var sha256: String
         public var size: Int64
@@ -31,7 +33,7 @@ public struct HelperManifest: Codable, Equatable, Sendable {
         }
     }
 
-    /// Tied to the app release (section 6.4: "The version is tied to the app release").
+    /// Tied to the app release.
     public var version: String
     public var binaries: [Binary]
 
@@ -46,10 +48,10 @@ public struct HelperManifest: Codable, Equatable, Sendable {
     /// another Mac's.
     public var fileNames: Set<String> { Set(binaries.map(\.file)) }
 
-    /// The binary for what `uname -sm` said, or nil - which section 6.4 makes an ordinary
-    /// outcome rather than an error: "A platform outside that list is the one case where a
-    /// server with shell access stays at the sweep tier, and `status` asks for an issue
-    /// with the `uname -sm` output".
+    /// The binary for what `uname -sm` said, or nil, which is an ordinary outcome rather
+    /// than an error: a platform outside that list is the one case where a server with
+    /// shell access stays at the sweep tier, and `status` asks for an issue with the
+    /// `uname -sm` output.
     public func binary(forUname uname: String) -> Binary? {
         guard let target = HelperTarget(uname: uname) else { return nil }
         return binaries.first { $0.os == target.os && $0.arch == target.arch }

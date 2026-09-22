@@ -2,11 +2,11 @@ import Foundation
 import AgentCore
 import Config
 
-/// The spike's presence override (DESIGN.md section 4.2).
+/// The presence override (docs/design/secrets.md).
 ///
 /// A headless VM's console session reports an input-idle time that only grows and a screen
-/// that can never be locked, so the real readings there are meaningless and S5's re-arm
-/// questions could not otherwise be asked. The override is `idle=<seconds>,locked=<0|1>`,
+/// that can never be locked, so the real readings there are meaningless and the deadline
+/// re-arm cannot otherwise be exercised. The override is `idle=<seconds>,locked=<0|1>`,
 /// read from `<group container>/presence-override` and, failing that, from the
 /// `SSHDRIVE_PRESENCE_OVERRIDE` environment variable.
 ///

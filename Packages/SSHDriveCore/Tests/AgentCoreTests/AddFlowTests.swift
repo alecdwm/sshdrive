@@ -6,12 +6,12 @@ import Secrets
 import SSHProcess
 import XPCProtocols
 
-/// The `sshdrive add` state machine (DESIGN.md sections 4.2, 4.3, 8) and the askpass
-/// broker behind it, driven with no `ssh` anywhere.
+/// The `sshdrive add` state machine (docs/design/secrets.md, docs/design/cli.md) and the
+/// askpass broker behind it, driven with no `ssh` anywhere.
 ///
 /// The flow's decisions are checked against a stub runner; the answers a collect
-/// connection actually gives `ssh` are checked against `AskpassHarness`, which is the same
-/// seam the milestone 2 tests use.
+/// connection actually gives `ssh` are checked against `AskpassHarness`, the same seam
+/// used elsewhere to test the collect connection.
 final class AddFlowTests: XCTestCase {
 
     // MARK: the state machine
@@ -37,8 +37,8 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testTheFirstPassRunsWithoutTheKeyAgentAndIsEnoughOnSuccess() async {
-        // Section 4.2: "The first attempt runs with `-o IdentityAgent=none` … A location
-        // that passes only the second attempt is recorded as `agentDependent`."
+        // docs/design/secrets.md: "The first attempt runs with `-o IdentityAgent=none` …
+        // A location that passes only the second attempt is recorded as `agentDependent`."
         let runner = ScriptedRunner([AddFlow.AttemptResult(authenticated: true)])
         let result = await AddFlow.run(runner: runner)
         XCTAssertTrue(result.authenticated)
@@ -64,9 +64,10 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testAStaleStoredSecretIsMaskedAndTheSamePassRepeated() async {
-        // Section 4.2: "a second location on a host whose password has since changed finds
-        // the shared item, `ssh` uses it for its single prompt and is refused. `add` then
-        // repeats the collect connection with the stored items for that host masked."
+        // docs/design/secrets.md: "a second location on a host whose password has since
+        // changed finds the shared item, `ssh` uses it for its single prompt and is
+        // refused. `add` then repeats the collect connection with the stored items for
+        // that host masked."
         let account = "password:pw@192.168.64.1:2201"
         let runner = ScriptedRunner([
             AddFlow.AttemptResult(
@@ -84,9 +85,9 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testATouchRequiredKeyRefusesTheLocationEvenWhenTheConnectionSucceeded() async {
-        // Section 4.2: "Mounting such a location would succeed once and then fail into
-        // `.notAuthenticated` on the first unattended reconnect … refusing up front is
-        // kinder."
+        // docs/design/secrets.md: "Mounting such a location would succeed once and then
+        // fail into `.notAuthenticated` on the first unattended reconnect … refusing up
+        // front is kinder."
         let runner = ScriptedRunner([
             AddFlow.AttemptResult(
                 authenticated: true,
@@ -102,8 +103,8 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testADeclinedHostKeyStopsTheFlowWithNoSecondPass() async {
-        // Section 4.3: answering anything but yes ends `add`; a key agent would not have
-        // changed the answer.
+        // docs/design/secrets.md: answering anything but yes ends `add`; a key agent
+        // would not have changed the answer.
         let runner = ScriptedRunner([
             AddFlow.AttemptResult(
                 authenticated: false, classification: .hostKeyFailed,
@@ -159,8 +160,8 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testTheTouchRefusalNamesTheKeyAndTheIdentityThatSkipsIt() {
-        // Section 4.2: "`~/.ssh/id_ed25519_sk` needs a touch on every connection; run
-        // `sshdrive add --identity ~/.ssh/id_nas nas` …"
+        // docs/design/secrets.md: "`~/.ssh/id_ed25519_sk` needs a touch on every
+        // connection; run `sshdrive add --identity ~/.ssh/id_nas nas` …"
         let hint = AddFlow.identityHint(
             touchKeys: ["ED25519-SK SHA256:XYZ"],
             identityFiles: ["/Users/alec/.ssh/id_ed25519_sk", "/Users/alec/.ssh/id_nas"],
@@ -235,7 +236,7 @@ final class AddFlowTests: XCTestCase {
         let reply = harness.prompt("pw@192.168.64.1's password: ")
         XCTAssertEqual(reply, .answer("spike-password"))
         XCTAssertEqual(asked.count, 1)
-        // Nothing is stored until the connection has authenticated (section 4.2).
+        // Nothing is stored until the connection has authenticated (docs/design/secrets.md).
         XCTAssertTrue(store.items.isEmpty)
 
         let written = try broker.commit(token: harness.token)
@@ -245,7 +246,8 @@ final class AddFlowTests: XCTestCase {
 
     func testASecondAddOnTheSameHostAnswersFromTheKeychainWithNoPrompt() {
         // The point of keying by `user@hostname:port` rather than by location: "two
-        // locations on one host share one" item (sections 4, 4.2, 8).
+        // locations on one host share one" item (docs/design/locations.md,
+        // docs/design/secrets.md, docs/design/cli.md).
         let destination = SSHDestination(user: "pw", hostname: "192.168.64.1", port: 2201)
         let store = MemoryStore()
         store.items["password:pw@192.168.64.1:2201"] = "spike-password"
@@ -283,9 +285,9 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testTheHostKeyQuestionIsRelayedDuringAddAndTheAnswerGoesStraightToSsh() {
-        // Section 4.3: the question arrives with `SSH_ASKPASS_PROMPT` unset and is
-        // recognised by its text; during `add` it is relayed, and `ssh` writes the answer
-        // to the user's own `known_hosts`.
+        // docs/design/secrets.md: the question arrives with `SSH_ASKPASS_PROMPT` unset and
+        // is recognised by its text; during `add` it is relayed, and `ssh` writes the
+        // answer to the user's own `known_hosts`.
         let destination = SSHDestination(user: "alec", hostname: "192.168.64.1", port: 2206)
         let store = MemoryStore()
         let (broker, harness) = broker(store, destination: destination)
@@ -301,7 +303,7 @@ final class AddFlowTests: XCTestCase {
             return "yes"
         }
         XCTAssertEqual(harness.prompt(question), .answer("yes"))
-        // Read visible, not hidden (section 4.2's collect paragraph).
+        // Read visible, not hidden (the collect paragraph in docs/design/secrets.md).
         XCTAssertFalse(wasSecret)
         // Nothing is stored for a host-key answer: we keep no host-key state of our own.
         XCTAssertEqual(try? broker.commit(token: harness.token).count, 0)
@@ -321,7 +323,8 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testOutsideAddTheSameQuestionIsRefused() {
-        // "otherwise refused" (section 4.2's table): a master token relays nothing.
+        // "otherwise refused" (the table in docs/design/secrets.md): a master token
+        // relays nothing.
         let destination = SSHDestination(user: "alec", hostname: "192.168.64.1", port: 2206)
         let store = MemoryStore()
         let broker = AskpassBroker(
@@ -337,8 +340,9 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testAnEmptyAnswerIsARefusalOfThatPromptAndStoresNothing() {
-        // Section 4.2: "An empty answer is a refusal of that prompt: nothing is stored, and
-        // the attempt fails over." For a passphrase this is `ssh`'s skip-this-identity.
+        // docs/design/secrets.md: "An empty answer is a refusal of that prompt: nothing is
+        // stored, and the attempt fails over." For a passphrase this is `ssh`'s
+        // skip-this-identity.
         let destination = SSHDestination(user: "alec", hostname: "192.168.64.1", port: 2201)
         let store = MemoryStore()
         let (broker, harness) = broker(store, destination: destination)
@@ -352,7 +356,7 @@ final class AddFlowTests: XCTestCase {
 
     func testAWrongPasswordIsNeverStoredBecauseCommitIsOnlyCalledOnSuccess() {
         // The rule is structural: `commit` is what writes, and the flow only calls it for
-        // an attempt that authenticated (section 4.2).
+        // an attempt that authenticated (docs/design/secrets.md).
         let destination = SSHDestination(user: "pw", hostname: "192.168.64.1", port: 2201)
         let store = MemoryStore()
         let (broker, harness) = broker(store, destination: destination)
@@ -364,8 +368,8 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testEachHopOfAChainGetsItsOwnKeyedItem() {
-        // Section 4.2: "Keying passwords by `<user>@<hostname>:<port>` rather than by
-        // location is what makes `ProxyJump` work with password auth on both hops."
+        // docs/design/secrets.md: "Keying passwords by `<user>@<hostname>:<port>` rather
+        // than by location is what makes `ProxyJump` work with password auth on both hops."
         // The testbed's two bastions have deliberately different passwords.
         let store = MemoryStore()
         let hopA = SSHDestination(user: "hop", hostname: "192.168.64.1", port: 2210)
@@ -399,8 +403,9 @@ final class AddFlowTests: XCTestCase {
     }
 
     func testACollectTokenOutlivesTheSixtySecondUnattendedDeadline() {
-        // A person is at the keyboard for a collect connection; section 4.2's 60 s is
-        // about the unattended reconnect the master makes afterwards.
+        // A person is at the keyboard for a collect connection; the 60 s deadline in
+        // docs/design/secrets.md is about the unattended reconnect the master makes
+        // afterwards.
         let broker = AskpassBroker(
             store: MemoryStore(),
             resolver: StaticSSHResolver(),

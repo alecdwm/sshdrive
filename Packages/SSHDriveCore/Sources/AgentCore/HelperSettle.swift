@@ -1,20 +1,21 @@
 import Foundation
 
-/// The rule `sshdrive add` waits by, so the one capability report it prints agrees with
-/// the `sshdrive status` the user runs a moment later (DESIGN.md sections 8, 8.1, 6.4).
+/// The rule `sshdrive add` waits by, so the one capability report it prints agrees with the
+/// `sshdrive status` the user runs a moment later (docs/design/cli.md,
+/// docs/design/change-detection.md).
 ///
 /// The helper is deployed by the first change-detection cycle, which starts with the
 /// location: at `add` time the ladder has already chosen tier 2 from the probe, and the
 /// binary is still going up the wire. A report written in that window described a sweep
 /// and blamed the server for it. So `add` waits - bounded, because a slow or refusing
 /// server must not hold the command open - and whatever is not settled by then is
-/// reported as `deploying`, never as "cannot run" (2026-09-05).
+/// reported as `deploying`, never as "cannot run".
 public enum HelperSettle {
 
-    /// How long `add` waits. Milestone 9 measured a deployment at well under a second on
-    /// a live connection (upload, `chmod`, `--version`, the `ready` handshake); this is
-    /// that with room for a slow link, and short enough that a server which will never
-    /// answer costs the command a few seconds and nothing more.
+    /// How long `add` waits. A deployment on a live connection (upload, `chmod`,
+    /// `--version`, the `ready` handshake) takes well under a second; this is that with
+    /// room for a slow link, and short enough that a server which will never answer costs
+    /// the command a few seconds and nothing more.
     public static let addSeconds: TimeInterval = 6
 
     public enum Step: Equatable {

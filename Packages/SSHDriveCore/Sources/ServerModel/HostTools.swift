@@ -8,10 +8,10 @@ import SSHProcess
 /// scenarios are bounded by the host rather than by the model. Those bounds are measured
 /// here, once per process, and named — never assumed, and never worked around by quietly
 /// weakening the assertion that met them. A scenario that cannot run on this box skips with
-/// the sentence this type returns (`docs/testing-architecture.md` section 4.2, the same rule
-/// as `ScriptShell.skipReason`).
+/// the sentence this type returns (docs/design/testing.md, the same rule as
+/// `ScriptShell.skipReason`).
 ///
-/// Three of them cost us the Darwin half of the suite on 2026-09-08:
+/// Three of them bound what the Darwin half of the suite can cover:
 /// - `SQ-080`: APFS refuses a filename that is not valid UTF-8, so `H7`'s premise cannot
 ///   exist on a Mac at all.
 /// - `SQ-081`: macOS's `/usr/bin/find` is BSD, not GNU findutils, so a row calibrated to
@@ -83,8 +83,8 @@ public enum HostTools {
 
     /// Whether this box's filesystem will hold a filename whose bytes are not valid UTF-8.
     ///
-    /// `SQ-080`: APFS will not - `mkdir` answers `EILSEQ` - so the non-UTF-8 root of
-    /// section 6.4 cannot be made to exist on a Mac at all, and `H7`'s real-filesystem half
+    /// `SQ-080`: APFS will not - `mkdir` answers `EILSEQ` - so a non-UTF-8 sweep root
+    /// cannot be made to exist on a Mac at all, and `H7`'s real-filesystem half
     /// can only ever run on Linux. Measured rather than assumed, because the answer belongs
     /// to the filesystem `$TMPDIR` is on and not to the OS.
     public static let filesystemTakesNonUTF8Names: Bool = probeNonUTF8Names()
@@ -92,7 +92,7 @@ public enum HostTools {
     /// The sentence a scenario that needs such a name skips with.
     public static let nonUTF8NameSkipReason =
         "SQ-080: this box's filesystem refuses a filename that is not valid UTF-8 (APFS answers "
-        + "EILSEQ), so the non-UTF-8 root of section 6.4 cannot be made to exist here. The rule "
+        + "EILSEQ), so a non-UTF-8 sweep root cannot be made to exist here. The rule "
         + "itself - that such a root is dropped from the `find` argv and listed at tier 0 in the "
         + "same cycle - keeps its full coverage on Linux, where the name can be created."
 

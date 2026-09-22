@@ -3,9 +3,9 @@ import Config
 @testable import XPCProtocols
 
 /// NSXPC rebuilds an NSError from domain, code and userInfo, and a Swift LocalizedError's
-/// description is not in userInfo, so it does not survive the trip: the CLI saw
-/// "Config.ConfigStoreError error 1" instead of the message (docs/spikes/results.md,
-/// 2026-09-04). `sshDriveXPCError` is what puts it there.
+/// description is not in userInfo, so it does not survive the trip on its own: without
+/// help the CLI sees "Config.ConfigStoreError error 1" instead of the message.
+/// `sshDriveXPCError` is what puts it there.
 final class XPCErrorTests: XCTestCase {
 
     func testLocalizedErrorDescriptionIsWrittenIntoUserInfo() {

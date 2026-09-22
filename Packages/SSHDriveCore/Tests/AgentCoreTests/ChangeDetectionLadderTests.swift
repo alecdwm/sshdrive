@@ -2,7 +2,8 @@ import Config
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.4's selection and its runtime ladder, with the clock as an argument.
+/// The change-detection tier selection and its runtime ladder (docs/design/change-detection.md),
+/// with the clock as an argument.
 final class ChangeDetectionLadderTests: XCTestCase {
 
     private typealias Capabilities = ChangeDetectionLadder.ServerCapabilities
@@ -33,7 +34,8 @@ final class ChangeDetectionLadderTests: XCTestCase {
     func testAutoWithShellAndFindSettlesAtSweepAndSaysWhyItIsNotHigher() {
         let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(), now: 0)
         XCTAssertEqual(ladder.tier, .sweep)
-        // Section 8.1's note: line, on a server whose probe left the helper out.
+        // The capability report's `note:` line (docs/design/cli.md), on a server whose
+        // probe left the helper out.
         XCTAssertEqual(ladder.note, "the server cannot run the remote helper")
     }
 
@@ -62,8 +64,8 @@ final class ChangeDetectionLadderTests: XCTestCase {
     // MARK: A specific watchMode disables the ladder except to poll
 
     func testWatchModeSweepOnAServerWithNoShellFallsAllTheWayToPoll() {
-        // Section 6.4: "Setting watchMode to a specific tier disables the fallback ladder
-        // except to poll, which always works."
+        // docs/design/change-detection.md: "Setting watchMode to a specific tier disables
+        // the fallback ladder except to poll, which always works."
         let ladder = ChangeDetectionLadder(watchMode: .sweep, capabilities: sftpOnlyServer(), now: 0)
         XCTAssertEqual(ladder.tier, .poll)
         XCTAssertEqual(ladder.note, "watchMode is set to sweep, but the account has no shell access")
@@ -138,8 +140,9 @@ final class ChangeDetectionLadderTests: XCTestCase {
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
         ladder.recordRuntimeFailure(reason: "the stream died", now: 10)
         XCTAssertEqual(ladder.tier, .sweep)
-        // A reconnect re-probes and finds the same capable server. Section 6.4's drop is
-        // "for the rest of the session", and a reconnect is not a new session.
+        // A reconnect re-probes and finds the same capable server. The runtime-failure
+        // drop holds "for the rest of the session" (docs/design/change-detection.md), and
+        // a reconnect is not a new session.
         ladder.applyCapabilities(gnuServer(helperAvailable: true), watchMode: .auto, now: 100)
         XCTAssertEqual(ladder.tier, .sweep)
         XCTAssertEqual(ladder.note, "helper failed: the stream died")
@@ -165,7 +168,8 @@ final class ChangeDetectionLadderTests: XCTestCase {
     func testSweepUsesMminFollowsTakesCmin() {
         let cmin = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(takesCmin: true), now: 0)
         XCTAssertFalse(cmin.sweepUsesMmin)
-        // A busybox NAS: section 6.4 calls this "a normal status line and not an alarm".
+        // A busybox NAS: the change-detection design page calls this "a normal status
+        // line and not an alarm" (docs/design/change-detection.md).
         let busybox = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(takesCmin: false), now: 0)
         XCTAssertEqual(busybox.tier, .sweep)
         XCTAssertTrue(busybox.sweepUsesMmin)
@@ -186,7 +190,7 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertNil(ChangeDetectionLadder.Tier.poll.oneLower)
     }
 
-    // MARK: The tier 2 rung (milestone 9)
+    // MARK: The tier 2 rung
 
     /// `auto` "tries the tiers from the top: helper first". On a server that can run it,
     /// that is where a location settles, with no note at all - the best level has nothing
@@ -198,8 +202,8 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertNil(ladder.note)
     }
 
-    /// The location's own `helper off` (section 8). Named first in the note, because it is
-    /// the one thing the user changed.
+    /// The location's own `helper off` (docs/design/cli.md). Named first in the note,
+    /// because it is the one thing the user changed.
     func testHelperOffKeepsTheLocationAtSweepAndSaysSo() {
         let ladder = ChangeDetectionLadder(
             watchMode: .auto,
@@ -208,8 +212,9 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertEqual(ladder.note, "the helper is off for this location")
     }
 
-    /// Section 8.1: the note has to name the real reason - `cache directory is noexec`,
-    /// `helper unsupported: <os>/<arch>`, `helper upload failed: …` - not a category.
+    /// The capability report's note names the real reason - `cache directory is noexec`,
+    /// `helper unsupported: <os>/<arch>`, `helper upload failed: …` - not a category
+    /// (docs/design/cli.md).
     func testTheDeploymentsOwnReasonIsWhatStatusPrints() {
         for reason in [
             "cache directory is noexec",
@@ -276,7 +281,7 @@ final class ChangeDetectionLadderTests: XCTestCase {
     }
 
     /// `watch-mode sweep` on a server that could run the helper is the user's choice, and
-    /// section 8.1 says it shows a note and *no* `upgrade:` line.
+    /// the capability report shows a note and *no* `upgrade:` line for it (docs/design/cli.md).
     func testWatchModeSweepIsRecordedAsTheUsersChoiceEvenWithAHelperAvailable() {
         let ladder = ChangeDetectionLadder(
             watchMode: .sweep, capabilities: gnuServer(helperAvailable: true), now: 0)
@@ -284,8 +289,9 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertEqual(ladder.note, "watchMode is set to sweep")
     }
 
-    /// Section 6.4 still runs a sweep every 30 minutes at tier 2, so the busybox `-mmin`
-    /// note belongs on a helper location too: that sweep has the same blind spot.
+    /// The 30-minute insurance sweep still runs at tier 2 (docs/design/change-detection.md),
+    /// so the busybox `-mmin` note belongs on a helper location too: that sweep has the
+    /// same blind spot.
     func testTheMminNoteSurvivesAtTierTwoBecauseTheInsuranceSweepStillRuns() {
         let ladder = ChangeDetectionLadder(
             watchMode: .auto,
@@ -294,10 +300,10 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertTrue(ladder.sweepUsesMmin)
     }
 
-    // MARK: Transient failures and the climb back (2026-09-08)
+    // MARK: Transient failures and the climb back
 
-    /// The production failure: a network outage kills the helper's stream, and before this
-    /// the location stayed at sweep until the agent was restarted.
+    /// A network outage kills the helper's stream. Without a bounded transient hold, the
+    /// location would stay at sweep until the agent is restarted.
     func testATransientFailureHoldsTheTierOnlyForItsBackoff() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
@@ -338,10 +344,11 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertLessThanOrEqual(seen.max() ?? 0, ChangeDetectionLadder.retryCapSeconds)
     }
 
-    /// Section 6.3 brings the connection back on its own schedule, and that is the evidence
-    /// the outage is over: the hold goes and the backoff starts again at 2 s. This is what
-    /// makes repeated down/up cycles converge on the helper within one cycle of the link
-    /// being stable rather than one per doubling.
+    /// The offline-handling breaker (docs/design/offline.md) brings the connection back
+    /// on its own schedule, and that is the evidence the outage is over: the hold goes
+    /// and the backoff starts again at 2 s. This is what makes repeated down/up cycles
+    /// converge on the helper within one cycle of the link being stable rather than one
+    /// per doubling.
     func testAConnectionComingUpClearsTheHoldAndTheBackoff() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
@@ -357,8 +364,9 @@ final class ChangeDetectionLadderTests: XCTestCase {
     }
 
     /// A permanent failure is still permanent, and a reconnect does not lift it: the
-    /// section 6.4 list is no shell, no exec channel, an unsupported architecture, a
-    /// `noexec` directory and a hash that did not match after a redeploy.
+    /// permanent reasons (docs/design/change-detection.md) are no shell, no exec channel,
+    /// an unsupported architecture, a `noexec` directory and a hash that did not match
+    /// after a redeploy.
     func testAPermanentFailureSurvivesAConnectionAndAClimbBack() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)

@@ -3,7 +3,7 @@ import XCTest
 
 @testable import SFTP
 
-/// The codec, the pipelining window and the deadlines of DESIGN.md section 6.2, against a
+/// The codec, the pipelining window and the deadlines (docs/design/sftp.md), against a
 /// scripted byte stream: no network, no subprocess, no server.
 final class SFTPClientTests: XCTestCase {
 
@@ -63,7 +63,8 @@ final class SFTPClientTests: XCTestCase {
         }
         // None of them reached the wire.
         XCTAssertTrue(stream.writtenPackets(ofType: .extended).isEmpty)
-        // And with no limits reply, the window is section 6.2's conservative 32 KB x 16.
+        // And with no limits reply, the window is the conservative 32 KB x 16
+        // (docs/design/sftp.md).
         let limits = await client.limits
         XCTAssertNil(limits)
         await client.shutdown()
@@ -85,7 +86,7 @@ final class SFTPClientTests: XCTestCase {
         }
         // A bare FAILURE keeps whatever sentence the server sent, and gets OpenSSH's
         // literal "Failure" when it sent none. ENOSPC, EEXIST, ENOTEMPTY and EXDEV all
-        // arrive here, indistinguishable (section 6.2).
+        // arrive here, indistinguishable (docs/design/sftp.md).
         XCTAssertEqual(SFTPStatusCode.failure.asError(message: ""), .failure("Failure"))
         XCTAssertEqual(SFTPStatusCode.failure.asError(message: "disk"), .failure("disk"))
         XCTAssertNil(SFTPStatusCode.ok.asError(message: ""))
@@ -105,7 +106,7 @@ final class SFTPClientTests: XCTestCase {
         XCTAssertEqual(file.uid, 501)
         XCTAssertEqual(file.gid, 20)
         // SFTP v3 has whole seconds only; nanoseconds and inode stay nil so the index
-        // records them without comparing (section 5.3).
+        // records them without comparing (docs/design/item-index.md).
         XCTAssertNil(file.mtimeNanoseconds)
         XCTAssertNil(file.inode)
 
@@ -133,10 +134,10 @@ final class SFTPClientTests: XCTestCase {
         let (client, stream) = try await connectedClient(server)
         try await client.symlink(target: Data("../elsewhere".utf8), at: path(server, "link"))
 
-        // Section 6.2: OpenSSH takes targetpath first, then linkpath, the opposite order
-        // from the draft. Reading the packet back is the only way to catch a regression,
-        // because a client that gets it wrong still works against a draft-conformant
-        // server and fails only against every real one.
+        // OpenSSH takes targetpath first, then linkpath, the opposite order from the
+        // draft (docs/design/sftp.md). Reading the packet back is the only way to catch
+        // a regression, because a client that gets it wrong still works against a
+        // draft-conformant server and fails only against every real one.
         let packets = stream.writtenPackets(ofType: .symlink)
         XCTAssertEqual(packets.count, 1)
         var reader = packets[0].reader()
@@ -160,7 +161,7 @@ final class SFTPClientTests: XCTestCase {
         XCTAssertEqual(stats.blockSize, 4096)
         XCTAssertEqual(stats.totalBlocks, 2048)
         XCTAssertEqual(stats.availableBlocks, 0)
-        // This is the second question section 6.2 says to ask after a bare FAILURE.
+        // This is the second question to ask after a bare FAILURE (docs/design/sftp.md).
         XCTAssertTrue(stats.isFull)
         await client.shutdown()
     }
@@ -200,9 +201,10 @@ final class SFTPClientTests: XCTestCase {
 
     // MARK: Pipelining
 
-    /// Section 6.2: reads keep a bounded window in flight. The server here answers only
-    /// once it has seen a full window, so a client that did not pipeline would deadlock
-    /// and a client that pipelined too deeply would be caught by the ceiling assertion.
+    /// Reads keep a bounded window in flight (docs/design/sftp.md). The server here
+    /// answers only once it has seen a full window, so a client that did not pipeline
+    /// would deadlock and a client that pipelined too deeply would be caught by the
+    /// ceiling assertion.
     func testReadsPipelineUpToTheWindowAndNoFurther() async throws {
         let window = 4
         let chunk = 1024
@@ -307,8 +309,8 @@ final class SFTPClientTests: XCTestCase {
         let stream = ScriptedByteStream()
         stream.responder = { packet, stream in
             // Answer the handshake, then go silent: this is the connection that died
-            // without telling anyone, which section 6.3 point 4 says the per-request
-            // deadline is what finds.
+            // without telling anyone, which the per-request deadline is what finds
+            // (docs/design/offline.md).
             if packet.packetType == .initialize {
                 stream.pushVersion(3, extensions: [])
             }
@@ -327,7 +329,7 @@ final class SFTPClientTests: XCTestCase {
         XCTAssertLessThan(elapsed, .seconds(3))
 
         // And the channel is dead afterwards, which is what makes the agent drop the
-        // master rather than keep issuing into a hole (section 6.2).
+        // master rather than keep issuing into a hole (docs/design/sftp.md).
         let alive = await client.isAlive
         XCTAssertFalse(alive)
         await assertSFTPError(.connectionLost) {

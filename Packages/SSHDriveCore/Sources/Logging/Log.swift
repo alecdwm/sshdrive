@@ -7,10 +7,9 @@ import Foundation
 #if canImport(os)
     /// The logger type behind `Log`: Apple's, on any platform that has `os`.
     ///
-    /// Nothing about the Darwin build changes with the facade - the subsystem, the five
-    /// categories and the `os_log` machinery (its lazy interpolation, its privacy handling and
-    /// its persistence rules) are exactly what they were, so `sshdrive logs`' predicates keep
-    /// matching (DESIGN.md section 8).
+    /// The subsystem, the five categories and the `os_log` machinery (its lazy
+    /// interpolation, its privacy handling and its persistence rules) are Apple's, which is
+    /// what `sshdrive logs`' predicates match on (docs/design/cli.md).
     public typealias SSHDriveLog = os.Logger
 #else
     /// The logger type behind `Log` where there is no `os`: the stderr backend of
@@ -18,9 +17,9 @@ import Foundation
     public typealias SSHDriveLog = SSHDriveLogger
 #endif
 
-/// Logging subsystems and categories, fixed by DESIGN.md section 3.1.
+/// Logging subsystems and categories (docs/design/components.md).
 ///
-/// Hostnames and paths are logged `.public` by decision (DESIGN.md section 9), so
+/// Hostnames and paths are logged `.public` on purpose (docs/design/security.md), so
 /// `sshdrive logs` is readable without a debugger attached. Secrets never reach a log
 /// line at all: they are not interpolated, redacted or otherwise.
 ///
@@ -30,8 +29,8 @@ import Foundation
 public enum Log {
     public static let subsystem = "org.shirls.sshdrive"
 
-    /// The category strings of section 3.1, named so a test can assert them on either
-    /// platform (`os.Logger` does not give its category back).
+    /// The category strings, named so a test can assert them on either platform
+    /// (`os.Logger` does not give its category back).
     public enum Category {
         public static let extensionLog = "extension"
         public static let agent = "agent"
@@ -39,7 +38,8 @@ public enum Log {
         public static let sftp = "sftp"
         public static let ssh = "ssh"
 
-        /// Every category `sshdrive logs` can show, in the order section 3.1 lists them.
+        /// Every category `sshdrive logs` can show, in the order the components design
+        /// page lists them.
         public static let all = [extensionLog, agent, cli, sftp, ssh]
     }
 

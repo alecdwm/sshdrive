@@ -2,21 +2,22 @@ import Foundation
 import XPCProtocols
 
 extension IndexItem {
-    /// A row is a finished item (DESIGN.md section 5.2): turning one into the value that
+    /// A row is a finished item (docs/design/extension.md): turning one into the value that
     /// crosses XPC, or that the extension's reader hands straight to the system, is a
-    /// field-by-field copy and nothing more. Both the agent and the extension use this,
-    /// so the two paths cannot drift.
+    /// field-by-field copy and nothing more. Both the agent and the extension use this, so
+    /// the two paths cannot drift.
     public var snapshot: SSHDriveItemSnapshot {
         // The marker decides the policy, not just the effect: a kept item is eager, an
         // explicitly excluded one (`pin_state = -1`) is lazy, which is what overrides an
-        // eager ancestor (section 7.1.1), and everything else says nothing.
+        // eager ancestor (docs/design/pinning.md), and everything else says nothing.
         let policy: SSHDriveContentPolicy =
             kept
             ? .downloadEagerlyAndKeepDownloaded
             : (pinState == -1 ? .downloadLazily : .unset)
-        // Section 5.4: the row's one local blob carries both the extended attributes and
-        // the Finder tags, and section 5.3 hashes exactly that blob into the metadata
-        // version, which is what stops the system re-offering a tag change (S10).
+        // The row's one local blob carries both the extended attributes and the Finder
+        // tags, and the metadata version hashes exactly that blob, which is what makes a
+        // change the agent itself makes - a restore from the index backup - reach the
+        // system (gotcha 50).
         let local = LocalAttributes.decode(xattrs)
         return SSHDriveItemSnapshot(
             identifier: identifier,

@@ -7,16 +7,13 @@ import XPCProtocols
 
 /// The agent, as the extension sees it, over a **real index database**.
 ///
-/// It is the scripted `AgentChannel` of `docs/testing-architecture.md` section 2.2, and it
-/// is deliberately not a mock of the answers: it runs `IndexChangeStream` on a real
+/// It is the scripted `AgentChannel` (docs/design/testing.md), and it is deliberately not
+/// a mock of the answers: it runs `IndexChangeStream` on a real
 /// SQLite file through `IndexWriter`, exactly as `AgentService.enumerateWorkingSetChanges`
 /// does on the writer's own connection. The extension's reader reads the same file. So
 /// when a scenario says "an index with rows the replica lacks", the rows are real rows and
 /// the two sources are the two real sources; the only thing scripted is whether the agent
 /// is reachable and what it answers to `indexReady`.
-///
-/// Step 8 replaces this with an in-process loopback onto `AgentRuntime`; until then it is
-/// the half of the mount the model owns.
 public final class ModelAgent: AgentChannel {
     public let writer: IndexWriter
     public let displayName: String
@@ -37,13 +34,13 @@ public final class ModelAgent: AgentChannel {
     /// Model seconds an enumeration takes to answer. `A8` sets it to 60 to hold the call
     /// open for the measured `MQ-007` duration.
     public var enumerateItemsDelay: Double = 0
-    /// Directory paging: how many rows one page carries (section 5.2).
+    /// Directory paging: how many rows one page carries.
     public var pageSize = 500
 
     /// What the agent was asked, in order.
     public private(set) var calls: [String] = []
-    /// `workingSetAnchorExpired` is answered by one full sweep of the root set
-    /// (section 5.3), and this is the count of them.
+    /// `workingSetAnchorExpired` is answered by one full sweep of the root set, and this
+    /// is the count of them.
     public private(set) var fullSweeps = 0
     public private(set) var anchorExpiryReports: [String] = []
 
@@ -150,8 +147,7 @@ public final class ModelAgent: AgentChannel {
                         anchor: String(page.newAnchor), moreComing: page.hasMore)))
         } catch IndexError.syncAnchorExpired {
             // It has to cross as the system's own error or the extension would map it to
-            // serverUnreachable and the fresh anchor would never be handed out
-            // (section 5.3).
+            // serverUnreachable and the fresh anchor would never be handed out.
             completion(.failure(.syncAnchorExpired))
         } catch {
             completion(.failure(.serverUnreachable))
@@ -224,10 +220,10 @@ public final class ModelAgent: AgentChannel {
     public var onModify:
         ((ProviderItemIdentifier, ProviderItemFields, ItemChanges) -> Result<ItemView, ProviderFailure>?)?
 
-    /// Section 5.7's lexical check, as far as the model needs it: a target that is
-    /// absolute-and-outside or climbs out of the share is refused, and the refusal is a
-    /// `.cannotSynchronize` that reaches the user only as the item's `uploadingError`
-    /// (`MQ-078`).
+    /// The symlink lexical check (docs/design/symlinks.md), as far as the model needs it:
+    /// a target that is absolute-and-outside or climbs out of the share is refused, and
+    /// the refusal is a `.cannotSynchronize` that reaches the user only as the item's
+    /// `uploadingError` (`MQ-078`).
     public var remoteRoot = "/home/alec"
 
     public func createItem(
@@ -238,7 +234,7 @@ public final class ModelAgent: AgentChannel {
         guard isReachable else { return completion(.failure(.serverUnreachable)) }
         if let scripted = onCreate?(template) { return completion(scripted) }
         if let target = template.symlinkTarget {
-            // The shipping check, not a paraphrase of it: section 5.7's lexical rule as
+            // The shipping check, not a paraphrase of it: the symlink lexical rule as
             // `createItem` applies it. An escaping or absolute target never leaves the
             // Mac, and the refusal is a `.cannotSynchronize` (`MQ-078`).
             let directory =
@@ -305,8 +301,8 @@ public final class ModelAgent: AgentChannel {
             if changedFields.contains(.fileSystemFlags), let flags = changes.newFileSystemFlags {
                 row.mode = Int64(flags)
             }
-            // Section 5.4: the tags and the xattrs go into the one local blob, and its
-            // hash is what moves the metadata version - which is the only thing that
+            // The tags and the xattrs go into the one local blob, and its hash is what
+            // moves the metadata version - which is the only thing that
             // moves it for an *agent-side* change (`MQ-079`).
             if changedFields.contains(.tagData) || changedFields.contains(.extendedAttributes) {
                 var local = LocalAttributes.decode(row.xattrs)
@@ -359,7 +355,7 @@ public final class ModelAgent: AgentChannel {
         calls.append("materializedItemsDidChange")
     }
 
-    /// One report, one full sweep of the root set (section 5.3). `A5` counts both.
+    /// One report, one full sweep of the root set. `A5` counts both.
     public func workingSetAnchorExpired(freshAnchor: String) {
         calls.append("workingSetAnchorExpired(\(freshAnchor))")
         anchorExpiryReports.append(freshAnchor)
@@ -377,7 +373,7 @@ public final class ModelAgent: AgentChannel {
     // MARK: The server's side, for a scenario to drive
 
     /// A row appearing in the index the way the change detector writes one: an upsert and
-    /// an anchor, which is what every caller in the agent does (section 5.3).
+    /// an anchor, which is what every caller in the agent does.
     @discardableResult
     public func indexRow(
         identifier: String, name: String, parent: String = IndexWriter.rootIdentifier,
@@ -391,8 +387,8 @@ public final class ModelAgent: AgentChannel {
             size: isDirectory ? 0 : size,
             mtime: mtime,
             contentVersion: IndexItem.contentVersion(size: size, mtime: mtime, generation: 0))
-        // Section 7.1.1: `kept` is derived from the parent row's effective state, which is
-        // the whole of "descendants the index has never seen need nothing".
+        // `kept` is derived from the parent row's effective state, which is the whole of
+        // "descendants the index has never seen need nothing" (docs/design/pinning.md).
         if let parentRow = try writer.item(identifier: parent), parentRow.kept {
             row.kept = true
         }
@@ -402,12 +398,12 @@ public final class ModelAgent: AgentChannel {
         return row
     }
 
-    /// A row leaving the index, which is the only thing that removes one (section 5.3).
+    /// A row leaving the index, which is the only thing that removes one.
     public func removeIndexRow(identifier: String) throws {
         try writer.delete(identifier: identifier)
     }
 
-    // MARK: Pins, as the agent writes them (section 7.1.1)
+    // MARK: Pins, as the agent writes them
 
     /// `sshdrive pin`: the marker on the row, `kept` on it and on every known descendant,
     /// a restamped metadata version each, and an anchor each - which is how the change
@@ -417,7 +413,7 @@ public final class ModelAgent: AgentChannel {
     }
 
     /// `sshdrive unpin` on a path inside a pin: an **exclusion**, which is the explicit
-    /// `.downloadLazily` that beats an eager ancestor (`MQ-027`, section 7.1.1 situation C).
+    /// `.downloadLazily` that beats an eager ancestor (`MQ-027`, docs/design/pinning.md).
     public func exclude(identifier: String) throws {
         try setPin(identifier: identifier, marker: -1, kept: false)
     }
@@ -451,7 +447,7 @@ public final class ModelAgent: AgentChannel {
         }
     }
 
-    // MARK: The conflict copy of section 5.5
+    // MARK: The conflict copy
 
     /// What the next `modifyItem` does instead of writing: rename the temp file - which
     /// already holds the local content - to `<name> (conflicted copy from <Mac> <date>)`

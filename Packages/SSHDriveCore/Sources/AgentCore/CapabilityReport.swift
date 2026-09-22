@@ -3,13 +3,14 @@ import Config
 import SFTP
 import SSHProcess
 
-/// Where the remote helper of section 6.4 tier 2 has got to, as the report has to say it.
+/// Where the remote helper (tier 2, docs/design/change-detection.md) has got to, as the
+/// report has to say it.
 ///
 /// The report is one sentence per feature and the user reads it as the truth about the
 /// server, so "not running" and "cannot run" are different states and must never be
 /// printed as the same one. `add` reaches this type in the window where the tier has been
-/// chosen and the binary is still going up the wire (2026-09-05); `status` reaches it a
-/// moment later with the stream up.
+/// chosen and the binary is still going up the wire; `status` reaches it a moment later
+/// with the stream up.
 public enum HelperState: Equatable, Sendable {
     /// The stream is up: its own version, the directory it runs from, and the mechanism
     /// its `ready` line named.
@@ -26,19 +27,19 @@ public enum HelperState: Equatable, Sendable {
     public var isRunning: Bool { if case .running = self { return true } else { return false } }
 }
 
-/// The capability report of DESIGN.md section 8.1.
+/// The capability report (docs/design/cli.md).
 ///
-/// "Every line in the report follows one shape so all permutations read the same way: a
-/// level glyph, the feature name, the level in use, and, whenever the level is not the
-/// best one, an indented `upgrade:` line naming the concrete requirement."
+/// Every line follows one shape so all permutations read the same way: a level glyph, the
+/// feature name, the level in use, and, whenever the level is not the best one, an
+/// indented `upgrade:` line naming the concrete requirement.
 ///
 /// The catalogue is data, not prose: eight features, each with its levels best-first, the
 /// level in use, and the sentence that names the next one. `--json` emits exactly these
 /// objects, and the CLI renders the same values as text, so the two can never disagree.
 ///
 /// It lives in `AgentCore` rather than beside the agent's plumbing so the rendering can be
-/// unit-tested from a recorded probe and a recorded extension set, which is what
-/// 2026-09-05's false "the server cannot run the remote helper" cost us.
+/// unit-tested from a recorded probe and a recorded extension set. A report built from
+/// live plumbing is where a false "the server cannot run the remote helper" hides.
 public struct CapabilityReport {
 
     public struct Feature {
@@ -51,7 +52,7 @@ public struct CapabilityReport {
         public var glyph: String
         /// Named only when the level is not the best one.
         public var upgrade: String?
-        /// A runtime downgrade, a user-forced setting, or ACL evidence (section 8.1).
+        /// A runtime downgrade, a user-forced setting, or ACL evidence (docs/design/cli.md).
         public var note: String?
         /// In place of `upgrade:` where the fix is a setting rather than a server change.
         public var consider: String?
@@ -74,9 +75,9 @@ public struct CapabilityReport {
     public var serverFreeSpace: String?
     /// Every extension name the server advertised in SSH_FXP_VERSION, as recorded at
     /// connect. Shown by `--json` so an "it did not advertise it" line can be checked
-    /// against the server rather than believed (2026-09-05).
+    /// against the server rather than believed.
     public var advertisedExtensions: [String] = []
-    /// Which SSH server this is, as far as the evidence goes (section 8.1). `status`
+    /// Which SSH server this is, as far as the evidence goes (docs/design/cli.md). `status`
     /// prints it and two of the lines below are worded from it.
     public var software: ServerSoftware = .unknown
 
@@ -96,9 +97,9 @@ public struct CapabilityReport {
         return out
     }
 
-    /// The fixed, short ignore list of section 6.4, printed under the change-detection
-    /// line whenever the helper is the running tier ("the list is printed on the
-    /// change-detection line of `sshdrive status`").
+    /// The fixed, short ignore list the helper applies
+    /// (docs/design/change-detection.md), printed on the change-detection line of
+    /// `sshdrive status` whenever the helper is the running tier.
     public static let helperIgnores = [".sshdrive-upload-*", ".*.swp", "*~", ".#*", "4913"]
 
     /// What `add` and `status` print while the helper is on its way up. No `upgrade:`
@@ -115,8 +116,8 @@ public struct CapabilityReport {
     ///   ladder offers the tier from the probe before anything has been deployed and a
     ///   report written in that window would claim events from a helper that has not
     ///   started. `.deploying` says so plainly rather than reaching for the sweep
-    ///   branch's "the server cannot run the remote helper", which was false for every
-    ///   server that could (2026-09-05).
+    ///   branch's "the server cannot run the remote helper", which is false for every
+    ///   server that could.
     public static func make(
         probe: ServerProbe.Result,
         extensions: SFTPServerExtensions,
@@ -181,13 +182,13 @@ public struct CapabilityReport {
         // 6. Durable writes: fsync@openssh.com · none.
         // 7. Transfer sizing: limits@openssh.com · conservative 32 KB requests.
         //
-        // Both are OpenSSH's own extensions, so on a server that is *not* OpenSSH the
-        // `upgrade:` line was a lie: there is no version of Go's `pkg/sftp` that
+        // Both are OpenSSH's own extensions, so on a server that is *not* OpenSSH an
+        // `upgrade:` line would be a lie: there is no version of Go's `pkg/sftp` that
         // advertises `fsync@openssh.com`, and telling that user to want OpenSSH >= 6.3
         // asks them to replace their SSH server. Where the software is known and is not
-        // OpenSSH the line becomes a `note:` stating the fact, and the `upgrade:` line
-        // goes (2026-09-08). Where it is *unknown* nothing changes: an unidentified
-        // server may well be an old OpenSSH.
+        // OpenSSH the line is a `note:` stating the fact, with no `upgrade:` line. Where
+        // it is *unknown* the `upgrade:` line stands: an unidentified server may well be
+        // an old OpenSSH.
         features.append(extensionFeature(
             name: "durable writes", present: extensions.contains(.fsync),
             level: "fsync@openssh.com",
@@ -202,7 +203,7 @@ public struct CapabilityReport {
         // 8. Collision-safe create: server-enforced · lstat preflight.
         // "a server whose plain `rename` refuses to overwrite, as OpenSSH does". A server
         // that advertises OpenSSH's own extensions is one; `set create-check lstat` forces
-        // the preflight regardless (section 5.5, section 8).
+        // the preflight regardless (docs/design/writes.md, docs/design/cli.md).
         let forced = location.createCheck == .lstat
         let serverEnforced = !forced && !extensions.isEmpty
         features.append(Feature(
@@ -244,7 +245,7 @@ public struct CapabilityReport {
         helper: HelperState
     ) -> Feature {
         let best = "helper (push, ~1s)"
-        // The running tier, at its own best level. Section 8.1's example line is
+        // The running tier, at its own best level. The line reads
         // `helper 1.2.0 at ~/.cache/sshdrive (push, ~1s)`; the mechanism comes from the
         // helper's own `ready` line, so a kqueue build says what it really does.
         if case let .running(version, directory, mechanism) = helper {
@@ -256,11 +257,11 @@ public struct CapabilityReport {
                 note: "ignores: " + helperIgnores.joined(separator: "  "))
         }
         // A user-forced watch-mode below the best available shows ◐ with `note: forced by
-        // watch-mode <x>` and no `upgrade:` line (section 8.1). Poll is also where a
+        // watch-mode <x>` and no `upgrade:` line (docs/design/cli.md). Poll is also where a
         // location with no shell at all lands.
         // The ladder, not the probe, is the authority on which tier is running once the
         // location has been up: a sweep that failed drops to poll for the session even
-        // though the probe still says the shell is there (section 6.4).
+        // though the probe still says the shell is there (docs/design/change-detection.md).
         if location.watchMode == .poll || !shell || activeTier == "poll" {
             var note: String?
             if location.watchMode == .poll {
@@ -284,8 +285,8 @@ public struct CapabilityReport {
             ? "sweep (find -cmin over the root set)"
             : "sweep (find -mmin over the root set; a rename or chmod moves ctime, not mtime, "
                 + "so those are missed until the next full sweep)"
-        // Section 8.1: "A runtime downgrade ... shows the level in use with ◐ and a
-        // `note:` line giving the reason and time, in addition to the `upgrade:` line."
+        // A runtime downgrade shows the level in use with ◐ and a `note:` line giving
+        // the reason and time, in addition to the `upgrade:` line.
         var note: String
         var upgrade: String? = "the remote helper (push events, real renames)"
         switch helper {

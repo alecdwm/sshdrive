@@ -3,7 +3,7 @@ import Logging
 import XPCProtocols
 
 /// The `-N` ControlMaster for one location, and the mux clients that run on its socket
-/// (DESIGN.md section 6.1).
+/// (docs/design/ssh.md).
 ///
 /// The master carries no session: authentication, the TCP connection and the mux socket,
 /// nothing else. Every SFTP and exec channel is a mux client with its own process, so a
@@ -18,48 +18,51 @@ public actor SSHMaster {
         public var locationID: String
         public var target: SSHTarget
         /// launchd's, with `HOME`, the askpass variables, and `PATH` and `SSH_AUTH_SOCK`
-        /// replaced by the login shell snapshot (section 6.1).
+        /// replaced by the login shell snapshot (docs/design/ssh.md).
         public var environment: [String: String]
         /// Only an `agentDependent` location consults a key agent, and only it is subject
-        /// to the pre-spawn socket check and the deadline re-arm (section 4.2).
+        /// to the pre-spawn socket check and the deadline re-arm
+        /// (docs/design/secrets.md).
         public var agentDependent: Bool
         /// The chain the agent built as its own `ProxyCommand`, or nil.
         public var proxyCommand: String?
         /// Which socket to probe before spawning, for an `agentDependent` location.
         public var identityAgentSocket: String?
         /// 60 s from spawn, signalled by the control socket appearing. The 15 s
-        /// `ConnectTimeout` is contained in it, never added (section 4.2, section 6.3).
+        /// `ConnectTimeout` is contained in it, never added (docs/design/secrets.md,
+        /// docs/design/offline.md).
         public var authenticationDeadline: TimeInterval
         public var controlPath: String
         /// `Contents/MacOS/sshdrive-askpass`, from the running bundle. Nil in a unit test
         /// and in `doctor`, where nothing may be prompted.
         public var askpassPath: String?
         /// The broker that mints the one-time token for this spawn and answers the
-        /// prompts it raises (section 4.2). `SSHProcess` never sees a secret: it puts the
+        /// prompts it raises (docs/design/secrets.md). `SSHProcess` never sees a secret:
+        /// it puts the
         /// token in the child's environment and retires it when the master exits.
         public var askpass: (any AskpassTokenProviding)?
-        /// `yes` for every runtime connection. The collect connection of section 4.2 runs
-        /// `ask`, so the fingerprint question of section 4.3 is raised and can be relayed
-        /// to the terminal, or `accept-new` under `--trust-first`.
+        /// `yes` for every runtime connection. The collect connection runs `ask`, so the
+        /// fingerprint question is raised and can be relayed to the terminal, or
+        /// `accept-new` under `--trust-first` (docs/design/secrets.md).
         public var hostKeyChecking: String
         /// True for the collect connection: its token is minted `collect`, so a prompt the
-        /// keychain cannot answer is relayed to the CLI instead of skipped (section 4.2).
+        /// keychain cannot answer is relayed to the CLI instead of skipped
+        /// (docs/design/secrets.md).
         public var isCollectConnection: Bool
         /// Stored items masked for this spawn, so a stale password reaches the terminal
         /// rather than being answered from the keychain and refused by the server
-        /// (section 4.2).
+        /// (docs/design/secrets.md).
         public var maskedAccounts: Set<String>
         /// Raise this one connection to `LogLevel=DEBUG1` and keep the server's
         /// identification string out of it.
         ///
-        /// Section 8.1 wants `status` to name the server software, and section 6.1 says
-        /// why nothing else can: the runtime masters run at `LogLevel=ERROR`, which prints
-        /// no remote version, and a mux client never talks to the server at all. The
-        /// collect connection of section 4.2 is a real, fresh `ssh` the agent makes once
-        /// per `add`, so it is the one place the line is free. Everything that looks at
-        /// this connection's stderr afterwards - the exit classifier and the sentence
-        /// `add` prints - sees the debug lines stripped again, so raising the level
-        /// changes no decision (2026-09-08).
+        /// `status` names the server software (docs/design/cli.md) and nothing else can
+        /// read it: the runtime masters run at `LogLevel=ERROR`, which prints no remote
+        /// version, and a mux client never talks to the server at all. The collect
+        /// connection is a real, fresh `ssh` the agent makes once per `add`, so it is the
+        /// one place the line is free. Everything that looks at this connection's stderr
+        /// afterwards - the exit classifier and the sentence `add` prints - sees the debug
+        /// lines stripped again, so raising the level changes no decision.
         public var capturesRemoteVersion: Bool
 
         public init(
@@ -103,7 +106,8 @@ public actor SSHMaster {
     /// `ssh`'s "remote software version <x>", when this master was asked for it.
     public private(set) var remoteSoftwareVersion: String?
     /// The token minted for the running master, retired when it goes. A `ProxyJump` hop
-    /// inherits it through the environment and is told apart by its own argv (section 4.2).
+    /// inherits it through the environment and is told apart by its own argv
+    /// (docs/design/secrets.md).
     public private(set) var askpassToken: String?
     /// The token the **last** spawn used, which `retireToken()` does not clear.
     ///
@@ -111,10 +115,11 @@ public actor SSHMaster {
     /// right for everything that might still put a prompt to it. But everything the
     /// connection recorded - the touch-required keys, the refusal reason, the answers it
     /// took from the keychain - is read off the broker's session *after* the attempt, and
-    /// a failed attempt is exactly when section 4.2 needs it: a refused PIN is a failure,
-    /// and "add explains which prompt it saw" has to survive it. Retiring the session is
-    /// what stops it answering; forgetting it is what makes it unreadable, and the collect
-    /// connection does that itself when it has finished with it (2026-09-08, Q8).
+    /// a failed attempt is exactly when it is needed (docs/design/secrets.md): a refused
+    /// PIN is a failure, and "add explains which prompt it saw" has to survive it.
+    /// Retiring the session is what stops it answering; forgetting it is what makes it
+    /// unreadable, and the collect connection does that itself when it has finished with
+    /// it (scenario `Q8`).
     public private(set) var lastAskpassToken: String?
 
     public init(configuration: Configuration) {
@@ -152,8 +157,9 @@ public actor SSHMaster {
         ControlSocket.unlink(configuration.controlPath)
         let invocation = self.invocation
         // One token per spawn, in this process's environment and nowhere else. Every hop
-        // of an agent-built ProxyCommand inherits it, which is exactly what section 4.2
-        // wants; a mux client gets an environment with all of it stripped (below).
+        // of an agent-built ProxyCommand inherits it, which is what
+        // docs/design/secrets.md wants; a mux client gets an environment with all of it
+        // stripped (below).
         let environment = mintedEnvironment(argv: invocation.argv)
         Log.ssh.info("spawning master for \(self.configuration.locationID, privacy: .public)")
         let spawned = try Spawn.run(
@@ -196,7 +202,7 @@ public actor SSHMaster {
         }
         // The deadline. For an agentDependent location this stops reconnection and is
         // re-armed once; for a first-pass location, which no key agent can be holding up,
-        // it is a transient failure retried through the breaker (section 6.1).
+        // it is a transient failure retried through the breaker (docs/design/ssh.md).
         let stderr = absorb(collector.text)
         lastStderr = stderr
         Spawn.terminate(spawned, grace: 1)
@@ -212,13 +218,14 @@ public actor SSHMaster {
 
     /// `-O check`: asks our own child, over the socket, whether it is alive. It says
     /// nothing about the server or the TCP connection, so it is the cheap "is our child
-    /// sane" check; the per-request deadline is the real liveness probe (section 6.1).
+    /// sane" check; the per-request deadline is the real liveness probe
+    /// (docs/design/ssh.md).
     ///
     /// "Cheap" is about the server, not about us: it spawns an `ssh` and waits up to ten
     /// seconds for it, so it suspends rather than blocking and the actor is released
     /// while the child runs. Nothing on the `status` path may call it; the caller that
-    /// does is section 6.4's "did the helper's stream die with the connection or on its
-    /// own", which has to know.
+    /// does is "did the helper's stream die with the connection or on its own"
+    /// (docs/design/change-detection.md), which has to know.
     public func check() async -> Bool {
         let invocation = SSHCommandBuilder.control(
             "check", controlPath: configuration.controlPath, host: configuration.target.host
@@ -231,7 +238,7 @@ public actor SSHMaster {
     }
 
     /// `-O exit`: the clean shutdown. Also what runs at the will-sleep message, on every
-    /// master, before the Mac abandons the connection (section 6.1).
+    /// master, before the Mac abandons the connection (docs/design/ssh.md).
     public func shutdown() {
         let invocation = SSHCommandBuilder.control(
             "exit", controlPath: configuration.controlPath, host: configuration.target.host
@@ -254,9 +261,9 @@ public actor SSHMaster {
     ///
     /// Only the collect connection ever runs at `DEBUG1`; for every other master this is
     /// the identity function. For that one it is what keeps raising the level free: the
-    /// exit classifier and the sentence `add` prints both see exactly the ERROR-level
-    /// text they saw before, because `debug1:`/`debug2:`/`debug3:` lines are dropped
-    /// (2026-09-08, section 8.1).
+    /// exit classifier and the sentence `add` prints both see exactly the text an
+    /// ERROR-level master would have produced, because `debug1:`/`debug2:`/`debug3:`
+    /// lines are dropped (docs/design/cli.md).
     @discardableResult
     private func absorb(_ raw: String) -> String {
         guard configuration.capturesRemoteVersion else { return raw }
@@ -290,8 +297,8 @@ public actor SSHMaster {
     /// **`ssh` ends every stderr log line with `\r\n`, and in Swift `"\r\n"` is one
     /// `Character`.** So `split(separator: "\n")` finds no separator at all in `ssh -v`
     /// output, the whole transcript is one "line", and the first thing that reads a value
-    /// off it takes the rest of the file with it: the captured server version became
-    /// `Tailscale` followed by a hundred `debug1:` lines, which `status` then printed
+    /// off it takes the rest of the file with it: the captured server version comes out
+    /// as `Tailscale` followed by a hundred `debug1:` lines, which `status` then prints
     /// (measured 2026-09-08). Normalise the line endings first, on scalars.
     static func lines(of raw: String) -> [Substring] {
         var normalised = ""
@@ -328,8 +335,9 @@ public actor SSHMaster {
     }
 
     /// The environment for the master itself: the location's, plus the askpass variables
-    /// and a token minted for this one spawn (section 4.2). Without a broker or an
-    /// askpass path it is the environment unchanged, which is what a unit test wants.
+    /// and a token minted for this one spawn (docs/design/secrets.md). Without a broker
+    /// or an askpass path it is the environment unchanged, which is what a unit test
+    /// wants.
     func mintedEnvironment(argv: [String]) -> [String: String] {
         guard let askpass = configuration.askpass, let path = configuration.askpassPath else {
             askpassToken = nil
@@ -356,7 +364,7 @@ public actor SSHMaster {
     // MARK: - Channels
 
     /// `ssh $MUX -s <host> sftp`. One of these is the metadata channel and a second the
-    /// bulk channel, so a long transfer never blocks a listing (section 6.1).
+    /// bulk channel, so a long transfer never blocks a listing (docs/design/ssh.md).
     public func openSFTPChannel(readinessDeadline: TimeInterval = 15) throws -> SFTPChannel {
         let invocation = SSHCommandBuilder.sftpChannel(
             controlPath: configuration.controlPath, host: configuration.target.host
@@ -371,7 +379,7 @@ public actor SSHMaster {
     }
 
     /// `ssh $MUX <host> sh -s`, the script on stdin, and the read that discards everything
-    /// up to and including the sentinel (section 9.2).
+    /// up to and including the sentinel (docs/design/security.md).
     ///
     /// A channel whose sentinel has not arrived by the deadline is "shell output
     /// unusable", except when the first bytes are SFTP framing, which is a
@@ -437,7 +445,7 @@ public actor SSHMaster {
     }
 
     /// A mux client gets no askpass token: it runs `BatchMode=yes` and can never prompt,
-    /// and the agent mints no token for one (section 4.2).
+    /// and the agent mints no token for one (docs/design/secrets.md).
     private func muxEnvironment() -> [String: String] {
         AskpassEnvironment.removingAskpass(from: configuration.environment)
     }

@@ -4,20 +4,20 @@ import ProviderCore
 import UniformTypeIdentifiers
 import XPCProtocols
 
-/// The File Provider extension (DESIGN.md section 5).
+/// The File Provider extension (`docs/design/extension.md`).
 ///
 /// One instance per domain; the system may host several instances in one process, so
 /// nothing here is global. It holds no state of its own, opens no sockets and never
 /// writes the index.
 ///
-/// **This file contains no decision.** Every rule the extension used to carry -
-/// which source answers the working set, which error a reader that cannot answer
-/// deserves, the trash refusal, the readiness window, item construction, the two Finder
-/// actions - lives in `ProviderCore.ProviderService`, where it compiles on Linux and is
-/// driven by `SystemModel.FileProviderD` (`docs/testing-architecture.md` section 2.2).
-/// What is left is one forwarding call per protocol method, plus the file I/O that only
-/// the appex can do: the temp file the system gives it for fetched content, whose handle
-/// it passes to the agent to fill (section 5.2).
+/// **This file contains no decision.** Every rule the extension applies - which source
+/// answers the working set, which error a reader that cannot answer deserves, the trash
+/// refusal, the readiness window, item construction, the two Finder actions - lives in
+/// `ProviderCore.ProviderService`, where it compiles on Linux and is driven by
+/// `SystemModel.FileProviderD` (`docs/design/testing.md`). What is left is one forwarding
+/// call per protocol method, plus the file I/O that only the appex can do: the temp file
+/// the system gives it for fetched content, whose handle it passes to the agent to
+/// fill.
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     let domain: NSFileProviderDomain
     let domainIdentifier: String
@@ -85,8 +85,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
-        // Section 6.2's two classes are read straight off the request and travel to the
-        // agent unchanged.
+        // The transfer scheduler's two classes, foreground and background, are read
+        // straight off the request and travel to the agent unchanged
+        // (`docs/design/sftp.md`).
         transfer(completionHandler) { [self] handle, transferID, done in
             service.fetchContents(
                 identifier: AppleMapping.identifier(itemIdentifier),
@@ -99,8 +100,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         }
     }
 
-    /// Range requests, for large media (section 5.1). Always a foreground transfer under
-    /// the scheduler of section 6.2.
+    /// Range requests, for large media. Always a foreground transfer under the transfer
+    /// scheduler (`docs/design/sftp.md`).
     func fetchPartialContents(
         for itemIdentifier: NSFileProviderItemIdentifier,
         version requestedVersion: NSFileProviderItemVersion,
@@ -125,8 +126,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     /// The extension creates the target file in its own temp directory, opens it for
     /// writing and sends the handle; the agent writes through it and never needs to
-    /// resolve, or be allowed to reach, a path inside the extension's container
-    /// (section 5.2).
+    /// resolve, or be allowed to reach, a path inside the extension's container.
     private func transfer(
         _ completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void,
         _ start: (FileHandle, String, @escaping (Result<ItemView, ProviderFailure>) -> Void) -> Void
@@ -161,7 +161,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
         callbacks.register(progress, for: transferID)
         // Cancelling the Progress sends a cancel for that transfer's id over the same
-        // connection; the agent abandons the SFTP requests in flight (section 5.2).
+        // connection; the agent abandons the SFTP requests in flight.
         progress.cancellationHandler = { [weak self] in
             self?.service.agent.cancelTransfer(transferID: transferID)
         }
@@ -201,16 +201,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             isSymlink: itemTemplate.contentType == .symbolicLink,
             symlinkTarget: itemTemplate.contentType == .symbolicLink
                 ? itemTemplate.symlinkTargetPath ?? nil : nil,
-            // Section 5.5: the temp file is opened with the Mac file's permission bits,
-            // 0755 when the local one is executable, and the modification date is set
-            // back after the rename.
+            // The temp file is opened with the Mac file's permission bits, 0755 when
+            // the local one is executable, and the modification date is set back after
+            // the rename (`docs/design/writes.md`).
             fileSystemFlags: (itemTemplate.fileSystemFlags?.rawValue).map { UInt64($0) },
             modificationDate: (itemTemplate.contentModificationDate ?? nil)?.timeIntervalSince1970,
             extendedAttributes: fields.contains(.extendedAttributes)
                 ? (itemTemplate.extendedAttributes ?? [:]) : nil,
-            // Section 5.4: tags never arrive as an xattr; they are the item's own
-            // `tagData`, and an item that returns none loses them on the next
-            // re-download.
+            // Tags never arrive as an xattr; they are the item's own `tagData`, and an
+            // item that returns none loses them on the next re-download.
             tagData: fields.contains(.tagData) ? (itemTemplate.tagData ?? nil) : nil)
 
         service.createItem(
@@ -303,10 +302,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     }
 }
 
-// MARK: Section 7.2's context-menu entries
+// MARK: The context-menu entries
 
 /// "Keep Downloaded" and "Don't Keep Downloaded", declared in the appex's Info.plist with
-/// the activation rules that read `userInfo.kept`, and forwarded here (section 7.2).
+/// the activation rules that read `userInfo.kept`, and forwarded here
+/// (`docs/design/pinning.md`).
 extension FileProviderExtension: NSFileProviderCustomAction {
     func performAction(
         identifier actionIdentifier: NSFileProviderExtensionActionIdentifier,

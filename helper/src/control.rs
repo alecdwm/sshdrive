@@ -1,12 +1,13 @@
 //! The agent's half of the stream: the ping line and the root set.
 //!
-//! DESIGN.md section 6.4 tier 2: "feed it the root set, and read NDJSON events … The
-//! agent sends a ping line every 15 s in return and the helper exits after 60 s without
-//! one, so it never outlives the connection."
+//! The agent feeds the helper the root set and reads NDJSON events back
+//! (docs/design/change-detection.md). It sends a ping line every 15 s in return and the
+//! helper exits after 60 s without one, so it never outlives the connection.
 //!
-//! That is a second, independent kill switch beside the heartbeat wrapper of section 9.2,
-//! and it is the one that works when the wrapper is not there - a helper started by hand,
-//! or a `sh` that died without reaping. The wrapper stays the outer guarantee.
+//! That is a second, independent kill switch beside the heartbeat wrapper the remote
+//! script puts around every child (docs/design/security.md), and it is the one that works
+//! when the wrapper is not there - a helper started by hand, or a `sh` that died without
+//! reaping. The wrapper stays the outer guarantee.
 
 use crate::json;
 use crate::paths::RootSet;

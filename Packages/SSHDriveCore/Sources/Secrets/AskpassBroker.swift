@@ -2,7 +2,7 @@ import Foundation
 import Logging
 import XPCProtocols
 
-/// What a token was minted for (DESIGN.md section 4.2). A `collect` token belongs to the
+/// What a token was minted for (docs/design/secrets.md). A `collect` token belongs to the
 /// verification connection `sshdrive add` and `sshdrive passwd` make; every prompt it has
 /// no stored answer for is relayed to the CLI. A `master` token belongs to a `-N` master
 /// (and, through the environment it inherits, to that master's `ProxyJump` hops); nothing
@@ -17,11 +17,11 @@ public enum AskpassReply: Equatable, Sendable {
     /// Print this on stdout and exit 0.
     case answer(String)
     /// Print an empty line and exit 0. For a secret this is "skip this identity":
-    /// `ssh` logs "no passphrase given, try next key" and moves on (section 4.2). For a
+    /// `ssh` logs "no passphrase given, try next key" and moves on. For a
     /// `SSH_ASKPASS_PROMPT=none` notification it is the acknowledgement.
     case empty
     /// Print nothing and exit non-zero: `ssh` fails the prompt, and with it the
-    /// connection. Section 4.2's refusals.
+    /// connection.
     case refuse(reason: String)
 }
 
@@ -37,15 +37,15 @@ public struct AskpassMiss: Equatable, Sendable {
 }
 
 /// The question the collect flow puts to the CLI, which shows it on the terminal
-/// (section 4.2). An empty answer is a refusal of that prompt: nothing is stored, and the
-/// attempt fails over to the second pass.
+/// (docs/design/secrets.md). An empty answer is a refusal of that prompt: nothing is
+/// stored, and the attempt fails over to the second pass.
 public struct AskpassCollectRequest: Sendable {
     public var locationID: String
     public var prompt: AskpassPrompt
     public var promptText: String
     public var key: SecretKey?
     public var destination: SSHDestination?
-    /// Secrets are read hidden; the host-key question is read visible (section 4.3).
+    /// Secrets are read hidden; the host-key question is read visible.
     public var isSecret: Bool
 }
 
@@ -62,12 +62,11 @@ public struct AskpassSessionInfo: Sendable {
     public var invocations: Int
     public var misses: [AskpassMiss]
     public var refusalReason: String?
-    /// FIDO keys that asked for a touch. `add` refuses a location that saw one
-    /// (section 4.2).
+    /// FIDO keys that asked for a touch. `add` refuses a location that saw one.
     public var touchRequiredKeys: [String]
 }
 
-/// The agent's half of the askpass token protocol (DESIGN.md section 4.2).
+/// The agent's half of the askpass token protocol (docs/design/secrets.md).
 ///
 /// The agent mints one token per `ssh` it spawns, puts it in that process's environment,
 /// and answers prompts that arrive carrying it. Everything else - a request with no
@@ -119,12 +118,13 @@ public final class AskpassBroker: @unchecked Sendable {
     private let lock = NSLock()
     private var sessions: [String: Session] = [:]
 
-    /// Section 4.2's authentication deadline. A token cannot outlive it: after 60 s the
-    /// agent has killed the `ssh` anyway, so an invocation arriving later is not ours.
+    /// The authentication deadline (docs/design/secrets.md). A token cannot outlive it:
+    /// after 60 s the agent has killed the `ssh` anyway, so an invocation arriving later
+    /// is not ours.
     public var authenticationDeadline: TimeInterval = 60
 
-    /// The collect connection's own deadline. Section 4.2's 60 s exists because nothing
-    /// may be waiting for a human on an unattended reconnect; a collect connection is the
+    /// The collect connection's own deadline. The 60 s exists because nothing may be
+    /// waiting for a human on an unattended reconnect; a collect connection is the
     /// one case where somebody *is* at the keyboard, reading a fingerprint off the screen
     /// and typing a password, so its token lives longer. The 60 s still bounds the master
     /// that `add` brings up afterwards, which is the connection that has to work
@@ -132,8 +132,8 @@ public final class AskpassBroker: @unchecked Sendable {
     public var collectDeadline: TimeInterval = 300
 
     /// A bound on how many prompts one spawn may raise. A token is not single-*prompt* -
-    /// section 4.2 has a master's `ProxyJump` hops share it, and one connection can be
-    /// asked for a passphrase and then a password - but it is single-*spawn*, and a
+    /// a master's `ProxyJump` hops share it, and one connection can be asked for a
+    /// passphrase and then a password - but it is single-*spawn*, and a
     /// `ssh` that has raised this many prompts is not authenticating, it is grinding.
     public var maximumInvocations = 32
 
@@ -196,7 +196,7 @@ public final class AskpassBroker: @unchecked Sendable {
         if !argv.isEmpty { session.argv = argv }
     }
 
-    /// Retire the token when the master exits, which ends every hop with it (section 4.2).
+    /// Retire the token when the master exits, which ends every hop with it.
     public func retire(token: String) {
         lock.lock(); defer { lock.unlock() }
         sessions[token]?.retired = true
@@ -238,9 +238,9 @@ public final class AskpassBroker: @unchecked Sendable {
         return sessions[token]?.used ?? []
     }
 
-    /// "When the connection succeeds, every answer that was actually used is written to
-    /// the keychain; a wrong password is never stored" (section 4.2). Called by `add` and
-    /// `passwd` only after the verification connection has authenticated.
+    /// When the connection succeeds, every answer that was actually used is written to
+    /// the keychain; a wrong password is never stored (docs/design/secrets.md). Called by
+    /// `add` and `passwd` only after the verification connection has authenticated.
     @discardableResult
     public func commit(token: String) throws -> [SecretKey] {
         let answers = usedAnswers(token: token)
@@ -260,7 +260,7 @@ public final class AskpassBroker: @unchecked Sendable {
     /// - Parameters:
     ///   - parentArguments: the argv of the askpass's parent `ssh`, read by the askpass
     ///     with `sysctl KERN_PROCARGS2`. This is how a `ProxyJump` hop is told apart from
-    ///     the master whose token it inherited (section 4.2).
+    ///     the master whose token it inherited.
     ///   - callerPID: the pid of the askpass process, from the XPC connection.
     public func answer(
         token: String,
@@ -312,7 +312,7 @@ public final class AskpassBroker: @unchecked Sendable {
         return reply(to: classified, promptText: prompt, session: session, resolution: resolution)
     }
 
-    // MARK: the section 4.2 table
+    // MARK: the prompt table
 
     private func reply(
         to prompt: AskpassPrompt, promptText: String, session: Session,
@@ -329,8 +329,8 @@ public final class AskpassBroker: @unchecked Sendable {
 
         case .password, .keyboardInteractivePassword:
             // Nothing is parsed out of the prompt text: the item is keyed by the
-            // destination of the asking ssh, resolved with `ssh -G` (section 4.2), so a
-            // HostKeyAlias in the prompt never reaches a key.
+            // destination of the asking ssh, resolved with `ssh -G`, so a HostKeyAlias
+            // in the prompt never reaches a key.
             guard let destination = resolution?.destination else {
                 record(
                     miss: AskpassMiss(
@@ -344,9 +344,9 @@ public final class AskpassBroker: @unchecked Sendable {
                                session: session, destination: destination, isSecret: true)
 
         case .confirmation(_, let isHostKey):
-            // Section 4.3: `ask` during add, refused everywhere else - and the refusal
-            // has to cover UpdateHostKeys=ask too, which is why every other connection
-            // also runs UpdateHostKeys=no.
+            // `ask` during add, refused everywhere else - and the refusal has to cover
+            // UpdateHostKeys=ask too, which is why every other connection also runs
+            // UpdateHostKeys=no (docs/design/secrets.md).
             if session.purpose == .collect, let responder = collectResponder {
                 let request = AskpassCollectRequest(
                     locationID: session.locationID, prompt: prompt, promptText: promptText,
@@ -368,7 +368,7 @@ public final class AskpassBroker: @unchecked Sendable {
 
         case .userPresence(let description):
             // Acknowledged; ssh reads nothing back. During add this is what marks the key
-            // touch-required and makes `add` refuse the location (section 4.2).
+            // touch-required and makes `add` refuse the location.
             lock.lock()
             if !session.touchRequiredKeys.contains(description) {
                 session.touchRequiredKeys.append(description)
@@ -430,8 +430,8 @@ public final class AskpassBroker: @unchecked Sendable {
                 locationID: session.locationID, prompt: prompt, promptText: promptText,
                 key: key, destination: destination, isSecret: isSecret)
             if let answer = responder(request) {
-                // "An empty answer is a refusal of that prompt: nothing is stored, and
-                // the attempt fails over" (section 4.2).
+                // An empty answer is a refusal of that prompt: nothing is stored and
+                // the attempt fails over.
                 guard !answer.isEmpty else { return .empty }
                 lock.lock()
                 session.used.append((key: key, value: answer))
@@ -442,7 +442,7 @@ public final class AskpassBroker: @unchecked Sendable {
 
         // No stored item and nobody to ask: answer empty. ssh gives up on that identity
         // after its single attempt and moves on; if nothing else works the "Permission
-        // denied" that follows is classified on exit like any other (section 4.2).
+        // denied" that follows is classified on exit like any other.
         return .empty
     }
 
@@ -459,7 +459,7 @@ public final class AskpassBroker: @unchecked Sendable {
     }
 
     /// The master's own prompts carry the argv the agent built; a `ProxyJump` hop carries
-    /// its own, and is resolved with `ssh -G` (section 4.2).
+    /// its own, and is resolved with `ssh -G`.
     private func resolution(for session: Session, parentArguments: [String]) -> SSHResolution? {
         lock.lock()
         let known = session.resolution
@@ -531,7 +531,7 @@ public struct AskpassHarness {
     public var info: AskpassSessionInfo? { broker.info(token: token) }
 }
 
-/// The seam `SSHProcess` reaches the broker through (section 4.2). `SSHProcess` spawns
+/// The seam `SSHProcess` reaches the broker through. `SSHProcess` spawns
 /// the `ssh`; it must not also know how a secret is stored, and `Secrets` must not know
 /// how a process is spawned, so the two meet on `AskpassTokenProviding` and nothing else.
 extension AskpassBroker: AskpassTokenProviding {

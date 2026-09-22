@@ -11,8 +11,8 @@ import XCTest
 @testable import ServerModel
 
 /// Suite K, the master half: the mux clients' options, the `-N` master's own shape, the
-/// orphan sweep and what `agent stop` leaves behind (`docs/testing-architecture.md`
-/// sections 4.2 and 5; DESIGN.md section 6.1).
+/// orphan sweep and what `agent stop` leaves behind (`docs/design/testing.md`
+/// sections 4.2 and 5; docs/design/ssh.md).
 ///
 /// Like `TransportScenarios`, everything here that can be run for real is run for real:
 /// `SSHMaster` spawns `FakeSSH` by the same `posix_spawn` and the same argv it spawns
@@ -224,7 +224,7 @@ final class MasterScenarios: XCTestCase {
         let path = controlPath(stub)
 
         // Every mux client the agent runs: the two SFTP channels, the exec channels and
-        // the `-O` commands (section 6.1's `MUX=` line).
+        // the `-O` commands (docs/design/ssh.md's `MUX=` line).
         for invocation in [
             SSHCommandBuilder.sftpChannel(controlPath: path, host: "deb"),
             SSHCommandBuilder.execChannel(controlPath: path, host: "deb"),
@@ -254,7 +254,7 @@ final class MasterScenarios: XCTestCase {
             XCTAssertEqual(error.classification, .masterLost,
                            "SQ-042: a client that never opened its channel is master lost")
             XCTAssertEqual(error.classification?.stopsReconnection, false,
-                           "section 6.1: it costs a reconnect, never the location")
+                           "docs/design/ssh.md: it costs a reconnect, never the location")
         }
         XCTAssertTrue(diagnostics.contains("Control socket connect"), "SQ-079: ssh's own wording")
         XCTAssertEqual(stub.unsupervisedFallbacks, [],
@@ -298,7 +298,7 @@ final class MasterScenarios: XCTestCase {
     }
 
     /// **K3** (`SQ-042`, `SQ-052`): and the reason the classification matters. A mux
-    /// client gets no askpass token (section 4.2), so the fallback connection cannot
+    /// client gets no askpass token (docs/design/secrets.md), so the fallback connection cannot
     /// authenticate and dies with the one sentence that stops a location for ever. It
     /// must not: `channelOpened` false is what the classifier reads, not the text.
     func testK3_aFallbackConnectionsPermissionDeniedIsStillMasterLost() async throws {
@@ -346,7 +346,7 @@ final class MasterScenarios: XCTestCase {
         let expected = "sshdrive-"
             + String(locationID.lowercased().filter(\.isHexDigit).prefix(8))
         XCTAssertEqual((path as NSString).lastPathComponent, expected,
-                       "$TMPDIR/sshdrive-<id8>, section 6.1")
+                       "$TMPDIR/sshdrive-<id8>, docs/design/ssh.md")
         XCTAssertTrue(path.hasPrefix(ControlSocket.temporaryDirectory()))
 
         let invocation = SSHCommandBuilder.master(
@@ -356,7 +356,7 @@ final class MasterScenarios: XCTestCase {
         XCTAssertEqual(invocation.option("ControlPersist"), "no", "SQ-041")
         XCTAssertEqual(invocation.option("ControlPath"), path)
         XCTAssertFalse(invocation.arguments.contains { $0.contains("%C") },
-                       "section 6.1: never %C - it hashes user, host and port")
+                       "docs/design/ssh.md: never %C - it hashes user, host and port")
         XCTAssertEqual(invocation.option("ForkAfterAuthentication"), "no",
                        "the other keyword that would detach the master")
 
@@ -426,10 +426,11 @@ final class MasterScenarios: XCTestCase {
 
     // MARK: - K5: the orphan sweep takes only sockets
 
-    /// The sweep as it was before 2026-09-04: every `$TMPDIR` entry whose name starts
-    /// with our prefix, unlinked. `sshdrive doctor` reported **six orphaned sockets** on
-    /// a clean install with this, and `agent restart` would have deleted them (`SQ-074`).
-    /// Kept here, and run, so the row is defended by the damage it prevents.
+    /// A name-only sweep: every `$TMPDIR` entry whose name starts with our prefix,
+    /// unlinked with no check that it is a socket. `$TMPDIR` is shared - this package's
+    /// own test databases live there too - so this reports **six orphaned sockets** on a
+    /// clean install and `agent restart` would delete them (`SQ-074`, gotcha 79). Kept
+    /// here, and run, so the row is defended by the damage it prevents.
     private static func nameOnlySweep(in directory: String) -> [String] {
         let entries = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
         var swept: [String] = []
@@ -521,11 +522,11 @@ final class MasterScenarios: XCTestCase {
 
     /// **K5** (`SQ-074`): `$TMPDIR` is shared and `sshdrive-` is not ours exclusively.
     /// The package's own tests write `sshdrive-nested-<uuid>.sqlite` there, and its `-wal`
-    /// and `-shm` sidecars were counted as **six orphaned control sockets** by `sshdrive
-    /// doctor`, which reported a healthy install as failing and would have deleted them
-    /// (2026-09-04). Every candidate is `lstat`ed for `S_IFSOCK`, so only the socket is a
-    /// candidate; the databases survive, the symlink planted at our prefix decides
-    /// nothing, and `doctor` calls a clean install clean.
+    /// and `-shm` sidecars would be counted as **six orphaned control sockets** by a
+    /// name-only sweep, reporting a healthy install as failing and deleting them. Every
+    /// candidate is `lstat`ed for `S_IFSOCK`, so only the socket is a candidate; the
+    /// databases survive, the symlink planted at our prefix decides nothing, and `doctor`
+    /// calls a clean install clean.
     func testK5_theSweepTakesOnlySocketsAndTheTestDatabasesSurvive() throws {
         let real = try makeSharedTemporaryDirectory(withSocket: true)
         let socketPath = try XCTUnwrap(real.socket)
@@ -536,7 +537,7 @@ final class MasterScenarios: XCTestCase {
         XCTAssertTrue(ControlSocket.isSocket(socketPath))
         XCTAssertFalse(
             ControlSocket.isSocket(decoy),
-            "section 9.1: `lstat`, never `stat` - a symlink at that name is not our socket")
+            "docs/design/security.md: `lstat`, never `stat` - a symlink at that name is not our socket")
         for database in real.databases { XCTAssertFalse(ControlSocket.isSocket(database)) }
 
         // The bite, against a directory of its own so the damage is real and contained.
@@ -599,7 +600,7 @@ final class MasterScenarios: XCTestCase {
     // MARK: - K6: `agent stop` takes the masters
 
     /// **K6** (`SQ-043`, `SQ-044`, `SQ-075`): two locations, four masters, and
-    /// every one of section 6.1's three routes needed to take them all.
+    /// every one of docs/design/ssh.md's three routes needed to take them all.
     ///
     /// Location A was restarted, so it holds two masters (`SQ-043`): the first owns the
     /// socket but has stopped serving it, and the second found that socket in place,
@@ -629,8 +630,8 @@ final class MasterScenarios: XCTestCase {
         // a test must not have. `swift test` runs the swift-testing suites **concurrently**
         // with XCTest in one process, and suite Q's `add` flow holds live `FakeSSH` masters
         // on control paths under the real `$TMPDIR` with the same prefix: sweeping the
-        // shared directory killed them mid-`add`, and Q2/Q3/Q5/Q8/Q9 failed
-        // `badMessage`/`serverUnreachable`, a different subset every run (2026-09-08).
+        // shared directory kills them mid-`add`, and Q2/Q3/Q5/Q8/Q9 fail
+        // `badMessage`/`serverUnreachable`, a different subset every run.
         //
         // Everything the three routes assert is unchanged; only what they can reach is.
         // The name is short because a `sockaddr_un` path holds 104 bytes (`SQ-085`).
@@ -645,7 +646,7 @@ final class MasterScenarios: XCTestCase {
         }
 
         // Location A, restarted. The first master owns the socket and has stopped
-        // serving it; section 6.1: "or one that has stopped serving it".
+        // serving it; docs/design/ssh.md: "or one that has stopped serving it".
         let alphaSocket = ownSocketPath()
         let alpha1 = try spawnMaster(
             stub, controlPath: alphaSocket,
@@ -707,7 +708,7 @@ final class MasterScenarios: XCTestCase {
         // process, and for alpha1 it is the only route there is.
         XCTAssertEqual(
             ControlSocket.masterPID(socket: alphaSocket, environment: environment), alpha1.pid,
-            "section 6.1: `Master running (pid=NNNN)` is how a socket names its owner")
+            "docs/design/ssh.md: `Master running (pid=NNNN)` is how a socket names its owner")
         let swept = ControlSocket.sweepOrphans(environment: environment, in: temporaryDirectory)
         XCTAssertTrue(swept.contains(alphaSocket), "the sweep found the socket alpha1 owns")
         XCTAssertFalse(swept.contains(beta2Socket), "which is exactly what it cannot find")

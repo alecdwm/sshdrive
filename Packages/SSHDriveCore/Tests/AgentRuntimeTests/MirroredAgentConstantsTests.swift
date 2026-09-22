@@ -18,7 +18,7 @@ import XCTest
 
     final class MirroredAgentConstantsTests: XCTestCase {
 
-        // MARK: The replica's `stat` (section 7)
+        // MARK: The replica's `stat` (docs/design/eviction.md)
 
         /// `SF_DATALESS`. A dataless file has no blocks and carries this flag, which is how
         /// the TTL loop tells "materialized" from "placeholder" without asking the system.
@@ -26,7 +26,7 @@ import XCTest
             XCTAssertEqual(MirroredAgentConstants.datalessFlag, UInt32(SF_DATALESS))
         }
 
-        // MARK: Eviction refusals (S4, 2026-09-04)
+        // MARK: Eviction refusals (measured 2026-09-04)
 
         /// All three codes, **including the two that are never seen**, because "we never
         /// see it" is the finding: an item with a pending upload and a kept item both come
@@ -56,7 +56,7 @@ import XCTest
                 NSXPCConnectionInvalid)
         }
 
-        // MARK: The domain (sections 5.4, 10; spikes S4, S6)
+        // MARK: The domain (docs/design/names-and-attributes.md, docs/design/packaging.md)
 
         /// `MQ-008`: `supportsSyncingTrash` **defaults to YES**, which is why the adapter
         /// clears it on every domain it adds. If this ever defaulted to NO the clearing
@@ -79,7 +79,7 @@ import XCTest
             XCTAssertEqual(NSFileProviderDomain.TestingModes.interactive.rawValue, 1 << 1)
         }
 
-        // MARK: The login item (section 10)
+        // MARK: The login item (docs/design/packaging.md)
 
         /// `doctor` prints this string and treats only `enabled` as a pass, so a fifth case
         /// Apple adds must read as a warning rather than as a broken registration. The five

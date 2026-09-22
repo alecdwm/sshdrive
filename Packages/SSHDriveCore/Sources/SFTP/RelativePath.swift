@@ -1,13 +1,14 @@
 import Foundation
 
-/// The one chokepoint for every remote path (DESIGN.md section 9.1).
+/// The one chokepoint for every remote path (docs/design/security.md).
 ///
 /// The SFTP layer has no API that takes a string path. Every operation takes a
 /// `RelativePath`, which can only be built from validated components, and the transport
 /// joins it to the canonical root itself. A path may have zero components, which is the
 /// root; a component is rejected if it is empty, ".", "..", or contains "/" or NUL.
 ///
-/// Components are bytes, not Strings: server names need not be valid UTF-8 (section 5.4).
+/// Components are bytes, not Strings: server names need not be valid UTF-8
+/// (docs/design/names-and-attributes.md).
 public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
     public enum ValidationError: Error, LocalizedError, Equatable {
         case emptyComponent
@@ -36,8 +37,8 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
     /// Stored rather than computed: a listing asks for it four or five times per entry -
     /// the seen set, the in-flight set, the incumbent row read, the row itself - so
     /// computing it would rebuild the same `Data` fifty thousand times over a directory of
-    /// ten thousand entries (section 5.3). It is derived from `components` and nothing
-    /// else.
+    /// ten thousand entries (docs/design/item-index.md). It is derived from
+    /// `components` and nothing else.
     public let bytes: Data
 
     /// The location root itself.
@@ -150,8 +151,9 @@ public struct RelativePath: Hashable, Sendable, CustomStringConvertible {
     }
 
     /// Joins to an absolute server root, byte for byte. This is the form that goes on
-    /// the wire: a component need not be valid UTF-8 (section 5.4), so it must never be
-    /// round-tripped through a String on the way there. Only the transport calls this.
+    /// the wire: a component need not be valid UTF-8
+    /// (docs/design/names-and-attributes.md), so it must never be round-tripped through
+    /// a String on the way there. Only the transport calls this.
     public func absoluteBytes(root: Data) -> Data {
         var out = root
         // A trailing slash on the root would produce "//" here, which is legal but ugly

@@ -1,9 +1,9 @@
 import XCTest
 @testable import SSHProcess
 
-/// Spike S2's `ProxyJump` half: a two-hop chain built by the agent as its own
-/// `ProxyCommand`, with a password on both hops and `ControlMaster auto` set for the
-/// bastion in `~/.ssh/config` (DESIGN.md section 6.1). Gated on `SSHDRIVE_TESTBED=1`.
+/// The `ProxyJump` half (docs/design/ssh.md): a two-hop chain built by the agent as
+/// its own `ProxyCommand`, with a password on both hops and `ControlMaster auto` set
+/// for the bastion in `~/.ssh/config`. Gated on `SSHDRIVE_TESTBED=1`.
 final class TestbedProxyChainTests: XCTestCase {
 
     private var master: SSHMaster?
@@ -96,7 +96,7 @@ final class TestbedProxyChainTests: XCTestCase {
         XCTAssertEqual(String(decoding: payload.dropLast(), as: UTF8.self), "inner")
 
         // Both hops asked, each for its own host, which is what per-host keychain keying
-        // exists for (section 4.2).
+        // exists for (docs/design/secrets.md).
         let prompts = askpass.prompts.joined(separator: "\n")
         XCTAssertTrue(prompts.contains("bastion-b"), prompts)
         XCTAssertTrue(prompts.contains("192.168.64.1") || prompts.contains("hop@"), prompts)

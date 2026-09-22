@@ -5,7 +5,7 @@ import ProviderCore
 import SystemModel
 
 /// **Suite A - the working set, anchors and enumeration**
-/// (`docs/testing-architecture.md` section 5).
+/// (docs/design/testing.md).
 ///
 /// Nine scenarios, all of them on Linux with nothing attached: a real index, the shipping
 /// `ProviderCore`, and a fileproviderd built out of `docs/quirks/macos.md`. `A2` is the
@@ -120,8 +120,8 @@ final class WorkingSetScenarios: XCTestCase {
     ///
     /// The failure here is the one case where `.serverUnreachable` is honest and neither
     /// source can answer: the agent is mid-reconcile, so it answers `indexReady` no *and*
-    /// refuses the change stream itself (section 5.3). The recovery is on the same
-    /// instance, which is the only life in which the extension can see both.
+    /// refuses the change stream itself (docs/design/item-index.md). The recovery is on
+    /// the same instance, which is the only life in which the extension can see both.
     func testA2_TheThrottleIsClearedOnTheFirstSuccessAfterAFailure() throws {
         let harness = try ScenarioHarness()
         let domain = try harness.addDomain()
@@ -279,8 +279,8 @@ final class WorkingSetScenarios: XCTestCase {
         domain.openFolder()
         XCTAssertEqual(harness.finderListing(), ["report.txt"])
 
-        // The conflict copy of section 5.5, written by the agent into a folder the system
-        // has already enumerated and will never enumerate again.
+        // The conflict copy (docs/design/writes.md), written by the agent into a folder
+        // the system has already enumerated and will never enumerate again.
         try harness.serverCreates("report (conflicted copy).txt")
         domain.openFolder()
         harness.system.advance(10 * 60)

@@ -19,7 +19,7 @@ sshdrive status nas               # sync errors, held deletions, what the server
 
 ## What `doctor` checks, and what each failure means
 
-### `agent reachable` — fail
+### `agent reachable` - fail
 
 The CLI could not get an answer on the mach service.
 
@@ -32,20 +32,20 @@ The CLI could not get an answer on the mach service.
   purpose.
 
 The most common cause of a suddenly unreachable agent is an upgrade that replaced the
-bundle without the unregister step — see **"the agent will not start after an upgrade"**
+bundle without the unregister step; see **"the agent will not start after an upgrade"**
 below.
 
-### `app in /Applications` — fail
+### `app in /Applications` - fail
 
 The bundle is somewhere else. The Homebrew cask puts it in `/Applications`; a copy run from
 `~/Downloads` or a build directory will work for a while and then confuse LaunchServices
 and the login item. Move it.
 
-### `macOS version` — fail
+### `macOS version` - fail
 
 Minimum is macOS 14. Nothing here is going to work on 13.
 
-### `login item` — fail
+### `login item` - fail
 
 `SMAppService` reports the login item as `requires approval`, `not registered` or
 `not found`.
@@ -53,11 +53,11 @@ Minimum is macOS 14. Nothing here is going to work on 13.
 - **not registered / not found**: the app has never been launched from its own bundle.
   `open -g -a "SSH Drive"`.
 - **requires approval**: switch SSH Drive on under System Settings → General → Login Items
-  & Extensions. On a signed, notarized install this state should not occur — a fresh user
+  & Extensions. On a signed, notarized install this state should not occur: a fresh user
   gets the item already **enabled**, and the "Background Items Added" notification is
   telling, not asking (measured on a clean account, 2026-09-04).
 
-### `app group container` — fail
+### `app group container` - fail
 
 Either the agent is unsigned or missing its `application-groups` entitlement, or the
 container exists and is not writable. On a cask install neither happens. On a hand-built
@@ -71,10 +71,10 @@ Note that the *directory* existing proves nothing: `containermanagerd` creates a
 skeleton for every installed app's group at first login. `config.json` inside it is the
 thing that means "this has run here".
 
-### `quarantine` — fail
+### `quarantine` - fail
 
 The app bundle still carries `com.apple.quarantine`, the attribute macOS puts on anything
-unpacked from a download. The agent does not care — launchd starts it directly — but
+unpacked from a download. The agent does not care (launchd starts it directly), but
 **LaunchServices registers no plugin of a quarantined bundle that has never been assessed
 through a launch a person saw**, and `open -g` is not such a launch. The File Provider
 extension therefore does not exist as far as the system is concerned, which is the
@@ -91,7 +91,7 @@ notarization ticket is stapled to the app; `spctl --assess --type execute "/Appl
 Drive.app"` says so, and the cask's `postflight` runs exactly that check before it strips
 the attribute. A build you copied out of a DMG by hand needs the two commands above.
 
-### `extension registered` — fail
+### `extension registered` - fail
 
 PlugInKit does not know about `SSHDriveFileProvider.appex`. Launching the app from its own
 bundle is what registers it, and a symlinked CLI cannot do it:
@@ -105,28 +105,28 @@ pluginkit -m -A -i org.shirls.sshdrive.fileprovider -vvv
 re-registering the appex by hand does not survive the next launch. Otherwise the bundle is
 probably not where LaunchServices thinks it is.
 
-### `ssh` — fail
+### `ssh` - fail
 
 `/usr/bin/ssh` could not be run. SSH Drive uses the system `ssh` by absolute path and never
 a `PATH` lookup, so a Homebrew OpenSSH does not affect this line.
 
-### `~/.ssh/config parses` — fail
+### `~/.ssh/config parses` - fail
 
 `ssh -G` failed against a name nothing can match, which means one of your `Host *` blocks
 or `Include`d files uses a keyword Apple's build of OpenSSH does not know. A config written
 for a newer Homebrew `ssh` does this. Guard the block with `Match exec` or remove the
 keyword. The exact diagnostic is in the check's detail line.
 
-### `control sockets` — fail
+### `control sockets` - fail
 
 There are `sshdrive-*` sockets in `$TMPDIR` that no live location owns: an agent crashed
-and left its `ssh -N` masters behind. `sshdrive agent restart` sweeps them — it sends each
+and left its `ssh -N` masters behind. `sshdrive agent restart` sweeps them: it sends each
 socket `-O exit`, unlinks it, and kills the `ssh` that owned it if it is still there.
 
 `doctor` reports them rather than sweeping them, because adopting or killing a master while
 a location is mounted would be a repair nobody asked for.
 
-### `keychain` — fail
+### `keychain` - fail
 
 The agent could not reach the data-protection keychain. This is almost always a signing
 problem, not a keychain problem: `keychain-access-groups` is a restricted entitlement, and
@@ -134,13 +134,14 @@ it only works when the bundle embeds a provisioning profile that authorises **th
 certificate the bundle was signed with**.
 
 A build signed with a Developer ID certificate the embedded profile was not issued for
-loses the entitlement silently — or, if the entitlement is left in, is killed at exec.
-`docs/release.md` has the check to run. A cask install is never in this state.
+loses the entitlement silently; if the entitlement is left in, it is killed at exec.
+The [release procedure](release.md) has the check to run. A cask install is never in
+this state.
 
 Passwords and key passphrases are the only thing that stops working; browsing, fetching and
 writing do not use the keychain.
 
-### `login shell snapshot` — warn
+### `login shell snapshot` - warn
 
 The agent takes `PATH` and `SSH_AUTH_SOCK` from a fresh login shell, which is what makes a
 key agent socket exported from `.zshrc`, and a `ProxyCommand` in `/opt/homebrew/bin`, work
@@ -169,10 +170,10 @@ Check `sshdrive status <name>` first. It prints the location's state, its last e
 sync errors the system is holding, and the capability report.
 
 - **`serverUnreachable`**: the agent cannot connect. `sshdrive show <name>` prints the
-  resolved `ssh` command and the last error. A location that has just started asking for a
-  password it used to have stored is a keychain problem (above).
-- A listing that hangs and then fails is usually the 60 s authentication deadline. Nothing
-  may wait for a human unattended, so a connection that needs a touch, a one-time code or
+  resolved `ssh` command and the last error. A location that suddenly asks for a
+  password it had stored is a keychain problem (above).
+- A listing that hangs and then fails is usually the 60 s authentication deadline
+  ([secrets and host keys](design/secrets.md)). Nothing may wait for a human unattended, so a connection that needs a touch, a one-time code or
   an unstored passphrase is stopped rather than left hanging. `sshdrive passwd <name>` (or
   `add` again) is how a secret gets stored.
 
@@ -187,19 +188,20 @@ a VPN is not. Fix it in System Settings → Privacy & Security → Local Network
 
 ### Files do not update when they change on the server
 
-`sshdrive status <name>` names the tier in use and why:
+`sshdrive status <name>` names the tier in use and why
+([remote change detection](design/change-detection.md)):
 
-- **tier 0, poll** — an SFTP `readdir` of the watched directories. Minutes.
-- **tier 1, sweep** — one `find` over an ssh exec channel. Up to a minute.
-- **tier 2, helper** — a small static binary on the server pushing changes. About a second.
+- **tier 0, poll**: an SFTP `readdir` of the watched directories. Minutes.
+- **tier 1, sweep**: one `find` over an ssh exec channel. Up to a minute.
+- **tier 2, helper**: a small static binary on the server pushing changes. About a second.
 
 A location drops down the ladder when the server cannot support the tier above, and says
 which reason applies: no shell access (`ForceCommand internal-sftp`), no spare channel
 (`MaxSessions 2`), an unknown architecture, or `helper off`.
 
-Only the **root set** is watched: directories with materialized files, pinned subtrees, and
-folders you have looked at in the last 30 minutes, capped at 256. Nothing else is polled,
-by design. `sshdrive debug roots <name>` shows the set.
+Only the **root set** is watched ([the root set](design/root-set.md)): directories with
+materialized files, pinned subtrees, and folders you have looked at in the last 30
+minutes, capped at 256. Nothing else is polled, by design. `sshdrive debug roots <name>` shows the set.
 
 Two other things worth knowing:
 
@@ -210,9 +212,9 @@ Two other things worth knowing:
 
 ### A lot of files vanished from the server and Finder still shows them
 
-That is the mass-deletion guard. A listing that removes at least half a directory and at
-least 20 items — or empties a non-empty root — is **held** rather than applied, and
-re-checked at 5 and 30 minutes. Deletions of items with a pending local edit are always
+That is the mass-deletion guard ([remote change detection](design/change-detection.md)).
+A listing that removes at least half a directory and at least 20 items, or empties a
+non-empty root, is **held** rather than applied, and re-checked at 5 and 30 minutes. Deletions of items with a pending local edit are always
 held.
 
 ```sh
@@ -225,16 +227,17 @@ is the honest state.
 
 ### A file will not evict, or the cache is not shrinking
 
-- Pinned items are never evicted. That is the whole point of a pin. `sshdrive pins` shows
-  the tree.
+- Pinned items are never evicted. That is the whole point of a pin ([pinning](design/pinning.md)).
+  `sshdrive pins` shows the tree.
 - An item with an upload still pending is refused, and the refusal says nothing about why:
   a pending upload and a kept item both come back as the same error.
 - `evict --all` is one call on the root container, and it fails as a whole if it meets a
-  kept child — and for 5-10 seconds after an unpin, before the system has re-read the
+  kept child, and for 5-10 seconds after an unpin, before the system has re-read the
   changed rows. It then falls back to walking the materialized set file by file, which
   leaves the directory rows materialized. That is expected.
-- The TTL is time since the **last fetch or save**, not since the last read. Reading a file
-  that is already downloaded does not keep it alive.
+- The TTL is time since the **last fetch or save**, not since the last read
+  ([cache eviction](design/eviction.md)). Reading a file that is already downloaded does
+  not keep it alive.
 
 ### An edit made offline has not been uploaded
 
@@ -245,8 +248,8 @@ system's own pending set.
 
 ### A symlink shows as an alias, or a `ln -s` was refused
 
-Symlinks are shown as native items and never followed. A link whose target lands outside
-the location's root is not shown at all, and creating one inside the mount is refused. The
+Symlinks are shown as native items and never followed ([symlinks](design/symlinks.md)).
+A link whose target lands outside the location's root is not shown at all, and creating one inside the mount is refused. The
 refusal arrives as the item's own sync error rather than as an alert, so
 `sshdrive status <name>` is where the sentence is.
 
@@ -289,9 +292,9 @@ open -g -a "SSH Drive"
 sshdrive doctor
 ```
 
-That registers the extension durably. Casks from version 0.1.0 onwards do it in the
-`postflight` — after running `spctl --assess` on the installed app themselves — so a fresh
-`brew install --cask sshdrive` should never land here.
+That registers the extension durably. The cask's `postflight` does it for you, after
+running `spctl --assess` on the installed app itself, so a `brew install --cask sshdrive`
+should not land here.
 
 ## The agent will not start after an upgrade
 
@@ -304,7 +307,7 @@ Service could not initialize: copy_bundle_path(...), error 0x6f
 ```
 
 A login item whose bundle was deleted and put back keeps its enabled status while launchd
-can no longer resolve the program, and `SMAppService.register()` keeps returning success
+cannot resolve the program, and `SMAppService.register()` keeps returning success
 because as far as it is concerned the item is still enabled. Only `unregister()` clears it.
 
 The cask's `postflight` does this automatically. By hand:
@@ -320,7 +323,7 @@ No logout is needed. Locations, domains, the cache and pending uploads all survi
 ## Gatekeeper refuses to open the app
 
 *"Apple could not verify "SSH Drive" is free of malware"* means the copy you have is not
-notarized — a build from source, or a release that skipped the notarization step. A cask
+notarized: a build from source, or a release that skipped the notarization step. A cask
 install is notarized, assesses itself in the `postflight` and then clears the quarantine
 attribute, so it shows no Gatekeeper dialog at all.
 

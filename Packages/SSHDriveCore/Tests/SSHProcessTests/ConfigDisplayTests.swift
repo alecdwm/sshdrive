@@ -2,7 +2,8 @@ import XCTest
 
 @testable import SSHProcess
 
-/// The `ssh -G` display and its config attribution (DESIGN.md sections 4.1, 6.1, 8).
+/// The `ssh -G` display and its config attribution (docs/design/locations.md,
+/// docs/design/ssh.md and docs/design/cli.md).
 ///
 /// `ssh -G` prints resolved values only, with no indication of where each came from, so
 /// the attribution is the diff against `ssh -F /dev/null -G`. Nothing here runs `ssh`: the
@@ -86,8 +87,9 @@ final class ConfigDisplayTests: XCTestCase {
     }
 
     func testEveryIdentityFileIsShownInOfferOrder() {
-        // Section 4.2's refusal turns on the order: a touch-required FIDO key that sits
-        // first is used, and asks for its touch, before the key that would have worked.
+        // The refusal (docs/design/secrets.md) turns on the order: a touch-required
+        // FIDO key that sits first is used, and asks for its touch, before the key
+        // that would have worked.
         let diff = attribution(
             resolved: """
                 user alec
@@ -105,9 +107,9 @@ final class ConfigDisplayTests: XCTestCase {
     }
 
     func testTheOverriddenKeywordsAreReportedSeparately() {
-        // Section 6.1: `show` prints the connection-sharing and session-shape settings the
-        // config would have applied and the agent overrode. `spike-deb-shapes` is exactly
-        // this case in the testbed.
+        // `show` prints the connection-sharing and session-shape settings the config
+        // would have applied and the agent overrode (docs/design/ssh.md).
+        // `spike-deb-shapes` is exactly this case in the testbed.
         let diff = attribution(
             resolved: """
                 user alec
@@ -145,8 +147,9 @@ final class ConfigDisplayTests: XCTestCase {
     }
 
     func testAHandWrittenSshProxyCommandIsCalledOut() {
-        // Section 6.1: that inner `ssh` is found through PATH, reads the config
-        // unmodified, and signs through the key agent during the IdentityAgent=none pass.
+        // That inner `ssh` is found through PATH, reads the config unmodified, and
+        // signs through the key agent during the IdentityAgent=none pass
+        // (docs/design/ssh.md).
         let diff = attribution(
             resolved: "user alec\nhostname nas\nport 22\nproxycommand ssh -W %h:%p bastion",
             withoutConfig: "user alec\nhostname nas\nport 22")
@@ -187,9 +190,9 @@ final class ConfigDisplayTests: XCTestCase {
     // MARK: the collect connection's command line
 
     func testTheCollectConnectionIsTheMastersOwnCommandLineWithAskInPlaceOfYes() {
-        // Section 4.2: "the agent runs the exact command it will use later". The only
-        // difference is section 4.3's host-key setting, so that the fingerprint question
-        // is raised and can be relayed to the terminal.
+        // The agent runs the exact command it will use later (docs/design/secrets.md);
+        // the only difference is the host-key setting, so that the fingerprint
+        // question is raised and can be relayed to the terminal.
         let target = SSHTarget(host: "nas", user: "alec", port: 2201)
         let runtime = SSHCommandBuilder.master(target: target, controlPath: "/tmp/s")
         let collect = SSHCommandBuilder.master(

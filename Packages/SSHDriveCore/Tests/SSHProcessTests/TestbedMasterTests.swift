@@ -1,8 +1,8 @@
 import XCTest
 @testable import SSHProcess
 
-/// Spike S2 against the testbed: the `-N` master, its mux clients, and what happens when
-/// one of them loses its socket (DESIGN.md section 6.1). Gated on `SSHDRIVE_TESTBED=1`.
+/// Against the testbed: the `-N` master, its mux clients, and what happens when one
+/// of them loses its socket (docs/design/ssh.md). Gated on `SSHDRIVE_TESTBED=1`.
 final class TestbedMasterTests: XCTestCase {
 
     private var master: SSHMaster?
@@ -155,8 +155,8 @@ final class TestbedMasterTests: XCTestCase {
 
     /// The other kind of mux client: `ssh $MUX -s <host> sftp`. One of these is the
     /// metadata channel and a second the bulk channel, and both run beside an exec channel
-    /// on the same connection. The SFTP wire protocol is section 6.2's; all this proves is
-    /// that the channel is a real byte stream in both directions.
+    /// on the same connection. The SFTP wire protocol is docs/design/sftp.md's; all
+    /// this proves is that the channel is a real byte stream in both directions.
     func testTwoSFTPChannelsAndAnExecChannelShareOneConnection() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try Testbed.master(host: "spike-deb")

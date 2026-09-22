@@ -5,9 +5,10 @@ import XPCProtocols
 @testable import SSHProcess
 
 /// A stand-in for `AskpassBroker`, which lives in `Secrets` and must not be a dependency
-/// of this module: the two meet on `AskpassTokenProviding` and nothing else (section 4.2).
-/// The real broker is driven end to end through `AskpassHarness` in `SecretsTests`, and
-/// with a real `ssh` from the signed agent (`docs/spikes/results.md`, S2).
+/// of this module: the two meet on `AskpassTokenProviding` and nothing else
+/// (docs/design/secrets.md). The real broker is driven end to end through
+/// `AskpassHarness` in `SecretsTests`, and with a real `ssh` from the signed agent,
+/// proved on the build VM.
 final class RecordingTokenProvider: AskpassTokenProviding, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var minted: [(locationID: String, argv: [String])] = []
@@ -32,9 +33,9 @@ final class RecordingTokenProvider: AskpassTokenProviding, @unchecked Sendable {
     }
 }
 
-/// The askpass half of section 4.2 as `SSHProcess` sees it: a token in the master's
-/// environment, the same token inherited by every hop of the agent-built `ProxyCommand`,
-/// and none of it on a mux client.
+/// The askpass half of secrets (docs/design/secrets.md) as `SSHProcess` sees it: a
+/// token in the master's environment, the same token inherited by every hop of the
+/// agent-built `ProxyCommand`, and none of it on a mux client.
 final class AskpassTokenTests: XCTestCase {
 
     private var testbedMaster: SSHMaster?
@@ -43,7 +44,7 @@ final class AskpassTokenTests: XCTestCase {
         // Not a `defer { Task { … } }`: a detached task in a defer can outlive the test
         // process, and what it leaves behind is a live `ssh -N` whose socket nothing
         // unlinks - an orphan the agent's own sweep cannot reach either, because `-O exit`
-        // needs the socket (section 6.1).
+        // needs the socket (docs/design/ssh.md).
         if let testbedMaster { await testbedMaster.shutdown() }
         testbedMaster = nil
     }
@@ -68,7 +69,7 @@ final class AskpassTokenTests: XCTestCase {
         XCTAssertEqual(environment[AskpassEnvironment.requireVariable], "force")
         XCTAssertEqual(environment[AskpassEnvironment.tokenVariable], "token-1")
         // ssh sets SSH_ASKPASS_PROMPT on the askpass it invokes; it must never be
-        // inherited into one (section 4.2).
+        // inherited into one (docs/design/secrets.md).
         XCTAssertNil(environment[AskpassEnvironment.promptVariable])
         XCTAssertEqual(environment["PATH"], "/usr/bin", "the rest of the environment is untouched")
         XCTAssertEqual(provider.minted.count, 1)
@@ -101,7 +102,7 @@ final class AskpassTokenTests: XCTestCase {
 
     /// A mux client runs `BatchMode=yes` and can never prompt, and the agent mints it no
     /// token; leaving the variables on it would only invite a refusal the exit classifier
-    /// would have to read as an authentication failure (section 6.1).
+    /// would have to read as an authentication failure (docs/design/ssh.md).
     func testAMuxClientGetsNoAskpassAndNoToken() {
         let full = AskpassEnvironment.environment(
             base: ["PATH": "/usr/bin"], askpassPath: "/x/sshdrive-askpass", token: "abc")
@@ -116,8 +117,8 @@ final class AskpassTokenTests: XCTestCase {
     /// The real thing against the testbed's password account: a master that has to be
     /// prompted, answered by an askpass named in `SSHMaster.Configuration` and reached
     /// through the environment the master built for itself. The broker's own half needs
-    /// `sshdrive-askpass` and the agent's XPC service, so it is proved on the VM instead
-    /// (`docs/spikes/results.md`, S2).
+    /// `sshdrive-askpass` and the agent's XPC service, so it is proved on the VM
+    /// instead.
     func testMasterAuthenticatesThroughItsOwnAskpassEnvironment() async throws {
         try Testbed.skipUnlessEnabled()
         let stub = try Testbed.StubAskpass()

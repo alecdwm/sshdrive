@@ -17,8 +17,8 @@ public struct ReaderChangePage: Equatable, Sendable {
     }
 }
 
-/// The extension's own read-only view of the domain's index (DESIGN.md section 5.2), as a
-/// protocol so a scenario can hand the provider a reader that is deliberately not usable.
+/// The extension's own read-only view of the domain's index (docs/design/extension.md), as
+/// a protocol so a scenario can hand the provider a reader that is deliberately not usable.
 ///
 /// **Every method that cannot answer returns nil rather than throwing**, because the
 /// caller has somewhere else to go: the agent has the same rows. The only errors that
@@ -33,7 +33,7 @@ public protocol ReaderStoring: AnyObject {
 
     /// The agent's answer to `indexReady`; `nil` means it could not be reached at all.
     func markReady(_ ready: Bool?)
-    /// Shut for the truncate window of a restore (section 5.3).
+    /// Shut for the truncate window of a restore (docs/design/item-index.md).
     func close()
     func reopen()
 

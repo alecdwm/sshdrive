@@ -2,7 +2,8 @@ import Foundation
 import Logging
 import SSHProcess
 
-/// `SFTPTransport` on top of the real wire client (DESIGN.md sections 6.2 and 9.1).
+/// `SFTPTransport` on top of the real wire client (docs/design/sftp.md,
+/// docs/design/security.md).
 ///
 /// This is the one path chokepoint: every method takes a `RelativePath`, and the only
 /// thing in the process that turns one into an absolute server path is
@@ -14,7 +15,7 @@ public actor RealSFTPTransport: SFTPTransport {
     public nonisolated let client: SFTPClient
     /// The canonical absolute root, as `realpath` resolved it, in server bytes.
     public private(set) var rootBytes: Data
-    /// A per-process tag for upload temp files. Section 5.5 names them
+    /// A per-process tag for upload temp files. They are named
     /// `.sshdrive-upload-<mac8>-<uuid>`; the `<mac8>` is the agent's, and is handed in
     /// here rather than derived, because this module has no business reading a Mac's
     /// hardware identifiers.
@@ -28,8 +29,8 @@ public actor RealSFTPTransport: SFTPTransport {
         self.uploadTag = uploadTag
     }
 
-    /// Handshakes on `stream` and canonicalises `root` with SFTP `realpath`, which is
-    /// what section 9.1 requires at `add` time and on every connection.
+    /// Handshakes on `stream` and canonicalises `root` with SFTP `realpath`, which
+    /// happens at `add` time and on every connection (docs/design/security.md).
     public static func connect(
         stream: any ByteStream,
         root: String,
@@ -43,14 +44,14 @@ public actor RealSFTPTransport: SFTPTransport {
     }
 
     /// Eight hex characters, stable for the life of the process. The agent overrides it
-    /// with the `<mac8>` of section 5.5.
+    /// with its own `<mac8>` (docs/design/writes.md).
     public static var defaultUploadTag: String {
         String(format: "%08x", UInt32.random(in: 0...UInt32.max))
     }
 
-    /// Section 9.1: on every connection the root is resolved again and the location
-    /// refuses to operate if it moved. Throws `.noSuchFile` when the root is gone and
-    /// `.failure` when it now resolves somewhere else.
+    /// On every connection the root is resolved again and the location refuses to
+    /// operate if it moved (docs/design/security.md). Throws `.noSuchFile` when the root
+    /// is gone and `.failure` when it resolves somewhere else.
     public func verifyRoot() async throws {
         let resolved = try await client.realpath(SFTPServerPath(bytes: rootBytes))
         guard resolved == rootBytes else {
@@ -79,7 +80,7 @@ public actor RealSFTPTransport: SFTPTransport {
     /// sent them - not just the five this client acts on. `capabilities.json` keeps it
     /// and `sshdrive status --json` shows it, because "the server did not advertise
     /// fsync@openssh.com" is a claim about the server that has to be checkable from a
-    /// user's machine (2026-09-05).
+    /// user's machine.
     public var extensionNames: [String] {
         get async { await client.serverExtensionNames }
     }
@@ -91,8 +92,9 @@ public actor RealSFTPTransport: SFTPTransport {
 
     public func lstat(_ path: RelativePath) async throws -> SFTPFileAttributes {
         var attributes = try await client.lstat(serverPath(path))
-        // Section 5.7: the target string is read once and handed to the Mac verbatim. It
-        // is never joined to a remote path, so a `..` inside it cannot steer anything.
+        // The target string is read once and handed to the Mac verbatim
+        // (docs/design/symlinks.md). It is never joined to a remote path, so a `..`
+        // inside it cannot steer anything.
         if attributes.type == .symlink, attributes.symlinkTarget == nil {
             attributes.symlinkTarget = try? await readlink(path)
         }
@@ -117,8 +119,9 @@ public actor RealSFTPTransport: SFTPTransport {
     }
 
     /// Streams a byte range to `receiver` without ever holding the whole file, at
-    /// `window` requests in flight. The transfer scheduler of section 6.2 and the
-    /// `fetchContents` FileHandle of section 5.2 both want this rather than `read`.
+    /// `window` requests in flight. The transfer scheduler (docs/design/sftp.md) and the
+    /// `fetchContents` FileHandle (docs/design/extension.md) both want this rather than
+    /// `read`.
     public func readStreaming(
         _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int = 16,
         receiver: @escaping @Sendable (UInt64, Data) async -> Void
@@ -136,11 +139,12 @@ public actor RealSFTPTransport: SFTPTransport {
         }
     }
 
-    /// Section 5.5's temp file plus rename, fed a chunk at a time so that a large upload
-    /// never sits in the agent's memory, and section 6.2's window share while it does it.
+    /// The temp file plus rename (docs/design/writes.md), fed a chunk at a time so that a
+    /// large upload never sits in the agent's memory, taking its share of the request
+    /// window while it does it.
     ///
     /// A cancel (the extension's `Progress`, or its connection going away) removes the
-    /// temp file it had started on the server, which is what section 5.2 requires.
+    /// temp file it had started on the server.
     public func writeStreaming(
         _ path: RelativePath, mode: UInt32, window: Int = 16,
         source: @Sendable @escaping () throws -> Data,
@@ -187,7 +191,8 @@ public actor RealSFTPTransport: SFTPTransport {
         try? await client.setstat(serverPath(path), SFTPSettableAttributes(permissions: mode))
     }
 
-    /// The create-versus-overwrite choice of section 5.5, shared by both write paths.
+    /// The create-versus-overwrite choice (docs/design/writes.md), shared by both write
+    /// paths.
     private func rename(_ temporary: RelativePath, into path: RelativePath) async throws {
         let temporaryPath = serverPath(temporary)
         if await client.extensions.contains(.posixRename) {
@@ -202,14 +207,14 @@ public actor RealSFTPTransport: SFTPTransport {
         }
     }
 
-    /// Section 5.5: never write in place. The bytes go to
+    /// Never write in place (docs/design/writes.md). The bytes go to
     /// `.sshdrive-upload-<tag>-<uuid>` beside the destination, are flushed with
     /// `fsync@openssh.com` where the server has it, and only then take the name.
     ///
-    /// The create-versus-overwrite choice of section 5.5 (a non-overwriting `rename` for
-    /// a create, `posix-rename@openssh.com` for a replacement) belongs to the agent's
-    /// upload path in milestone 4, which drives the client directly; this method is the
-    /// `SFTPTransport` shape the fake backend already has, so it replaces.
+    /// The create-versus-overwrite choice (a non-overwriting `rename` for a create,
+    /// `posix-rename@openssh.com` for a replacement) belongs to the agent's upload path,
+    /// which drives the client directly; this method is the `SFTPTransport` shape the
+    /// fake backend has, so it replaces.
     public func write(_ path: RelativePath, contents: Data, mode: UInt32) async throws {
         guard let parent = path.parent else {
             throw SFTPError.failure("Cannot write to the location root")
@@ -243,7 +248,7 @@ public actor RealSFTPTransport: SFTPTransport {
                 // Without posix-rename there is no atomic replace on the wire. The
                 // non-overwriting rename is tried first so the common create case stays
                 // atomic, and only a genuine replacement takes the unlink-then-rename
-                // window. Section 8.1 reports the difference as a capability tier.
+                // window. `sshdrive status` reports the difference as a capability tier.
                 do {
                     try await client.rename(temporaryPath, to: serverPath(path))
                 } catch {
@@ -256,16 +261,17 @@ public actor RealSFTPTransport: SFTPTransport {
             throw error
         }
         // The temp file was created with `mode`, but the server's umask may have taken
-        // bits off it, so the mode is restored after the rename (section 5.5).
+        // bits off it, so the mode is restored after the rename (docs/design/writes.md).
         try? await client.setstat(
             serverPath(path), SFTPSettableAttributes(permissions: mode))
     }
 
-    /// The exclusive create the section 5.5 upload protocol writes its temp file with:
-    /// `SSH_FXF_CREAT | SSH_FXF_EXCL` at exactly this path, the permission bits in the
-    /// `open` attributes as `sftp put` does, `fsync@openssh.com` where the server offers
-    /// it, and no rename of any kind. The rename, the conflict check between the two and
-    /// the mode and mtime restore afterwards all belong to the agent (section 5.5).
+    /// The exclusive create the upload protocol writes its temp file with
+    /// (docs/design/writes.md): `SSH_FXF_CREAT | SSH_FXF_EXCL` at exactly this path, the
+    /// permission bits in the `open` attributes as `sftp put` does, `fsync@openssh.com`
+    /// where the server offers it, and no rename of any kind. The rename, the conflict
+    /// check between the two and the mode and mtime restore afterwards all belong to the
+    /// agent.
     ///
     /// A cancel, or any failure, removes the partial file it had started.
     public func writeExclusive(
@@ -289,7 +295,7 @@ public actor RealSFTPTransport: SFTPTransport {
                 written += Int64(piece.count)
                 progress(written)
             }
-            // Section 5.5, durability: fsync after each upload where the server offers it.
+            // Durability: fsync after each upload where the server offers it.
             if await client.extensions.contains(.fsync) {
                 try? await client.fsync(handle)
             }
@@ -327,7 +333,7 @@ public actor RealSFTPTransport: SFTPTransport {
             modifiedTime: mtime.map { UInt32(truncatingIfNeeded: $0) })
         guard !attributes.isEmpty else { return }
         // lsetstat where the server has it, so a setstat on a symlink cannot walk through
-        // it (section 9.1's "never descend through a link").
+        // it ("never descend through a link", docs/design/security.md).
         if await client.extensions.contains(.lsetstat) {
             do {
                 try await client.lsetstat(serverPath(path), attributes)
@@ -353,8 +359,8 @@ public actor RealSFTPTransport: SFTPTransport {
 
     // MARK: Handles, for the callers that want them
 
-    /// Opens a file. Exposed because the milestone 4 upload path and the transfer
-    /// scheduler of section 6.2 need the handle, not just whole-file reads.
+    /// Opens a file. Exposed because the agent's upload path and the transfer scheduler
+    /// (docs/design/sftp.md) need the handle, not just whole-file reads.
     public func open(_ path: RelativePath, flags: SFTPOpenFlags, mode: UInt32? = nil) async throws
         -> SFTPFileHandle
     {

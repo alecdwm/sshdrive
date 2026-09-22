@@ -8,7 +8,7 @@
 #
 # The Apple and FreeBSD targets are NOT linkable here (they need Apple's linker and
 # FreeBSD's libc respectively) and are only `cargo check`ed on this box; CI links them on
-# the runners section 10.1 names.
+# the runners docs/design/packaging.md names.
 
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "linker=rust-lld", "-C", "link-self-contained=yes"]

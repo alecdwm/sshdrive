@@ -4,8 +4,8 @@ import SSHProcess
 
 @testable import SFTP
 
-/// The seam milestone 2 closes: the wire client of section 6.2 running on a **mux client
-/// of the `-N` master** of section 6.1, not on an `ssh` of its own.
+/// The wire client (docs/design/sftp.md) running on a **mux client of the `-N` master**
+/// (docs/design/ssh.md), not on an `ssh` of its own.
 ///
 /// `SFTPSubprocess` spawns its own `ssh -s <host> sftp` and stays as the test path that
 /// let the codec be written before `SSHProcess` existed; production opens the subsystem on
@@ -60,7 +60,7 @@ final class TestbedChannelTransportTests: XCTestCase {
         let transport = try await connect(alias: "spike-deb")
 
         let root = await transport.root
-        XCTAssertTrue(root.hasPrefix("/"), "realpath canonicalises the root (section 9.1)")
+        XCTAssertTrue(root.hasPrefix("/"), "realpath canonicalises the root (docs/design/security.md)")
 
         let listing = try await transport.readdir(.root)
         XCTAssertTrue(
@@ -78,7 +78,7 @@ final class TestbedChannelTransportTests: XCTestCase {
         let attributes = try await transport.lstat(file)
         XCTAssertEqual(attributes.type, .file)
         XCTAssertEqual(attributes.size, 20)
-        XCTAssertEqual(attributes.mode & 0o777, 0o644, "the mode is restored after the rename (5.5)")
+        XCTAssertEqual(attributes.mode & 0o777, 0o644, "the mode is restored after the rename (docs/design/writes.md)")
 
         let renamed = try scratch.appending(component: Data("renamed.txt".utf8))
         try await transport.rename(file, to: renamed)
@@ -95,7 +95,7 @@ final class TestbedChannelTransportTests: XCTestCase {
     }
 
     /// The master outlives its channels: a wedged SFTP channel is killed and reopened on
-    /// its own without touching the connection (section 6.1).
+    /// its own without touching the connection (docs/design/ssh.md).
     func testASecondChannelOpensOnTheSameMasterAfterTheFirstIsKilled() async throws {
         let first = try await connect(alias: "spike-deb")
         _ = try await first.readdir(.root)

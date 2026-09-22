@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import AgentCore
 
-/// DESIGN.md section 6.5, rule by rule. Times are arguments, so the rotation and the cap
-/// are exact and nothing sleeps.
+/// The root-set rules (docs/design/root-set.md), rule by rule. Times are arguments, so
+/// the rotation and the cap are exact and nothing sleeps.
 final class RootSetTests: XCTestCase {
 
     private func path(_ text: String) -> Data { Data(text.utf8) }
@@ -51,8 +51,8 @@ final class RootSetTests: XCTestCase {
     func testAFullSweepSuspendsTheRotationForThatOneCycle() {
         let entries = (0..<200).map { entry("m/\($0)", [.materialized], lastListed: Double($0)) }
         let set = RootSet(entries: entries)
-        // Section 6.4: "at tier 0 a readdir of every root with the rotation of section 6.5
-        // suspended for that one cycle".
+        // A full sweep does a tier 0 readdir of every root, with the rotation suspended
+        // for that one cycle (docs/design/change-detection.md).
         XCTAssertEqual(set.tier0Cycle(fullSweep: true).count, 200)
         XCTAssertEqual(set.tier0Cycle(fullSweep: false).count, 64)
     }
@@ -91,9 +91,9 @@ final class RootSetTests: XCTestCase {
     }
 
     func testOnlyTheViewedReasonIsCounted() {
-        // A thousand materialized roots do not push a single viewed one out: section 6.5
-        // caps the viewed set, and "the materialized reason is not capped, since dropping
-        // a directory from it would leave cached files in it unwatched".
+        // A thousand materialized roots do not push a single viewed one out: the viewed
+        // set is capped (docs/design/root-set.md), and the materialized reason is not,
+        // since dropping a directory from it would leave cached files in it unwatched.
         let entries = (0..<1000).map { entry("m/\($0)", [.materialized]) } + [entry("v", [.viewed])]
         XCTAssertEqual(RootSet(entries: entries).viewedEvictions(cap: 4), [])
     }
@@ -102,8 +102,9 @@ final class RootSetTests: XCTestCase {
 
     func testADirectoryUnderAPinRootIsExcludedFromViewedAndMaterialized() {
         let set = RootSet(entries: [entry("Photos", [.pinned])])
-        // Section 6.5: "a directory under a recursive pin root is never added to it, since
-        // the pin's recursive watch already covers it", and the same for materialized.
+        // A directory under a recursive pin root is never added to the root set, since
+        // the pin's recursive watch already covers it (docs/design/root-set.md), and the
+        // same for materialized.
         XCTAssertTrue(set.isUnderPinRoot(path("Photos/2024")))
         XCTAssertTrue(set.isUnderPinRoot(path("Photos/2024/June")))
         // The pin root itself is in the set on its own account, not under itself.
@@ -160,10 +161,10 @@ final class RootSetTests: XCTestCase {
         XCTAssertEqual(roots.recursive, [path("Photos"), path("Pinned2")])
     }
 
-    /// Milestone 8's half of section 6.5: a pin root is never rotated and is never
-    /// dropped from a cycle, however long ago it was listed, and it takes none of the
-    /// sixty-four rotation slots from the directories that do rotate. Times are arguments,
-    /// so "however long ago" is exact.
+    /// A pin root (docs/design/root-set.md) is never rotated and is never dropped from a
+    /// cycle, however long ago it was listed, and it takes none of the sixty-four rotation
+    /// slots from the directories that do rotate. Times are arguments, so "however long
+    /// ago" is exact.
     func testAPinRootIsSweptEveryCycleAndTakesNoRotationSlot() {
         var entries = (0..<200).map { entry("m/\($0)", [.materialized], lastListed: 1_000 + Double($0)) }
         // Listed longer ago than anything else in the set, and holding cached files too.
@@ -179,8 +180,8 @@ final class RootSetTests: XCTestCase {
     }
 
     func testAShallowRootUnderAPinRootIsNotSentTwice() {
-        // The pin-root exclusion of section 6.5 should have kept it out of the set at all;
-        // if it slipped in, the recursive find already walks it.
+        // The pin-root exclusion (docs/design/root-set.md) should have kept it out of
+        // the set at all; if it slipped in, the recursive find already walks it.
         let set = RootSet(entries: [
             entry("Photos", [.pinned]),
             entry("Photos/2024", [.materialized]),

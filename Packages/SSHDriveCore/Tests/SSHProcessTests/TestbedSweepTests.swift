@@ -3,10 +3,10 @@ import XCTest
 import SFTP
 @testable import SSHProcess
 
-/// Spike S7's tier 1 half, against the real testbed (DESIGN.md section 6.4): the `find`
-/// sweep over an exec channel, its two `find` flavours, the server-clock window, and the
-/// claim that it coexists with SFTP traffic on one connection. Gated on
-/// `SSHDRIVE_TESTBED=1`.
+/// The tier 1 sweep, against the real testbed (docs/design/change-detection.md): the
+/// `find` sweep over an exec channel, its two `find` flavours, the server-clock
+/// window, and the claim that it coexists with SFTP traffic on one connection. Gated
+/// on `SSHDRIVE_TESTBED=1`.
 final class TestbedSweepTests: XCTestCase {
 
     private var masters: [SSHMaster] = []
@@ -40,7 +40,8 @@ final class TestbedSweepTests: XCTestCase {
     // MARK: The sweep itself
 
     /// One sweep, end to end: the server's own clock first, then a `-printf` record per
-    /// hit carrying everything section 5.3 wants and needing no follow-up `stat`.
+    /// hit carrying everything the index wants (docs/design/item-index.md) and
+    /// needing no follow-up `stat`.
     func testGnuSweepCarriesTheServerClockAndFullRecords() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-deb")
@@ -53,9 +54,10 @@ final class TestbedSweepTests: XCTestCase {
         let after = Int64(Date().timeIntervalSince1970)
 
         XCTAssertFalse(outcome.truncated, "the closing sentinel must end the read")
-        // The window comes from the server's clock, never the Mac's (section 6.4). The
-        // testbed's containers share the host's clock, so what this proves is that the
-        // value the agent stores is the one the *script* printed.
+        // The window comes from the server's clock, never the Mac's
+        // (docs/design/change-detection.md). The testbed's containers share the
+        // host's clock, so what this proves is that the value the agent stores is
+        // the one the *script* printed.
         let serverTime = try XCTUnwrap(outcome.serverTime)
         XCTAssertGreaterThanOrEqual(serverTime, before - 5)
         XCTAssertLessThanOrEqual(serverTime, after + 5)
@@ -99,9 +101,10 @@ final class TestbedSweepTests: XCTestCase {
         XCTAssertEqual(after.hits.first?.path, Data("./data/tree/d0001/f000.bin".utf8))
     }
 
-    /// Section 6.4's reason for `-cmin` over `-mmin`, measured rather than asserted: a
-    /// `chmod` on a file whose mtime is old moves ctime and not mtime, so `-cmin` finds it
-    /// and `-mmin` does not. Every busybox server loses exactly this.
+    /// The reason for `-cmin` over `-mmin` (docs/design/change-detection.md), measured
+    /// rather than asserted: a `chmod` on a file whose mtime is old moves ctime and
+    /// not mtime, so `-cmin` finds it and `-mmin` does not. Every busybox server
+    /// loses exactly this.
     func testCminCatchesAChmodThatMminMisses() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-deb")
@@ -134,7 +137,7 @@ final class TestbedSweepTests: XCTestCase {
             "-cmin must see the chmod")
         XCTAssertFalse(
             mmin.hits.contains { $0.path == Data("./data/s7-cmin/probe.txt".utf8) },
-            "-mmin must miss it: that is the cost section 6.4 records for every busybox")
+            "-mmin must miss it: that is the cost every busybox server pays")
         _ = try await Testbed.runScript(
             on: master, body: "rm -rf \"$HOME/data/s7-cmin\"; printf 'x\\000'", timeout: 20)
     }
@@ -166,8 +169,9 @@ final class TestbedSweepTests: XCTestCase {
         }
     }
 
-    /// Section 9.2's quoting rule, at the scale the sweep uses it: the testbed's `weird/`
-    /// tree exists for this. A directory named `$(echo pwned)` must be a path.
+    /// The quoting rule (docs/design/security.md), at the scale the sweep uses it:
+    /// the testbed's `weird/` tree exists for this. A directory named
+    /// `$(echo pwned)` must be a path.
     func testAwkwardRootsAndAwkwardOutputSurviveTheSweep() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-deb")
@@ -199,8 +203,8 @@ final class TestbedSweepTests: XCTestCase {
             "0")
     }
 
-    /// The sweep runs on an exec channel while both SFTP channels are busy, which is the
-    /// first question S7 asks. One connection, three channels, all at once.
+    /// The sweep runs on an exec channel while both SFTP channels are busy: one
+    /// connection, three channels, all at once.
     func testSweepCoexistsWithTwoSFTPChannelsOnOneConnection() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-deb")
@@ -263,7 +267,7 @@ final class TestbedSweepTests: XCTestCase {
 
     /// `bashbg` leaves a background child holding stdout, so EOF never arrives. The sweep
     /// reads to its own closing sentinel and must return in seconds, not at the timeout
-    /// (section 9.2, and the trap testbed/README.md records).
+    /// (docs/design/security.md, and the trap testbed/README.md records).
     func testSweepReturnsOnABashbgAccountWhereEOFNeverArrives() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-shells", user: "bashbg")
@@ -277,8 +281,9 @@ final class TestbedSweepTests: XCTestCase {
             Date().timeIntervalSince(started), 45, "it must not wait out the timeout")
     }
 
-    /// A root that does not exist makes `find` exit non-zero. Section 6.4's `|| true` is
-    /// what stops one such root losing every other root's changes.
+    /// A root that does not exist makes `find` exit non-zero. The `|| true`
+    /// (docs/design/change-detection.md) is what stops one such root losing every
+    /// other root's changes.
     func testOneUnreadableRootDoesNotLoseTheRestOfTheSweep() async throws {
         try Testbed.skipUnlessEnabled()
         let master = try await master(host: "spike-deb")

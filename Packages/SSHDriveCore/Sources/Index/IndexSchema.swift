@@ -1,17 +1,16 @@
 import Foundation
 
-/// The per-domain index schema, exactly as DESIGN.md section 5.3 sets it out. The agent
-/// is the only writer; the extension opens the same file read-only in WAL mode.
+/// The per-domain index schema (docs/design/item-index.md). The agent is the only writer;
+/// the extension opens the same file read-only in WAL mode.
 public enum IndexSchema {
-    /// Bumped whenever a column changes, or whenever the *meaning* of one does. Version 2
-    /// is milestone 4: the `xattrs` blob now holds a `LocalAttributes` object (extended
-    /// attributes plus the Finder `tagData` that never arrives as an xattr, section 5.4)
-    /// rather than a bare dictionary. Version 3 is milestone 6: `roots` carries
-    /// `last_listed`, the round-robin key of section 6.5's tier 0 rotation, `held` carries
-    /// the re-check count and the reason section 6.4's guard reports, and `meta` carries
-    /// the server's own clock from the last applied sweep. An extension that finds a
-    /// version newer than it understands falls back to asking the agent for items
-    /// (section 5.2).
+    /// Bumped whenever a column changes, or whenever the *meaning* of one does. At version
+    /// 2 the `xattrs` blob holds a `LocalAttributes` object (extended attributes plus the
+    /// Finder `tagData` that never arrives as an xattr,
+    /// docs/design/names-and-attributes.md) rather than a bare dictionary. Version 3 adds
+    /// `roots.last_listed`, the round-robin key of the tier 0 rotation, `held.checks` and
+    /// `held.reason` for the mass-deletion guard, and the server's own clock from the last
+    /// applied sweep in `meta`. An extension that finds a version newer than it understands
+    /// falls back to asking the agent for items.
     public static let version = 3
 
     /// Keys in the `meta` table. The reader checks all three on every call.
@@ -19,29 +18,32 @@ public enum IndexSchema {
         public static let schemaVersion = "schema_version"
         /// Set for the whole reconcile walk. While it is set the extension answers
         /// item(for:) and the working-set enumerator with serverUnreachable rather than
-        /// reading rows that are still being rebuilt (section 5.2).
+        /// reading rows that are still being rebuilt.
         public static let reconciling = "reconciling"
-        /// Bumped whenever the agent has replaced the database's contents wholesale.
-        /// The reader reads it with the other two keys in the check it makes on every
-        /// call, and hands it to the extension's state file (section 5.2). It is not what
-        /// invalidates the statement cache: a `sqlite3_prepare_v2` statement re-prepares
-        /// itself after a schema change, and the restore purges the cache anyway.
+        /// Bumped whenever the agent has replaced the database's contents wholesale. The
+        /// reader reads it with the other two keys in the check it makes on every call, and
+        /// hands it to the extension's state file. It is not what invalidates the statement
+        /// cache: a `sqlite3_prepare_v2` statement re-prepares itself after a schema
+        /// change, and the restore purges the cache anyway.
         public static let generation = "generation"
-        /// The canonical absolute remote root this index was built against (section 9.1).
+        /// The canonical absolute remote root this index was built against
+        /// (docs/design/security.md).
         public static let remoteRoot = "remote_root"
         /// The server's own `date +%s` from the last sweep whose results were *applied*
-        /// (section 6.4). Stored only after the apply, never before: a stamp written
-        /// ahead of the results would, if the sweep or the agent died between the two,
-        /// claim we had seen everything up to a moment whose changes were never recorded,
-        /// and the next sweep would ask for changes since then and never find them.
+        /// (docs/design/change-detection.md). Stored only after the apply, never before: a
+        /// stamp written ahead of the results would, if the sweep or the agent died between
+        /// the two, claim we had seen everything up to a moment whose changes were never
+        /// recorded, and the next sweep would ask for changes since then and never find
+        /// them.
         public static let sweepServerTime = "sweep_server_time"
         /// Our own clock at the last full sweep of the root set, which is what the
-        /// 30-minute insurance pass times from (section 6.4). It is deliberately not the
-        /// server's: the interval between our own passes is ours to measure, and the two
-        /// clocks need not agree.
+        /// 30-minute insurance pass times from (docs/design/change-detection.md). It is
+        /// deliberately not the server's: the interval between our own passes is ours to
+        /// measure, and the two clocks need not agree.
         public static let lastFullSweep = "last_full_sweep"
-        /// The change-detection tier actually in use (section 6.4), so `status` can answer
-        /// for a location whose agent has just restarted and not yet re-probed.
+        /// The change-detection tier actually in use (docs/design/change-detection.md), so
+        /// `status` can answer for a location whose agent has just restarted and not yet
+        /// re-probed.
         public static let watchTier = "watch_tier"
     }
 
@@ -80,10 +82,11 @@ public enum IndexSchema {
             at REAL NOT NULL
         );
 
-        -- The change-detection root set (section 6.5). These two tables gained columns in
-        -- schema version 3, and `CREATE TABLE IF NOT EXISTS` will not put them on a
-        -- database that already has the table: it sees the name, does nothing, and leaves
-        -- the old shape in place. IndexWriter.migrate() adds them explicitly.
+        -- The change-detection root set (docs/design/root-set.md). `CREATE TABLE IF NOT
+        -- EXISTS` only ever creates: on a database that already carries the table it sees
+        -- the name, does nothing, and leaves whatever shape is there. Columns a later
+        -- schema version adds (`roots.last_listed`, `held.checks`, `held.reason`) are put
+        -- on by IndexWriter.migrate() instead.
         CREATE TABLE IF NOT EXISTS roots (
             path BLOB NOT NULL,
             reason TEXT NOT NULL,           -- materialized | pinned | viewed
@@ -97,7 +100,7 @@ public enum IndexSchema {
             dir BLOB NOT NULL,
             first_missing REAL NOT NULL,
             recheck_at REAL NOT NULL,
-            checks INTEGER NOT NULL DEFAULT 0,  -- the re-checks at 5 and 30 minutes (section 6.4)
+            checks INTEGER NOT NULL DEFAULT 0,  -- the re-checks at 5 and 30 minutes
             reason TEXT NOT NULL DEFAULT ''     -- why the deletion was held, for `status`
         );
 
@@ -108,7 +111,7 @@ public enum IndexSchema {
         """
 }
 
-/// One row of `items`, which is one finished item (DESIGN.md section 5.2).
+/// One row of `items`, which is one finished item (docs/design/extension.md).
 public struct IndexItem: Equatable, Sendable {
     public var identifier: String
     /// Empty for the root, which is a permanent row carrying the rootContainer identifier.
@@ -186,7 +189,8 @@ public struct IndexItem: Equatable, Sendable {
     }
 
     /// The last path component, decoded for display and for the item's filename. A name
-    /// that is not valid UTF-8 never reaches here: it is hidden (section 5.4).
+    /// that is not valid UTF-8 never reaches here: it is hidden
+    /// (docs/design/names-and-attributes.md).
     public var filename: String {
         guard !path.isEmpty else { return "" }
         // The bytes after the last slash, without cutting the whole path into components
@@ -197,21 +201,21 @@ public struct IndexItem: Equatable, Sendable {
         return String(decoding: path[path.index(after: slash)...], as: UTF8.self)
     }
 
-    /// "size-mtime-generation" at every tier (section 5.3).
+    /// "size-mtime-generation" at every tier.
     public static func contentVersion(size: Int64, mtime: Int64, generation: Int64) -> String {
         "\(size)-\(mtime)-\(generation)"
     }
 
-    /// A fresh item identifier: "a UUID minted the first time we see a path"
-    /// (section 5.3), in the same uppercase hyphenated spelling `UUID().uuidString` gives.
+    /// A fresh item identifier: a UUID minted the first time we see a path, in the same
+    /// uppercase hyphenated spelling `UUID().uuidString` gives.
     ///
     /// The bytes come from a generator seeded once per process out of the system's rather
-    /// than from `Foundation.UUID()`, which asks the platform for entropy on every call.
-    /// A first listing of a ten-thousand-entry directory mints ten thousand identifiers,
-    /// and `Foundation.UUID()` spends seventy milliseconds of that one call
-    /// (section 5.3). What a seeded generator gives up is unpredictability - an item
-    /// identifier is a local name for a row, never a secret and never a capability - and
-    /// what it keeps is the shape, the spelling and 122 bits of distinctness.
+    /// than from `Foundation.UUID()`, which asks the platform for entropy on every call. A
+    /// first listing of a ten-thousand-entry directory mints ten thousand identifiers, and
+    /// `Foundation.UUID()` spends seventy milliseconds of that one call. What a seeded
+    /// generator gives up is unpredictability - an item identifier is a local name for a
+    /// row, never a secret and never a capability - and what it keeps is the shape, the
+    /// spelling and 122 bits of distinctness.
     public static func mintIdentifier() -> String {
         var bytes = IdentifierSource.shared.next16()
         // Version 4, variant 1, as `uuid_generate_random` sets them.
@@ -310,25 +314,25 @@ public struct IndexAnchorEntry: Equatable, Sendable {
 /// Errors the index raises. `.syncAnchorExpired` and `.reconciling` are the two the
 /// extension must translate rather than swallow.
 public enum IndexError: Error, Equatable {
-    /// The system presented an anchor the index no longer knows: pruned, or rebuilt
-    /// (section 5.3). Those are the only two sources.
+    /// The system presented an anchor the index does not know: pruned, or rebuilt. Those
+    /// are the only two sources.
     case syncAnchorExpired
     /// A reconcile is running. Answer serverUnreachable, never noSuchItem.
     case reconciling
     /// The schema is newer than this build understands. Fall back to the agent.
     case schemaTooNew(found: Int)
     case noSuchItem
-    /// The reader is closed for the truncate window of a restore (section 5.3).
+    /// The reader is closed for the truncate window of a restore.
     case closed
 }
 
-/// The working-set change stream, read identically by the extension's read-only reader
-/// and by the agent's writer (DESIGN.md sections 5.2, 5.3).
+/// The working-set change stream, read identically by the extension's read-only reader and
+/// by the agent's writer (docs/design/extension.md, docs/design/item-index.md).
 ///
 /// It lives here, taking a connection rather than sitting on either class, because the
-/// extension now has two ways to answer the working set - its own reader, and the agent
-/// over XPC when the reader is not usable - and two copies of "what is a change since
-/// this anchor" would drift. One query, one expiry rule, two callers.
+/// extension has two ways to answer the working set - its own reader, and the agent over
+/// XPC when the reader is not usable - and two copies of "what is a change since this
+/// anchor" would drift. One query, one expiry rule, two callers.
 public enum IndexChangeStream {
     public struct Page: Equatable, Sendable {
         public var entries: [IndexAnchorEntry]
@@ -356,9 +360,9 @@ public enum IndexChangeStream {
         return statement.int(0)
     }
 
-    /// Throws `.syncAnchorExpired` when the anchor is older than the oldest row still
-    /// held; the caller hands out a fresh anchor and tells the agent, whose response is
-    /// one full sweep of the root set (section 5.3).
+    /// Throws `.syncAnchorExpired` when the anchor is older than the oldest row still held;
+    /// the caller hands out a fresh anchor and tells the agent, whose response is one full
+    /// sweep of the root set.
     public static func changes(_ connection: SQLiteConnection, since anchor: Int64, limit: Int)
         throws -> Page
     {

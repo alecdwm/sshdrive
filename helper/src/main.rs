@@ -1,10 +1,11 @@
-//! `sshdrive-helper` - the remote change-detection helper of DESIGN.md section 6.4 tier 2.
+//! `sshdrive-helper` - the tier 2 remote change-detection helper
+//! (docs/design/change-detection.md).
 //!
 //! One static binary, uploaded to the server over the connection that is already open,
 //! started from the same `sh -s` heartbeat wrapper as every other remote command
-//! (section 9.2), fed the root set on its stdin and writing NDJSON events back on its
-//! stdout. It never listens on a socket, never runs detached, and exits when its stdin
-//! closes or its pings stop, so a dropped connection leaves nothing behind (section 9).
+//! (docs/design/security.md), fed the root set on its stdin and writing NDJSON events
+//! back on its stdout. It never listens on a socket, never runs detached, and exits when
+//! its stdin closes or its pings stop, so a dropped connection leaves nothing behind.
 //!
 //! ```text
 //! sshdrive-helper --version
@@ -55,7 +56,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const OS: &str = std::env::consts::OS;
 const ARCH: &str = std::env::consts::ARCH;
 
-/// Section 6.4: "a heartbeat every 15 s", and "the helper exits after 60 s without one".
+/// A heartbeat every 15 s; the helper exits after 60 s without one.
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const PING_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -93,17 +94,17 @@ fn run(arguments: &[String]) -> i32 {
     }
 }
 
-const USAGE: &str = "sshdrive-helper - SSH Drive remote change detection (DESIGN.md 6.4 tier 2)\n\
+const USAGE: &str = "sshdrive-helper - SSH Drive remote change detection\n\
     \n\
     sshdrive-helper --version\n\
     sshdrive-helper watch --json --root <dir> [--roots-from-stdin]\n\
     \x20                      [--shallow P]... [--recursive P]... [--exclude P]...\n\
     sshdrive-helper sweep --root <dir> [--since <epoch>] [--shallow P]...\n";
 
-/// Section 6.4's verification fallback, "by size plus its own `--version` output", needs
-/// the version line to identify the exact bytes that are answering. The digest is of the
-/// running executable, computed now: a constant compiled in could not be the hash of the
-/// file that contains it.
+/// The agent's verification fallback is size plus this line, so it has to identify the
+/// exact bytes that are answering. The digest is of the running executable, computed at
+/// call time: a constant compiled in could not be the hash of the file that contains
+/// it.
 fn version_line() -> String {
     let digest = sha256::own_executable()
         .and_then(|path| sha256::file(&path))
@@ -144,8 +145,8 @@ impl Options {
                     .ok_or_else(|| format!("{argument} needs a value"))
             };
             match argument {
-                // Accepted and ignored: the agent passes it because section 6.4 spells
-                // the command line out, and a future non-JSON mode would be a new flag.
+                // Accepted and ignored: the agent passes it because the command line
+                // is fixed, and a future non-JSON mode would be a new flag.
                 "--json" => {}
                 "--roots-from-stdin" => options.from_stdin = true,
                 "--root" => options.root = PathBuf::from(value()?),
@@ -228,8 +229,7 @@ fn watch(options: Options) -> i32 {
     let mut last_heartbeat = Instant::now();
     loop {
         // Two independent reasons to stop, and both mean the agent is gone: silence past
-        // the timeout, and EOF on stdin. Neither depends on sshd noticing anything
-        // (section 6.4, "Lifetime of anything we start on the server").
+        // the timeout, and EOF on stdin. Neither depends on sshd noticing anything.
         if options.from_stdin && control.expired() {
             return 0;
         }

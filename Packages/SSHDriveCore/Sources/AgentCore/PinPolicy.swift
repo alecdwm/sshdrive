@@ -1,23 +1,24 @@
 import Foundation
 
-/// DESIGN.md section 7.1.1's "one rule", as a pure value.
+/// The one rule for nested pin markers (docs/design/pinning.md), as a pure value.
 ///
-/// Two words are used strictly (section 7.1): **pinned** and **excluded** are *markers* a
-/// user places on a path; **kept** is the *effect* at an item, which is whether the
-/// nearest marker at or above it is a pin. Kept is what the system, the eviction loop, the
-/// badge and the Finder menu act on, and it is what this type computes.
+/// Two words are used strictly (docs/design/pinning.md): **pinned** and **excluded** are
+/// *markers* a user places on a path; **kept** is the *effect* at an item, which is whether
+/// the nearest marker at or above it is a pin. Kept is what the system, the eviction loop,
+/// the badge and the Finder menu act on, and it is what this type computes.
 ///
 /// Nothing here does I/O or reads a clock. It answers four questions: what the effective
-/// state of a path is, which of section 7.1.1's five situations an item is in, what the
+/// state of a path is, which of the five situations an item is in, what the
 /// smallest marker change is that makes an item kept or not kept (invariant 3), and which
 /// explicit states a change wipes out beneath it (invariant 2).
 ///
-/// Paths are index path bytes ("a/b/c", no leading slash, empty `Data` for the location
-/// root) and every comparison is byte-wise, because a server name need not be valid UTF-8
-/// (section 5.4) and a `String` round trip would merge two different paths into one.
+/// Paths are index path bytes ("a/b/c", no leading slash, empty `Data` for the location root)
+/// and every comparison is byte-wise, because a server name need not be valid UTF-8
+/// (docs/design/names-and-attributes.md) and a `String` round trip would merge two different
+/// paths into one.
 public enum PinPolicy {
 
-    /// The `pin_state` column, spelled out (section 5.3).
+    /// The `pin_state` column, spelled out (docs/design/item-index.md).
     public enum Marker: Int64, Sendable, CaseIterable {
         case excluded = -1
         case inherit = 0
@@ -34,8 +35,8 @@ public enum PinPolicy {
         public var isExplicit: Bool { self != .inherit }
     }
 
-    /// What the user asked for. Section 7.1.1: "there are only two user-facing operations",
-    /// and each is a statement about the effective state, never about a marker.
+    /// What the user asked for. There are only two user-facing operations, and each is a
+    /// statement about the effective state, never about a marker.
     public enum Request: String, Sendable {
         /// `sshdrive pin`, Finder's "Keep Downloaded".
         case keep
@@ -43,7 +44,7 @@ public enum PinPolicy {
         case dontKeep
     }
 
-    /// Section 7.1.1's five situations. Every item is in exactly one of them.
+    /// The five situations. Every item is in exactly one of them.
     public enum Situation: String, Sendable {
         /// A. no marker at or above.
         case plain
@@ -62,8 +63,8 @@ public enum PinPolicy {
     /// What a `pin` or `unpin` does to one path.
     public struct Change: Equatable, Sendable {
         public var situation: Situation
-        /// True when the request already holds and nothing is written. Section 7.1.1's
-        /// table: the CLI says so, and Finder never offers the entry at all.
+        /// True when the request already holds and nothing is written. The CLI says so,
+        /// and Finder never offers the entry at all.
         public var isNoOp: Bool
         /// The marker to write on the path itself. Nil only for a no-op.
         public var newMarker: Marker?
@@ -73,7 +74,7 @@ public enum PinPolicy {
         /// The effective state after the change, which is what the row's `kept` column and
         /// the served `contentPolicy` become.
         public var keptAfter: Bool
-        /// One sentence for the CLI. Finder has no output channel (section 7.1.1).
+        /// One sentence for the CLI. Finder has no output channel (docs/design/pinning.md).
         public var note: String
 
         public init(
@@ -93,10 +94,10 @@ public enum PinPolicy {
 
     /// The effective state from the markers at and above an item, nearest first.
     ///
-    /// "The effective state of any item is the nearest explicit state at or above it in
-    /// the tree" (section 7.1.1). `markersNearestFirst` therefore starts with the item's
-    /// own marker and walks upwards to the root; `.inherit` entries are skipped, and an
-    /// item with nothing explicit anywhere above it is not kept.
+    /// "The effective state of any item is the nearest explicit state at or above it in the
+    /// tree" (docs/design/pinning.md). `markersNearestFirst` therefore starts with the item's
+    /// own marker and walks upwards to the root; `.inherit` entries are skipped, and an item
+    /// with nothing explicit anywhere above it is not kept.
     public static func kept(markersNearestFirst: [Marker]) -> Bool {
         for marker in markersNearestFirst where marker.isExplicit {
             return marker == .pinned
@@ -120,7 +121,7 @@ public enum PinPolicy {
 
     // MARK: The smallest change that produces the asked-for effect
 
-    /// Section 7.1.1's table, row by row.
+    /// The table of docs/design/pinning.md, row by row.
     ///
     /// Invariant 3, "minimal markers": the handler writes the smallest explicit state that
     /// produces the asked-for effective result - removing an exclusion rather than adding
@@ -227,7 +228,7 @@ public enum PinPolicy {
     }
 
     /// True when `path` lies strictly under `root`. Shares its definition with the root
-    /// set (section 6.5), which asks the same question of the same bytes.
+    /// set (docs/design/root-set.md), which asks the same question of the same bytes.
     public static func isStrictlyUnder(_ path: Data, root: Data) -> Bool {
         RootSet.isStrictlyUnder(path, root: root)
     }
@@ -235,9 +236,9 @@ public enum PinPolicy {
 
 /// The explicit markers of one location, which is what the `pin_state` column holds.
 ///
-/// A value rather than a query against the index, so that section 7.1.1's rules can be
-/// tested without a database and so the agent can evaluate a whole subtree in one pass
-/// (a pin change rewrites every known descendant, section 7.1 step 2).
+/// A value rather than a query against the index, so that the rules can be tested without
+/// a database and so the agent can evaluate a whole subtree in one pass: a pin change
+/// rewrites every known descendant.
 public struct PinMarkerSet: Sendable, Equatable {
     /// Only the explicit ones. A path absent here inherits.
     public private(set) var markers: [Data: PinPolicy.Marker]
@@ -305,7 +306,7 @@ public struct PinMarkerSet: Sendable, Equatable {
 
     /// Applies a change, so a caller can ask what the set looks like afterwards without
     /// touching the index. Returns the paths whose effective state the caller must
-    /// therefore rewrite (section 7.1 step 2 bumps every known descendant row).
+    /// therefore rewrite; a pin change bumps every known descendant row.
     @discardableResult
     public mutating func apply(_ change: PinPolicy.Change, at path: Data) -> [Data] {
         guard !change.isNoOp, let marker = change.newMarker else { return [] }
@@ -324,16 +325,16 @@ public struct PinMarkerSet: Sendable, Equatable {
 
     /// How many explicit markers sit strictly above this one. `sshdrive pins` indents by
     /// it, so an exclusion is drawn under the pin it sits in and a re-pin under that
-    /// (section 7.1's rendering).
+    /// (docs/design/pinning.md's rendering).
     public func ancestorMarkerDepth(of path: Data) -> Int {
         PinPolicy.ancestors(of: path).reduce(into: 0) { total, ancestor in
             if marker(at: ancestor).isExplicit { total += 1 }
         }
     }
 
-    /// The recursive watch of section 6.5 with section 7.1.1's "the recursive watch of
-    /// kept subtrees skips excluded subtrees": every exclusion that actually sits inside a
-    /// pinned subtree, which is what tier 1 prunes and tier 0 refuses to descend into.
+    /// The recursive watch of a pin root skips excluded subtrees: every exclusion that
+    /// actually sits inside a pinned subtree, which is what tier 1 prunes and tier 0
+    /// refuses to descend into.
     public func prunedExclusions() -> [Data] {
         exclusions.filter { exclusion in
             nearestAncestorMarker(of: exclusion)?.marker == .pinned

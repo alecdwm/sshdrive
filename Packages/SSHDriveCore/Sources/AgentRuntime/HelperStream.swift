@@ -7,12 +7,12 @@ import SSHProcess
 
 /// The tier 2 event stream: one exec channel running the deployed helper under the
 /// heartbeat wrapper, decoding NDJSON and handing events to the detector
-/// (DESIGN.md section 6.4 tier 2, step 3).
+/// (docs/design/change-detection.md, tier 2).
 ///
 /// One channel, held for the life of the connection, which is what tier 2 is and tier 1 is
 /// not: a sweep spends half a second on a channel and gives it back. That is why the
-/// budget of section 6.1 has to allow a *persistent* exec channel before this is even
-/// tried, and why a `MaxSessions 2` server stays at sweep.
+/// channel budget has to allow a *persistent* exec channel before this is even tried,
+/// and why a `MaxSessions 2` server stays at sweep.
 actor HelperStream {
 
     enum State: Equatable {
@@ -54,7 +54,7 @@ actor HelperStream {
     /// Called with every batch the decoder produced, on the detector's actor.
     private let onEvents: @Sendable ([HelperEvent]) async -> Void
     /// Called once when the stream dies, with the reason. The ladder decides what that
-    /// costs the location (section 6.4).
+    /// costs the location.
     private let onDeath: @Sendable (String) async -> Void
 
     init(
@@ -72,10 +72,9 @@ actor HelperStream {
 
     // MARK: The script
 
-    /// Section 6.4: "Start `<path>/sshdrive-helper watch --json --root <root>
-    /// --roots-from-stdin` from the same `sh -s` wrapper script as every other remote
-    /// command (section 9.2), its path and root single-quoted into the script and never on
-    /// the command line".
+    /// Start `<path>/sshdrive-helper watch --json --root <root> --roots-from-stdin` from
+    /// the same `sh -s` wrapper script as every other remote command, its path and root
+    /// single-quoted into the script and never on the command line.
     ///
     /// The initial root set goes on the helper's own argv as well as down the relay. That
     /// is not redundancy for its own sake: a server whose helper directory cannot hold a
@@ -138,7 +137,7 @@ actor HelperStream {
             // Not permanent: the commonest way to get here is a channel that went with
             // the connection between the deployment and the `ready` line, and a server
             // that genuinely cannot execute the binary was already refused by the
-            // `--version` run in the deployment (section 6.4, step 1).
+            // `--version` run in the deployment.
             throw HelperDeployer.Failure.unavailable(
                 stderr.isEmpty
                     ? "the helper did not start on the server"
@@ -171,16 +170,16 @@ actor HelperStream {
         reader = nil
         beater = nil
         // Closing stdin is what the wrapper reads as EOF: it kills the helper and exits,
-        // so nothing is left running on the server (section 6.4).
+        // so nothing is left running on the server.
         channel?.endInput()
         channel?.close()
         channel = nil
         if state == .running { state = .idle }
     }
 
-    /// Section 6.4: "When it changes, the helper is sent the new set on its stdin and
-    /// applies it live." The line goes down the channel's stdin; the wrapper relays it into
-    /// the helper's FIFO.
+    /// When the root set changes the helper is sent the new set on its stdin and applies
+    /// it live. The line goes down the channel's stdin; the wrapper relays it into the
+    /// helper's FIFO.
     func updateRoots(_ new: Roots) async {
         guard new != roots else { return }
         roots = new
@@ -237,9 +236,9 @@ actor HelperStream {
 
     private func die(_ reason: String) async {
         guard state == .running else { return }
-        // What the channel had to say on its way out. Without this a helper that died on
-        // a real server left one sentence in the log - "the helper exited" - and no exit
-        // status, no signal and no stderr to say why (2026-09-05).
+        // What the channel had to say on its way out. Without it a helper that dies on a
+        // real server leaves one sentence in the log, "the helper exited", with no exit
+        // status, no signal and no stderr to say why.
         var full = reason
         if let channel {
             let detail = await Self.deathDetail(channel)
@@ -277,7 +276,7 @@ actor HelperStream {
         return parts.joined(separator: "; ")
     }
 
-    // MARK: Reporting (section 8.1)
+    // MARK: Reporting
 
     func report() -> [String: Any] {
         var out: [String: Any] = [

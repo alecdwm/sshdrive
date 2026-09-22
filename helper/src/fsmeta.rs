@@ -1,7 +1,8 @@
 //! One `lstat` turned into the metadata every event carries.
 //!
-//! `lstat`, never `stat`: a symlink is a leaf item and is never followed (DESIGN.md
-//! sections 5.7 and 9.1). A link's own size and mtime are what the agent stores for it.
+//! `lstat`, never `stat`: a symlink is a leaf item and is never followed
+//! (docs/design/symlinks.md). A link's own size and mtime are what the agent stores for
+//! it.
 
 use crate::proto::Meta;
 use std::fs::Metadata;
@@ -14,7 +15,7 @@ pub struct Stat {
     pub is_symlink: bool,
     /// Change time in whole seconds; the sweep's window is a ctime comparison, because
     /// ctime moves on `chmod`, `chown` and on writes that preserve mtime and mtime does
-    /// not (section 6.4).
+    /// not.
     pub ctime: i64,
 }
 
@@ -43,7 +44,7 @@ pub fn from_metadata(metadata: &Metadata) -> Stat {
     }
 }
 
-/// True for anything that is not a regular file, a directory or a symlink. Section 5.3
+/// True for anything that is not a regular file, a directory or a symlink. The index
 /// stores only those three; a fifo the helper reported would make the agent `lstat`
 /// something it will then refuse anyway.
 pub fn is_special(metadata: &Metadata) -> bool {

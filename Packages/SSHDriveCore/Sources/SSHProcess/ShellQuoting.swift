@@ -1,11 +1,12 @@
 import Foundation
 
-/// POSIX `sh` single-quoting, the one quoting rule this project has (DESIGN.md section 9.2).
+/// POSIX `sh` single-quoting, the one quoting rule this project has
+/// (docs/design/security.md).
 ///
 /// Used in two places that look unrelated and are not: the values a remote `sh -s` script
 /// embeds through `set --`, and the `ProxyCommand` string the agent builds for a
-/// `ProxyJump` hop, which `ssh` hands to `/bin/sh -c` (section 6.1). Both are "a string
-/// that a POSIX shell must see verbatim", so both go through here.
+/// `ProxyJump` hop, which `ssh` hands to `/bin/sh -c` (docs/design/ssh.md). Both are
+/// "a string that a POSIX shell must see verbatim", so both go through here.
 public enum ShellQuoting {
 
     /// Wraps `value` in single quotes, writing an embedded `'` as `'\''`.

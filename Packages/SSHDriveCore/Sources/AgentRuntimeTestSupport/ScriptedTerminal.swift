@@ -6,7 +6,8 @@ import XPCProtocols
     import AgentRuntime
 #endif
 
-/// The terminal the collect connection of DESIGN.md section 4.2 relays its prompts to.
+/// The terminal the collect connection relays its prompts to
+/// (docs/design/secrets.md).
 ///
 /// "The CLI shows the prompt on the terminal, reads the answer (hidden for secrets,
 /// visible for the host-key question), and returns it." This is that CLI: every note is
@@ -14,9 +15,9 @@ import XPCProtocols
 /// test can assert *what the user was shown* as well as what was typed.
 ///
 /// A prompt with no scripted answer is a **hard stop**, not an empty answer: an empty
-/// answer is section 4.2's deliberate refusal of one prompt ("press Enter to skip"), and a
-/// double that returned it for a prompt nobody scripted would silently turn a missing
-/// script into that refusal.
+/// answer is the deliberate refusal of one prompt ("press Enter to skip"), and a double
+/// that returned it for a prompt nobody scripted would silently turn a missing script into
+/// that refusal.
 public final class ScriptedTerminal: TerminalRelaying, @unchecked Sendable {
 
     /// One prompt as the user saw it.
@@ -27,7 +28,7 @@ public final class ScriptedTerminal: TerminalRelaying, @unchecked Sendable {
         public var prompt: String
         public var detail: String
         /// Read hidden. False for the host-key question, which the user must be able to
-        /// read back against the fingerprint on the screen (section 4.3).
+        /// read back against the fingerprint on the screen (docs/design/secrets.md).
         public var secret: Bool
         public var answered: String?
     }
@@ -39,8 +40,8 @@ public final class ScriptedTerminal: TerminalRelaying, @unchecked Sendable {
         public var match: String
         public var answer: String
         /// How many times this entry may answer. A second location on the same host must
-        /// prompt for *nothing* (section 4.2), and an entry that answered for ever would
-        /// hide the day it starts prompting again.
+        /// prompt for *nothing*, and an entry that answered for ever would hide the day
+        /// it starts prompting again.
         public var uses: Int
 
         public init(kind: String? = nil, match: String, answer: String, uses: Int = 1) {
@@ -97,12 +98,13 @@ public final class ScriptedTerminal: TerminalRelaying, @unchecked Sendable {
 ///
 /// The shipping one "knows nothing: it opens an XPC connection to the agent and sends the
 /// token, the prompt text, `SSH_ASKPASS_PROMPT`, and the argv of its parent `ssh` process
-/// (read with `sysctl KERN_PROCARGS2`), then prints the agent's reply" (section 4.2). This
-/// is the same program with a file mailbox in place of the XPC connection: a small `sh`
-/// script `ssh` really invokes, and a poller in this process that hands each request to
-/// the **real** `AskpassBroker` and writes the reply back. Everything section 4.2 makes
-/// decisions about - the token, the retired token, the pid ancestry, the classification,
-/// the keychain lookup, the relay to the terminal - is the shipping code path.
+/// (read with `sysctl KERN_PROCARGS2`), then prints the agent's reply"
+/// (docs/design/secrets.md). This is the same program with a file mailbox in place of the
+/// XPC connection: a small `sh` script `ssh` really invokes, and a poller in this process
+/// that hands each request to the **real** `AskpassBroker` and writes the reply back.
+/// Everything the askpass protocol makes decisions about - the token, the retired token,
+/// the pid ancestry, the classification, the keychain lookup, the relay to the terminal -
+/// is the shipping code path.
 ///
 /// Two honest differences from the Mac, both stated rather than hidden:
 ///
@@ -282,7 +284,7 @@ public final class AskpassBridge: @unchecked Sendable {
         return """
             #!/bin/sh
             # AgentRuntimeTestSupport.AskpassBridge - `sshdrive-askpass` with a file
-            # mailbox where the XPC connection is (DESIGN.md section 4.2). It holds
+            # mailbox where the XPC connection is (docs/design/secrets.md). It holds
             # nothing: the token, the prompt, the hint and the parent argv go to the
             # agent, and whatever the agent says is what is printed.
             D=\(quoted)
@@ -315,7 +317,7 @@ public final class AskpassBridge: @unchecked Sendable {
             rm -f "$REQ"
 
             # Bounded: nothing here may outlive the authentication deadline the agent is
-            # already holding over the ssh that is waiting on this reply (section 4.2).
+            # already holding over the ssh that is waiting on this reply.
             __i=0
             while [ "$__i" -lt 3000 ]; do
               if [ -f "$REQ.rep" ]; then
@@ -325,7 +327,7 @@ public final class AskpassBridge: @unchecked Sendable {
                   exit 0
                 fi
                 # Print nothing and exit non-zero: `ssh` fails the prompt, and with it the
-                # connection. Section 4.2's refusals.
+                # connection, which is what a refusal is.
                 rm -f "$REQ.rep"
                 exit 1
               fi

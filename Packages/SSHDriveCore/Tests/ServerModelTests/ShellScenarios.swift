@@ -6,7 +6,7 @@ import SSHProcess
 @testable import ServerModel
 
 /// The scenarios that run our remote scripts through **real shells**
-/// (`docs/testing-architecture.md` sections 4.2 and 5, suite J).
+/// (`docs/design/testing.md` sections 4.2 and 5, suite J).
 ///
 /// This is the deliberate design choice of the whole harness: three of this project's
 /// worst bugs lived in shell behaviour and nothing above the shell could have caught any
@@ -35,7 +35,7 @@ final class ShellScenarios: XCTestCase {
     /// `.bashrc` through `BASH_ENV` for bash, `.zshenv` for zsh (read for *every*
     /// invocation), `/etc/profile` for a busybox ash. Everything before the sentinel must
     /// be discarded, and it must still be *available* to `status`, which is what tells the
-    /// user which rc file to go and fix (section 9.2).
+    /// user which rc file to go and fix (docs/design/security.md).
     func testJ5_theSentinelDiscardsTheRCNoiseInEveryShellShape() async throws {
         var ran = 0
         var skipped: [String] = []
@@ -173,11 +173,11 @@ final class ShellScenarios: XCTestCase {
     }
 
     /// **J6** (`SQ-017`, `SQ-019`): the wrapper must not kill its own **healthy** child.
-    /// Two ways it used to: the one-second `read -t` probe ran with the EXIT trap still
-    /// set and deleted the stamp file, and the heartbeat reader was handed a `/dev/null`
-    /// stdin by the fork and saw EOF at once. Both looked exactly like the failure the
-    /// wrapper exists to prevent. Debian's `sh` is dash, so this is the ordinary Linux
-    /// path and not a fallback.
+    /// Two ways it could: a one-second `read -t` probe run with the EXIT trap still set
+    /// would delete the stamp file, and a heartbeat reader handed a `/dev/null` stdin by
+    /// the fork would see EOF at once. Both look exactly like the failure the wrapper
+    /// exists to prevent. Debian's `sh` is dash, so this is the ordinary Linux path and
+    /// not a fallback.
     func testJ6_theWrapperDoesNotKillItsOwnHealthyChild() async throws {
         let server = try sshd(.debian)
         let marker = "sshdrive-j6-\(UUID().uuidString.prefix(8))"
@@ -223,7 +223,7 @@ final class ShellScenarios: XCTestCase {
 
     // MARK: - J14: the login-shell env snapshot, per shell
 
-    /// **J14** (`SQ-015`, `SQ-016`, `SQ-017`): the login-shell snapshot of section 6.1
+    /// **J14** (`SQ-015`, `SQ-016`, `SQ-017`): the login-shell snapshot of docs/design/ssh.md
     /// runs the *account's own* shell - `<shell> -ilc` - and takes exactly two variables
     /// out of it. Every byte the rc files print arrives **in front of** the opening
     /// sentinel and must be discarded, in every shell shape the box can run: bash quiet,
@@ -299,7 +299,7 @@ final class ShellScenarios: XCTestCase {
             // Only the two variables travel; nothing else of the shell's is taken.
             let applied = snapshot.applied(to: ["PATH": "/usr/bin:/bin", "HOME": "/var/empty"])
             XCTAssertEqual(applied["PATH"], account.expectedPATH)
-            XCTAssertEqual(applied["HOME"], "/var/empty", "section 6.1: only the two")
+            XCTAssertEqual(applied["HOME"], "/var/empty", "docs/design/ssh.md: only the two")
             ran.append(shape.rawValue)
         }
 

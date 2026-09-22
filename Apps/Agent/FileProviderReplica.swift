@@ -5,16 +5,16 @@ import Logging
 import ProviderCore
 import XPCProtocols
 
-/// `ReplicaControlling` over `NSFileProviderManager` (docs/testing-architecture.md
-/// section 2.3): the domain list, the signals, the two replica enumerators, `evictItem`,
-/// the two identifier lookups, and the `lstat` of a replica file.
+/// `ReplicaControlling` over `NSFileProviderManager` (`docs/design/testing.md`): the
+/// domain list, the signals, the two replica enumerators, `evictItem`, the two identifier
+/// lookups, and the `lstat` of a replica file.
 ///
 /// The agent is the only process that can make any of them: `NSFileProviderManager` is
 /// useless from a sandboxed extension, and reading `~/Library/CloudStorage/...` from the
-/// launchd agent is allowed with no TCC prompt because it is our own domain (S4,
-/// 2026-09-04, DESIGN.md section 7).
+/// launchd agent is allowed with no TCC prompt because it is our own domain (measured
+/// 2026-09-04; `docs/design/eviction.md`).
 ///
-/// Nothing here decides anything. **The error code does not say why** (S4): an item with a
+/// Nothing here decides anything. **The error code does not say why**: an item with a
 /// pending upload and a kept item both come back as `NSFileProviderErrorNonEvictable`
 /// (-2008), and a directory eviction that meets a pending child fails as
 /// `NSCocoaErrorDomain` 4101 with a `contentVersionMismatch` underneath - so the refusal
@@ -44,23 +44,24 @@ struct FileProviderReplica: ReplicaControlling {
         let system = NSFileProviderDomain(
             identifier: NSFileProviderDomainIdentifier(rawValue: domain.identifier),
             displayName: domain.displayName)
-        // Only ever set by `sshdrive debug fake add --testing-modes` (spikes S4 and S6).
+        // Only ever set by `sshdrive debug fake add --testing-modes`.
         // `alwaysEnabled` skips the user's approval, `interactive` hands the scheduler to
         // `listAvailableTestingOperations`; the appex's
         // com.apple.developer.fileprovider.testing-mode entitlement is what allows either,
         // and the system does not let a domain give `interactive` back once it has it.
         let modes = Self.testingModes(named: testingModes)
         if !modes.isEmpty { system.testingModes = modes }
-        // No trash (section 5.4). This property defaults to YES, and with it the system
-        // draws a `.Trash` in the mount, syncs it to the extension, and loops on
-        // materializing a container we do not serve; anything that stats `.Trash`, such as
-        // `ls -la`, waits on that loop (docs/spikes/results.md, 2026-09-04).
+        // No trash (`docs/design/names-and-attributes.md`). This property defaults to
+        // YES, and with it the system draws a `.Trash` in the mount, syncs it to the
+        // extension, and loops on materializing a container we do not serve; anything
+        // that stats `.Trash`, such as `ls -la`, waits on that loop (measured
+        // 2026-09-04).
         system.supportsSyncingTrash = false
         try await NSFileProviderManager.add(system)
     }
 
     /// Split out for the macOS-only `MirroredAgentConstantsTests`: these two words are the
-    /// whole of what `debug fake add --testing-modes` accepts (spikes S4 and S6).
+    /// whole of what `debug fake add --testing-modes` accepts.
     static func testingModes(named words: [String]) -> NSFileProviderDomain.TestingModes {
         var modes: NSFileProviderDomain.TestingModes = []
         for word in words {
@@ -153,8 +154,8 @@ struct FileProviderReplica: ReplicaControlling {
         }
     }
 
-    /// `lstat` with `AT_SYMLINK_NOFOLLOW` (section 9.1), read **before** the eviction,
-    /// since an eviction moves atime (S4).
+    /// `lstat` with `AT_SYMLINK_NOFOLLOW`, read **before** the eviction, since an
+    /// eviction moves atime.
     func replicaTimes(url: URL) -> (atime: Double, mtime: Double)? {
         var buffer = Foundation.stat()
         guard lstat(url.path, &buffer) == 0 else { return nil }
@@ -165,9 +166,8 @@ struct FileProviderReplica: ReplicaControlling {
         var report: [String: Any] = ["path": url.path, "read": readFirst]
 
         if readFirst {
-            // Open and read one byte, the way anything that "uses" the file does. This is
-            // the read whose effect on atime S4 measured, made from the agent so a TCC
-            // refusal on the open shows up too.
+            // Open and read one byte, the way anything that "uses" the file does. It is
+            // made from the agent, so a TCC refusal on the open shows up too.
             let descriptor = open(url.path, O_RDONLY)
             if descriptor < 0 {
                 report["openErrno"] = errno
@@ -200,7 +200,7 @@ struct FileProviderReplica: ReplicaControlling {
         return report
     }
 
-    // MARK: The spike barriers
+    // MARK: The synchronisation barriers
 
     func stabilize(locationID: String) async throws -> [String: Any] {
         let manager = try Self.manager(locationID)
@@ -295,7 +295,7 @@ struct FileProviderReplica: ReplicaControlling {
 
     /// Pages an enumerator to its end and returns the identifiers, under a deadline of its
     /// own: the enumerator is the system's, it is answered from the replica, and a wedged
-    /// one must never stall a change-detection cycle (section 6.3).
+    /// one must never stall a change-detection cycle.
     private static func drain(
         _ enumerator: NSFileProviderEnumerator, timeout: TimeInterval
     ) async -> [String] {

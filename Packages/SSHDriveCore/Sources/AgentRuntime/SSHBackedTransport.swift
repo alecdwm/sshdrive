@@ -6,14 +6,13 @@ import SFTP
 import SSHProcess
 import XPCProtocols
 
-/// The environment every `ssh` the agent spawns runs in (DESIGN.md section 6.1):
-/// launchd's, with `HOME`, and with `PATH` and `SSH_AUTH_SOCK` replaced by a snapshot of
-/// the user's login shell.
+/// The environment every `ssh` the agent spawns runs in (docs/design/ssh.md): launchd's,
+/// with `HOME`, and with `PATH` and `SSH_AUTH_SOCK` replaced by a snapshot of the user's
+/// login shell.
 ///
 /// The snapshot is taken once and reused, because taking it runs the user's rc files and
-/// costs up to ten seconds. Section 6.1 refreshes it at agent start and on every `add`,
-/// `test` and `passwd`; those three commands are milestone 3, and `refresh()` is what
-/// they will call.
+/// costs up to ten seconds. `refresh()` retakes it at agent start and on every `add`,
+/// `test` and `passwd`.
 public actor AgentSSHEnvironment {
     public static let shared = AgentSSHEnvironment()
 
@@ -33,7 +32,7 @@ public actor AgentSSHEnvironment {
                 "login shell snapshot from \(taken.shell, privacy: .public): PATH \(taken.path?.count ?? 0, privacy: .public) bytes, SSH_AUTH_SOCK \(taken.sshAuthSock == nil ? "unset" : "set", privacy: .public)"
             )
         } else {
-            // Section 6.1: launchd's values are used and `doctor` says so.
+            // launchd's values are used and `doctor` says so.
             Log.ssh.error(
                 "login shell snapshot failed (\(taken.diagnostic ?? "no diagnostic", privacy: .public)); using launchd's PATH and SSH_AUTH_SOCK"
             )
@@ -42,7 +41,7 @@ public actor AgentSSHEnvironment {
     }
 
     /// The base environment plus the snapshot. The askpass variables are added per spawn
-    /// by `SSHMaster`, which is the only thing that knows the token (section 4.2).
+    /// by `SSHMaster`, which is the only thing that knows the token.
     public func environment() async -> [String: String] {
         var base = ProcessInfo.processInfo.environment
         if base["HOME"] == nil { base["HOME"] = NSHomeDirectory() }
@@ -53,46 +52,46 @@ public actor AgentSSHEnvironment {
 }
 
 /// One location's live transport: the `-N` master, the **two** SFTP channels opened on
-/// its mux socket, and a wire client on each channel's stdio (DESIGN.md sections 6.1
-/// and 6.2).
+/// its mux socket, and a wire client on each channel's stdio (docs/design/ssh.md,
+/// docs/design/sftp.md).
 ///
 /// It is an `SFTPTransport` like `FakeTransport`, so nothing in `LocationRuntime` or the
 /// File Provider paths changes when a location is real rather than fake. What it adds
-/// over `RealSFTPTransport` is the two things milestone 2 owes the extension:
+/// over `RealSFTPTransport` is two things the extension needs:
 ///
-/// - **Every call has a deadline.** The wire client already has per-request deadlines
-///   (section 6.2), but a call can also wedge before it reaches the wire - the actor
-///   ahead of it, a channel that never opened - and an extension call that never returns
-///   hangs Finder. So each method runs under a wall-clock deadline of its own and a miss
-///   is `.deadlineExceeded`, which the agent maps to `.serverUnreachable`.
+/// - **Every call has a deadline.** The wire client has per-request deadlines of its own,
+///   but a call can also wedge before it reaches the wire - the actor ahead of it, a
+///   channel that never opened - and an extension call that never returns hangs Finder.
+///   So each method runs under a wall-clock deadline of its own and a miss is
+///   `.deadlineExceeded`, which the agent maps to `.serverUnreachable`.
 /// - **A lost master is `.serverUnreachable`.** When the `-N` master has gone, every
 ///   channel on it is dead; the error is reported as a lost connection rather than
 ///   whatever the dying channel happened to say.
 ///
-/// The rest of section 6.3 - the `NWPathMonitor` gate, the circuit breaker, reconnection
-/// with backoff - is milestone 5. What is here is only enough that nothing hangs.
+/// The `NWPathMonitor` gate, the circuit breaker and reconnection with backoff sit above
+/// this in `ReconnectingTransport`. What is here is only enough that nothing hangs.
 public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked Sendable {
 
-    /// Section 6.2's metadata deadline (20 s) with a little room for the actor hop, so
+    /// The wire client's metadata deadline (20 s) with a little room for the actor hop, so
     /// the wire client's own deadline is normally what fires and says which request it
     /// was.
     static let metadataDeadlineSeconds: Double = 25
     /// Transfers are bounded far more loosely: the client re-arms its own deadline while
-    /// bytes keep arriving (section 6.2), and this is only the backstop.
+    /// bytes keep arriving, and this is only the backstop.
     static let transferDeadlineSeconds: Double = 3600
 
     public let locationID: String
     public let master: SSHMaster
-    /// The same master, as the seam names it (docs/testing-architecture.md section 2.3):
-    /// nil means "no exec channel", which is what a location with no real `ssh` behind it
-    /// already means everywhere in section 6.4.
+    /// The same master, as the seam names it (docs/design/testing.md): nil means "no exec
+    /// channel", which is what a location with no real `ssh` behind it means everywhere in
+    /// change detection.
     public var execMaster: SSHMaster? { master }
-    /// What the server let us hold at once, and what that cost (section 6.1).
+    /// What the server let us hold at once, and what that cost.
     public let budget: ChannelBudget
-    /// What section 8.1's probe found on one exec channel at connect: the account the
-    /// server sees us as (section 5.4), `uname`, the `find` flavour, a checksum tool and a
-    /// cache directory for the helper. Everything below `uname` is unknown where there is
-    /// no shell, or no channel to spare for one.
+    /// What the capability probe found on one exec channel at connect: the account the
+    /// server sees us as, `uname`, the `find` flavour, a checksum tool and a cache
+    /// directory for the helper. Everything below `uname` is unknown where there is no
+    /// shell, or no channel to spare for one.
     public let probe: ServerProbe.Result
 
     /// Channel 1: `stat`, `readdir`, `rename`, small files. Never carries a transfer
@@ -104,18 +103,17 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
     private let bulkChannel: SFTPChannel?
     private let bulk: RealSFTPTransport?
 
-    /// Where a transfer runs. The same object on a degraded location, which is exactly
-    /// what section 6.2's "at a `MaxSessions` of 2 the same scheduler runs on the
-    /// metadata channel" means.
+    /// Where a transfer runs. The same object on a degraded location: at a `MaxSessions`
+    /// of 2 the same scheduler runs on the metadata channel.
     private var transferTransport: RealSFTPTransport { bulk ?? inner }
 
     /// The metadata channel's client, for the one caller that needs to address a path
     /// outside every location root: the helper's deployment into the cache directory the
-    /// probe chose (section 6.4 tier 2, and `HelperLocation.swift` on why that door is
-    /// narrow). Nothing on the File Provider path uses it.
+    /// probe chose (`HelperLocation.swift` on why that door is narrow). Nothing on the
+    /// File Provider path uses it.
     public var metadataTransport: RealSFTPTransport? { inner }
 
-    /// The `<mac8>` of section 5.5, kept so the helper's upload can use the same temp-file
+    /// The `<mac8>` of the upload temp name, kept so the helper's upload can use the same
     /// shape as every other upload.
     public let uploadTag: String
 
@@ -176,8 +174,8 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
 
         do {
             // Channel 1, the metadata channel, and the canonical root every other channel
-            // is opened against (section 9.1: the root is resolved again on every
-            // connection and the location refuses to operate if it moved).
+            // is opened against. The root is resolved again on every connection and the
+            // location refuses to operate if it moved.
             let transport = try await RealSFTPTransport.connect(
                 stream: channel.stream,
                 root: location.remotePath ?? ".",
@@ -188,7 +186,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
                 "location \(location.id, privacy: .public) rooted at \(root, privacy: .public)")
 
             // Channel 2, the bulk channel, and with it the answer to "may I hold three
-            // channels at once" that section 6.1 turns into the whole channel budget.
+            // channels at once" that becomes the whole channel budget.
             if reprobeChannels { CapabilityCache.forgetChannelBudget(locationID: location.id) }
             var budget: ChannelBudget
             var bulk: ChannelProbe.Opened?
@@ -214,7 +212,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
                             master: master, root: root, uploadTag: uploadTag,
                             locationID: location.id)
                         // A probe that failed because the connection died records nothing:
-                        // the attempt fails and the breaker tries again (2026-09-08).
+                        // the attempt fails and the breaker tries again.
                         guard let measured = probed.budget else { throw SFTPError.connectionLost }
                         budget = measured
                         bulk = probed.bulk
@@ -233,7 +231,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
                 Log.ssh.notice("\(location.id, privacy: .public): \(budget.note, privacy: .public)")
             }
 
-            // Section 5.4's identity, from one `id` exec channel. At a budget of 1 there
+            // The server identity, from one `id` exec channel. At a budget of 1 there
             // is no channel to spare and the location is SFTP-only in every respect.
             var probe = ServerProbe.Result()
             if budget.allowsExecChannel {
@@ -246,9 +244,8 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
             } else {
                 probe.failure = "the server allows only one channel at a time"
             }
-            // Section 8.1: the probe's result is cached in
-            // `domains/<id>/capabilities.json` with a timestamp, beside the channel budget
-            // that `CapabilityCache` already owns.
+            // The probe's result is cached in `domains/<id>/capabilities.json` with a
+            // timestamp, beside the channel budget that `CapabilityCache` already owns.
             let advertised = await transport.extensionNames
             Log.sftp.notice(
                 "\(location.id, privacy: .public): SFTP extensions advertised: \(advertised.joined(separator: " "), privacy: .public)"
@@ -284,7 +281,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         await master.shutdown()
     }
 
-    /// The `-O check` of section 6.1: our own child, over the socket. Cheap, and says
+    /// `-O check`: our own child, over the socket. Cheap, and says
     /// nothing about the server.
     public func isMasterAlive() async -> Bool {
         guard await master.isRunning else { return false }
@@ -307,7 +304,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
             throw SFTPError.deadlineExceeded
         } catch let error as SFTPError {
             // A wire error on a channel whose master has gone is a lost connection, not
-            // whatever the dying channel managed to say on the way out (section 6.1).
+            // whatever the dying channel managed to say on the way out.
             if await !master.isRunning { throw SFTPError.connectionLost }
             throw error
         } catch is CancellationError {
@@ -329,7 +326,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         get async { await inner.extensions }
     }
 
-    /// Every name the metadata channel's handshake recorded (section 8.1).
+    /// Every name the metadata channel's handshake recorded.
     public var extensionNames: [String] {
         get async { await inner.extensionNames }
     }
@@ -360,8 +357,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         _ path: RelativePath, offset: UInt64, length: UInt64?, window: Int,
         receiver: @escaping @Sendable (UInt64, Data) async -> Void
     ) async throws -> UInt64 {
-        // On the bulk channel, at the scheduler's share of the pipelined window
-        // (section 6.2).
+        // On the bulk channel, at the scheduler's share of the pipelined window.
         let transport = transferTransport
         return try await guarded("read", seconds: SSHBackedTransport.transferDeadlineSeconds) {
             try await transport.readStreaming(
@@ -448,7 +444,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
 
 
 /// `TransportLauncher` over `SSHBackedTransport`: the only thing in the agent that spawns
-/// `/usr/bin/ssh` (DESIGN.md section 6.1).
+/// `/usr/bin/ssh` (docs/design/ssh.md).
 ///
 /// It is in the package rather than in `Apps/Agent` because everything under it - the argv
 /// assembly, the control socket, the exit classification, the mux clients - is already

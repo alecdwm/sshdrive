@@ -7,7 +7,7 @@ import SFTP
 import SSHProcess
 
 /// One location's change detection: the poll cadence, the tier ladder, and the cycle that
-/// tiers 0 and 1 share (DESIGN.md section 6.4).
+/// tiers 0 and 1 share (docs/design/change-detection.md).
 ///
 /// Separate from `LocationRuntime` because the runtime is the index's writer and every
 /// call on it serialises behind the index; a detector that lived there would put a
@@ -28,31 +28,31 @@ public actor ChangeDetector {
     private var loop: Task<Void, Never>?
     /// The loop's current sleep, so a transient hold can end it early (`nudge`).
     private var sleeper: Task<Void, Never>?
-    /// Section 6.4: "every 60 s while the user has touched the domain in the last 10
-    /// minutes ... every 10 min otherwise". A touch is a File Provider request that was
-    /// not a system request, or a CLI command naming the location.
+    /// The cadence: every 60 s while the user has touched the domain in the last 10
+    /// minutes, every 10 min otherwise. A touch is a File Provider request that was not a
+    /// system request, or a CLI command naming the location.
     private var lastTouch: Double?
     private var lastCycle: Double = 0
     private var cycles = 0
     /// Set by a reconnect, a returning network path, a fresh working-set anchor, and the
-    /// 30-minute insurance pass. "On reconnect after any outage every tier first runs one
-    /// full sweep so changes made while disconnected are caught" (section 6.4).
+    /// 30-minute insurance pass. On reconnect after any outage every tier first runs one
+    /// full sweep, so changes made while disconnected are caught.
     private var fullSweepPending = true
     private var fullSweepReason = "first cycle"
     private var lastOutcome: [String: Any] = [:]
     private var cycleInProgress = false
 
     /// `sshdrive debug watch --clock-skew <seconds>`: shifts the sweep's own reference,
-    /// which is the only way to exercise section 6.4's server-clock window from a
+    /// which is the only way to exercise the sweep's server-clock window from a
     /// container that shares the host's clock (testbed/README.md). Applied to the stored
     /// timestamp, never to what the server said, so what is under test is the window the
     /// agent computes rather than the value it reads.
     private var clockSkewSeconds: Int64 = 0
-    /// `sshdrive debug watch --pause`: stops the loop without stopping the location, so a
-    /// spike can drive single cycles by hand.
+    /// `sshdrive debug watch --pause`: stops the loop without stopping the location, so
+    /// single cycles can be driven by hand.
     private var paused = false
 
-    // MARK: Tier 2 (section 6.4)
+    // MARK: Tier 2
 
     /// The live stream, or nil while the location is not at tier 2. Owned here rather than
     /// by `LocationRuntime` for the same reason the detector is: the runtime serialises
@@ -63,9 +63,9 @@ public actor ChangeDetector {
     /// Why the helper is not running, when the ladder needs to say so.
     private var helperNote: String?
     /// How long the last cycle took. A cycle that consumed most of its own interval backs
-    /// the schedule off (section 6.4, 2026-09-05).
+    /// the schedule off.
     private var lastCycleSeconds: Double = 0
-    /// Set by an `overflow` event: section 6.4 answers one with a sweep.
+    /// Set by an `overflow` event, which is answered with a sweep.
     private var helperOverflowPending = false
     /// Serialises `ensureHelper` against itself, since a cycle and a reconnect can both
     /// ask for it.
@@ -136,9 +136,9 @@ public actor ChangeDetector {
     /// Ends the loop's current sleep so the schedule is re-read now.
     ///
     /// A transient tier hold is two seconds, and the loop is normally asleep for the rest
-    /// of a 60 s (or 10 min) poll interval when one is recorded. Without this the climb
-    /// back to tier 2 was measured at 21 s after a 2 s hold - the backoff was right and
-    /// nothing was awake to act on it (2026-09-08).
+    /// of a 60 s (or 10 min) poll interval when one is recorded. Without this the backoff
+    /// is right and nothing is awake to act on it: a 2 s hold measured 21 s of climb back
+    /// to tier 2.
     private func nudge() {
         sleeper?.cancel()
         sleeper = nil
@@ -152,19 +152,18 @@ public actor ChangeDetector {
         // A transient downgrade is held for seconds, not for a poll interval, so the loop
         // wakes when the hold expires rather than at the next 60 s (or 10 min) boundary.
         // Without this the 2 s backoff would be read as "some time in the next ten
-        // minutes", which is the delay the fix exists to remove (2026-09-08).
+        // minutes".
         if let expires = ladder.transientHoldExpiresAt { due = min(due, expires) }
         return max(0, due - now)
     }
 
     // MARK: Triggers
 
-    /// Section 4.2's touch, reused here for section 6.4's cadence.
+    /// Records a touch, which is what paces the poll cadence.
     public func noteTouch(now: Double = Date().timeIntervalSince1970) { lastTouch = now }
 
     /// A reconnect, a returning network path, or the extension handing out a fresh
-    /// working-set anchor. Every one of them is "run one full sweep at once" (sections
-    /// 6.4, 5.3).
+    /// working-set anchor. Every one of them means "run one full sweep at once".
     public func requestFullSweep(reason: String) {
         fullSweepPending = true
         fullSweepReason = reason
@@ -176,10 +175,10 @@ public actor ChangeDetector {
     /// same master those channels sit on and a stream started before them would be started
     /// on the connection that is going away.
     ///
-    /// Section 6.4 says the helper's stream is per connection, so a reconnect is exactly
-    /// when it has to be re-opened. It used to be left to the next poll cycle, which is up
-    /// to 60 s away on a touched location and up to 10 min on an idle one - and on a
-    /// location a transient failure had dropped to sweep, never (2026-09-08).
+    /// The helper's stream is per connection, so the reconnect is exactly when it has to
+    /// be re-opened. Leaving it to the next poll cycle would be up to 60 s away on a
+    /// touched location and up to 10 min on an idle one, and on a location a transient
+    /// failure had dropped to sweep, never.
     public func connectionCameUp() async {
         let now = Date().timeIntervalSince1970
         if ladder.noteConnected(now: now) {
@@ -205,7 +204,7 @@ public actor ChangeDetector {
     }
 
     /// The connection went away. The stream went with it; nothing is a tier failure here,
-    /// because the reconnect of section 6.3 is what answers an outage.
+    /// because the reconnect is what answers an outage.
     public func connectionWentAway(reason: String) async {
         guard let helper else { return }
         self.helper = nil
@@ -223,11 +222,10 @@ public actor ChangeDetector {
         ladder.applyCapabilities(capabilities, watchMode: watchMode, now: now)
     }
 
-    /// `materializedItemsDidChange` from the extension: section 6.5 sources the
-    /// `materialized` reason from `enumeratorForMaterializedItems()` "refreshed on
-    /// materializedItemsDidChange", so the root set is rebuilt at once rather than at the
-    /// next cycle - a file that was just downloaded should be watched from now, not from
-    /// up to ten minutes from now.
+    /// `materializedItemsDidChange` from the extension. The root set's `materialized`
+    /// reason comes from `enumeratorForMaterializedItems()`, refreshed on this call, so the
+    /// set is rebuilt at once rather than at the next cycle: a file that was just
+    /// downloaded should be watched from now, not from up to ten minutes from now.
     public func materializedChanged() async {
         let identifiers = await environment.replica.materializedIdentifiers(
             locationID: locationID)
@@ -235,10 +233,10 @@ public actor ChangeDetector {
     }
 
     /// The same, with the enumeration already made. `DomainManager` walks the replica once
-    /// and gives the answer to the root set and to section 7.2's safety net together.
+    /// and gives the answer to the root set and to the pin re-assert safety net together.
     public func materializedChanged(identifiers: [String]?) async {
         // Published for `sshdrive status`, which needs the same set for its Cache and Pins
-        // lines and has no business draining the replica a third time (section 8.1).
+        // lines and has no business draining the replica a third time.
         runtime.materialized.record(identifiers, at: environment.clock.now())
         _ = try? await runtime.refreshRootSet(materializedIdentifiers: identifiers)
     }
@@ -256,8 +254,8 @@ public actor ChangeDetector {
         cycleInProgress = true
         defer { cycleInProgress = false; lastCycle = Date().timeIntervalSince1970 }
 
-        // A transient failure holds the tier down for a bounded backoff and no longer; the
-        // cycle is where the hold is noticed to have expired (section 6.4, 2026-09-08).
+        // A transient failure holds the tier down for a bounded backoff and not beyond
+        // it; the cycle is where the hold is noticed to have expired.
         if ladder.climbBack(now: now) {
             Log.agent.notice(
                 "\(self.locationID, privacy: .public): the transient failure has expired; climbing back to \(self.ladder.tier.rawValue, privacy: .public)"
@@ -280,13 +278,13 @@ public actor ChangeDetector {
             reason = "30-minute insurance sweep"
         }
         // The cycle's own stopwatch. `environment.clock` rather than `Date()` because a
-        // cycle's duration is what paces the next interval (section 6.4), and a scenario
+        // cycle's duration is what paces the next interval, and a scenario
         // that asserts the pacing has to be able to make a cycle take 56.8 s without
         // taking 56.8 s (`H10`). `SystemAgentClock.now()` *is* `Date().timeIntervalSince1970`,
         // so nothing about a shipping agent changes.
         let started = environment.clock.now()
 
-        // Section 6.4's guard needs the pending set, and section 6.5's root set needs the
+        // The mass-deletion guard needs the pending set, and the root set needs the
         // materialized one. Both are the system's answers, taken before anything is listed.
         let pendingIdentifiers = await environment.replica.pendingIdentifiers(
             locationID: locationID)
@@ -303,8 +301,8 @@ public actor ChangeDetector {
         var handledByHelper = false
         if ladder.tier == .helper {
             await ensureHelper()
-            // Section 6.4: "The helper replaces the schedule with events; a sweep still
-            // runs every 30 min as insurance against missed events." So an ordinary cycle
+            // The helper replaces the schedule with events; a sweep still runs every
+            // 30 min as insurance against missed events. So an ordinary cycle
             // at tier 2 costs one root-set refresh and nothing on the wire; only a full
             // pass - reconnect, a fresh anchor, the insurance timer, or an `overflow` the
             // helper reported - runs a sweep.
@@ -332,14 +330,14 @@ public actor ChangeDetector {
         // connection dropped a moment ago, or the deployment is being retried - still gets
         // a cycle. Without this the minute between the stream dying and the next cycle
         // starting it is a minute with no change detection at all, which is worse than the
-        // tier it is nominally running (2026-09-05).
+        // tier it is nominally running.
         if !handledByHelper, ladder.tier >= .sweep, ladder.capabilities.hasFind {
             do {
                 application = try await runSweep(full: full)
             } catch {
-                // "A tier that fails at runtime (the helper's stream dies with a
+                // A tier that fails at runtime (the helper's stream dies with a
                 // non-network error, `find` is missing) drops the location one tier down
-                // for the rest of the session and records why" (section 6.4).
+                // for the rest of the session and records why.
                 let text = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 if isTransportOutage(error) {
                     sweepNote = "the sweep could not run this cycle: \(text)"
@@ -361,7 +359,7 @@ public actor ChangeDetector {
             tierUsed = .poll
         }
 
-        // Section 6.4's re-check schedule for anything the guard is holding.
+        // The re-check schedule for anything the mass-deletion guard is holding.
         let rechecks = await runtime.recheckHeldDeletions(now: now)
         application.changed += rechecks.changed
         application.deleted += rechecks.deleted
@@ -375,7 +373,7 @@ public actor ChangeDetector {
 
         if !application.isEmpty {
             // Every difference became an anchor as it was written; this is what makes the
-            // system come and read them (sections 5.3, 6.4).
+            // system come and read them.
             await environment.replica.signalWorkingSet(locationID: locationID)
         }
 
@@ -408,7 +406,7 @@ public actor ChangeDetector {
     /// Deploys the helper if it is not there, and starts the stream if it is not running.
     ///
     /// Called from every cycle rather than once, because the stream dies with the
-    /// connection and section 6.3 brings the connection back on its own schedule: the
+    /// connection and the breaker brings the connection back on its own schedule: the
     /// cheapest correct rule is "if the tier is helper and nothing is streaming, start
     /// one", and it costs a comparison on a cycle where it is already up.
     private func ensureHelper() async {
@@ -424,16 +422,16 @@ public actor ChangeDetector {
             deployment = try await HelperDeployer.ensureDeployed(
                 connection: connection, locationID: locationID)
         } catch {
-            // "Deployment failures are never fatal: the location silently continues at the
-            // next tier and the status report says why the helper is not running."
+            // Deployment failures are never fatal: the location silently continues at the
+            // next tier and the status report says why the helper is not running.
             let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             helperNote = reason
             let now = Date().timeIntervalSince1970
             guard ChangeDetector.permanence(of: error) == .permanent else {
                 // A deployment that met a dying connection says nothing about the server,
                 // and writing it into the capabilities would keep the helper refused on
-                // every later connect until something re-probed (2026-09-08). Hold the
-                // tier for the backoff instead and try again.
+                // every later connect until something re-probed. Hold the tier for the
+                // backoff instead and try again.
                 ladder.recordRuntimeFailure(reason: reason, permanence: .transient, now: now)
                 await runtime.setWatchTier(ladder.tier.rawValue)
                 nudge()
@@ -469,17 +467,17 @@ public actor ChangeDetector {
             helper = stream
             await runtime.setWatchTier(ladder.tier.rawValue)
             // The stream starts watching *now*, and everything that changed on the server
-            // before it did is invisible to it. That is exactly the case section 6.4's
-            // reconnect sweep exists for, so one is asked for here rather than assumed.
+            // before it did is invisible to it. That is exactly the case the reconnect
+            // sweep exists for, so one is asked for here rather than assumed.
             requestFullSweep(reason: "the helper stream started")
         } catch {
             let reason = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             helperNote = reason
             // A stream that would not start on a shell that answered is a runtime failure
             // of the tier. Whether it costs the location the tier for the session or only
-            // for a bounded backoff is section 6.4's permanent list, not the fact that it
-            // failed: a `ready` line that never arrived because the channel died is an
-            // outage, and an outage is not a verdict (2026-09-08).
+            // for a bounded backoff is the permanent list, not the fact that it failed:
+            // a `ready` line that never arrived because the channel died is an outage, and
+            // an outage is not a verdict.
             let permanence = ChangeDetector.permanence(of: error)
             if ladder.recordRuntimeFailure(
                 reason: reason, permanence: permanence, now: Date().timeIntervalSince1970)
@@ -496,10 +494,10 @@ public actor ChangeDetector {
     /// What `sshdrive add` waits for: the first deployment attempt, settled.
     ///
     /// `add` prints one capability report and the user reads it as the truth about this
-    /// server (section 8.1), so it must not be written in the window between the ladder
-    /// choosing tier 2 and the binary arriving. Bounded by `HelperSettle`: a server that
-    /// never answers costs `add` a few seconds, and the report then says `deploying`
-    /// rather than blaming the server (2026-09-05).
+    /// server, so it must not be written in the window between the ladder choosing tier 2
+    /// and the binary arriving. Bounded by `HelperSettle`: a server that never answers
+    /// costs `add` a few seconds, and the report then says `deploying` rather than blaming
+    /// the server.
     ///
     /// The elapsed time and the poll interval are both the injected clock's (`P9`), so
     /// the bound is a value a scenario can drive rather than six real seconds in a test
@@ -549,9 +547,8 @@ public actor ChangeDetector {
             requestFullSweep(reason: "the helper reported an overflow")
         }
         // At the default level, so `log show` still has it hours later. A mount that
-        // takes no server-side change is diagnosed by two facts - did the events arrive,
-        // and did applying them change anything - and neither used to be recorded at all
-        // (2026-09-08).
+        // takes no server-side change is diagnosed by two facts: did the events arrive,
+        // and did applying them change anything.
         let kinds = Dictionary(grouping: events, by: { $0.kind.rawValue })
             .map { "\($0.key)=\($0.value.count)" }
             .sorted()
@@ -587,14 +584,14 @@ public actor ChangeDetector {
 
     /// The stream ended. A connection that simply went is not a tier failure - the breaker
     /// brings it back and the next cycle starts a new stream - but a helper that died with
-    /// the connection up is, and section 6.4 costs the location a tier for the session.
+    /// the connection up is, and costs the location a tier.
     private func helperDied(_ reason: String) async {
         helper = nil
         helperNote = reason
         let connected = await runtime.isConnected()
         guard connected else {
-            // The connection is what took it. The gate is already reconnecting on section
-            // 6.3's schedule, and `connectionCameUp` starts a new stream the moment it
+            // The connection is what took it. The gate is already reconnecting on the
+            // breaker's schedule, and `connectionCameUp` starts a new stream the moment it
             // does, so the tier is left where it is.
             Log.agent.notice(
                 "\(self.locationID, privacy: .public): the helper stream ended with the connection; it restarts on the reconnect"
@@ -602,11 +599,11 @@ public actor ChangeDetector {
             return
         }
         // A stream that died while the connection is still up is a runtime failure of the
-        // tier - but a transient one. Section 6.4's permanent list is about the server, and
-        // a channel that was killed, a helper that was reaped or a wrapper whose heartbeat
-        // lapsed says nothing about whether the server can run one. Before 2026-09-08 this
-        // was always permanent, which is how a 90-second network stall left a location at
-        // sweep until the agent was restarted.
+        // tier - but a transient one. The permanent list is about the server, and a
+        // channel that was killed, a helper that was reaped or a wrapper whose heartbeat
+        // lapsed says nothing about whether the server can run one. Recording it as
+        // permanent leaves a location that met a 90-second network stall at sweep until the
+        // agent is restarted.
         let now = Date().timeIntervalSince1970
         if ladder.recordRuntimeFailure(reason: reason, permanence: .transient, now: now) {
             await runtime.setWatchTier(ladder.tier.rawValue)
@@ -618,7 +615,7 @@ public actor ChangeDetector {
         }
     }
 
-    /// Section 6.4's permanent list, applied to whatever the deployment or the stream
+    /// The permanent list, applied to whatever the deployment or the stream
     /// threw. Everything that is not on it - and every transport error, which is an outage
     /// by definition - is transient and is retried on the ladder's bounded backoff.
     public static func permanence(of error: Error) -> ChangeDetectionLadder.Permanence {
@@ -630,7 +627,7 @@ public actor ChangeDetector {
     }
 
     /// `sshdrive set <name> helper off`, and `sshdrive remove`: stop the stream and take
-    /// the binary off the server (sections 6.4, 8).
+    /// the binary off the server.
     public func shutDownHelper(removeFromServer: Bool) async -> [String] {
         let stream = helper
         helper = nil
@@ -654,7 +651,7 @@ public actor ChangeDetector {
     }
 
     /// A connection that is simply down is not a tier failure: the breaker will bring it
-    /// back and the reconnect runs a full sweep of its own (section 6.3). Only a shell
+    /// back and the reconnect runs a full sweep of its own. Only a shell
     /// that answered and could not do the job drops the tier.
     private func isTransportOutage(_ error: Error) -> Bool {
         if let failure = error as? RemoteSweep.Failure, case .noExecChannel = failure { return true }
@@ -671,9 +668,9 @@ public actor ChangeDetector {
         let split = set.sweepRoots()
 
         // A root whose bytes are not valid UTF-8 cannot travel through `set --`, which is
-        // a String pipeline end to end (section 9.2). It is listed at tier 0 in the same
-        // cycle instead, so it is watched rather than dropped; nothing about the sweep is
-        // weakened for the rest of the tree (2026-09-04, section 13).
+        // a String pipeline end to end (docs/design/security.md). It is listed at tier 0
+        // in the same cycle instead, so it is watched rather than dropped; nothing about
+        // the sweep is weakened for the rest of the tree.
         // `SweepPlan.partitionRoots` is the rule itself (`SQ-055`, `SQ-007`), so the sweep
         // scenarios and the agent make the same split of the same roots.
         let partition = SweepPlan.partitionRoots(
@@ -685,7 +682,7 @@ public actor ChangeDetector {
         // The window is elapsed time on **our** clock applied to the **server's** stamp,
         // never the Mac's wall clock measured against a server timestamp: the second form
         // folds the whole clock difference into the window, and a server a few minutes
-        // behind would then be swept with a window of nothing (section 6.4). The
+        // behind would then be swept with a window of nothing. The
         // arithmetic is `SweepWindow.forCycle`'s, where `H4` exercises it.
         let stored = await runtime.sweepServerTime()
         let takenAt = await runtime.sweepServerTimeTakenAt()
@@ -700,8 +697,8 @@ public actor ChangeDetector {
         case "busybox": flavour = .busybox
         default: flavour = .bsd
         }
-        // Section 7.1.1: "the recursive watch of kept subtrees skips excluded subtrees",
-        // which at tier 1 is `find`'s own `-path <glob> -prune`. Only exclusions that
+        // The recursive watch of kept subtrees skips excluded subtrees, which at tier 1
+        // is `find`'s own `-path <glob> -prune`. Only exclusions that
         // really sit inside a pinned subtree are sent: one outside a pin prunes nothing
         // and would only lengthen the argv.
         let excluded = (try? await runtime.excludedSweepPaths()) ?? []
@@ -718,9 +715,9 @@ public actor ChangeDetector {
             timeout: full ? 900 : 300)
 
         var application = await runtime.applySweepHits(outcome.hits)
-        // "the agent stores it once the sweep's results have been applied to the index,
-        // never before" (section 6.4). A truncated sweep stores nothing, so the next
-        // window still covers what this one missed.
+        // The server time is stored once the sweep's results have been applied to the
+        // index, never before. A truncated sweep stores nothing, so the next window still
+        // covers what this one missed.
         if let serverTime = outcome.serverTime, !outcome.truncated {
             await runtime.setSweepServerTime(serverTime)
         }
@@ -730,7 +727,7 @@ public actor ChangeDetector {
         return application
     }
 
-    // MARK: Status (section 8.1)
+    // MARK: Status
 
     /// `now` is a parameter so a scenario can ask what the schedule says at a moment of
     /// its choosing - eleven minutes after the last touch, say - rather than living
@@ -755,8 +752,8 @@ public actor ChangeDetector {
         }
         if let note = ladder.note { out["note"] = note }
         if let note = helperNote, ladder.note == nil { out["note"] = note }
-        // Section 6.4's climb-back, so `status` says a downgrade is temporary and when it
-        // ends rather than reading as a verdict (2026-09-08).
+        // The climb-back, so `status` says a downgrade is temporary and when it ends
+        // rather than reading as a verdict.
         if let expires = ladder.transientHoldExpiresAt {
             let remaining = max(0, (expires - now).rounded(.up))
             out["retryingHigherTierInSeconds"] = remaining
