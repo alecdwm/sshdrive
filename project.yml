@@ -99,6 +99,9 @@ targets:
         SKIP_INSTALL: NO
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_APP_SANDBOX: NO
+        # Apps/Agent/Assets.xcassets is picked up with the Apps/Agent sources; this names
+        # the icon set inside it. Regenerate the PNGs with scripts/render-icon.sh.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   SSHDriveFileProvider:
     type: app-extension
     platform: macOS
