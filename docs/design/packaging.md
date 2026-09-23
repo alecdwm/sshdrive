@@ -29,6 +29,18 @@ only UI the user ever sees.
 
 ### `postflight`
 
+The postflight is a legacy Ruby `postflight do` block of `system_command` calls, not
+`postflight_steps`. Homebrew runs `postflight_steps` in a sandbox that denies LaunchServices and
+the Mach services behind it (Homebrew/brew#23907), which is every step below except the
+quarantine strip: inside it `spctl --assess` printed `internal error in Code Signing subsystem`,
+`lsregister -dump` printed `failed to scan /Applications/SSH Drive.app: -10822 from spotlight`,
+each `lsregister -f` died `Trace/BPT trap: 5`, and `open -g` failed `-10810 kLSUnknownErr` with
+`Couldn't communicate with a helper application` under it (Homebrew 7, macOS 27.0, 2026-09-23,
+upgrading 0.1.9 to 0.1.10). The legacy block runs outside the sandbox. Homebrew rejects it in
+official taps and keeps it for third-party taps for now, so the cask's caveats say what to run
+when an install ran none of this: `open -a "SSH Drive"`, whose launch does steps 3 to 5 itself,
+then `sshdrive doctor`.
+
 The steps run in this order:
 
 1. **Assess:** `/usr/sbin/spctl --assess --type execute` on the installed app. The verdict is

@@ -168,15 +168,13 @@ macOS does not know about the Finder extension (`SSHDriveFileProvider.appex`). *
 the usual cause, a quarantined app is the other, and registering the extension by hand does
 not survive the next launch.
 
-Straight after a `brew upgrade` this can also be nothing but bad timing. Homebrew moves the app
-into place and LaunchServices does not answer for a few minutes: the install prints `internal
-error in Code Signing subsystem`, `failed to scan /Applications/SSH Drive.app: -10822 from
-spotlight` and `-10810 kLSUnknownErr`, and nothing gets registered. **The agent repairs this
-itself**, on its next start and again 15 s, 60 s and 5 minutes after that, so waiting is usually
-enough. To force it now:
+If `brew install` or `brew upgrade` printed `internal error in Code Signing subsystem`,
+`failed to scan /Applications/SSH Drive.app: -10822 from spotlight`, `Trace/BPT trap: 5` or
+`-10810 kLSUnknownErr`, the cask's postflight could not reach LaunchServices and registered
+nothing. Opening the app does the same work:
 
 ```sh
-sshdrive agent restart
+open -a "SSH Drive"
 sshdrive doctor
 ```
 

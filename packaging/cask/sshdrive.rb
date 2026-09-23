@@ -56,18 +56,29 @@ cask "sshdrive" do
   # and SMAppService.register() keeps returning success throughout because as far as it is
   # concerned the item is still enabled. Only unregister() clears it (measured 2026-09-04).
   # On a first install there is nothing to unregister and the call is a no-op.
-  postflight_steps do
-    # Homebrew's declarative steps cannot branch, so the assessment's verdict is printed
-    # (print_stdout) rather than summarised; a failed assessment does not abort the install.
-    # macOS 27's spctl rejects --verbose=4 and prints its usage; -v is accepted by every
-    # version.
-    run "/usr/sbin/spctl",
-        args: ["--assess", "--type", "execute", "-v", "{{appdir}}/SSH Drive.app"],
-        print_stdout: true,
-        must_succeed: false
-    run "/usr/bin/xattr",
-        args: ["-dr", "com.apple.quarantine", "{{appdir}}/SSH Drive.app"],
-        must_succeed: false
+  #
+  # This is a legacy Ruby `postflight` block rather than `postflight_steps`, and has to be.
+  # Homebrew runs `postflight_steps` inside a sandbox that denies LaunchServices and the
+  # Mach services behind it (Homebrew/brew#23907), and every step here after the
+  # quarantine strip is a call to one of them. Inside that sandbox `spctl --assess`
+  # printed `internal error in Code Signing subsystem`, `lsregister -dump` printed `failed
+  # to scan /Applications/SSH Drive.app: -10822 from spotlight`, every `lsregister -f` died
+  # `Trace/BPT trap: 5`, and `open -g` failed `-10810 kLSUnknownErr` with `Couldn't
+  # communicate with a helper application` under it; the same commands run by hand
+  # worked. Homebrew keeps the legacy block for third-party taps only, and only for now;
+  # the caveats tell a user whose install ran none of this what to do instead.
+  postflight do
+    app = "#{appdir}/SSH Drive.app"
+
+    # The assessment's verdict is printed rather than acted on; a failed assessment does
+    # not abort the install. macOS 27's spctl rejects --verbose=4 and prints its usage; -v
+    # is accepted by every version.
+    system_command "/usr/sbin/spctl",
+                   args:         ["--assess", "--type", "execute", "-v", app],
+                   print_stdout: true
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", app]
+
     # Drop every LaunchServices record for org.shirls.sshdrive that is not the installed
     # bundle, then rebuild the installed bundle's own.
     #
@@ -87,67 +98,40 @@ cask "sshdrive" do
     # 2026-09-23, upgrading 0.1.7 to 0.1.8, with the stale record 3 hours old; 26.4.1
     # produces no /Volumes record at all and registers the appex through the plain
     # `open -g`).
-    #
-    # The force is retried because LaunchServices is not always answering when this runs.
-    # Straight after Homebrew moved the bundle in, the assess above printed `internal
-    # error in Code Signing subsystem`, this step's lsregister printed `failed to scan
-    # /Applications/SSH Drive.app: -10822 from spotlight` (kLSServerCommunicationErr) and
-    # the `open -g` below printed `-10810 kLSUnknownErr` with `Couldn't communicate with
-    # a helper application` under it, so nothing registered anything; the same commands
-    # by hand minutes later worked (measured on macOS 27.0, 2026-09-23, upgrading 0.1.9).
-    # The sweep runs once: a dump that could not be read lists nothing to drop either way,
-    # and the agent's own check on its next start is what repairs the case this loop
-    # cannot wait out.
-    run "/bin/sh",
-        must_succeed: false,
-        args: ["-c", <<~'SH', "{{appdir}}/SSH Drive.app"]
-          lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-          app=$1
-          # A record is a block of "key:  value" lines; "path:" opens one and the first
-          # "identifier:" after it belongs to the same record. A value can carry a
-          # trailing store id in parentheses, which is not part of the path.
-          "$lsregister" -dump | awk -v id=org.shirls.sshdrive -v keep="$app" '
-            /^[[:space:]]*path:[[:space:]]/ {
-              line = $0
-              sub(/^[[:space:]]*path:[[:space:]]*/, "", line)
-              sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
-              p = line
-              next
-            }
-            /^[[:space:]]*identifier:[[:space:]]/ {
-              line = $0
-              sub(/^[[:space:]]*identifier:[[:space:]]*/, "", line)
-              sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
-              if (p != "" && line == id && p != keep) print p
-              p = ""
-            }
-          ' | while IFS= read -r stale; do
-            echo "dropping the LaunchServices record for $stale"
-            "$lsregister" -u "$stale"
-          done
-          attempt=1
-          while :; do
-            "$lsregister" -f -R -trusted "$app"
-            sleep 1
-            if /usr/bin/pluginkit -m -p com.apple.fileprovider-nonui 2>/dev/null |
-              grep -q org.shirls.sshdrive.fileprovider; then
-              echo "the File Provider extension is registered"
-              exit 0
-            fi
-            [ "$attempt" -ge 4 ] && break
-            echo "the extension is not registered yet; forcing the registration again (attempt $attempt)"
-            attempt=$((attempt + 1))
-            sleep 5
-          done
-          echo "the extension is still unregistered; the agent repairs this on its next start"
-        SH
-    run "SSH Drive.app/Contents/MacOS/SSH Drive",
-        base: :appdir,
-        env: { "SSHDRIVE_AGENT_ROLE" => "unregister" },
-        must_succeed: false
-    run "/usr/bin/open",
-        args: ["-g", "{{appdir}}/SSH Drive.app"],
-        must_succeed: false
+    system_command "/bin/sh",
+                   args:         ["-c", <<~'SH', "sh", app],
+                     lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+                     app=$1
+                     # A record is a block of "key:  value" lines; "path:" opens one and the first
+                     # "identifier:" after it belongs to the same record. A value can carry a
+                     # trailing store id in parentheses, which is not part of the path.
+                     "$lsregister" -dump | awk -v id=org.shirls.sshdrive -v keep="$app" '
+                       /^[[:space:]]*path:[[:space:]]/ {
+                         line = $0
+                         sub(/^[[:space:]]*path:[[:space:]]*/, "", line)
+                         sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
+                         p = line
+                         next
+                       }
+                       /^[[:space:]]*identifier:[[:space:]]/ {
+                         line = $0
+                         sub(/^[[:space:]]*identifier:[[:space:]]*/, "", line)
+                         sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
+                         if (p != "" && line == id && p != keep) print p
+                         p = ""
+                       }
+                     ' | while IFS= read -r stale; do
+                       echo "dropping the LaunchServices record for $stale"
+                       "$lsregister" -u "$stale"
+                     done
+                     "$lsregister" -f -R -trusted "$app"
+                   SH
+                   print_stdout: true
+
+    system_command "#{app}/Contents/MacOS/SSH Drive",
+                   env: { "SSHDRIVE_AGENT_ROLE" => "unregister" }
+    system_command "/usr/bin/open",
+                   args: ["-g", app]
   end
 
   # Homebrew runs `uninstall` on `brew upgrade` and `brew reinstall` as well as on
@@ -206,6 +190,13 @@ cask "sshdrive" do
         it connects to a server on your own network, which is the ordinary case
         for a NAS. Answer Allow, or the mount cannot reach it. If you miss it:
         System Settings > Privacy & Security > Local Network.
+
+    If the install printed errors from spctl, lsregister or open, or
+    `sshdrive doctor` reports a problem after an upgrade, open the app once
+    and check again:
+
+      open -a "SSH Drive"
+      sshdrive doctor
 
     Before uninstalling, run:
 
