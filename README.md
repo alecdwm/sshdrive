@@ -23,7 +23,7 @@ mount reconnects with nobody there to answer.
 ## Requirements
 
 - macOS 14 or newer.
-- A server you can reach over SFTP. It is not `sshfs` and not a general SSH client.
+- A server you can reach over SFTP.
 
 ## Install
 

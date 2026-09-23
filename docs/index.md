@@ -32,8 +32,7 @@ sshdrive add nas alec@nas.local
 - **Nobody needs to be at the keyboard on every connection.** The mount reconnects on its own, so
   `add` refuses a key that asks for a touch, a PIN or a one-time code each time. A key agent, a FIDO
   key made with `no-touch-required`, or a password works instead.
-- **You run macOS 14 or newer**, and the server speaks SFTP. This is not `sshfs`, and not a
-  general SSH client.
+- **You run macOS 14 or newer**, and the server speaks SFTP.
 
 ## What it does
 
