@@ -35,16 +35,21 @@ The steps run in this order:
    logged; it does not fail the install.
 2. **Strip quarantine:** `/usr/bin/xattr -dr com.apple.quarantine` on the bundle
    ([below](#quarantine)).
-3. **Rebuild the LaunchServices record:** `lsregister -f -R -trusted` on the bundle
-   ([below](#a-stale-launchservices-record)).
+3. **Sweep and rebuild the LaunchServices records:** one `/bin/sh` step. It reads `lsregister
+   -dump`, runs `lsregister -u` on every record path under `org.shirls.sshdrive` that is not the
+   installed bundle, and then `lsregister -f -R -trusted` on the installed bundle
+   ([below](#stale-launchservices-records)).
 4. **Unregister:** run the new bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
    `SMAppService.unregister()`, waits, and exits ([upgrades](#upgrades)).
 5. **Open:** `open -g -a "SSH Drive"`, which registers again.
 
 `sshdrive doctor` runs the last step on its own. The unregister and open come after the
 assess-and-strip pair because a quarantined bundle registers no plugin however many times it is
-opened, and after the rebuild because an `open -g` answered from a stale record registers
+opened, and after the sweep because a registration answered from another copy's record registers
 nothing new. A developer replacing the bundle by hand has to run steps 3 to 5 too.
+
+Step 1 spells the verbosity flag `-v`: macOS 27's `spctl` rejects `--verbose=4` and prints its
+usage instead of a verdict.
 
 ### Quarantine
 
@@ -69,27 +74,36 @@ from the Internet" dialog, which `open -g` shows to nobody anyway.
   ordinary cause of that one failing. Its remedy is the two commands above.
 - The agent logs the same thing once per launch when its own bundle is quarantined.
 
-### A stale LaunchServices record
+### Stale LaunchServices records
 
-A bundle registered with LaunchServices while it is still being copied gets a record that names
-no usable executable, and that record is what every launch after it is answered with. `lsd` logs
-`Failed to register bundle <private> because no satisfactory executable could be found`,
-`SecStaticCodeCreateWithPath(<private>) failed with error -67028` and `skipping registration of
-an incomplete bundle`; from then on `open -g` produces `Registration succeeded, but did not
-actually register anything new; returning existing bundle`. PlugInKit never discovers the appex,
-so the symptoms are the ones [quarantine](#quarantine) produces - `pluginkit -m` silent, `doctor`
-failing "extension registered" and "file provider domains" - on a bundle carrying no quarantine
-attribute at all (MQ-081, gotcha 107).
+LaunchServices keys its records on the bundle identifier, and it holds one per path. A record for
+a second copy of `SSH Drive.app` answers every registration of the installed one. The second copy
+is the DMG: the app is opened once from `/Volumes/SSH Drive/SSH Drive.app`, the volume is
+detached, and the record stays behind it.
 
-`lsregister -f -R -trusted` on the bundle forces the record to be rebuilt, and `pkd` creates the
-plugin within milliseconds of it returning. Unlike `pluginkit -a`, the rebuild survives the next
-launch. Two things run it:
+While that record is there, `lsd` answers every registration of `/Applications/SSH Drive.app` -
+the postflight's own `lsregister -f -R -trusted` included - with
+`SecStaticCodeCreateWithPath(<private>) failed with error -67028`, `skipping registration of an
+incomplete bundle` and `Registration succeeded, but did not actually register anything new;
+returning existing bundle`, and `pkd` says `No plugins found to match query`. PlugInKit discovers
+no appex, so the symptoms are the ones [quarantine](#quarantine) produces - `pluginkit -m`
+silent, `doctor` failing "extension registered" and "file provider domains" - on a bundle
+carrying no quarantine attribute at all (MQ-081, gotcha 107).
+
+`lsregister -u` on the stale path drops that record, and `lsregister -f -R -trusted` on the
+installed bundle then rebuilds its own; the appex is registered on the next launch. Unlike
+`pluginkit -a`, that survives the launch after it. The sweep has to come first: the force on its
+own is one of the registrations the stale record answers. Three things do it:
 
 - the cask's `postflight`, before its unregister and open, so an install never leaves the appex
   hidden;
-- the app launch itself. After the login item answers, the launch asks PlugInKit whether it
-  knows the extension, and when the answer is nothing it runs `lsregister` **once** and waits up
-  to 5 s, polling every 0.5 s, for the appex to appear. The outcome is logged either way.
+- the app launch itself. After the login item answers, the launch asks PlugInKit whether it knows
+  the extension, and when the answer is nothing it unregisters every record path that is not its
+  own bundle, forces its own registration **once**, and waits up to 5 s, polling every 0.5 s, for
+  the appex to appear. The outcome is logged either way.
+- `doctor`'s `launch services records` check, ordered before "extension registered" for the same
+  reason `quarantine` is, lists every other record path and gives the `lsregister -u` command for
+  each.
 
 ### `uninstall` stanza
 

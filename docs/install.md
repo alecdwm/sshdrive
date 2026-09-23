@@ -47,7 +47,7 @@ Each release on <https://github.com/alecdwm/sshdrive/releases> carries
 does:
 
 ```sh
-spctl --assess --type execute --verbose=4 "/Applications/SSH Drive.app"   # accepted, Notarized Developer ID
+spctl --assess --type execute -v "/Applications/SSH Drive.app"   # accepted, Notarized Developer ID
 xattr -dr com.apple.quarantine "/Applications/SSH Drive.app"
 open -g -a "SSH Drive"
 sudo ln -sf "/Applications/SSH Drive.app/Contents/MacOS/sshdrive" /usr/local/bin/sshdrive

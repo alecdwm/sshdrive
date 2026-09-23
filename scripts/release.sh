@@ -338,7 +338,7 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 		echo \"--- spctl --assess\"
 		# Unnotarized, this says \"rejected (source=Unnotarized Developer ID)\" and that
 		# is the expected pre-notarization state, not a failure of the run.
-		spctl --assess --type execute --verbose=4 \"\$APP\" || true
+		spctl --assess --type execute -v \"\$APP\" || true
 		echo \"--- identities and entitlements\"
 		for x in \"\$APP\" \"\$APP/Contents/MacOS/sshdrive\" \
 			\"\$APP/Contents/PlugIns/SSHDriveFileProvider.appex\"; do
@@ -500,9 +500,9 @@ EOF
 		xcrun stapler staple \"dist/$DMG_NAME\"
 		xcrun stapler validate \"dist/$DMG_NAME\"
 		echo \"--- spctl on the stapled app\"
-		spctl --assess --type execute --verbose=4 \"\$APP\"
+		spctl --assess --type execute -v \"\$APP\"
 		echo \"--- spctl on the stapled DMG, the way a download is checked\"
-		spctl --assess --type open --context context:primary-signature --verbose=4 \"dist/$DMG_NAME\"
+		spctl --assess --type open --context context:primary-signature -v \"dist/$DMG_NAME\"
 	'"
 fi
 

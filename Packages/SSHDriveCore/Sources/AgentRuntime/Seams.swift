@@ -301,9 +301,14 @@ public protocol BundleInspecting: Sendable {
     func quarantineValue(atPath path: String) -> String?
     /// `pluginkit -m -A -i <id>`'s line, or nil when it printed nothing.
     func plugInRegistration(bundleID: String) -> String?
-    /// Rebuilds the bundle's LaunchServices record with `lsregister -f -R -trusted`, which
-    /// is what makes PlugInKit discover an appex that a stale record is hiding
-    /// (`MQ-081`). Answers whether the command ran and exited 0.
+    /// Every path LaunchServices holds a record for under `bundleID`, read out of
+    /// `lsregister -dump`. A second record, for a copy of the app somewhere else, is what
+    /// blocks the registration of the installed one (`MQ-081`).
+    func launchServicesRecordPaths(bundleID: String) -> [String]
+    /// `lsregister -u <path>`, which drops one record. Answers whether it exited 0.
+    func unregisterLaunchServicesRecord(atPath path: String) -> Bool
+    /// Rebuilds the bundle's LaunchServices record with `lsregister -f -R -trusted`.
+    /// Answers whether the command ran and exited 0.
     func forceLaunchServicesRegistration() -> Bool
     /// The running OS, for `doctor`'s minimum-version check.
     var operatingSystemVersion: (major: Int, minor: Int, patch: Int) { get }

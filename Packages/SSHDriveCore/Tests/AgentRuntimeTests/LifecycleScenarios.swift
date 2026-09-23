@@ -164,33 +164,43 @@ extension AgentScenarios {
                 "P10: repaired repairAttempts times, then reported")
         }
 
-        /// **P11** - a launch rebuilds a stale LaunchServices record.
+        /// **P11** - a launch sweeps a stale LaunchServices record and rebuilds its own.
         ///
-        /// `MQ-081`. Homebrew copies the bundle, something asks LaunchServices to register
-        /// it mid-copy, and the record that comes out names no usable executable; every
-        /// later launch, the postflight's `open -g` included, is answered with that record
-        /// and PlugInKit never sees the appex. `pluginkit -m` prints nothing, `doctor`
-        /// fails "extension registered", and `add` says "The application cannot be used
-        /// right now", while the agent itself answers fine.
+        /// `MQ-081`. The app is opened once from the DMG, the volume is detached, and
+        /// LaunchServices keeps a record for `/Volumes/SSH Drive/SSH Drive.app` under the
+        /// app identifier. While that record is there every registration of the installed
+        /// bundle is answered `Registration succeeded, but did not actually register
+        /// anything new; returning existing bundle`, so PlugInKit never sees the appex:
+        /// `pluginkit -m` prints nothing, `doctor` fails "extension registered", and `add`
+        /// says "The application cannot be used right now", while the agent itself answers
+        /// fine.
         ///
         /// So the launch asks PlugInKit, and when the answer is nothing it runs
-        /// `lsregister -f -R -trusted` on the bundle once and waits briefly for the appex
+        /// `lsregister -u` on every record path that is not the installed bundle, then
+        /// `lsregister -f -R -trusted` on the bundle once, and waits briefly for the appex
         /// to appear. Measured on 27.0 (2026-09-23), `pkd` logged `Created plugin` 16 ms
         /// after `lsregister` returned.
-        @Test func p11ALaunchRebuildsAStaleLaunchServicesRecord() async {
+        @Test func p11ALaunchSweepsAStaleLaunchServicesRecord() async {
             let clock = VirtualAgentClock(autoAdvance: true)
             let bundle = FakeBundle(version: (27, 0, 0))
             bundle.setStaleLaunchServicesRecord(
-                revealing: "org.shirls.sshdrive.fileprovider(0.1.7)")
+                atPath: "/Volumes/SSH Drive/SSH Drive.app",
+                revealing: "org.shirls.sshdrive.fileprovider(0.1.8)")
 
             let registered = await AgentLifecycle.ensureExtensionRegistered(
                 inspector: bundle, clock: clock)
 
-            #expect(registered, "P11: the record is rebuilt and PlugInKit then has the appex")
+            #expect(registered, "P11: the stale record goes and PlugInKit then has the appex")
+            #expect(
+                bundle.unregisteredRecords == ["/Volumes/SSH Drive/SSH Drive.app"],
+                "P11: the detached volume's record, and only it")
+            #expect(
+                bundle.launchServicesRecords == ["/Applications/SSH Drive.app"],
+                "P11: the installed bundle's own record is left alone")
             #expect(bundle.forcedRegistrations == 1, "P11: one forced registration per launch")
             #expect(
                 bundle.plugInRegistration(bundleID: SSHDriveIdentifiers.extensionBundleID)
-                    == "org.shirls.sshdrive.fileprovider(0.1.7)")
+                    == "org.shirls.sshdrive.fileprovider(0.1.8)")
             #expect(
                 clock.requestedSleeps == [AgentLifecycle.plugInRegistrationPollSeconds],
                 "P11: it polls rather than sleeping the whole window out")
@@ -198,11 +208,13 @@ extension AgentScenarios {
             // A launch that finds the extension registered leaves LaunchServices alone.
             let healthyClock = VirtualAgentClock(autoAdvance: true)
             let healthy = FakeBundle(version: (27, 0, 0))
-            healthy.setPlugInRegistration("org.shirls.sshdrive.fileprovider(0.1.7)")
+            healthy.launchServicesRecords = ["/Applications/SSH Drive.app"]
+            healthy.setPlugInRegistration("org.shirls.sshdrive.fileprovider(0.1.8)")
             let up = await AgentLifecycle.ensureExtensionRegistered(
                 inspector: healthy, clock: healthyClock)
             #expect(up)
             #expect(healthy.forcedRegistrations == 0, "P11: nothing is forced on an ordinary launch")
+            #expect(healthy.unregisteredRecords.isEmpty, "P11: and no record is dropped")
             #expect(healthyClock.requestedSleeps.isEmpty, "P11: and it waits for nothing")
 
             // An lsregister that will not run is reported, not retried.
@@ -231,6 +243,41 @@ extension AgentScenarios {
                             AgentLifecycle.plugInRegistrationTimeoutSeconds
                                 / AgentLifecycle.plugInRegistrationPollSeconds)),
                 "P11: bounded by plugInRegistrationTimeoutSeconds")
+
+            // What the sweep reads: `lsregister -dump`, in the shape 27.0 prints it -
+            // a trailing store id on every path, records separated by dashes, and other
+            // identifiers and a volume's own record in between.
+            let dump = """
+                --------------------------------------------------------------------------------
+                bundle id:                  SSH Drive (0x1540)
+                container:                  /Volumes/SSH Drive (0x18)
+                path:                       /Volumes/SSH Drive/SSH Drive.app (0x25f4)
+                name:                       SSH Drive
+                identifier:                 org.shirls.sshdrive
+                codeInfoID:                 org.shirls.sshdrive
+                --------------------------------------------------------------------------------
+                bundle id:                  Mail (0x1544)
+                path:                       /System/Applications/Mail.app (0x2600)
+                identifier:                 com.apple.mail
+                --------------------------------------------------------------------------------
+                bundle id:                  SSH Drive (0x15ac)
+                container:                  / (0x4)
+                path:                       /Applications/SSH Drive.app (0x266c)
+                name:                       SSH Drive
+                identifier:                 org.shirls.sshdrive
+                --------------------------------------------------------------------------------
+                container id:               /Volumes/SSH Drive (0x18)
+                path:                       /Volumes/SSH Drive (0x25e4)
+                --------------------------------------------------------------------------------
+                """
+            #expect(
+                LaunchServicesDump.recordPaths(
+                    in: dump, identifier: SSHDriveIdentifiers.appBundleID)
+                    == ["/Volumes/SSH Drive/SSH Drive.app", "/Applications/SSH Drive.app"],
+                "P11: both records under our identifier, and neither of the others")
+            #expect(
+                LaunchServicesDump.recordPaths(in: "", identifier: SSHDriveIdentifiers.appBundleID)
+                    .isEmpty)
         }
 
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.

@@ -208,8 +208,9 @@ absolutely because zsh has a `log` builtin. Ctrl-C ends a `--follow`.
 
 ### `doctor`
 
-`doctor [--json]` checks, in order: app in `/Applications`, quarantine attribute stripped,
-extension registered (`pluginkit`), login item enabled and agent reachable, app group container
+`doctor [--json]` checks, in order: app in `/Applications`, quarantine attribute stripped, no
+LaunchServices record for another copy of the app ([packaging](packaging.md)), extension
+registered (`pluginkit`), login item enabled and agent reachable, app group container
 writable, CLI on `PATH`, `ssh` version, macOS version, login shell snapshot obtained
 ([ssh](ssh.md)). It reminds that `remove --all` must precede `brew uninstall`
 ([packaging](packaging.md)). "Agent reachable" and "CLI on PATH" are checked by the CLI itself,

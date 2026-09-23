@@ -323,6 +323,8 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
     private var quarantine: [String: String] = [:]
     private var plugIn: String?
     private var hiddenPlugIn: String?
+    private var records: [String] = []
+    private var unregistered: [String] = []
     /// How many times the LaunchServices record has been rebuilt, which is what bounds
     /// the launch to one forced registration.
     public private(set) var forcedRegistrations = 0
@@ -355,20 +357,50 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
         lock.lock(); plugIn = line; lock.unlock()
     }
 
-    /// Stages `MQ-081`: LaunchServices holds a record built while the bundle was still
-    /// being copied, so PlugInKit answers nothing about the extension until the record is
-    /// rebuilt. `line` is what `pluginkit` prints once it has been.
-    public func setStaleLaunchServicesRecord(revealing line: String) {
+    /// The record paths `lsregister -dump` lists for the app identifier, and the paths
+    /// `lsregister -u` has been run on, in order.
+    public var launchServicesRecords: [String] {
+        get { lock.lock(); defer { lock.unlock() }; return records }
+        set { lock.lock(); records = newValue; lock.unlock() }
+    }
+
+    public var unregisteredRecords: [String] {
+        lock.lock(); defer { lock.unlock() }; return unregistered
+    }
+
+    /// Stages `MQ-081`: LaunchServices holds a record for another copy of the app, at
+    /// `path`, alongside the installed bundle's own. While that record is there a forced
+    /// registration registers nothing new and PlugInKit answers nothing about the
+    /// extension; `line` is what `pluginkit` prints once the record is gone and the
+    /// registration has been forced.
+    public func setStaleLaunchServicesRecord(atPath path: String, revealing line: String) {
         lock.lock()
         plugIn = nil
         hiddenPlugIn = line
+        records = [bundleURL.path, path]
         lock.unlock()
+    }
+
+    public func launchServicesRecordPaths(bundleID: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return bundleID == SSHDriveIdentifiers.appBundleID ? records : []
+    }
+
+    public func unregisterLaunchServicesRecord(atPath path: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        unregistered.append(path)
+        guard let index = records.firstIndex(of: path) else { return false }
+        records.remove(at: index)
+        return true
     }
 
     public func forceLaunchServicesRegistration() -> Bool {
         lock.lock(); defer { lock.unlock() }
         forcedRegistrations += 1
         guard forceSucceeds else { return false }
+        // A record for another path under the same identifier answers the registration,
+        // so the force runs and reveals nothing until that record has been dropped.
+        guard records.allSatisfy({ $0 == bundleURL.path }) else { return true }
         if let hidden = hiddenPlugIn {
             plugIn = hidden
             hiddenPlugIn = nil

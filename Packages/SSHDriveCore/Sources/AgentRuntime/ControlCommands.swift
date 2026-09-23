@@ -700,6 +700,25 @@ public enum ControlCommands {
             BundleQuarantine.detail(bundlePath: bundleURL.path, value: quarantineValue),
             remedy: quarantineValue == nil ? nil : BundleQuarantine.remedy(bundlePath: bundleURL.path))
 
+        // LaunchServices records, which are checked before the extension for the same
+        // reason quarantine is: a record for another copy of the app under our identifier
+        // answers every registration of the installed one, and the appex is then never
+        // discovered (`MQ-081`). The DMG the app was dragged out of is where the other
+        // copy comes from.
+        let strayRecords = AgentLifecycle.staleRecordPaths(inspector: environment.bundle)
+        check(
+            "launch services records", strayRecords.isEmpty,
+            strayRecords.isEmpty
+                ? bundleURL.path
+                : "\(bundleURL.path); also registered: \(strayRecords.joined(separator: ", "))",
+            remedy: strayRecords.isEmpty
+                ? nil
+                : "Drop the record for a copy of the app that is not the installed one: "
+                    + strayRecords
+                    .map { "\(AgentLifecycle.lsregisterPath) -u \"\($0)\"" }
+                    .joined(separator: "; ")
+                    + ". Then launch the app again: open -g -a \"SSH Drive\".")
+
         // The extension, as PlugInKit sees it. `pluginkit -m -A -i <id>` prints a line
         // when the extension is registered.
         let pluginKit = environment.bundle.plugInRegistration(
@@ -707,15 +726,14 @@ public enum ControlCommands {
         check(
             "extension registered", pluginKit != nil, pluginKit ?? "pluginkit reported nothing",
             remedy: pluginKit == nil
-                ? "Rebuild the bundle's LaunchServices record: /System/Library/Frameworks"
-                    + "/CoreServices.framework/Frameworks/LaunchServices.framework/Support"
-                    + "/lsregister -f -R -trusted \"\(bundleURL.path)\", then open -g -a "
-                    + "\"SSH Drive\". A record built while the bundle was still being copied "
-                    + "is reused by every launch after it, so open -g on its own may not "
-                    + "rebuild it. A bundle still carrying com.apple.quarantine is the other "
-                    + "cause - LaunchServices registers no plugin of one, and re-registering "
-                    + "with pluginkit -a does not survive the next launch. See the "
-                    + "\"quarantine\" check above."
+                ? "A LaunchServices record for another copy of the app is the usual cause - "
+                    + "see the \"launch services records\" check above, drop what it names, "
+                    + "then rebuild this bundle's record: \(AgentLifecycle.lsregisterPath) "
+                    + "-f -R -trusted \"\(bundleURL.path)\", then open -g -a \"SSH Drive\". "
+                    + "A bundle still carrying com.apple.quarantine is the other cause - "
+                    + "LaunchServices registers no plugin of one, and re-registering with "
+                    + "pluginkit -a does not survive the next launch. See the \"quarantine\" "
+                    + "check above."
                 : nil)
 
         // What the extension's own read-only index reader last said about itself. The

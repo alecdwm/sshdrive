@@ -238,6 +238,12 @@ public enum AgentLifecycle {
         return false
     }
 
+    /// `lsregister`, which is not on any PATH and is spelled absolutely wherever it is
+    /// run: by the adapter behind `BundleInspecting`, and in `doctor`'s remedy text.
+    public static let lsregisterPath =
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks"
+        + "/LaunchServices.framework/Support/lsregister"
+
     /// How long one launch waits for PlugInKit to pick the extension up after the
     /// LaunchServices record has been rebuilt, and how often it asks. Measured on 27.0
     /// (2026-09-23), `pkd` logged `Created plugin` 16 ms after `lsregister` returned.
@@ -247,21 +253,24 @@ public enum AgentLifecycle {
     /// The other half of what launching the app is for: the File Provider extension being
     /// registered with PlugInKit.
     ///
-    /// LaunchServices can hold a record for the bundle that names no usable executable,
-    /// and every later launch reuses it rather than building a new one. Homebrew's copy is
-    /// where that record gets made: something asks LaunchServices to register the bundle
-    /// while `ditto` is still writing it, `lsd` logs `Failed to register bundle … because
-    /// no satisfactory executable could be found` and `skipping registration of an
-    /// incomplete bundle`, and from then on the postflight's `open -g` answers
-    /// `Registration succeeded, but did not actually register anything new; returning
-    /// existing bundle`. PlugInKit never sees the appex, so `pluginkit -m` prints nothing,
-    /// `doctor` fails "extension registered", and a domain cannot be added at all
-    /// ("The application cannot be used right now") - while the agent itself is fine,
-    /// because launchd starts it directly (`MQ-081`, measured on 27.0, 2026-09-23).
+    /// LaunchServices keys its records on the bundle identifier, and a second record for
+    /// the same identifier at another path stops the installed bundle's own record from
+    /// being built. The other path is the DMG: the app is opened from `/Volumes/SSH
+    /// Drive/SSH Drive.app` once, the volume is detached, the record stays, and after the
+    /// next upgrade `lsd` answers every registration of the installed copy with
+    /// `SecStaticCodeCreateWithPath(<private>) failed with error -67028`, `skipping
+    /// registration of an incomplete bundle` and `Registration succeeded, but did not
+    /// actually register anything new; returning existing bundle`. PlugInKit then knows no
+    /// appex: `pluginkit -m` prints nothing, `doctor` fails "extension registered", and a
+    /// domain cannot be added at all ("The application cannot be used right now"), while
+    /// the agent itself is fine because launchd starts it directly (`MQ-081`, measured on
+    /// 27.0, 2026-09-23).
     ///
-    /// `lsregister -f -R -trusted` on the bundle forces the record to be rebuilt, and that
-    /// survives the next launch, which `pluginkit -a` does not (`MQ-061`). It is run at
-    /// most once per launch: a second one answers nothing the first did not.
+    /// So the sweep comes first and the force second. `lsregister -u` on every record path
+    /// that is not the installed bundle drops the records that are answering for us;
+    /// `lsregister -f -R -trusted` then rebuilds ours, and that survives the next launch,
+    /// which `pluginkit -a` does not (`MQ-061`). Both run at most once per launch: a
+    /// second pass answers nothing the first did not.
     ///
     /// - Returns: whether PlugInKit knows the extension by the time this returns.
     public static func ensureExtensionRegistered(
@@ -273,8 +282,14 @@ public enum AgentLifecycle {
             return true
         }
         Log.agent.error(
-            "PlugInKit does not know \(identifier, privacy: .public) (MQ-081: a LaunchServices record built while the bundle was still being copied is reused by every launch after it) - rebuilding the record with lsregister"
+            "PlugInKit does not know \(identifier, privacy: .public) (MQ-081: a LaunchServices record for another copy of the app answers for the installed one) - sweeping the stale records and rebuilding ours"
         )
+        for path in staleRecordPaths(inspector: inspector) {
+            let dropped = inspector.unregisterLaunchServicesRecord(atPath: path)
+            Log.agent.notice(
+                "lsregister -u \(path, privacy: .public): \(dropped ? "dropped" : "failed", privacy: .public)"
+            )
+        }
         guard inspector.forceLaunchServicesRegistration() else {
             Log.agent.error("lsregister did not run; the extension stays unregistered")
             return false
@@ -295,6 +310,16 @@ public enum AgentLifecycle {
         return false
     }
 
+    /// Every LaunchServices record for the app identifier that is not the bundle this
+    /// process runs from. Paths are compared standardized, because a record can carry the
+    /// path with a trailing slash or a `.` component and still name the same bundle.
+    /// `doctor` lists what this returns; the launch unregisters it.
+    public static func staleRecordPaths(inspector: any BundleInspecting) -> [String] {
+        let installed = URL(fileURLWithPath: inspector.bundleURL.path).standardizedFileURL.path
+        return inspector.launchServicesRecordPaths(bundleID: SSHDriveIdentifiers.appBundleID)
+            .filter { URL(fileURLWithPath: $0).standardizedFileURL.path != installed }
+    }
+
     /// Polls `reachable` on the clock until it answers true or the timeout passes. The
     /// deadline is read from the clock rather than counted in turns, so a slow ping spends
     /// the same budget a fast one does.
@@ -307,5 +332,46 @@ public enum AgentLifecycle {
             if clock.uptime() >= deadline { return false }
             await clock.sleep(seconds: reachablePollSeconds)
         }
+    }
+}
+
+/// Reading `lsregister -dump`, which is the only place LaunchServices will say what
+/// records it holds for an identifier.
+public enum LaunchServicesDump {
+
+    /// The path of every record in `dump` whose `identifier:` is `identifier`, in the
+    /// order the dump prints them and without duplicates.
+    ///
+    /// A record is a block of `key:` lines separated from the next by a line of dashes.
+    /// `path:` opens one and the first `identifier:` after it belongs to the same record,
+    /// which is the order every record is printed in, so the pairing holds whether or not
+    /// the separator is there. A value can carry a trailing store id in parentheses
+    /// (`path:  /Applications/SSH Drive.app (0x266c)`), which is not part of the path.
+    public static func recordPaths(in dump: String, identifier: String) -> [String] {
+        var paths: [String] = []
+        var pending: String?
+        for rawLine in dump.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if !line.isEmpty, line.allSatisfy({ $0 == "-" }) {
+                pending = nil
+            } else if let path = value(of: "path", in: line) {
+                pending = path.isEmpty ? nil : path
+            } else if let recorded = value(of: "identifier", in: line) {
+                if let path = pending, recorded == identifier, !paths.contains(path) {
+                    paths.append(path)
+                }
+                pending = nil
+            }
+        }
+        return paths
+    }
+
+    private static func value(of key: String, in line: String) -> String? {
+        guard line.hasPrefix(key + ":") else { return nil }
+        var value = line.dropFirst(key.count + 1).trimmingCharacters(in: .whitespaces)
+        if value.hasSuffix(")"), let marker = value.range(of: " (0x", options: .backwards) {
+            value = String(value[value.startIndex..<marker.lowerBound])
+        }
+        return value.trimmingCharacters(in: .whitespaces)
     }
 }

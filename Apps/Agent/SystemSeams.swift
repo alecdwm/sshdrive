@@ -352,16 +352,46 @@ struct RunningBundle: BundleInspecting {
         return text.isEmpty ? nil : text
     }
 
-    /// `lsregister -f -R -trusted` on our own bundle: force, recursive, and trusting the
-    /// signature already on disk. It is the only thing that replaces a LaunchServices
-    /// record built from an incomplete bundle, which is what hides the appex from
-    /// PlugInKit (`MQ-081`). The binary is not on any PATH and is spelled absolutely.
-    func forceLaunchServicesRegistration() -> Bool {
-        let lsregister =
-            "/System/Library/Frameworks/CoreServices.framework/Frameworks"
-            + "/LaunchServices.framework/Support/lsregister"
+    /// Every path LaunchServices holds a record for under `bundleID`. `lsregister -dump`
+    /// is the only way to ask it, and it prints every record on the machine - tens of
+    /// thousands of lines - so the output is read to the end before the process is waited
+    /// on, and `LaunchServicesDump` picks the paths out of it (`MQ-081`).
+    func launchServicesRecordPaths(bundleID: String) -> [String] {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: lsregister)
+        process.executableURL = URL(fileURLWithPath: AgentLifecycle.lsregisterPath)
+        process.arguments = ["-dump"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+        return LaunchServicesDump.recordPaths(
+            in: String(decoding: data, as: UTF8.self), identifier: bundleID)
+    }
+
+    /// `lsregister -u <path>`, which drops the record for one bundle path without
+    /// touching the bundle itself. The path may no longer exist - a record for a detached
+    /// volume is the case this is here for - and the command still answers 0.
+    func unregisterLaunchServicesRecord(atPath path: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: AgentLifecycle.lsregisterPath)
+        process.arguments = ["-u", path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    /// `lsregister -f -R -trusted` on our own bundle: force, recursive, and trusting the
+    /// signature already on disk. It rebuilds the bundle's LaunchServices record, which is
+    /// what makes PlugInKit discover the appex once the records answering for us are gone
+    /// (`MQ-081`). The binary is not on any PATH and is spelled absolutely.
+    func forceLaunchServicesRegistration() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: AgentLifecycle.lsregisterPath)
         process.arguments = ["-f", "-R", "-trusted", bundleURL.path]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

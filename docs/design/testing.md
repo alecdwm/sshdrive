@@ -136,7 +136,7 @@ the helper's deployment and stream, the collect connection and both command hand
 | `ScreenLockObserving` | the `com.apple.screenIsUnlocked` notifications | `ScriptedScreenLock` |
 | `PeerIdentifying` | `PeerExecutable` + `SecStaticCode` | `ScriptedPeers` |
 | `IndexReaderPeering` | the extension connection table | `RecordingReaderPeers` |
-| `BundleInspecting` | quarantine xattr, bundle path, the executable vnode watch | `FakeBundle` |
+| `BundleInspecting` | quarantine xattr, bundle path, the executable vnode watch, PlugInKit and the LaunchServices records | `FakeBundle` |
 | `KeychainDiagnosing` | the `OSStatus` round trip `doctor` reports | scripted |
 | `TransportLauncher` | spawns `/usr/bin/ssh` | `FakeTransportLauncher`, or the real launcher with `ServerModel.FakeSSH` installed at `SSHProcess.sshBinaryPath` |
 | `AgentEndpoint` | the NSXPC listener and `exit` | `RecordingEndpoint` |
@@ -616,7 +616,7 @@ it is a runbook item.
 | P8 | A nickname renames in place |
 | P9 | `add` waits for the first deployment |
 | P10 | A launch repairs a constrained registration |
-| P11 | A launch rebuilds a stale LaunchServices record |
+| P11 | A launch sweeps a stale LaunchServices record |
 
 ### Q - `add`, askpass and the collect connection
 

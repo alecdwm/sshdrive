@@ -135,21 +135,40 @@ checks itself in the `postflight` and clears the quarantine attribute, so it sho
 Gatekeeper dialog at all. To check a copy:
 
 ```sh
-spctl --assess --type execute --verbose=4 "/Applications/SSH Drive.app"
+spctl --assess --type execute -v "/Applications/SSH Drive.app"
 ```
 
 A shipped build says `accepted / source=Notarized Developer ID`.
 
+### `launch services records` (fail)
+
+LaunchServices holds a record for another copy of `SSH Drive.app`, and the check names its
+path. That usually means the app was opened once from the mounted DMG: the record for
+`/Volumes/SSH Drive/SSH Drive.app` outlives the volume.
+
+LaunchServices keys records on the bundle identifier, so the other copy's record answers every
+registration of the installed one. `lsd` logs `skipping registration of an incomplete bundle`
+and `Registration succeeded, but did not actually register anything new; returning existing
+bundle`, and the extension is never registered. Drop the record the check names, then launch:
+
+```sh
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -u "/Volumes/SSH Drive/SSH Drive.app"
+open -g -a "SSH Drive"
+sshdrive doctor
+```
+
+The app does this itself when it finds the extension unregistered, so opening it once is
+usually enough.
+
 ### `extension registered` (fail)
 
 macOS does not know about the Finder extension (`SSHDriveFileProvider.appex`). **Check
-`quarantine` first**: a quarantined app is one cause, and registering the extension by hand
-does not survive the next launch.
+`launch services records` and `quarantine` first**: a record for another copy of the app is
+the usual cause, a quarantined app is the other, and registering the extension by hand does
+not survive the next launch.
 
-The other cause is a LaunchServices record built for the bundle while it was still being
-copied. It names no usable executable, every launch after it is answered with that same
-record, and PlugInKit never sees the extension - so `open -g` on its own fixes nothing.
-Rebuild the record, then launch:
+With both of those green, rebuild the bundle's own record and launch:
 
 ```sh
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
@@ -158,9 +177,7 @@ open -g -a "SSH Drive"
 pluginkit -m -A -i org.shirls.sshdrive.fileprovider -vvv
 ```
 
-Launching the app does this itself when it finds the extension unregistered, so opening it
-once is usually enough. If the extension is still missing, the app is probably not where
-LaunchServices thinks it is.
+If the extension is still missing, the app is probably not where LaunchServices thinks it is.
 
 ### `index reader (<name>)` (warn)
 

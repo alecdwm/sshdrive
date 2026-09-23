@@ -13,7 +13,7 @@ cask "sshdrive" do
 
   url "https://github.com/alecdwm/sshdrive/releases/download/v#{version}/SSH-Drive-#{version}.dmg"
   name "SSH Drive"
-  desc "Mount SFTP locations in Finder through the File Provider framework"
+  desc "Mount SSH servers in Finder through the File Provider framework"
   homepage "https://github.com/alecdwm/sshdrive"
 
   # Minimum macOS 14 (docs/design/platform.md). The symbol form is a minimum in current
@@ -59,30 +59,63 @@ cask "sshdrive" do
   postflight_steps do
     # Homebrew's declarative steps cannot branch, so the assessment's verdict is printed
     # (print_stdout) rather than summarised; a failed assessment does not abort the install.
+    # macOS 27's spctl rejects --verbose=4 and prints its usage; -v is accepted by every
+    # version.
     run "/usr/sbin/spctl",
-        args: ["--assess", "--type", "execute", "--verbose=4", "{{appdir}}/SSH Drive.app"],
+        args: ["--assess", "--type", "execute", "-v", "{{appdir}}/SSH Drive.app"],
         print_stdout: true,
         must_succeed: false
     run "/usr/bin/xattr",
         args: ["-dr", "com.apple.quarantine", "{{appdir}}/SSH Drive.app"],
         must_succeed: false
-    # Rebuild the bundle's LaunchServices record before anything launches the app.
-    # Something registers the bundle while Homebrew is still copying it - five times in
-    # 15 ms on the upgrade that was measured - and `lsd` logs `Failed to register bundle
-    # <private> because no satisfactory executable could be found`,
-    # `SecStaticCodeCreateWithPath(<private>) failed with error -67028` and `skipping
-    # registration of an incomplete bundle`. Every launch after that, the `open -g` below
-    # included, is answered `Registration succeeded, but did not actually register
-    # anything new; returning existing bundle`, PlugInKit never discovers the appex,
-    # `pluginkit -m` prints nothing, `doctor` fails "extension registered" and a domain
-    # cannot be added ("The application cannot be used right now"). `lsregister -f -R
-    # -trusted` rebuilds the record; `pkd` logged `Created plugin` for
-    # org.shirls.sshdrive.fileprovider 16 ms later, and it survived the next launch, which
-    # `pluginkit -a` does not (measured on macOS 27.0, 2026-09-23, upgrading 0.1.5 to
-    # 0.1.7; the same sequence on 26.4.1 registers the appex through the plain `open -g`).
-    run "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-        args: ["-f", "-R", "-trusted", "{{appdir}}/SSH Drive.app"],
-        must_succeed: false
+    # Drop every LaunchServices record for org.shirls.sshdrive that is not the installed
+    # bundle, then rebuild the installed bundle's own.
+    #
+    # LaunchServices keys its records on the bundle identifier, and a record for a second
+    # copy of the app answers for the installed one. Opening the app once from the mounted
+    # DMG leaves such a record for /Volumes/SSH Drive/SSH Drive.app, and detaching the
+    # volume does not remove it. While it is there, `lsd` answers every registration of
+    # /Applications/SSH Drive.app with `SecStaticCodeCreateWithPath(<private>) failed with
+    # error -67028`, `skipping registration of an incomplete bundle` and `Registration
+    # succeeded, but did not actually register anything new; returning existing bundle`;
+    # `pkd` says `No plugins found to match query`, `pluginkit -m` prints nothing,
+    # `doctor` fails "extension registered" and a domain cannot be added ("The application
+    # cannot be used right now"). `lsregister -f -R -trusted` on its own does not help,
+    # and neither does the `open -g` below. `lsregister -u` on the stale path, then the
+    # force, registers the appex at once: `pkd` logged `Created plugin` for
+    # org.shirls.sshdrive.fileprovider on the next launch (measured on macOS 27.0,
+    # 2026-09-23, upgrading 0.1.7 to 0.1.8, with the stale record 3 hours old; 26.4.1
+    # produces no /Volumes record at all and registers the appex through the plain
+    # `open -g`).
+    run "/bin/sh",
+        must_succeed: false,
+        args: ["-c", <<~'SH', "{{appdir}}/SSH Drive.app"]
+          lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+          app=$1
+          # A record is a block of "key:  value" lines; "path:" opens one and the first
+          # "identifier:" after it belongs to the same record. A value can carry a
+          # trailing store id in parentheses, which is not part of the path.
+          "$lsregister" -dump | awk -v id=org.shirls.sshdrive -v keep="$app" '
+            /^[[:space:]]*path:[[:space:]]/ {
+              line = $0
+              sub(/^[[:space:]]*path:[[:space:]]*/, "", line)
+              sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
+              p = line
+              next
+            }
+            /^[[:space:]]*identifier:[[:space:]]/ {
+              line = $0
+              sub(/^[[:space:]]*identifier:[[:space:]]*/, "", line)
+              sub(/[[:space:]]*\(0x[0-9a-fA-F]+\)[[:space:]]*$/, "", line)
+              if (p != "" && line == id && p != keep) print p
+              p = ""
+            }
+          ' | while IFS= read -r stale; do
+            echo "dropping the LaunchServices record for $stale"
+            "$lsregister" -u "$stale"
+          done
+          "$lsregister" -f -R -trusted "$app"
+        SH
     run "SSH Drive.app/Contents/MacOS/SSH Drive",
         base: :appdir,
         env: { "SSHDRIVE_AGENT_ROLE" => "unregister" },
