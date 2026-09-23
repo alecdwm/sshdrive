@@ -36,8 +36,10 @@ The steps run in this order:
 2. **Strip quarantine:** `/usr/bin/xattr -dr com.apple.quarantine` on the bundle
    ([below](#quarantine)).
 3. **Sweep and rebuild the LaunchServices records:** one `/bin/sh` step. It reads `lsregister
-   -dump`, runs `lsregister -u` on every record path under `org.shirls.sshdrive` that is not the
-   installed bundle, and then `lsregister -f -R -trusted` on the installed bundle
+   -dump` once and runs `lsregister -u` on every record path under `org.shirls.sshdrive` that is
+   not the installed bundle, then forces the installed bundle's own registration with `lsregister
+   -f -R -trusted`, asking `pluginkit -m -p com.apple.fileprovider-nonui` for our extension
+   between attempts and forcing again after 5 s while it hears nothing, at most four times
    ([below](#stale-launchservices-records)).
 4. **Unregister:** run the new bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
    `SMAppService.unregister()`, waits, and exits ([upgrades](#upgrades)).
@@ -50,6 +52,16 @@ nothing new. A developer replacing the bundle by hand has to run steps 3 to 5 to
 
 Step 1 spells the verbosity flag `-v`: macOS 27's `spctl` rejects `--verbose=4` and prints its
 usage instead of a verdict.
+
+None of the five steps can be relied on to have run. Straight after Homebrew moves the bundle
+into `/Applications`, LaunchServices and the code signing subsystem both answer nothing for a
+while: step 1 printed `internal error in Code Signing subsystem`, step 3's `lsregister` printed
+`failed to scan /Applications/SSH Drive.app: -10822 from spotlight` (`kLSServerCommunicationErr`)
+and registered nothing, and step 5 printed `-10810 kLSUnknownErr` with `Couldn't communicate with
+a helper application` under it, so the app-launch role never ran; by hand minutes later both
+worked (MQ-081, 27.0, 2026-09-23). Step 3's retries are for the short version of that window. The
+long version is repaired by the agent, which launchd starts for the mach service whatever else
+failed.
 
 ### Quarantine
 
@@ -93,17 +105,30 @@ carrying no quarantine attribute at all (MQ-081, gotcha 107).
 `lsregister -u` on the stale path drops that record, and `lsregister -f -R -trusted` on the
 installed bundle then rebuilds its own; the appex is registered on the next launch. Unlike
 `pluginkit -a`, that survives the launch after it. The sweep has to come first: the force on its
-own is one of the registrations the stale record answers. Three things do it:
+own is one of the registrations the stale record answers. Four things do it:
 
 - the cask's `postflight`, before its unregister and open, so an install never leaves the appex
   hidden;
-- the app launch itself. After the login item answers, the launch asks PlugInKit whether it knows
-  the extension, and when the answer is nothing it unregisters every record path that is not its
-  own bundle, forces its own registration **once**, and waits up to 5 s, polling every 0.5 s, for
-  the appex to appear. The outcome is logged either way.
+- the app launch, which `open -g -a "SSH Drive"` and `sshdrive doctor` both make;
+- **the agent's own start, from the launchd role**, which is the one path that always runs: the
+  postflight's force and its `open -g` can both fail out of a LaunchServices that has just had the
+  bundle moved under it, and launchd starts the agent for the mach service regardless. It runs
+  detached from the listener, so the retry's waits hold nothing else up.
 - `doctor`'s `launch services records` check, ordered before "extension registered" for the same
   reason `quarantine` is, lists every other record path and gives the `lsregister -u` command for
   each.
+
+What a check does, on a launch or on an agent start: ask PlugInKit whether it knows the
+extension, and stop there if it does - no dump, no force, no wait. Otherwise unregister every
+record path that is not its own bundle, force its own registration, and wait up to 5 s, polling
+every 0.5 s, for the appex to appear. A pass that ends with nothing registered is repeated whole,
+sweep included, after 15 s, then 60 s, then 300 s, and then reported. The sweep is repeated
+because a `lsregister -dump` made inside that window reads no records either, so the first pass
+may have had nothing to sweep rather than nothing to find. Every attempt and its outcome is
+logged.
+
+The 15/60/300 backoff covers the one observed recovery with room either side; it is not a
+measured boundary.
 
 ### `uninstall` stanza
 

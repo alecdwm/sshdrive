@@ -158,8 +158,8 @@ open -g -a "SSH Drive"
 sshdrive doctor
 ```
 
-The app does this itself when it finds the extension unregistered, so opening it once is
-usually enough.
+The app does this itself when it finds the extension unregistered, and so does the agent on
+every start, so opening the app once or `sshdrive agent restart` is usually enough.
 
 ### `extension registered` (fail)
 
@@ -168,7 +168,19 @@ macOS does not know about the Finder extension (`SSHDriveFileProvider.appex`). *
 the usual cause, a quarantined app is the other, and registering the extension by hand does
 not survive the next launch.
 
-With both of those green, rebuild the bundle's own record and launch:
+Straight after a `brew upgrade` this can also be nothing but bad timing. Homebrew moves the app
+into place and LaunchServices does not answer for a few minutes: the install prints `internal
+error in Code Signing subsystem`, `failed to scan /Applications/SSH Drive.app: -10822 from
+spotlight` and `-10810 kLSUnknownErr`, and nothing gets registered. **The agent repairs this
+itself**, on its next start and again 15 s, 60 s and 5 minutes after that, so waiting is usually
+enough. To force it now:
+
+```sh
+sshdrive agent restart
+sshdrive doctor
+```
+
+To do the same by hand, rebuild the bundle's own record and launch:
 
 ```sh
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \

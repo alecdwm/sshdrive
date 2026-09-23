@@ -217,12 +217,13 @@ extension AgentScenarios {
             #expect(healthy.unregisteredRecords.isEmpty, "P11: and no record is dropped")
             #expect(healthyClock.requestedSleeps.isEmpty, "P11: and it waits for nothing")
 
-            // An lsregister that will not run is reported, not retried.
+            // One pass of an lsregister that will not run forces once and waits for
+            // nothing. What the retry adds to that is P12.
             let deadClock = VirtualAgentClock(autoAdvance: true)
             let dead = FakeBundle(version: (27, 0, 0))
             dead.forceSucceeds = false
             let failed = await AgentLifecycle.ensureExtensionRegistered(
-                inspector: dead, clock: deadClock)
+                inspector: dead, clock: deadClock, backoff: [])
             #expect(!failed)
             #expect(dead.forcedRegistrations == 1)
             #expect(deadClock.requestedSleeps.isEmpty)
@@ -232,7 +233,7 @@ extension AgentScenarios {
             let slowClock = VirtualAgentClock(autoAdvance: true)
             let slow = FakeBundle(version: (27, 0, 0))
             let never = await AgentLifecycle.ensureExtensionRegistered(
-                inspector: slow, clock: slowClock)
+                inspector: slow, clock: slowClock, backoff: [])
             #expect(!never)
             #expect(slow.forcedRegistrations == 1, "P11: still one, after the wait as before it")
             #expect(
@@ -278,6 +279,67 @@ extension AgentScenarios {
             #expect(
                 LaunchServicesDump.recordPaths(in: "", identifier: SSHDriveIdentifiers.appBundleID)
                     .isEmpty)
+        }
+
+        /// **P12** - the extension check survives a LaunchServices that is not answering yet.
+        ///
+        /// `MQ-081`, the second measurement. Upgrading the cask on 27.0 (2026-09-23), the
+        /// postflight's three steps failed one after another straight after Homebrew moved
+        /// the bundle: `spctl --assess` answered `internal error in Code Signing
+        /// subsystem`, `lsregister` answered `failed to scan /Applications/SSH Drive.app:
+        /// -10822 from spotlight` and exited non-zero, and `open -g` answered `-10810
+        /// kLSUnknownErr` with `Couldn't communicate with a helper application` under it,
+        /// so the app-launch role never ran at all. The same commands by hand minutes later
+        /// worked. The agent was up throughout, launchd having started it for the mach
+        /// service, which is why the check belongs in the launchd role and why it retries.
+        @Test func p12TheExtensionCheckRetriesAForcedRegistrationThatFails() async {
+            let clock = VirtualAgentClock(autoAdvance: true)
+            let bundle = FakeBundle(version: (27, 0, 0))
+            bundle.revealPlugIn(
+                "org.shirls.sshdrive.fileprovider(0.1.9)", fromForcedRegistration: 2)
+            bundle.forceFailures = 1
+
+            let registered = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: bundle, clock: clock)
+
+            #expect(registered, "P12: the second attempt is the one that runs")
+            #expect(bundle.forcedRegistrations == 2, "P12: one per attempt, not one per launch")
+            #expect(
+                clock.requestedSleeps == [
+                    AgentLifecycle.registrationRetryBackoffSeconds[0],
+                    AgentLifecycle.plugInRegistrationPollSeconds,
+                ],
+                "P12: the first backoff, then the poll of the attempt that worked")
+
+            // A LaunchServices that never comes back is reported after the bounded number
+            // of attempts, rather than retried for the life of the agent.
+            let deadClock = VirtualAgentClock(autoAdvance: true)
+            let dead = FakeBundle(version: (27, 0, 0))
+            dead.forceSucceeds = false
+            let failed = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: dead, clock: deadClock)
+            #expect(!failed)
+            #expect(
+                dead.forcedRegistrations
+                    == AgentLifecycle.registrationRetryBackoffSeconds.count + 1,
+                "P12: one attempt, then one per backoff")
+            #expect(
+                deadClock.requestedSleeps == AgentLifecycle.registrationRetryBackoffSeconds,
+                "P12: every backoff waited, and nothing else: a force that did not run has no window to poll"
+            )
+
+            // The ordinary launch still asks PlugInKit once and stops there: no dump, no
+            // force, no wait.
+            let healthyClock = VirtualAgentClock(autoAdvance: true)
+            let healthy = FakeBundle(version: (27, 0, 0))
+            healthy.launchServicesRecords = ["/Applications/SSH Drive.app"]
+            healthy.setPlugInRegistration("org.shirls.sshdrive.fileprovider(0.1.9)")
+            let up = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: healthy, clock: healthyClock)
+            #expect(up)
+            #expect(healthy.forcedRegistrations == 0)
+            #expect(healthy.unregisteredRecords.isEmpty)
+            #expect(healthyClock.requestedSleeps.isEmpty, "P12: and the retry costs it nothing")
         }
 
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.

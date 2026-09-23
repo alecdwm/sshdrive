@@ -87,6 +87,17 @@ cask "sshdrive" do
     # 2026-09-23, upgrading 0.1.7 to 0.1.8, with the stale record 3 hours old; 26.4.1
     # produces no /Volumes record at all and registers the appex through the plain
     # `open -g`).
+    #
+    # The force is retried because LaunchServices is not always answering when this runs.
+    # Straight after Homebrew moved the bundle in, the assess above printed `internal
+    # error in Code Signing subsystem`, this step's lsregister printed `failed to scan
+    # /Applications/SSH Drive.app: -10822 from spotlight` (kLSServerCommunicationErr) and
+    # the `open -g` below printed `-10810 kLSUnknownErr` with `Couldn't communicate with
+    # a helper application` under it, so nothing registered anything; the same commands
+    # by hand minutes later worked (measured on macOS 27.0, 2026-09-23, upgrading 0.1.9).
+    # The sweep runs once: a dump that could not be read lists nothing to drop either way,
+    # and the agent's own check on its next start is what repairs the case this loop
+    # cannot wait out.
     run "/bin/sh",
         must_succeed: false,
         args: ["-c", <<~'SH', "{{appdir}}/SSH Drive.app"]
@@ -114,7 +125,21 @@ cask "sshdrive" do
             echo "dropping the LaunchServices record for $stale"
             "$lsregister" -u "$stale"
           done
-          "$lsregister" -f -R -trusted "$app"
+          attempt=1
+          while :; do
+            "$lsregister" -f -R -trusted "$app"
+            sleep 1
+            if /usr/bin/pluginkit -m -p com.apple.fileprovider-nonui 2>/dev/null |
+              grep -q org.shirls.sshdrive.fileprovider; then
+              echo "the File Provider extension is registered"
+              exit 0
+            fi
+            [ "$attempt" -ge 4 ] && break
+            echo "the extension is not registered yet; forcing the registration again (attempt $attempt)"
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+          echo "the extension is still unregistered; the agent repairs this on its next start"
         SH
     run "SSH Drive.app/Contents/MacOS/SSH Drive",
         base: :appdir,

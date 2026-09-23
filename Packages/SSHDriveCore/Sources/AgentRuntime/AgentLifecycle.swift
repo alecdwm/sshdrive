@@ -250,8 +250,28 @@ public enum AgentLifecycle {
     public static let plugInRegistrationTimeoutSeconds: Double = 5
     public static let plugInRegistrationPollSeconds: Double = 0.5
 
-    /// The other half of what launching the app is for: the File Provider extension being
-    /// registered with PlugInKit.
+    /// How long to wait before each further pass when the first one leaves the extension
+    /// unregistered, and so how many passes there are: one immediately, then one after
+    /// each of these.
+    ///
+    /// Straight after Homebrew moves the bundle into `/Applications`, neither the code
+    /// signing subsystem nor `lsregister` is usable: the postflight's `spctl --assess`
+    /// answered `internal error in Code Signing subsystem`, its `lsregister` answered
+    /// `failed to scan /Applications/SSH Drive.app: -10822 from spotlight`
+    /// (`kLSServerCommunicationErr`) and exited non-zero, and its `open -g` answered
+    /// `-10810 kLSUnknownErr` with `Couldn't communicate with a helper application` under
+    /// it, so the app-launch role never ran either. The same two commands run by hand
+    /// minutes later both succeeded (`MQ-081`, measured on 27.0, 2026-09-23). The window
+    /// is minutes and it clears on its own, so the passes are spread across roughly six
+    /// minutes rather than repeated tightly.
+    ///
+    /// Confidence: 15/60/300 covers the one observed recovery with room either side; it is
+    /// not a measured boundary.
+    public static let registrationRetryBackoffSeconds: [Double] = [15, 60, 300]
+
+    /// The File Provider extension being registered with PlugInKit: the other half of what
+    /// launching the app is for, and what the launchd role checks on every agent start,
+    /// that being the one path that always runs.
     ///
     /// LaunchServices keys its records on the bundle identifier, and a second record for
     /// the same identifier at another path stops the installed bundle's own record from
@@ -269,12 +289,21 @@ public enum AgentLifecycle {
     /// So the sweep comes first and the force second. `lsregister -u` on every record path
     /// that is not the installed bundle drops the records that are answering for us;
     /// `lsregister -f -R -trusted` then rebuilds ours, and that survives the next launch,
-    /// which `pluginkit -a` does not (`MQ-061`). Both run at most once per launch: a
-    /// second pass answers nothing the first did not.
+    /// which `pluginkit -a` does not (`MQ-061`).
     ///
+    /// A pass that leaves the extension unregistered is repeated on
+    /// `registrationRetryBackoffSeconds`, sweep and all, because the failure this repairs
+    /// is not always about the records: right after a bundle is moved into place
+    /// `lsregister` itself fails and recovers minutes later, and a `lsregister -dump` made
+    /// in that window lists no record to sweep. A launch that finds PlugInKit already
+    /// knowing the extension does none of it - no dump, no force, no wait.
+    ///
+    /// - Parameter backoff: the wait before each pass after the first. Empty means one
+    ///   pass and no retry.
     /// - Returns: whether PlugInKit knows the extension by the time this returns.
     public static func ensureExtensionRegistered(
-        inspector: any BundleInspecting, clock: any AgentClock
+        inspector: any BundleInspecting, clock: any AgentClock,
+        backoff: [Double] = registrationRetryBackoffSeconds
     ) async -> Bool {
         let identifier = SSHDriveIdentifiers.extensionBundleID
         if let line = inspector.plugInRegistration(bundleID: identifier) {
@@ -282,8 +311,34 @@ public enum AgentLifecycle {
             return true
         }
         Log.agent.error(
-            "PlugInKit does not know \(identifier, privacy: .public) (MQ-081: a LaunchServices record for another copy of the app answers for the installed one) - sweeping the stale records and rebuilding ours"
+            "PlugInKit does not know \(identifier, privacy: .public) (MQ-081: a LaunchServices record for another copy of the app answers for the installed one, and a LaunchServices that has just had the bundle moved under it answers nothing at all) - sweeping the stale records and rebuilding ours"
         )
+        let passes = backoff.count + 1
+        for pass in 1 ... passes {
+            if await sweepAndForce(
+                inspector: inspector, clock: clock, identifier: identifier, pass: pass,
+                of: passes)
+            {
+                return true
+            }
+            guard pass < passes else { break }
+            let wait = backoff[pass - 1]
+            Log.agent.notice(
+                "retrying the sweep and the forced registration in \(wait, privacy: .public) s")
+            await clock.sleep(seconds: wait)
+        }
+        Log.agent.error(
+            "the extension is still unregistered after \(passes, privacy: .public) attempts; run `sshdrive doctor`"
+        )
+        return false
+    }
+
+    /// One pass: drop every record that is not ours, force our own registration, and wait
+    /// `plugInRegistrationTimeoutSeconds` for PlugInKit to pick the appex up.
+    private static func sweepAndForce(
+        inspector: any BundleInspecting, clock: any AgentClock, identifier: String, pass: Int,
+        of passes: Int
+    ) async -> Bool {
         for path in staleRecordPaths(inspector: inspector) {
             let dropped = inspector.unregisterLaunchServicesRecord(atPath: path)
             Log.agent.notice(
@@ -291,7 +346,9 @@ public enum AgentLifecycle {
             )
         }
         guard inspector.forceLaunchServicesRegistration() else {
-            Log.agent.error("lsregister did not run; the extension stays unregistered")
+            Log.agent.error(
+                "lsregister did not run (attempt \(pass, privacy: .public) of \(passes, privacy: .public)); the extension stays unregistered"
+            )
             return false
         }
         let deadline = clock.uptime() + plugInRegistrationTimeoutSeconds
@@ -305,7 +362,7 @@ public enum AgentLifecycle {
             if clock.uptime() >= deadline { break }
         }
         Log.agent.error(
-            "the extension is still unregistered \(plugInRegistrationTimeoutSeconds, privacy: .public) s after lsregister; run `sshdrive doctor`"
+            "the extension is still unregistered \(plugInRegistrationTimeoutSeconds, privacy: .public) s after lsregister (attempt \(pass, privacy: .public) of \(passes, privacy: .public))"
         )
         return false
     }
