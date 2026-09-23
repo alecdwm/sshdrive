@@ -142,6 +142,10 @@ A shipped build says `accepted / source=Notarized Developer ID`.
 
 ### `launch services records` (fail)
 
+`doctor` reads the LaunchServices records only when `extension registered` would fail: a stale
+record matters only while it keeps the extension unregistered, and reading them takes seconds.
+With the extension registered this line says `not checked: the extension is registered`.
+
 LaunchServices holds a record for another copy of `SSH Drive.app`, and the check names its
 path. That usually means the app was opened once from the mounted DMG: the record for
 `/Volumes/SSH Drive/SSH Drive.app` outlives the volume.

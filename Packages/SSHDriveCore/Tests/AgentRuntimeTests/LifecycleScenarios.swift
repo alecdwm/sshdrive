@@ -280,6 +280,64 @@ extension AgentScenarios {
                     .isEmpty)
         }
 
+        /// **P12** - `doctor` reads the LaunchServices records only when the extension is
+        /// not registered.
+        ///
+        /// `MQ-081`. A stale record matters only while it stops PlugInKit discovering the
+        /// appex, and `lsregister -dump` takes 3.5 s from a terminal and more from the agent
+        /// on 27.0. So the "launch services records" check takes the answer the "extension
+        /// registered" check gets from PlugInKit: with a line there it passes without the
+        /// dump, and with nothing there it dumps and names every record that is not the
+        /// installed bundle, as the launch does.
+        @Test func p12DoctorReadsTheRecordsOnlyForAnUnregisteredExtension() {
+            let registered = FakeBundle(version: (27, 0, 0))
+            registered.launchServicesRecords = [
+                "/Applications/SSH Drive.app", "/Volumes/SSH Drive/SSH Drive.app",
+            ]
+            let line = "org.shirls.sshdrive.fileprovider(0.1.11)"
+            registered.setPlugInRegistration(line)
+            let passed = AgentLifecycle.recordsCheck(
+                inspector: registered,
+                extensionRegistration: registered.plugInRegistration(
+                    bundleID: SSHDriveIdentifiers.extensionBundleID))
+            #expect(passed.ok, "P12: a registered extension passes the check")
+            #expect(!passed.swept)
+            #expect(passed.detail == "not checked: the extension is registered")
+            #expect(passed.remedy == nil)
+            #expect(registered.recordDumps == 0, "P12: and lsregister -dump is never run")
+
+            // Unregistered, with a record for the detached DMG: the dump runs once and the
+            // stray record is named with the command that drops it.
+            let stale = FakeBundle(version: (27, 0, 0))
+            stale.setStaleLaunchServicesRecord(
+                atPath: "/Volumes/SSH Drive/SSH Drive.app", revealing: line)
+            let failed = AgentLifecycle.recordsCheck(
+                inspector: stale,
+                extensionRegistration: stale.plugInRegistration(
+                    bundleID: SSHDriveIdentifiers.extensionBundleID))
+            #expect(!failed.ok)
+            #expect(failed.swept)
+            #expect(stale.recordDumps == 1, "P12: one dump")
+            #expect(
+                failed.detail
+                    == "/Applications/SSH Drive.app; also registered: /Volumes/SSH Drive/SSH Drive.app")
+            #expect(
+                failed.remedy?.contains(
+                    "\(AgentLifecycle.lsregisterPath) -u \"/Volumes/SSH Drive/SSH Drive.app\"")
+                    == true)
+            #expect(stale.unregisteredRecords.isEmpty, "P12: doctor reports, it does not repair")
+
+            // Unregistered with only the installed bundle's own record: the dump runs and
+            // finds nothing to accuse, so the cause is elsewhere (quarantine, say).
+            let clean = FakeBundle(version: (27, 0, 0))
+            clean.launchServicesRecords = ["/Applications/SSH Drive.app"]
+            let alone = AgentLifecycle.recordsCheck(inspector: clean, extensionRegistration: nil)
+            #expect(alone.ok)
+            #expect(alone.swept)
+            #expect(alone.detail == "/Applications/SSH Drive.app")
+            #expect(clean.recordDumps == 1)
+        }
+
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.
         ///
         /// docs/design/packaging.md: the agent waits until the bundle at its path is readable, its

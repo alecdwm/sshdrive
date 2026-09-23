@@ -210,14 +210,38 @@ absolutely because zsh has a `log` builtin. Ctrl-C ends a `--follow`.
 
 ### `doctor`
 
-`doctor [--json]` checks, in order: app in `/Applications`, quarantine attribute stripped, no
-LaunchServices record for another copy of the app ([packaging](packaging.md)), extension
-registered (`pluginkit`), login item enabled and agent reachable, app group container
-writable, CLI on `PATH`, `ssh` version, macOS version, login shell snapshot obtained
-([ssh](ssh.md)). It reminds that `remove --all` must precede `brew uninstall`
-([packaging](packaging.md)). "Agent reachable" and "CLI on PATH" are checked by the CLI itself,
-and an agent that accepts the connection but does not answer in time is reported as that, not as
-unreachable.
+`doctor [--json]` prints one line per check, in this order:
+
+1. agent reachable, and CLI on `PATH`. The CLI checks these two itself; an agent that accepts
+   the connection but does not answer in time is reported as that, not as unreachable.
+2. app in `/Applications`.
+3. macOS version, 14 or newer.
+4. login item enabled.
+5. app group container writable.
+6. quarantine attribute stripped ([packaging](packaging.md)).
+7. launch services records: no record for another copy of the app ([packaging](packaging.md)).
+   `lsregister -dump` takes seconds, so it is read only when PlugInKit does not know the
+   extension; with the extension registered the line passes as "not checked".
+8. extension registered (`pluginkit`).
+9. index reader, one line per mounted location: the state the extension last wrote to
+   `reader-state.json` ([the index](item-index.md#reader-readiness)). `ready` passes; any other
+   state, and a file never written, warns: every read then goes to the agent, which is slower but
+   works.
+10. `ssh`: `/usr/bin/ssh -V` runs.
+11. `~/.ssh/config` parses: `ssh -G` against a name nothing matches ([locations](locations.md)).
+12. control sockets: none left without a location ([ssh](ssh.md)). Reported, never swept.
+13. keychain reachable from the agent ([secrets](secrets.md)).
+14. login shell snapshot obtained ([ssh](ssh.md)).
+15. file provider domains: the domains the system holds for us.
+
+It ends with a note that `remove --all` must precede `brew uninstall` ([packaging](packaging.md)).
+Only a `fail` makes the exit status non-zero.
+
+The agent times every check. `--json` carries `elapsedMs` on each check and on the report as a
+whole. A check's time runs from the end of the one before it, except the PlugInKit and
+LaunchServices checks, which time their own call. `-v` appends each check's time to its line and
+prints the total. The agent logs each time at info (`sshdrive logs --info`) and the total at
+notice.
 
 ### `agent`
 

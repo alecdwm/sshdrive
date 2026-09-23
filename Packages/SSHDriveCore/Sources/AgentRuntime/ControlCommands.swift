@@ -36,7 +36,8 @@ public enum ControlCommands {
             ])
 
         case "doctor":
-            return try json(["checks": await doctor()])
+            let (checks, elapsedMs) = await doctor()
+            return try json(["checks": checks, "elapsedMs": elapsedMs])
 
         case "agent.stop":
             // launchd leaves the agent down until the next mach lookup, which any CLI
@@ -635,20 +636,37 @@ public enum ControlCommands {
 
     // MARK: doctor
 
-    /// The `doctor` checks. Two of them, "CLI on PATH" and "agent reachable", the
-    /// CLI adds itself: the first it can only see from the terminal, and the second is
-    /// implied by this call having arrived at all.
-    private static func doctor() async -> [[String: Any]] {
+    /// The `doctor` checks, and the wall time they took in total, in milliseconds. Two
+    /// of them, "CLI on PATH" and "agent reachable", the CLI adds itself: the first it
+    /// can only see from the terminal, and the second is implied by this call having
+    /// arrived at all.
+    ///
+    /// Each check carries `elapsedMs`: the wall time from the end of the check before it
+    /// to its own, unless the check passes its own measurement. The checks run one after
+    /// another, so the lines add up to about the total.
+    private static func doctor() async -> (checks: [[String: Any]], elapsedMs: Int) {
         var checks: [[String: Any]] = []
+        let clock = ContinuousClock()
+        let started = clock.now
+        var mark = started
 
-        func check(_ name: String, _ ok: Bool?, _ detail: String, remedy: String? = nil) {
+        func check(
+            _ name: String, _ ok: Bool?, _ detail: String, remedy: String? = nil,
+            elapsed: Duration? = nil
+        ) {
+            let now = clock.now
+            let milliseconds = Self.milliseconds(elapsed ?? (now - mark))
+            mark = now
             var entry: [String: Any] = [
                 "name": name,
                 "status": ok == nil ? "warn" : (ok! ? "ok" : "fail"),
                 "detail": detail,
+                "elapsedMs": milliseconds,
             ]
             if let remedy { entry["remedy"] = remedy }
             checks.append(entry)
+            Log.agent.info(
+                "doctor: \(name, privacy: .public) took \(milliseconds, privacy: .public) ms")
         }
 
         // App in /Applications.
@@ -700,29 +718,27 @@ public enum ControlCommands {
             BundleQuarantine.detail(bundlePath: bundleURL.path, value: quarantineValue),
             remedy: quarantineValue == nil ? nil : BundleQuarantine.remedy(bundlePath: bundleURL.path))
 
-        // LaunchServices records, which are checked before the extension for the same
+        // The extension, as PlugInKit sees it. `pluginkit -m -A -i <id>` prints a line
+        // when the extension is registered. It is asked here, ahead of the LaunchServices
+        // records, because its answer decides whether those are read at all.
+        let pluginKitStarted = clock.now
+        let pluginKit = environment.bundle.plugInRegistration(
+            bundleID: SSHDriveIdentifiers.extensionBundleID)
+        let pluginKitElapsed = clock.now - pluginKitStarted
+
+        // LaunchServices records, which are reported before the extension for the same
         // reason quarantine is: a record for another copy of the app under our identifier
         // answers every registration of the installed one, and the appex is then never
         // discovered (`MQ-081`). The DMG the app was dragged out of is where the other
-        // copy comes from.
-        let strayRecords = AgentLifecycle.staleRecordPaths(inspector: environment.bundle)
+        // copy comes from. `lsregister -dump` takes seconds, so it runs only when
+        // PlugInKit does not know the extension.
+        let recordsStarted = clock.now
+        let records = AgentLifecycle.recordsCheck(
+            inspector: environment.bundle, extensionRegistration: pluginKit)
         check(
-            "launch services records", strayRecords.isEmpty,
-            strayRecords.isEmpty
-                ? bundleURL.path
-                : "\(bundleURL.path); also registered: \(strayRecords.joined(separator: ", "))",
-            remedy: strayRecords.isEmpty
-                ? nil
-                : "Drop the record for a copy of the app that is not the installed one: "
-                    + strayRecords
-                    .map { "\(AgentLifecycle.lsregisterPath) -u \"\($0)\"" }
-                    .joined(separator: "; ")
-                    + ". Then launch the app again: open -g -a \"SSH Drive\".")
+            "launch services records", records.ok, records.detail, remedy: records.remedy,
+            elapsed: clock.now - recordsStarted)
 
-        // The extension, as PlugInKit sees it. `pluginkit -m -A -i <id>` prints a line
-        // when the extension is registered.
-        let pluginKit = environment.bundle.plugInRegistration(
-            bundleID: SSHDriveIdentifiers.extensionBundleID)
         check(
             "extension registered", pluginKit != nil, pluginKit ?? "pluginkit reported nothing",
             remedy: pluginKit == nil
@@ -734,7 +750,8 @@ public enum ControlCommands {
                     + "LaunchServices registers no plugin of one, and re-registering with "
                     + "pluginkit -a does not survive the next launch. See the \"quarantine\" "
                     + "check above."
-                : nil)
+                : nil,
+            elapsed: pluginKitElapsed)
 
         // What the extension's own read-only index reader last said about itself. The
         // extension is sandboxed, short-lived and not running most of the time, so it
@@ -831,7 +848,15 @@ public enum ControlCommands {
             "detail": "Run `sshdrive remove --all` before `brew uninstall --cask sshdrive`: "
                 + "Homebrew cannot remove File Provider domains or keychain items for you.",
         ])
-        return checks
+        let total = milliseconds(clock.now - started)
+        Log.agent.notice(
+            "doctor: \(checks.count - 1, privacy: .public) checks in \(total, privacy: .public) ms")
+        return (checks, total)
+    }
+
+    private static func milliseconds(_ duration: Duration) -> Int {
+        let (seconds, attoseconds) = duration.components
+        return Int(seconds) * 1000 + Int(attoseconds / 1_000_000_000_000_000)
     }
 
     /// `ssh -G` against a name no config can match, so every `Host *` block and every

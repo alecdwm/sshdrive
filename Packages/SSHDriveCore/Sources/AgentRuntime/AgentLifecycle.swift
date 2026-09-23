@@ -320,6 +320,44 @@ public enum AgentLifecycle {
             .filter { URL(fileURLWithPath: $0).standardizedFileURL.path != installed }
     }
 
+    /// `doctor`'s "launch services records" line.
+    public struct RecordsCheck: Equatable, Sendable {
+        public var ok: Bool
+        public var detail: String
+        public var remedy: String?
+        /// Whether `lsregister -dump` was run for this answer.
+        public var swept: Bool
+    }
+
+    /// The "launch services records" check, given what PlugInKit said about the
+    /// extension. A stale record matters only while it stops the extension registering
+    /// (`MQ-081`), and `lsregister -dump` takes seconds, so with the extension registered
+    /// the dump is not run and the check passes; this is the same condition the launch
+    /// sweeps on.
+    public static func recordsCheck(
+        inspector: any BundleInspecting, extensionRegistration: String?
+    ) -> RecordsCheck {
+        let installed = inspector.bundleURL.path
+        guard extensionRegistration == nil else {
+            return RecordsCheck(
+                ok: true, detail: "not checked: the extension is registered", remedy: nil,
+                swept: false)
+        }
+        let stray = staleRecordPaths(inspector: inspector)
+        guard !stray.isEmpty else {
+            return RecordsCheck(ok: true, detail: installed, remedy: nil, swept: true)
+        }
+        return RecordsCheck(
+            ok: false,
+            detail: "\(installed); also registered: \(stray.joined(separator: ", "))",
+            remedy: "Drop the record for a copy of the app that is not the installed one: "
+                + stray
+                .map { "\(lsregisterPath) -u \"\($0)\"" }
+                .joined(separator: "; ")
+                + ". Then launch the app again: open -g -a \"SSH Drive\".",
+            swept: true)
+    }
+
     /// Polls `reachable` on the clock until it answers true or the timeout passes. The
     /// deadline is read from the clock rather than counted in turns, so a slow ping spends
     /// the same budget a fast one does.

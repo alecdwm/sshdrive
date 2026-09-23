@@ -328,6 +328,9 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
     /// How many times the LaunchServices record has been rebuilt, which is what bounds
     /// the launch to one forced registration.
     public private(set) var forcedRegistrations = 0
+    /// How many times `lsregister -dump` has been read, which takes seconds on a real
+    /// machine.
+    public private(set) var recordDumps = 0
     /// An `lsregister` that will not run at all, for the launch that has to report
     /// rather than wait.
     public var forceSucceeds = true
@@ -383,6 +386,7 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
 
     public func launchServicesRecordPaths(bundleID: String) -> [String] {
         lock.lock(); defer { lock.unlock() }
+        recordDumps += 1
         return bundleID == SSHDriveIdentifiers.appBundleID ? records : []
     }
 

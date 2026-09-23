@@ -84,10 +84,17 @@ struct Doctor: ParsableCommand {
         for check in checks {
             let status = check["status"] as? String ?? "warn"
             if status == "fail" { failed = true }
-            print(line(status, check["name"] as? String ?? "", check["detail"] as? String ?? ""))
+            var detail = check["detail"] as? String ?? ""
+            if global.verbose, let elapsed = check["elapsedMs"] as? Int {
+                detail += " (\(elapsed) ms)"
+            }
+            print(line(status, check["name"] as? String ?? "", detail))
             if let remedy = check["remedy"] as? String {
                 print("        \(remedy.replacingOccurrences(of: "\n", with: "\n        "))")
             }
+        }
+        if global.verbose, let elapsed = report["elapsedMs"] as? Int {
+            print("\nThe agent's checks took \(elapsed) ms.")
         }
         if failed || !reachable { throw ExitCode.failure }
     }

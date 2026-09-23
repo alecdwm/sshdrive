@@ -617,6 +617,7 @@ it is a runbook item.
 | P9 | `add` waits for the first deployment |
 | P10 | A launch repairs a constrained registration |
 | P11 | A launch sweeps a stale LaunchServices record |
+| P12 | `doctor` reads the LaunchServices records only for an unregistered extension |
 
 ### Q - `add`, askpass and the collect connection
 

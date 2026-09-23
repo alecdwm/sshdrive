@@ -115,7 +115,11 @@ own is one of the registrations the stale record answers. Three things do it:
   the appex to appear. The outcome is logged either way.
 - `doctor`'s `launch services records` check, ordered before "extension registered" for the same
   reason `quarantine` is, lists every other record path and gives the `lsregister -u` command for
-  each.
+  each. It reads `lsregister -dump` only when PlugInKit does not know the extension, the launch's
+  own condition. The dump is slow (3.5 s from a terminal, and nearly all of a 23 s `doctor` when
+  the agent read it, on 27.0, 2026-09-23), and a record that is not stopping the appex
+  registering is not a finding. With the extension registered the check passes as "not
+  checked".
 
 ### `uninstall` stanza
 
