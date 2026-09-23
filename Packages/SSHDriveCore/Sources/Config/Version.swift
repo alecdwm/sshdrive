@@ -6,5 +6,5 @@
 /// script) and the Homebrew cask. `sshDriveXPCInterfaceVersion` is a separate number - it
 /// describes the XPC protocol, not the release.
 public enum SSHDriveVersion {
-    public static let string = "0.1.5"
+    public static let string = "0.1.6"
 }
