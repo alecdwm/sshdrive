@@ -135,14 +135,19 @@ default:
     Log.agent.notice("app launch: registering the login item and the extension")
     let done = DispatchSemaphore(value: 0)
     var reachedAgent = false
+    var registeredExtension = false
     Task {
         reachedAgent = await AgentLifecycle.registerAndVerify(
             loginItem: environment.loginItem, launchd: environment.launchd, uid: getuid(),
             clock: environment.clock,
             reachable: { await pingAgent(timeout: AgentLifecycle.pingTimeoutSeconds) })
+        registeredExtension = await AgentLifecycle.ensureExtensionRegistered(
+            inspector: environment.bundle, clock: environment.clock)
         done.signal()
     }
     done.wait()
-    Log.agent.notice("app launch finished (agent reachable: \(reachedAgent, privacy: .public))")
+    Log.agent.notice(
+        "app launch finished (agent reachable: \(reachedAgent, privacy: .public), extension registered: \(registeredExtension, privacy: .public))"
+    )
     exit(0)
 }

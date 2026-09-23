@@ -164,6 +164,75 @@ extension AgentScenarios {
                 "P10: repaired repairAttempts times, then reported")
         }
 
+        /// **P11** - a launch rebuilds a stale LaunchServices record.
+        ///
+        /// `MQ-081`. Homebrew copies the bundle, something asks LaunchServices to register
+        /// it mid-copy, and the record that comes out names no usable executable; every
+        /// later launch, the postflight's `open -g` included, is answered with that record
+        /// and PlugInKit never sees the appex. `pluginkit -m` prints nothing, `doctor`
+        /// fails "extension registered", and `add` says "The application cannot be used
+        /// right now", while the agent itself answers fine.
+        ///
+        /// So the launch asks PlugInKit, and when the answer is nothing it runs
+        /// `lsregister -f -R -trusted` on the bundle once and waits briefly for the appex
+        /// to appear. Measured on 27.0 (2026-09-23), `pkd` logged `Created plugin` 16 ms
+        /// after `lsregister` returned.
+        @Test func p11ALaunchRebuildsAStaleLaunchServicesRecord() async {
+            let clock = VirtualAgentClock(autoAdvance: true)
+            let bundle = FakeBundle(version: (27, 0, 0))
+            bundle.setStaleLaunchServicesRecord(
+                revealing: "org.shirls.sshdrive.fileprovider(0.1.7)")
+
+            let registered = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: bundle, clock: clock)
+
+            #expect(registered, "P11: the record is rebuilt and PlugInKit then has the appex")
+            #expect(bundle.forcedRegistrations == 1, "P11: one forced registration per launch")
+            #expect(
+                bundle.plugInRegistration(bundleID: SSHDriveIdentifiers.extensionBundleID)
+                    == "org.shirls.sshdrive.fileprovider(0.1.7)")
+            #expect(
+                clock.requestedSleeps == [AgentLifecycle.plugInRegistrationPollSeconds],
+                "P11: it polls rather than sleeping the whole window out")
+
+            // A launch that finds the extension registered leaves LaunchServices alone.
+            let healthyClock = VirtualAgentClock(autoAdvance: true)
+            let healthy = FakeBundle(version: (27, 0, 0))
+            healthy.setPlugInRegistration("org.shirls.sshdrive.fileprovider(0.1.7)")
+            let up = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: healthy, clock: healthyClock)
+            #expect(up)
+            #expect(healthy.forcedRegistrations == 0, "P11: nothing is forced on an ordinary launch")
+            #expect(healthyClock.requestedSleeps.isEmpty, "P11: and it waits for nothing")
+
+            // An lsregister that will not run is reported, not retried.
+            let deadClock = VirtualAgentClock(autoAdvance: true)
+            let dead = FakeBundle(version: (27, 0, 0))
+            dead.forceSucceeds = false
+            let failed = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: dead, clock: deadClock)
+            #expect(!failed)
+            #expect(dead.forcedRegistrations == 1)
+            #expect(deadClock.requestedSleeps.isEmpty)
+
+            // And one that runs without the appex appearing gives the window up rather
+            // than the launch.
+            let slowClock = VirtualAgentClock(autoAdvance: true)
+            let slow = FakeBundle(version: (27, 0, 0))
+            let never = await AgentLifecycle.ensureExtensionRegistered(
+                inspector: slow, clock: slowClock)
+            #expect(!never)
+            #expect(slow.forcedRegistrations == 1, "P11: still one, after the wait as before it")
+            #expect(
+                slowClock.requestedSleeps
+                    == Array(
+                        repeating: AgentLifecycle.plugInRegistrationPollSeconds,
+                        count: Int(
+                            AgentLifecycle.plugInRegistrationTimeoutSeconds
+                                / AgentLifecycle.plugInRegistrationPollSeconds)),
+                "P11: bounded by plugInRegistrationTimeoutSeconds")
+        }
+
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.
         ///
         /// docs/design/packaging.md: the agent waits until the bundle at its path is readable, its

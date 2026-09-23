@@ -143,18 +143,24 @@ A shipped build says `accepted / source=Notarized Developer ID`.
 ### `extension registered` (fail)
 
 macOS does not know about the Finder extension (`SSHDriveFileProvider.appex`). **Check
-`quarantine` first**: a quarantined app is the usual cause, and registering the extension by
-hand does not survive the next launch.
+`quarantine` first**: a quarantined app is one cause, and registering the extension by hand
+does not survive the next launch.
 
-Otherwise, launch the app from its own bundle, which registers it (the `sshdrive` symlink
-cannot), and check:
+The other cause is a LaunchServices record built for the bundle while it was still being
+copied. It names no usable executable, every launch after it is answered with that same
+record, and PlugInKit never sees the extension - so `open -g` on its own fixes nothing.
+Rebuild the record, then launch:
 
 ```sh
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+  -f -R -trusted "/Applications/SSH Drive.app"
 open -g -a "SSH Drive"
 pluginkit -m -A -i org.shirls.sshdrive.fileprovider -vvv
 ```
 
-If it is still missing, the app is probably not where LaunchServices thinks it is.
+Launching the app does this itself when it finds the extension unregistered, so opening it
+once is usually enough. If the extension is still missing, the app is probably not where
+LaunchServices thinks it is.
 
 ### `index reader (<name>)` (warn)
 

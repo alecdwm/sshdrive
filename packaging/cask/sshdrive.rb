@@ -66,6 +66,23 @@ cask "sshdrive" do
     run "/usr/bin/xattr",
         args: ["-dr", "com.apple.quarantine", "{{appdir}}/SSH Drive.app"],
         must_succeed: false
+    # Rebuild the bundle's LaunchServices record before anything launches the app.
+    # Something registers the bundle while Homebrew is still copying it - five times in
+    # 15 ms on the upgrade that was measured - and `lsd` logs `Failed to register bundle
+    # <private> because no satisfactory executable could be found`,
+    # `SecStaticCodeCreateWithPath(<private>) failed with error -67028` and `skipping
+    # registration of an incomplete bundle`. Every launch after that, the `open -g` below
+    # included, is answered `Registration succeeded, but did not actually register
+    # anything new; returning existing bundle`, PlugInKit never discovers the appex,
+    # `pluginkit -m` prints nothing, `doctor` fails "extension registered" and a domain
+    # cannot be added ("The application cannot be used right now"). `lsregister -f -R
+    # -trusted` rebuilds the record; `pkd` logged `Created plugin` for
+    # org.shirls.sshdrive.fileprovider 16 ms later, and it survived the next launch, which
+    # `pluginkit -a` does not (measured on macOS 27.0, 2026-09-23, upgrading 0.1.5 to
+    # 0.1.7; the same sequence on 26.4.1 registers the appex through the plain `open -g`).
+    run "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+        args: ["-f", "-R", "-trusted", "{{appdir}}/SSH Drive.app"],
+        must_succeed: false
     run "SSH Drive.app/Contents/MacOS/SSH Drive",
         base: :appdir,
         env: { "SSHDRIVE_AGENT_ROLE" => "unregister" },

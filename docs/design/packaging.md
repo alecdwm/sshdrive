@@ -35,13 +35,16 @@ The steps run in this order:
    logged; it does not fail the install.
 2. **Strip quarantine:** `/usr/bin/xattr -dr com.apple.quarantine` on the bundle
    ([below](#quarantine)).
-3. **Unregister:** run the new bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
+3. **Rebuild the LaunchServices record:** `lsregister -f -R -trusted` on the bundle
+   ([below](#a-stale-launchservices-record)).
+4. **Unregister:** run the new bundle once with `SSHDRIVE_AGENT_ROLE=unregister`, which calls
    `SMAppService.unregister()`, waits, and exits ([upgrades](#upgrades)).
-4. **Open:** `open -g -a "SSH Drive"`, which registers again.
+5. **Open:** `open -g -a "SSH Drive"`, which registers again.
 
 `sshdrive doctor` runs the last step on its own. The unregister and open come after the
 assess-and-strip pair because a quarantined bundle registers no plugin however many times it is
-opened. A developer replacing the bundle by hand has to run steps 3 and 4 too.
+opened, and after the rebuild because an `open -g` answered from a stale record registers
+nothing new. A developer replacing the bundle by hand has to run steps 3 to 5 too.
 
 ### Quarantine
 
@@ -65,6 +68,28 @@ from the Internet" dialog, which `open -g` shows to nobody anyway.
 - `doctor` has a `quarantine` check, ordered before "extension registered" because it is the
   ordinary cause of that one failing. Its remedy is the two commands above.
 - The agent logs the same thing once per launch when its own bundle is quarantined.
+
+### A stale LaunchServices record
+
+A bundle registered with LaunchServices while it is still being copied gets a record that names
+no usable executable, and that record is what every launch after it is answered with. `lsd` logs
+`Failed to register bundle <private> because no satisfactory executable could be found`,
+`SecStaticCodeCreateWithPath(<private>) failed with error -67028` and `skipping registration of
+an incomplete bundle`; from then on `open -g` produces `Registration succeeded, but did not
+actually register anything new; returning existing bundle`. PlugInKit never discovers the appex,
+so the symptoms are the ones [quarantine](#quarantine) produces - `pluginkit -m` silent, `doctor`
+failing "extension registered" and "file provider domains" - on a bundle carrying no quarantine
+attribute at all (MQ-081, gotcha 107).
+
+`lsregister -f -R -trusted` on the bundle forces the record to be rebuilt, and `pkd` creates the
+plugin within milliseconds of it returning. Unlike `pluginkit -a`, the rebuild survives the next
+launch. Two things run it:
+
+- the cask's `postflight`, before its unregister and open, so an install never leaves the appex
+  hidden;
+- the app launch itself. After the login item answers, the launch asks PlugInKit whether it
+  knows the extension, and when the answer is nothing it runs `lsregister` **once** and waits up
+  to 5 s, polling every 0.5 s, for the appex to appear. The outcome is logged either way.
 
 ### `uninstall` stanza
 

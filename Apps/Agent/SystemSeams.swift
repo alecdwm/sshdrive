@@ -352,6 +352,24 @@ struct RunningBundle: BundleInspecting {
         return text.isEmpty ? nil : text
     }
 
+    /// `lsregister -f -R -trusted` on our own bundle: force, recursive, and trusting the
+    /// signature already on disk. It is the only thing that replaces a LaunchServices
+    /// record built from an incomplete bundle, which is what hides the appex from
+    /// PlugInKit (`MQ-081`). The binary is not on any PATH and is spelled absolutely.
+    func forceLaunchServicesRegistration() -> Bool {
+        let lsregister =
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks"
+            + "/LaunchServices.framework/Support/lsregister"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: lsregister)
+        process.arguments = ["-f", "-R", "-trusted", bundleURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
     var operatingSystemVersion: (major: Int, minor: Int, patch: Int) {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return (version.majorVersion, version.minorVersion, version.patchVersion)

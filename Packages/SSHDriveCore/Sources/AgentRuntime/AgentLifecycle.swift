@@ -238,6 +238,63 @@ public enum AgentLifecycle {
         return false
     }
 
+    /// How long one launch waits for PlugInKit to pick the extension up after the
+    /// LaunchServices record has been rebuilt, and how often it asks. Measured on 27.0
+    /// (2026-09-23), `pkd` logged `Created plugin` 16 ms after `lsregister` returned.
+    public static let plugInRegistrationTimeoutSeconds: Double = 5
+    public static let plugInRegistrationPollSeconds: Double = 0.5
+
+    /// The other half of what launching the app is for: the File Provider extension being
+    /// registered with PlugInKit.
+    ///
+    /// LaunchServices can hold a record for the bundle that names no usable executable,
+    /// and every later launch reuses it rather than building a new one. Homebrew's copy is
+    /// where that record gets made: something asks LaunchServices to register the bundle
+    /// while `ditto` is still writing it, `lsd` logs `Failed to register bundle … because
+    /// no satisfactory executable could be found` and `skipping registration of an
+    /// incomplete bundle`, and from then on the postflight's `open -g` answers
+    /// `Registration succeeded, but did not actually register anything new; returning
+    /// existing bundle`. PlugInKit never sees the appex, so `pluginkit -m` prints nothing,
+    /// `doctor` fails "extension registered", and a domain cannot be added at all
+    /// ("The application cannot be used right now") - while the agent itself is fine,
+    /// because launchd starts it directly (`MQ-081`, measured on 27.0, 2026-09-23).
+    ///
+    /// `lsregister -f -R -trusted` on the bundle forces the record to be rebuilt, and that
+    /// survives the next launch, which `pluginkit -a` does not (`MQ-061`). It is run at
+    /// most once per launch: a second one answers nothing the first did not.
+    ///
+    /// - Returns: whether PlugInKit knows the extension by the time this returns.
+    public static func ensureExtensionRegistered(
+        inspector: any BundleInspecting, clock: any AgentClock
+    ) async -> Bool {
+        let identifier = SSHDriveIdentifiers.extensionBundleID
+        if let line = inspector.plugInRegistration(bundleID: identifier) {
+            Log.agent.notice("extension registered with PlugInKit: \(line, privacy: .public)")
+            return true
+        }
+        Log.agent.error(
+            "PlugInKit does not know \(identifier, privacy: .public) (MQ-081: a LaunchServices record built while the bundle was still being copied is reused by every launch after it) - rebuilding the record with lsregister"
+        )
+        guard inspector.forceLaunchServicesRegistration() else {
+            Log.agent.error("lsregister did not run; the extension stays unregistered")
+            return false
+        }
+        let deadline = clock.uptime() + plugInRegistrationTimeoutSeconds
+        while true {
+            await clock.sleep(seconds: plugInRegistrationPollSeconds)
+            if let line = inspector.plugInRegistration(bundleID: identifier) {
+                Log.agent.notice(
+                    "extension registered after lsregister: \(line, privacy: .public)")
+                return true
+            }
+            if clock.uptime() >= deadline { break }
+        }
+        Log.agent.error(
+            "the extension is still unregistered \(plugInRegistrationTimeoutSeconds, privacy: .public) s after lsregister; run `sshdrive doctor`"
+        )
+        return false
+    }
+
     /// Polls `reachable` on the clock until it answers true or the timeout passes. The
     /// deadline is read from the clock rather than counted in turns, so a slow ping spends
     /// the same budget a fast one does.

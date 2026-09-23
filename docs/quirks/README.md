@@ -37,6 +37,7 @@ numbering are expected and mean nothing.
 |---|---|---|
 | **26.4** | macOS 26.4.1 (25E253), Xcode 26.4, arm64, headless | the build VM — almost every measurement |
 | **26.6** | macOS 26.6.2 | the owner's own Mac, measured 2026-09-05 and 2026-09-08 |
+| **27.0** | macOS 27.0 | the owner's own Mac, measured 2026-09-23 |
 | **14** / **15** | macOS 14 / 15 | **the minimum [docs/design/platform.md](../design/platform.md) names. Nothing has been measured there.** Every `14 —` cell in [macos.md](macos.md) is an open question |
 
 `SQ` rows are measured against a testbed service or a real server, not an OS version. The names

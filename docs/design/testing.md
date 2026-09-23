@@ -616,6 +616,7 @@ it is a runbook item.
 | P8 | A nickname renames in place |
 | P9 | `add` waits for the first deployment |
 | P10 | A launch repairs a constrained registration |
+| P11 | A launch rebuilds a stale LaunchServices record |
 
 ### Q - `add`, askpass and the collect connection
 

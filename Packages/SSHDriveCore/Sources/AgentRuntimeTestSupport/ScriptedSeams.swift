@@ -322,6 +322,13 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
     public var helperResourcesURL: URL?
     private var quarantine: [String: String] = [:]
     private var plugIn: String?
+    private var hiddenPlugIn: String?
+    /// How many times the LaunchServices record has been rebuilt, which is what bounds
+    /// the launch to one forced registration.
+    public private(set) var forcedRegistrations = 0
+    /// An `lsregister` that will not run at all, for the launch that has to report
+    /// rather than wait.
+    public var forceSucceeds = true
     private var inodes: [String: UInt64] = [:]
     private var identifiers: [String: String] = [:]
     private var readable: Set<String> = []
@@ -346,6 +353,27 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
 
     public func setPlugInRegistration(_ line: String?) {
         lock.lock(); plugIn = line; lock.unlock()
+    }
+
+    /// Stages `MQ-081`: LaunchServices holds a record built while the bundle was still
+    /// being copied, so PlugInKit answers nothing about the extension until the record is
+    /// rebuilt. `line` is what `pluginkit` prints once it has been.
+    public func setStaleLaunchServicesRecord(revealing line: String) {
+        lock.lock()
+        plugIn = nil
+        hiddenPlugIn = line
+        lock.unlock()
+    }
+
+    public func forceLaunchServicesRegistration() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        forcedRegistrations += 1
+        guard forceSucceeds else { return false }
+        if let hidden = hiddenPlugIn {
+            plugIn = hidden
+            hiddenPlugIn = nil
+        }
+        return true
     }
 
     /// The two facts the upgrade handover reads (docs/design/packaging.md): the

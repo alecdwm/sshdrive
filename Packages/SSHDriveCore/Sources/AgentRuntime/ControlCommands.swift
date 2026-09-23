@@ -707,10 +707,15 @@ public enum ControlCommands {
         check(
             "extension registered", pluginKit != nil, pluginKit ?? "pluginkit reported nothing",
             remedy: pluginKit == nil
-                ? "Launch the app once from its bundle: open -g -a \"SSH Drive\". "
-                    + "A bundle still carrying com.apple.quarantine is the usual cause - "
-                    + "LaunchServices registers no plugin of one, and re-registering by hand "
-                    + "does not survive the next launch. See the \"quarantine\" check above."
+                ? "Rebuild the bundle's LaunchServices record: /System/Library/Frameworks"
+                    + "/CoreServices.framework/Frameworks/LaunchServices.framework/Support"
+                    + "/lsregister -f -R -trusted \"\(bundleURL.path)\", then open -g -a "
+                    + "\"SSH Drive\". A record built while the bundle was still being copied "
+                    + "is reused by every launch after it, so open -g on its own may not "
+                    + "rebuild it. A bundle still carrying com.apple.quarantine is the other "
+                    + "cause - LaunchServices registers no plugin of one, and re-registering "
+                    + "with pluginkit -a does not survive the next launch. See the "
+                    + "\"quarantine\" check above."
                 : nil)
 
         // What the extension's own read-only index reader last said about itself. The

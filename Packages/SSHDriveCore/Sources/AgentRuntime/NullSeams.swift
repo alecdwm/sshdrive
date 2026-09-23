@@ -109,6 +109,7 @@ struct UnconfiguredBundle: BundleInspecting {
     var helperResourcesURL: URL? { nil }
     func quarantineValue(atPath path: String) -> String? { nil }
     func plugInRegistration(bundleID: String) -> String? { nil }
+    func forceLaunchServicesRegistration() -> Bool { false }
     var operatingSystemVersion: (major: Int, minor: Int, patch: Int) {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         return (version.majorVersion, version.minorVersion, version.patchVersion)
