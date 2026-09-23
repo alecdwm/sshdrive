@@ -13,7 +13,7 @@ import Logging
 struct SSHDrive: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sshdrive",
-        abstract: "Mount SFTP locations in Finder.",
+        abstract: "Mount SSH servers in Finder.",
         discussion: """
             A command that changes something prints nothing when it works; prompts,
             warnings and errors always appear, and `-v` after the subcommand prints the

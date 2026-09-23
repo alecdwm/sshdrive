@@ -1,13 +1,14 @@
 # Goals and non-goals
 
-SSH Drive mounts remote SFTP locations into Finder through Apple's File Provider framework, the
+SSH Drive mounts remote SSH locations into Finder through Apple's File Provider framework, the
 mechanism iCloud Drive, Google Drive, OneDrive and Dropbox use on modern macOS. It has no GUI:
 everything is driven by the `sshdrive` CLI, and authentication is whatever the user's `ssh` already
 does.
 
 ## Goals
 
-- **SFTP only.** Each location is its own Finder sidebar entry, named
+- **SSH only.** Files move over SFTP on an SSH connection; there is no FTP, FTPS, SMB or
+  WebDAV. Each location is its own Finder sidebar entry, named
   `SSH Drive - <nickname, else hostname>`.
 - **Zero GUI.** Add, remove, configure and inspect through `sshdrive`.
 - **Dataless until opened.** Files are placeholders; opening one downloads it on demand.
@@ -44,7 +45,7 @@ The exceptions:
 
 ## Non-goals (v1)
 
-- Any protocol other than SFTP.
+- Any protocol other than SSH (and SFTP on it).
 - A menu-bar item, preference pane, windows or notification UI. Finder context-menu entries
   provided through the File Provider action mechanism are allowed: they are menu items handled by
   the extension, not a UI of our own.

@@ -1,6 +1,6 @@
 # SSH Drive
 
-A no-GUI macOS app that mounts remote SFTP locations into Finder through Apple's File Provider
+A no-GUI macOS app that mounts remote SSH locations into Finder through Apple's File Provider
 framework (like Mountain Duck / iCloud Drive). Files are dataless placeholders until opened; cached
 content is TTL-evicted unless pinned; mounts survive reboot, sleep and network loss; auth is whatever
 the user's own `ssh` already does. Everything is driven by the `sshdrive` CLI. The design lives in

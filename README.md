@@ -4,7 +4,7 @@
 </h1>
 
 <p align="center">
-  Your SFTP servers in Finder's sidebar, next to iCloud Drive.<br>
+  Your SSH servers in Finder's sidebar, next to iCloud Drive.<br>
   <a href="https://sshdrive.shirls.org/">Docs</a> ·
   <a href="https://sshdrive.shirls.org/install/">Install and use</a> ·
   <a href="https://sshdrive.shirls.org/troubleshooting/">Troubleshooting</a>
@@ -22,7 +22,7 @@ mount reconnects with nobody there to answer.
 ## Requirements
 
 - macOS 14 or newer.
-- A server you can reach over SFTP.
+- A server you can reach over SSH, with the SFTP subsystem enabled (OpenSSH enables it by default).
 
 ## Install
 

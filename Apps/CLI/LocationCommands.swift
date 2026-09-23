@@ -12,7 +12,7 @@ import Logging
 
 struct Add: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "Add an SFTP location and mount it in Finder.",
+        abstract: "Add an SSH location and mount it in Finder.",
         discussion: """
             Resolves the host with `ssh -G` and shows what it resolves to, warns when this
             terminal's PATH or SSH_AUTH_SOCK differs from the login shell snapshot the

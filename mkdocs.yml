@@ -1,5 +1,5 @@
 site_name: SSH Drive
-site_description: Mount SFTP locations in Finder on macOS, through Apple's File Provider framework.
+site_description: Mount SSH servers in Finder on macOS, through Apple's File Provider framework.
 site_url: https://sshdrive.shirls.org/
 repo_url: https://github.com/alecdwm/sshdrive
 repo_name: alecdwm/sshdrive

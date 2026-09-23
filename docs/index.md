@@ -8,12 +8,12 @@ title: SSH Drive
   <img class="hero-icon" src="assets/icon-256.png" alt="" width="112" height="112">
   <div class="hero-text">
     <p class="hero-title" role="heading" aria-level="1">SSH Drive</p>
-    <p class="hero-tagline">Your SFTP servers in Finder's sidebar, next to iCloud Drive. Files
+    <p class="hero-tagline">Your SSH servers in Finder's sidebar, next to iCloud Drive. Files
     download when you open them, and the cache clears itself.</p>
   </div>
 </div>
 
-SSH Drive mounts SFTP servers through Apple's
+SSH Drive mounts SSH servers through Apple's
 [File Provider](https://developer.apple.com/documentation/fileprovider) framework, the one iCloud
 Drive and Dropbox use. There is no window: you set a location up with the `sshdrive` command, then
 use Finder.
@@ -32,7 +32,7 @@ sshdrive add nas alec@nas.local
 - **Nobody needs to be at the keyboard on every connection.** The mount reconnects on its own, so
   `add` refuses a key that asks for a touch, a PIN or a one-time code each time. A key agent, a FIDO
   key made with `no-touch-required`, or a password works instead.
-- **You run macOS 14 or newer**, and the server speaks SFTP.
+- **You run macOS 14 or newer**, and the server allows SFTP over SSH, which OpenSSH does by default.
 
 ## What it does
 
