@@ -1,67 +1,62 @@
 # Server quirks
 
-Measured behaviour of remote servers - sshd and Tailscale SSH, SFTP implementations, login
-shells, `find` flavours and OpenSSH's own client - that SSH Drive depends on. Format and rules:
-[README.md](README.md). Each row is the record of its own measurement; `testbed/README.md` describes the
-service a row names in its **measured on** cell. Design pages named in the **source** column
-live under `docs/design/`.
+Measured behaviour of remote servers that SSH Drive depends on: sshd and Tailscale SSH, SFTP
+implementations, login shells, `find` flavours and OpenSSH's own client. Each row is the record of
+its own measurement. Format and rules are in [the catalog's README](README.md);
+`testbed/README.md` describes the service a row names in its **measured on** cell, and the design
+pages in the **source** column live under `docs/design/`.
 
 `ServerModel.ServerProfile` is built from these rows: a profile is a set of values for them, and
 the testbed's twelve services are twelve profiles.
 
-`Sources/ServerModel` keys a rule on each of the ids below, and `Tests/ServerModelTests`
-defends it with no Mac, no VM, no network and no testbed:
-`ServerProfileScenarios` (the profile table, the three extension sets, the prompt strings,
-and the assertion that every id the model keys on is a row of *this file*),
-`SFTPWireScenarios` (**L1**, **M2**, **D7**, **J8**, **J11**, **K12**, **N2** and the
-`SQ-027`/`SQ-028`/`SQ-029` wire rules, over a real SFTP v3 wire server),
-`ShellScenarios` (**J4**, **J5**, **J6**, **J7**, **J14**, **N4**, against real shells -
-J14 is the login-shell snapshot per shell shape, with the bite-proof that a reader
-waiting for EOF is still waiting when its deadline fires),
-`HelperShellScenarios` (**J9**, **J10**, **J13**: the real Rust helper's self-digest
-against a same-size corruption, `ETXTBSY` over a running executable and the
-temp-name-and-rename that gets past it, and an exec channel that dies 255 with
-nothing on stderr, reported to the log with its status and its stderr),
-`HeartbeatScenarios` (**J1** - including the bite-proof that a wrapper naming the ambient
-process group kills a sibling session - **J2**, **J3**),
-`SweepScenarios` (**H1**, **H2**, **H3**, **H4**, **H5**, **H6**, **H7**),
-`NamesAndAttributesScenarios` (**L7**, **L8**: the case collision the wire really
-carries, and the two bitmasks derived from a mode the server really reports),
-`TransportScenarios` (**K1**, **K2**, **K7**, **K9**, **K10**, **K11**, **K13**, **K14**,
-**N3**, **J12**, against a stub `ssh` that `SSHMaster` spawns exactly as it spawns the real
-one),
-`MasterScenarios` (**K3**, **K4**, **K5**, **K6** - the mux client's three options, the
-`-N` master's shape, the orphan sweep and the three routes `agent stop` needs to take
-every master - against real processes with real `AF_UNIX` sockets, each with the
-bite-proof that shows what the rule prevents: a mux client that opens a second
-unsupervised connection, a `ControlPersist` master that forks away from its own pid, and
-a name-only sweep that deletes the package's test databases).
+## Where the rows are defended
 
-**The same suite runs on the Mac, and the box is a seam there too.** Nothing is branched out
-with a `#if`: `ServerModel.HostTools` measures what the machine running the suite can actually
-do - the flavour of its own `find` by what it *accepts* (`SQ-081`), whether its filesystem will
-hold a name that is not valid UTF-8 (`SQ-080`), and its `PATH_MAX` and `sun_path` budgets
-(`SQ-085`) - and a row that meets one of those bounds skips with an `XCTSkip` naming the fact,
-the same rule as `ScriptShell.skipReason`. Exactly one row loses coverage on a Mac: `H7`'s
-real-`find` half, because APFS cannot hold the name (`SQ-080`); its `partitionRoots` and
-SFTP-wire halves still run there. `J14`'s zsh row is skipped by the same rule (`SQ-083`) with
-bash and dash still running on both. `SQ-082` and `SQ-084` are what let `K4`, `K6` and `J13`
-run on Darwin at all.
+`Sources/ServerModel` keys a rule on each id below, and `Tests/ServerModelTests` defends it with
+no Mac, no VM, no network and no testbed. A bite-proof is a test showing what the rule prevents.
+
+| Suite | Scenarios | Against |
+|---|---|---|
+| `ServerProfileScenarios` | | the profile table, the three extension sets, the prompt strings, and the assertion that every id the model keys on is a row of *this file* |
+| `SFTPWireScenarios` | L1, J8, J11, K12, N2 | a real SFTP v3 wire server; also the `SQ-027`/`SQ-028`/`SQ-029` wire rules and one `readlink` per link (`SQ-031`) |
+| `ShellScenarios` | J4, J5, J6, J7, J14, N4 | real shells. J14 is the login-shell snapshot per shell shape, with the bite-proof that a reader waiting for EOF is still waiting when its deadline fires |
+| `HelperShellScenarios` | J9, J10, J13 | the real Rust helper's self-digest against a same-size corruption, `ETXTBSY` over a running executable and the temp-name-and-rename that gets past it, and an exec channel that dies 255 with nothing on stderr, reported to the log with its status and its stderr |
+| `HeartbeatScenarios` | J1, J2, J3 | real shells; J1 includes the bite-proof that a wrapper naming the ambient process group kills a sibling session |
+| `SweepScenarios` | H1, H2, H3, H4, H5, H6, H7 | |
+| `NamesAndAttributesScenarios` | L7, L8 | the case collision the wire really carries, and the two bitmasks derived from a mode the server really reports |
+| `TransportScenarios` | K1, K2, K7, K9, K10, K11, K13, K14, N3, J12 | a stub `ssh` that `SSHMaster` spawns exactly as it spawns the real one |
+| `MasterScenarios` | K3, K4, K5, K6 | real processes with real `AF_UNIX` sockets. The bite-proofs: a mux client that opens a second unsupervised connection, a `ControlPersist` master that forks away from its own pid, and a name-only sweep that deletes the package's test databases |
 
 Nine of these rows are also defended from the **agent's** side, in
-`Tests/AgentRuntimeTests/AddFlowScenarios.swift`: suite **Q** drives the shipping
-`sshdrive add` end to end against `FakeSSH` and `FakeSFTPServer`, with a real
-`sshdrive-askpass`-shaped program answering from the real `AskpassBroker`, so the prompt
-strings (`SQ-060`), the missing hint on the host-key question (`SQ-047`), the truncating
-passphrase prompt (`SQ-048`), keyboard-interactive's shape (`SQ-062`), the per-hop argv rule
-(`SQ-063`) and the key-and-password server (`SQ-064`) are exercised by the code that makes
-the decision rather than by an assertion about a string.
+`Tests/AgentRuntimeTests/AddFlowScenarios.swift`. Suite **Q** drives the shipping `sshdrive add`
+end to end against `FakeSSH` and `FakeSFTPServer`, with a real `sshdrive-askpass`-shaped program
+answering from the real `AskpassBroker`. The prompt strings (`SQ-060`), the missing hint on the
+host-key question (`SQ-047`), the truncating passphrase prompt (`SQ-048`), keyboard-interactive's
+shape (`SQ-062`), the per-hop argv rule (`SQ-063`) and the key-and-password server (`SQ-064`) are
+exercised by the code that makes the decision rather than by an assertion about a string.
 
-A scenario needing a shell this box lacks - `busybox`, `fish`, `tcsh` - skips with a
-named reason rather than pretending, and **J1's bite-proof skips on macOS**: the sessions
-are put in one shared process group there too, but a `kill -TERM 0` reaches nothing but the
-sender's own child, so the row says so instead of passing for the wrong reason. Linux is
-the gate.
+### On a Mac
+
+The same suite runs on the Mac, and the box is a seam there too. Nothing is branched out with a
+`#if`: `ServerModel.HostTools` measures what the machine running the suite can do, and a row that
+meets one of those bounds skips with an `XCTSkip` naming the fact, the same rule as
+`ScriptShell.skipReason`. It measures:
+
+- the flavour of its own `find`, by what it *accepts* (`SQ-081`)
+- whether its filesystem will hold a name that is not valid UTF-8 (`SQ-080`)
+- its `PATH_MAX` and `sun_path` budgets (`SQ-085`)
+
+What that costs and buys on a Mac:
+
+- Exactly one row loses coverage: `H7`'s real-`find` half, because APFS cannot hold the name
+  (`SQ-080`). Its `partitionRoots` and SFTP-wire halves still run.
+- `J14`'s zsh row is skipped by the same rule (`SQ-083`); bash and dash still run on both.
+- `SQ-082` and `SQ-084` are what let `K4`, `K6` and `J13` run on Darwin at all.
+- **J1's bite-proof skips on macOS.** The sessions are put in one shared process group there too,
+  but a `kill -TERM 0` reaches nothing but the sender's own child, so the row says so instead of
+  passing for the wrong reason.
+
+A scenario needing a shell the box lacks (`busybox`, `fish`, `tcsh`) skips with a named reason
+rather than pretending. Linux is the gate.
 
 ## `find` and the sweep
 
@@ -158,15 +153,21 @@ the gate.
 
 **Measurement:** the prompts were captured with an `SSH_ASKPASS` script that logged `argv[1]`
 and `SSH_ASKPASS_PROMPT` and answered nothing, run against the testbed from the VM
-(macOS 26.4.1 arm64, `OpenSSH_10.2p1, LibreSSL 3.3.6`, 2026-09-04). `strings /usr/bin/ssh`
-gives the format strings behind them: `%s@%s's password: `,
-`Enter passphrase for key '%.100s': `, `The authenticity of host '%.200s (%s)' can't be
-established`, `Are you sure you want to continue connecting (yes/no/[fingerprint])? `,
-`Are you sure you want to continue connecting (yes/no)? `, `Warning: the %s host key for
-'%.200s' differs from the key for the IP address '%.128s'`, `Confirm user presence for key
-%s %s`, `Enter PIN for %s key %s: `, `Enter PIN for '%s': `. The last three have never been
-raised here: no security key was attached, so those rows of the classification table are the
-format strings plus unit tests.
+(macOS 26.4.1 arm64, `OpenSSH_10.2p1, LibreSSL 3.3.6`, 2026-09-04). `strings /usr/bin/ssh` gives
+the format strings behind them:
+
+- `%s@%s's password: `
+- `Enter passphrase for key '%.100s': `
+- `The authenticity of host '%.200s (%s)' can't be established`
+- `Are you sure you want to continue connecting (yes/no/[fingerprint])? `
+- `Are you sure you want to continue connecting (yes/no)? `
+- `Warning: the %s host key for '%.200s' differs from the key for the IP address '%.128s'`
+- `Confirm user presence for key %s %s`
+- `Enter PIN for %s key %s: `
+- `Enter PIN for '%s': `
+
+The last three have never been raised here: no security key was attached, so those rows of the
+classification table are the format strings plus unit tests.
 
 ## Helper targets and build
 

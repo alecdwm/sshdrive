@@ -1,9 +1,14 @@
 # Components and identifiers
 
-Two words are used strictly throughout these pages. **The agent** is SSH Drive's
-own background process, described below. A **key agent** is `ssh-agent`,
-1Password, Secretive, or anything else that answers on `SSH_AUTH_SOCK`; the
-literal `ssh` message `agent refused operation` refers to one of those.
+SSH Drive is four executables in one app bundle plus a helper binary uploaded to servers. The
+background agent owns everything of consequence; the extension, the CLI and askpass are thin XPC
+clients of it.
+
+Two words are used strictly on these pages. **The agent** is SSH Drive's own background process. A
+**key agent** is `ssh-agent`, 1Password, Secretive, or anything else that answers on
+`SSH_AUTH_SOCK`; the literal `ssh` message `agent refused operation` refers to one of those.
+
+## Bundle layout
 
 ```
 SSH Drive.app                          (LSUIElement agent app, Developer ID signed, notarized)
@@ -19,7 +24,11 @@ SSH Drive.app                          (LSUIElement agent app, Developer ID sign
 │                                      (change-detection.md, tier 2)
 └── Contents/Library/LaunchAgents/org.shirls.sshdrive.agent.plist
                                        registered via SMAppService.agent
+```
 
+## The shared package
+
+```
 Shared Swift package: SSHDriveCore
 ├── Config         location model, JSON store in the app-group container
 ├── Secrets        keychain wrapper (shared access group, data-protection keychain)
@@ -34,62 +43,71 @@ Shared Swift package: SSHDriveCore
 └── Logging        os.Logger subsystems, shared by all processes
 ```
 
-The four executables are adapters. They translate between Apple's types and the
-package and hold no branch worth testing; a new rule belongs in `ProviderCore`
-or `AgentRuntime` with a scenario ([testing](testing.md)).
+The four executables are adapters. They translate between Apple's types and the package and hold
+no branch worth testing; a new rule belongs in `ProviderCore` or `AgentRuntime` with a scenario
+([testing](testing.md)).
 
-Why the agent owns everything:
+## What each process does
 
-- **Extension**: mandatory, sandboxed, ephemeral. Answers `item(for:)`
-  and the working-set change stream from the domain's index, which it
-  opens read-only ([the extension](extension.md)), and translates every
-  other system call (list, fetch, create, modify, delete) into one XPC
-  call to the agent and the reply back. It holds no state of its own,
-  opens no sockets and never writes the index. Its only other file I/O is
-  the index it reads, the temp file the system gives it for fetched
-  content, whose handle it passes to the agent to fill, and
-  `domains/<id>/reader-state.json`, where it records the state of its
-  own index reader for `sshdrive doctor` ([the index](item-index.md)).
-- **Agent**: a `SMAppService` login agent whose plist sets `RunAtLoad`
-  and `KeepAlive` with `SuccessfulExit` false, so it runs from login
-  rather than from the first mach lookup, comes back after a crash, and
-  stays down after a deliberate exit until the next lookup
-  ([packaging and install](packaging.md)): the poll schedule, the
-  eviction loop, the kept-subtree refresh and the wake handler are timers
-  of its own and would otherwise not run until Finder touched a domain.
-  Invisible. Owns the `ssh` processes, the SFTP sessions, the per-domain
-  index, the change detection streams, the eviction loop, and the File
-  Provider domain lifecycle (`add`, `remove`, `signalEnumerator`,
-  `evictItem`). It is the only writer of the index and, with one
-  exception, the only process that changes domain state through
-  `NSFileProviderManager`: the extension calls `disconnect(reason:)` and
-  `reconnect()` on its own domain when the agent cannot be reached
-  ([the extension](extension.md)), the one case where the agent is not
-  there to do it (its other uses of the manager, the temp directory and
-  `signalEnumerator`, change nothing).
-- **CLI**: the only user interface. A pure XPC client of the agent: every
-  command is a request to the agent, so the CLI never touches the network,
-  the keychain or File Provider. It can therefore be invoked through any
-  path, including the Homebrew symlink. Even `sshdrive add` does not run
-  `ssh`: the agent makes the verification connection in its own
-  environment and the CLI only relays prompts to the terminal
-  ([secrets](secrets.md)).
-- **askpass**: the program `ssh` calls for every prompt. Also a pure XPC
-  client: it forwards the prompt to the agent with a one-time token and
-  prints whatever the agent answers. It reads nothing itself
-  ([secrets](secrets.md)).
+### Extension
 
-Putting SSH in the agent rather than the extension is what makes the auth
-goal in [goals and non-goals](goals.md) true: the agent is not sandboxed, so
-`ssh` reads `~/.ssh/config`, talks to `ssh-agent`, runs `ProxyCommand`, and
-uses FIDO keys exactly as it does in a terminal. It also puts the long-running
-watch streams ([change detection](change-detection.md)) in the one process
-that is allowed to be long-running, and gives the index a single writer. The
-cost is that the mount depends on the login agent being enabled
-([the extension](extension.md)).
+Mandatory, sandboxed, ephemeral.
 
-Shared state lives in the app-group container
-`~/Library/Group Containers/RWGDZAYBM8.org.shirls.sshdrive/`:
+- Answers `item(for:)` and the working-set change stream from the domain's index, which it opens
+  read-only ([the extension](extension.md)).
+- Translates every other system call (list, fetch, create, modify, delete) into one XPC call to the
+  agent and passes the reply back.
+- Holds no state, opens no sockets, never writes the index.
+- Its only other file I/O: the temp file the system gives it for fetched content, whose handle it
+  passes to the agent to fill, and `domains/<id>/reader-state.json`, where it records the state of
+  its index reader for `sshdrive doctor` ([the index](item-index.md)).
+- Calls `disconnect(reason:)` and `reconnect()` on its own domain when the agent cannot be reached
+  ([the extension](extension.md)). This is the one case where a process other than the agent
+  changes domain state, because the agent is not there to do it. Its other uses of
+  `NSFileProviderManager` (the temp directory, `signalEnumerator`) change nothing.
+
+### Agent
+
+An invisible `SMAppService` login agent.
+
+- Its plist sets `RunAtLoad` and `KeepAlive` with `SuccessfulExit` false: it runs from login rather
+  than from the first mach lookup, comes back after a crash, and stays down after a deliberate exit
+  until the next lookup ([packaging and install](packaging.md)). Running from login matters because
+  the poll schedule, the eviction loop, the kept-subtree refresh and the wake handler are its own
+  timers and would otherwise not run until Finder touched a domain.
+- Owns the `ssh` processes, the SFTP sessions, the per-domain index, the change detection streams,
+  the eviction loop, and the domain lifecycle (`add`, `remove`, `signalEnumerator`, `evictItem`).
+- Is the only writer of the index and, apart from the extension's `disconnect`/`reconnect` above,
+  the only process that changes domain state through `NSFileProviderManager`.
+
+### CLI
+
+The only user interface, and a pure XPC client: every command is a request to the agent, so the CLI
+never touches the network, the keychain or File Provider, and can be invoked through any path,
+including the Homebrew symlink. Even `sshdrive add` does not run `ssh`: the agent makes the
+verification connection in its own environment and the CLI only relays prompts to the terminal
+([secrets](secrets.md)).
+
+### askpass
+
+The program `ssh` calls for every prompt. A pure XPC client that reads nothing itself: it forwards
+the prompt to the agent with a one-time token and prints the agent's answer
+([secrets](secrets.md)).
+
+### Why the agent owns everything
+
+- The agent is not sandboxed, so `ssh` reads `~/.ssh/config`, talks to `ssh-agent`, runs
+  `ProxyCommand` and uses FIDO keys exactly as in a terminal. That is what makes the auth promise
+  of [goals and non-goals](goals.md) true.
+- The long-running watch streams ([change detection](change-detection.md)) live in the one process
+  allowed to be long-running.
+- The index has a single writer.
+
+The cost is that the mount depends on the login agent being enabled ([the extension](extension.md)).
+
+## Shared state
+
+The app-group container is `~/Library/Group Containers/RWGDZAYBM8.org.shirls.sshdrive/`:
 
 ```
 config.json                  schema version, the install's macId (writes.md), locations (no secrets)
@@ -106,11 +124,10 @@ domains/<location-id>/
     capabilities.json        cached server probe (cli.md)
 ```
 
-Secrets (passwords, key passphrases) go in the keychain under access group
-`RWGDZAYBM8.org.shirls.sshdrive`, keyed by the prompt's identity,
-`password:<user>@<hostname>:<port>` or `passphrase:<keypath>`, and shared by
-every location that names the same one ([secrets](secrets.md)); never in
-`config.json`, and read and written only by the agent.
+Secrets (passwords, key passphrases) are never in `config.json`. They go in the keychain under
+access group `RWGDZAYBM8.org.shirls.sshdrive`, keyed `password:<user>@<hostname>:<port>` or
+`passphrase:<keypath>`, shared by every location that names the same item, and read and written
+only by the agent ([secrets](secrets.md)).
 
 ## Identifiers
 
@@ -130,24 +147,16 @@ every location that names the same one ([secrets](secrets.md)); never in
 | Source repository | `https://github.com/alecdwm/sshdrive` |
 | Domain identifier | the location's UUID ([the location model](locations.md)) |
 
-Entitlements per target:
+## Entitlements
 
-- Extension: `com.apple.security.app-sandbox`,
-  `com.apple.security.application-groups` (required to connect to the
-  group-prefixed mach service),
-  `com.apple.developer.fileprovider.testing-mode` (debug builds only). No
-  network entitlement: the extension never opens a socket.
-- App/agent: hardened runtime, `com.apple.security.application-groups`,
-  `keychain-access-groups`. The latter is a restricted entitlement on
-  macOS and needs a Developer ID provisioning profile, which only a bundle
-  can embed; the app bundle carries one, and the agent, as the bundle's
-  main executable, is therefore the only process with keychain access. Not
-  sandboxed ([security](security.md)). A profile authorises only the
-  certificate it was issued for: signed with a different Developer ID
-  Application certificate than the profile names, every restricted
-  entitlement is unsatisfied, `amfid` answers `-413 "No matching profile
-  found"` and the agent is SIGKILLed at exec, having notarized and stapled
-  perfectly first ([packaging and install](packaging.md)).
-- CLI and askpass: hardened runtime only. They are bare executables in
-  `Contents/MacOS`, cannot embed a profile, and need no entitlement: both
-  are pure XPC clients of the agent ([secrets](secrets.md)).
+| Target | Entitlements | Notes |
+|---|---|---|
+| Extension | `com.apple.security.app-sandbox`, `com.apple.security.application-groups`, `com.apple.developer.fileprovider.testing-mode` (debug builds only) | The app group is required to connect to the group-prefixed mach service. No network entitlement: the extension never opens a socket. |
+| App / agent | hardened runtime, `com.apple.security.application-groups`, `keychain-access-groups` | Not sandboxed ([security](security.md)). `keychain-access-groups` is restricted and needs a Developer ID provisioning profile, which only a bundle can embed; the bundle carries one, so the agent, as its main executable, is the only process with keychain access. |
+| CLI and askpass | hardened runtime only | Bare executables in `Contents/MacOS` cannot embed a profile, and need no entitlement: both are pure XPC clients of the agent ([secrets](secrets.md)). |
+
+!!! warning "A profile only authorises its own certificate"
+    Signed with a different Developer ID Application certificate than the profile names, every
+    restricted entitlement is unsatisfied: `amfid` answers `-413 "No matching profile found"` and
+    the agent is SIGKILLed at exec, after notarizing and stapling perfectly
+    ([packaging and install](packaging.md); gotcha 91).

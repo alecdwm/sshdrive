@@ -1,6 +1,12 @@
 # Testing
 
-The principle, in the owner's words:
+The whole suite runs on Linux, against models of macOS and of servers that encode every behaviour
+measured so far. The Mac VM only measures: it seeds the models, and a green Linux suite is what
+proves a change.
+
+## The principle
+
+In the owner's words:
 
 > "I would like as much of the testing as possible to be done in a way that encodes mocks
 > measured/known macOS behaviour and then exercises the codebase against all known issues
@@ -10,6 +16,54 @@ The principle, in the owner's words:
 > run 100% isolated on a Linux box. We should only use the VM to seed the macOS mocks into the
 > tests."
 
+## Running the suite
+
+On Linux, where the suite is the gate:
+
+```sh
+. ~/.local/share/swiftly/env.sh
+cd Packages/SSHDriveCore
+swift test
+cd ../../helper && cargo test && cargo clippy -- -D warnings
+```
+
+No Mac, no VM, no network, no testbed, no `docker compose`. The run is 819 XCTest tests with 41
+skipped, 65 swift-testing tests in twelve suites, and 54 crate tests for the helper. The 41 skips
+are the testbed-backed tests in `SFTPTests` and `SSHProcessTests`, gated on `SSHDRIVE_TESTBED=1`.
+The testbed answers the build VM and nothing else, so they are inert here.
+
+### On the build VM
+
+The same `swift test` must be green on the VM too. It is the same scenarios against a different
+box, not a second suite:
+
+- Extra tests: the mirrored-constant assertions, which need Apple's frameworks (see
+  [the extension's seams](#the-extensions-providercore)).
+- Extra skips: rows whose premise a Mac cannot hold, each skipping by name
+  (see [the box is a seam too](#the-box-is-a-seam-too)).
+- macOS has no `timeout` and none of the shells some rows want, so start a long run detached on
+  the VM and poll it.
+
+```sh
+scripts/mac-build.sh test     # sync, xcodegen, swift build + swift test on the VM
+scripts/mac-build.sh app      # sync, xcodegen, xcodebuild, ad-hoc sign
+```
+
+`Apps/` needs a Mac only to compile and sign.
+
+!!! warning "Run `signed` last"
+    `scripts/mac-build.sh` rsyncs the tree to the VM with `--delete`, and there is no `build/` on
+    the Linux side, so every run wipes the Mac's build directory.
+
+### The testbed and CI
+
+The testbed is twelve real SSH servers in Docker Compose, run **on the Mac that hosts the build
+VM**, never on the Linux box. It exists to seed `SQ` rows and to answer questions the model
+cannot; no ordinary run needs it. `testbed/README.md` has the account table, the `~/.ssh/config`
+stanzas and the per-service smoke tests.
+
+`.github/workflows/helper.yml` builds and tests the Rust crate and cross-compiles its targets.
+
 ## No decision under `Apps/`
 
 `Apps/` is adapters: Apple types in, package types out, package types in, Apple calls out. A
@@ -17,29 +71,29 @@ reviewer should be able to read any file there in one sitting and find no branch
 
 | Target | Files | Lines | What is in it |
 |---|---|---|---|
-| `Apps/Agent` | 10 | 2,012 | the three roles, the XPC listener and services, the IOKit/`NWPathMonitor`/`CGEventSource`/`SMAppService`/`launchctl` adapters, `ReplicaControlling` over `NSFileProviderManager` |
+| `Apps/Agent` | 10 | 2,049 | the three roles, the XPC listener and services, the IOKit/`NWPathMonitor`/`CGEventSource`/`SMAppService`/`launchctl` adapters, `ReplicaControlling` over `NSFileProviderManager` |
 | `Apps/FileProvider` | 5 | 979 | [the extension](extension.md): `NSFileProviderReplicatedExtension`, the enumerator and observer adapters, `NSFileProviderItem` over an `ItemView`, the `NSXPCConnection` half |
-| `Apps/CLI` | 8 | 2,582 | argument parsing, output formatting, the XPC client |
+| `Apps/CLI` | 8 | 2,654 | argument parsing, output formatting, the XPC client |
 | `Apps/Askpass` | 1 | 97 | one prompt relayed to the agent |
 
-A new rule the extension follows belongs in `ProviderCore` with a scenario. A new rule the
-agent follows belongs in `AgentRuntime` with a scenario. Nowhere else.
+A new rule the extension follows belongs in `ProviderCore` with a scenario. A new rule the agent
+follows belongs in `AgentRuntime` with a scenario. Nowhere else.
 
 `Packages/SSHDriveCore` holds `Logging`, `XPCProtocols`, `XPCInterfaces`, `Config`, `Index`,
 `SFTP`, `Secrets`, `SSHProcess`, `AgentCore`, `ProviderCore`, `AgentRuntime`,
-`AgentRuntimeTestSupport`, `SystemModel` and `ServerModel`. All of it builds and tests on
-Linux; `XPCInterfaces` (the `@objc` NSXPC protocols and the configured `NSXPCInterface`
-whitelists, linked only by the four app targets) has `#if canImport(Darwin)` file bodies and
-compiles to nothing off Darwin.
+`AgentRuntimeTestSupport`, `SystemModel` and `ServerModel`. All of it builds and tests on Linux.
+`XPCInterfaces` (the `@objc` NSXPC protocols and the configured `NSXPCInterface` whitelists,
+linked only by the four app targets) has `#if canImport(Darwin)` file bodies and compiles to
+nothing off Darwin.
 
 ## The seams
 
 ### The extension's (`ProviderCore`)
 
-Everything `Apps/FileProvider` would otherwise decide - the two enumerators, the working-set
-change path and its fallback, the reader store and its readiness rule, item construction, the
-trash contract, error selection and the two Finder actions - is
-`ProviderCore`, behind platform-free protocols:
+Everything `Apps/FileProvider` would otherwise decide is in `ProviderCore`: the two enumerators,
+the working-set change path and its fallback, the reader store and its readiness rule, item
+construction, the trash contract, error selection and the two Finder actions. It sits behind
+platform-free protocols:
 
 | Name | What it is |
 |---|---|
@@ -52,22 +106,23 @@ trash contract, error selection and the two Finder actions - is
 | `ProviderClock` | `now()`, injected |
 | `ProviderDomainSignalling` | the signals the extension raises back at the system |
 
-Apple's identifiers, capability bits, `fileSystemFlags` bits, `changedFields` bits, content
-policy and error codes are mirrored as `ProviderItemIdentifier`, `ProviderSyncAnchor`,
+Apple's identifiers, capability bits, `fileSystemFlags` bits, `changedFields` bits, content policy
+and error codes are mirrored as `ProviderItemIdentifier`, `ProviderSyncAnchor`,
 `ProviderCapabilities`, `ProviderFileSystemFlags`, `ProviderItemFields` and
-`ProviderContentPolicy`, so `AgentCore` and `ProviderCore` need no `import FileProvider`. A
-mirror that drifted would be silent: the adapter would keep compiling and the Linux suite
-would keep passing. `Tests/ProviderCoreTests/MirroredProviderConstantsTests.swift` and
-`Tests/AgentRuntimeTests/MirroredAgentConstantsTests.swift` are one assert per constant
-against Apple's own, compiled only where Apple's frameworks exist, and they are the reason the
-suite is also run on the Mac.
+`ProviderContentPolicy`, so `AgentCore` and `ProviderCore` need no `import FileProvider`.
+
+A mirror that drifted would be silent: the adapter keeps compiling and the Linux suite keeps
+passing. `Tests/ProviderCoreTests/MirroredProviderConstantsTests.swift` and
+`Tests/AgentRuntimeTests/MirroredAgentConstantsTests.swift` are one assert per constant against
+Apple's own, compiled only where Apple's frameworks exist. They are the reason the suite also runs
+on the Mac.
 
 ### The agent's (`AgentRuntime`)
 
 `LocationRuntime` and its extensions, `DomainManager`, `ChangeDetector`, `CacheEvictor`,
-`IndexReconcile`, `ReconnectingTransport` and its gate, `SSHBackedTransport`, the channel
-budget, the helper's deployment and stream, the collect connection and both command handlers
-live in `AgentRuntime` behind fifteen protocols:
+`IndexReconcile`, `ReconnectingTransport` and its gate, `SSHBackedTransport`, the channel budget,
+the helper's deployment and stream, the collect connection and both command handlers live in
+`AgentRuntime` behind fifteen protocols:
 
 | Protocol | Darwin implementation (`Apps/Agent`) | Linux implementation |
 |---|---|---|
@@ -87,39 +142,39 @@ live in `AgentRuntime` behind fifteen protocols:
 | `AgentEndpoint` | the NSXPC listener and `exit` | `RecordingEndpoint` |
 | `AgentClock` | the system clock | `VirtualAgentClock` |
 
-`AgentClock` answers `now()` (wall clock, what the schedules are in), `uptime()` (monotonic,
-what the breaker's backoff is in) and `sleep(seconds:)`, so a scenario drives both readings
-together. `AgentEndpoint.terminate(status:)` does not return `Never`: the real one calls
-`exit`, the harness records the status, and `P4` asserts that SIGTERM exits 0.
-
-Two protocols sit beside the fifteen: `TerminalRelaying` (the CLI as the collect connection
-sees it, one note and one prompt; `ScriptedTerminal` off Darwin) and `LiveConnection` (an
+Two protocols sit beside the fifteen: `TerminalRelaying` (the CLI as the collect connection sees
+it, one note and one prompt; `ScriptedTerminal` off Darwin) and `LiveConnection` (an
 `SFTPTransport` the gate hands out or does not).
 
-The seams are one value, `AgentEnvironment`, and `DomainManager` is constructed with it
-rather than reading singletons. That is what lets one process run two agents.
-`DomainManager.shared` still exists for the XPC command layer, which is reached from an object
-made per connection and has nothing else to hold; a scenario binds its own through
-`AgentCommandContext`, a task local, for the duration of one call.
+Details that matter when writing a scenario:
 
-`AgentRuntimeTestSupport` is the in-memory half: the fakes above plus `AgentHarness`, which
-gives a scenario an `AgentEnvironment` it can drive, a `DomainManager` on it, a real SQLite
-index and a temporary directory standing in for the group container. `Config.GroupContainer`
-is process-wide, so the harness installs its locator on set-up and puts it back on tear-down,
-and the suites that use it are `.serialized`.
+- `AgentClock` answers `now()` (wall clock, what the schedules are in), `uptime()` (monotonic,
+  what the breaker's backoff is in) and `sleep(seconds:)`, so a scenario drives both readings
+  together.
+- `AgentEndpoint.terminate(status:)` does not return `Never`: the real one calls `exit`, the
+  harness records the status, and `P4` asserts that SIGTERM exits 0.
+- The seams are one value, `AgentEnvironment`, and `DomainManager` is constructed with it rather
+  than reading singletons. That is what lets one process run two agents.
+- `DomainManager.shared` still exists for the XPC command layer, which is reached from an object
+  made per connection and has nothing else to hold. A scenario binds its own through
+  `AgentCommandContext`, a task local, for the duration of one call.
+
+`AgentRuntimeTestSupport` is the in-memory half: the fakes above plus `AgentHarness`, which gives
+a scenario an `AgentEnvironment` it can drive, a `DomainManager` on it, a real SQLite index and a
+temporary directory standing in for the group container. `Config.GroupContainer` is process-wide,
+so the harness installs its locator on set-up and puts it back on tear-down, and the suites that
+use it are `.serialized`.
 
 ## `SystemModel`
 
 A simulated fileproviderd, Finder and launchd. It drives `ProviderCore` through the protocols
-above, exactly as the real one drives `Apps/FileProvider`, and behaves the way macOS was
-measured to behave, with the version's quirk table deciding every difference. The agent on the
-other side is `ModelAgent`: a scripted `AgentChannel` whose answers come from a real
-`IndexWriter` on a real SQLite file, so "an index with rows the replica lacks" means real rows
-and the extension's reader reads the same file. What is scripted is whether the agent is
-reachable and what it answers to `indexReady`.
+above exactly as the real one drives `Apps/FileProvider`, and behaves the way macOS was measured
+to behave, with the version's quirk table deciding every difference.
 
-A scenario builds a `FileProviderD` for a version, a `ModelAgent` over a real SQLite index in
-a temporary group container, and drives them:
+The agent on the other side is `ModelAgent`: a scripted `AgentChannel` whose answers come from a
+real `IndexWriter` on a real SQLite file. "An index with rows the replica lacks" means real rows,
+and the extension's reader reads the same file. Only two things are scripted: whether the agent is
+reachable, and what it answers to `indexReady`.
 
 ```swift
 let harness = try ScenarioHarness(macOS: .v26_4)
@@ -130,33 +185,21 @@ harness.clock.advance(60)              // the driven clock; nothing sleeps
 XCTAssertEqual(harness.finderListing(), ["note.txt"])
 ```
 
-Three parts:
+| Part | What it simulates |
+|---|---|
+| `FileProviderD` | the replica (a tree of items with `isDownloaded`, size, versions, xattrs, `tagData`, content policy and pending state), the domain list, the working-set change stream, the sync-anchor bookkeeping, the pending-operation queue with its retry schedules, the error throttler, the download scheduler with its concurrency ceiling, and the trash node. It calls `ProviderCore` exactly as fileproviderd calls the extension, including launching a fresh provider instance for every working-set signal |
+| `Finder` | the user: `open`, `read`, `openAtOnce`, `create`, `symlink`, `duplicate`, `save` (the atomic-save shape), `rename`, `chmod`, `tag`, `setExtendedAttribute`, `delete`, a `walk` answered from the replica that never reaches the extension, and `contextMenu(for:)`, which evaluates an action's activation rule the way `fileproviderctl evaluate` does |
+| `Launchd` | the agent job, `RunAtLoad`, `KeepAlive`/`SuccessfulExit`, SIGTERM, the login-item record, `unregister`'s asynchrony and the launch-constraint window, bundle replacement, quarantine and the plugin registration that depends on it |
 
-- **`FileProviderD`** - the replica (a tree of items with `isDownloaded`, size, versions,
-  xattrs, `tagData`, content policy and pending state), the domain list, the working-set
-  change stream, the sync-anchor bookkeeping, the pending-operation queue with its retry
-  schedules, the error throttler, the download scheduler with its concurrency ceiling, and the
-  trash node. It calls `ProviderCore` exactly as fileproviderd calls the extension, including
-  launching a fresh provider instance for every working-set signal.
-- **`Finder`** - the user: `open`, `read`, `openAtOnce`, `create`, `symlink`, `duplicate`,
-  `save` (the atomic-save shape), `rename`, `chmod`, `tag`, `setExtendedAttribute`, `delete`,
-  a `walk` that is answered from the replica and never reaches the extension, and
-  `contextMenu(for:)`, which evaluates an action's activation rule the way
-  `fileproviderctl evaluate` does.
-- **`Launchd`** - the agent job, `RunAtLoad`, `KeepAlive`/`SuccessfulExit`, SIGTERM, the
-  login-item record, `unregister`'s asynchrony and the launch-constraint window, bundle
-  replacement, quarantine and the plugin registration that depends on it.
+`VirtualClock` is the only clock in the model. `advance` moves time, releases whatever the
+simulated schedulers owe, and returns when everything queued has run. There is no real sleeping
+in the suite.
 
-`VirtualClock` is the only clock in the model: `advance` moves time, releases whatever the
-simulated schedulers owe, and returns when everything queued has run. There is no real
-sleeping in the suite.
+### Quirks and versions
 
 Every behaviour the model implements is keyed to an `MQ-###` id from
-[the quirk catalogue](../quirks/macos.md); a version whose table says otherwise gets the other
-behaviour. `QuirkTable(for:)` resolves each id to the value measured nearest that version and
-**refuses to resolve an id with no measurement covering it**, so a scenario that depends on an
-unmeasured quirk on a version we claim to support fails loudly with the id rather than
-quietly taking someone's guess.
+[the macOS quirk catalogue](../quirks/macos.md); a version whose table says otherwise gets the
+other behaviour.
 
 ```swift
 public struct Quirk {
@@ -166,180 +209,188 @@ public struct Quirk {
 }
 ```
 
-`MacOSVersion` has two columns today, `26.4` and `26.6`, and they are identical unless a quirk
-says otherwise. macOS 14 and 15 are the supported minimum and nothing has been measured on
-either; every empty cell in the catalogue is that work item, and any scenario reaching for one
-of those columns fails rather than guesses.
+`QuirkTable(for:)` resolves each id to the value measured nearest that version and **refuses to
+resolve an id with no measurement covering it**. A scenario that depends on an unmeasured quirk on
+a supported version fails loudly with the id rather than quietly taking someone's guess.
 
-Where a value was taken once, or bracketed rather than measured, the rule that reads it and
-the catalogue row both carry a `confidence:` note. Five do: the window in which an eviction
-straight after a `modifyItem` reply is refused (`MQ-017`), the single deferred atime advance
-(`MQ-022`), the reading that the dividing line in `MQ-029` is a new container rather than a
-new item, the unpin settle window (`MQ-034`), and the length of the window `unregister()`
-leaves open (`MQ-063`).
+`MacOSVersion` has two columns, `26.4` and `26.6`, identical unless a quirk says otherwise. macOS
+14 and 15 are the supported minimum and nothing has been measured on either. Every empty cell in
+the catalogue is that work item, and a scenario reaching for one of those columns fails rather
+than guesses.
+
+Where a value was taken once, or bracketed rather than measured, the rule that reads it and the
+catalogue row both carry a `confidence:` note. Five do:
+
+- the window in which an eviction straight after a `modifyItem` reply is refused (`MQ-017`)
+- the single deferred atime advance (`MQ-022`)
+- the reading that the dividing line in `MQ-029` is a new container rather than a new item
+- the unpin settle window (`MQ-034`)
+- the length of the window `unregister()` leaves open (`MQ-063`)
 
 ## `ServerModel`
 
-The remote half: a whole SSH/SFTP server universe in process, plus the parts that are honest
-to run for real on Linux.
+The remote half: a whole SSH/SFTP server universe in process, plus the parts that are honest to
+run for real on Linux.
 
-**`ServerProfile`** is one value describing a server - `sftp` implementation, the advertised
-extension list in order, `findFlavour`, `loginShell`, `forceCommand`, `maxSessions`,
-`sessionGrouping`, `clientAliveInterval`, `reapsOrphans`, `clockOffset`, `umask`,
-`caseInsensitive`, `renameOverwrites`, `hasSHA256Sum`, `hasMkfifo`, `unameSM`,
-`identificationString`, `auth`, and the `quirks` list naming the `SQ-###` rows it carries.
-Twenty-one constants: the twelve testbed services, five account variants of them that behave
-differently (`debianPassword`, `debianKeyOrPassword`, `debianBackgroundHolder`,
-`debianForceCommand`, `debianExternalSFTPQuiet`), the owner's own two servers (`ownerDebian`,
-`ownerTailscale`), and two we have no access to and model anyway (`freeBSD`, `synologyDSM`).
-The extension sets are exact, because `sshdrive status` reads them: Go `pkg/sftp` advertises
-exactly `hardlink@openssh.com`, `posix-rename@openssh.com` and
-`statvfs@openssh.com`; OpenSSH's own server adds `fsync`, `lsetstat`, `limits`, `expand-path`,
-`copy-data`, `home-directory` and `users-groups-by-id`.
+### `ServerProfile`
 
-Three stand-ins do the rest. The first two speak the same `SSHProcess.ByteStream` a mux
-client's stdio does, so `SFTPClient`, `RemoteScript`, the sweep script, the sentinel, the
-heartbeat wrapper and the helper's NDJSON reader all run unmodified.
+One value describing a server: `sftp` implementation, the advertised extension list in order,
+`findFlavour`, `loginShell`, `forceCommand`, `maxSessions`, `sessionGrouping`,
+`clientAliveInterval`, `reapsOrphans`, `clockOffset`, `umask`, `caseInsensitive`,
+`renameOverwrites`, `hasSHA256Sum`, `hasMkfifo`, `unameSM`, `identificationString`, `auth`, and
+the `quirks` list naming the `SQ-###` rows it carries.
 
-- **`FakeSFTPServer`** - a real SFTP v3 **wire** server over a `ByteStream` pair. It speaks the
-  protocol, not a mock of it: `SSH_FXP_VERSION` with the profile's extension list, status
-  classes and no errno so `ENOSPC`/`EEXIST`/`ENOTEMPTY`/`EXDEV` all arrive as a bare `FAILURE`,
-  OpenSSH's reversed `SSH2_FXP_SYMLINK` argument order, an `opendir` that follows a symlink, a
-  `readdir` carrying attributes but no link target, `limits@openssh.com` values, `posix-rename`
-  present or absent, a plain `rename` that does or does not overwrite, `ETXTBSY` on a write
-  over a running executable, `mkdir` attributes filtered by the umask, and case folding.
-  `SFTP.FakeTransport` remains the fast in-memory double for tests that do not care about the
-  wire.
-- **`FakeExecChannel`** - an exec channel whose remote end is **a real POSIX shell on the box
-  running the tests**. It picks the profile's shell, prepends the profile's rc-file noise,
-  applies the `ForceCommand` refusal sentence where the profile has one, enforces
-  `MaxSessions`, and models the session's process-group policy with a real `setsid` or a
-  shared pgid, so `kill -TERM 0` really does or does not reach a bystander. A scenario needing
-  a shell the box does not have (`fish`, `tcsh`, `zsh`) skips with a named reason rather than
-  pretending. The shell scripts are tested against real shells because that is where three of
-  the worst bugs this project has had lived: the `;;` dash rejects, the `{ … }` group the
-  heartbeat reader would otherwise eat off its own stdin, and the `printf "\0<sentinel>"`
-  that ate its own sentinel.
-- **`FakeSSH`** - a small executable the package builds, installed at
-  `SSHProcess.sshBinaryPath` as the `TransportLauncher`'s "ssh", so `SSHInvocation`'s argv
-  assembly, the spawn, `ExitClassification` and `ControlSocket` are exercised for real. It
-  binds a real `ControlPath` socket, answers `-O check` and `-O exit`, honours or ignores
-  `ControlPersist`, prints the measured stderr sentences with CRLF line endings, prints
-  `remote software version …` only at `DEBUG1` and above, invokes `SSH_ASKPASS` with the
-  measured prompt strings including their trailing spaces, applies OpenSSH's readconf
-  first-setting-wins rule, percent-expands a `ProxyCommand` before handing it to `/bin/sh`,
-  and exits 255 with nothing on stderr when its remote command was killed by a signal.
+There are twenty-one constants:
+
+- the twelve testbed services
+- five account variants of them that behave differently: `debianPassword`,
+  `debianKeyOrPassword`, `debianBackgroundHolder`, `debianForceCommand`, `debianExternalSFTPQuiet`
+- the owner's own two servers, `ownerDebian` and `ownerTailscale`
+- two we have no access to and model anyway, `freeBSD` and `synologyDSM`
+
+The extension sets are exact, because `sshdrive status` reads them. Go `pkg/sftp` advertises
+exactly `hardlink@openssh.com`, `posix-rename@openssh.com` and `statvfs@openssh.com`; OpenSSH's
+own server adds `fsync`, `lsetstat`, `limits`, `expand-path`, `copy-data`, `home-directory` and
+`users-groups-by-id`.
+
+### The three stand-ins
+
+`FakeSFTPServer` and `FakeExecChannel` speak the same `SSHProcess.ByteStream` a mux client's stdio
+does, so `SFTPClient`, `RemoteScript`, the sweep script, the sentinel, the heartbeat wrapper and
+the helper's NDJSON reader all run unmodified.
+
+**`FakeSFTPServer`** is a real SFTP v3 wire server over a `ByteStream` pair. It speaks the
+protocol, not a mock of it:
+
+- `SSH_FXP_VERSION` with the profile's extension list
+- status classes and no errno, so `ENOSPC`/`EEXIST`/`ENOTEMPTY`/`EXDEV` all arrive as a bare
+  `FAILURE`
+- OpenSSH's reversed `SSH2_FXP_SYMLINK` argument order
+- an `opendir` that follows a symlink, and a `readdir` carrying attributes but no link target
+- `limits@openssh.com` values, `posix-rename` present or absent, and a plain `rename` that does or
+  does not overwrite
+- `ETXTBSY` on a write over a running executable, `mkdir` attributes filtered by the umask, and
+  case folding
+
+`SFTP.FakeTransport` remains the fast in-memory double for tests that do not care about the wire.
+
+**`FakeExecChannel`** is an exec channel whose remote end is **a real POSIX shell on the box
+running the tests**. It picks the profile's shell, prepends the profile's rc-file noise, applies
+the `ForceCommand` refusal sentence where the profile has one, enforces `MaxSessions`, and models
+the session's process-group policy with a real `setsid` or a shared pgid, so `kill -TERM 0` really
+does or does not reach a bystander. A scenario needing a shell the box does not have (`fish`,
+`tcsh`, `zsh`) skips with a named reason.
+
+The shell scripts are tested against real shells because three of the worst bugs this project has
+had lived there: the `;;` dash rejects, the `{ … }` group the heartbeat reader would otherwise eat
+off its own stdin, and the `printf "\0<sentinel>"` that ate its own sentinel.
+
+**`FakeSSH`** is a small executable the package builds, installed at `SSHProcess.sshBinaryPath` as
+the `TransportLauncher`'s "ssh", so `SSHInvocation`'s argv assembly, the spawn,
+`ExitClassification` and `ControlSocket` run for real. It:
+
+- binds a real `ControlPath` socket and answers `-O check` and `-O exit`
+- honours or ignores `ControlPersist`
+- prints the measured stderr sentences with CRLF line endings, and `remote software version …`
+  only at `DEBUG1` and above
+- invokes `SSH_ASKPASS` with the measured prompt strings, trailing spaces included
+- applies OpenSSH's readconf first-setting-wins rule, and percent-expands a `ProxyCommand` before
+  handing it to `/bin/sh`
+- exits 255 with nothing on stderr when its remote command was killed by a signal
 
 ### The box is a seam too
 
-`ServerModel.HostTools` measures once per process what the machine running the suite can
-actually do, and a scenario that meets one of those bounds skips with the sentence it returns
-- a skip naming the platform fact, never a silent `#if`. Three bounds bite today. The local
-`find` is probed by what it accepts rather than by what it prints (`SQ-081`, the same rule
-`SQ-002` states for a server), so a row needing *a* `-cmin` runs against GNU findutils on
-Linux and BSD `find` on a Mac, and only a busybox profile is shimmed. The filesystem is asked
-whether it will hold a name that is not valid UTF-8 (`SQ-080`): APFS will not, so `H7`'s
-real-`find` half is Linux-only while its `partitionRoots` and SFTP-wire halves run everywhere.
-And `PATH_MAX` and `sockaddr_un.sun_path` are read from the box rather than written out
-(`SQ-085`), because a harness tree deep enough to outrun a channel's 4 MB buffer is over the
-Darwin limit at Linux's dimensions and every `open` then fails silently.
+`ServerModel.HostTools` measures once per process what the machine running the suite can do. A
+scenario that meets one of those bounds skips with the sentence it returns: a skip naming the
+platform fact, never a silent `#if`. Three bounds apply:
 
-`FakeSSH` also tells `ControlSocket` what the kernel will call a running stub: the stub is a
-shell script named `ssh`, Linux takes a process's short name from the script and XNU from the
-interpreter binary, and macOS launch constraints `SIGKILL` a copy of any system shell, so
-there is no binary to point a shebang at (`SQ-082`). `ControlSocket.masterProcessName` is the
-seam, and `install()` sets it to a name measured from a probe script that prints before it
-sleeps.
+| Bound | Rule |
+|---|---|
+| the local `find` | probed by what it accepts, not what it prints (`SQ-081`, the rule `SQ-002` states for a server). A row needing *a* `-cmin` runs against GNU findutils on Linux and BSD `find` on a Mac; only a busybox profile is shimmed |
+| non-UTF-8 names | the filesystem is asked whether it will hold one (`SQ-080`). APFS will not, so `H7`'s real-`find` half is Linux-only; its `partitionRoots` and SFTP-wire halves run everywhere |
+| `PATH_MAX` and `sockaddr_un.sun_path` | read from the box, not written out (`SQ-085`). A harness tree deep enough to outrun a channel's 4 MB buffer is over the Darwin limit at Linux's dimensions, and every `open` then fails silently |
 
-One artifact the harness suppresses rather than asserts around: a shell prints
-`Killed`/`Terminated` on its own stderr when a foreground child dies by a signal, and dash
-writes it to the *command's* redirected stderr (`SQ-084`), while `SQ-011` is the claim that a
-signal-killed remote command says nothing at all. `FakeSSH` hands the session its real stderr
-on fd 4 and points its own at `/dev/null`.
+`FakeSSH` also tells `ControlSocket` what the kernel will call a running stub. The stub is a shell
+script named `ssh`; Linux takes a process's short name from the script and XNU from the
+interpreter binary, and macOS launch constraints `SIGKILL` a copy of any system shell, so there is
+no binary to point a shebang at (`SQ-082`). `ControlSocket.masterProcessName` is the seam, and
+`install()` sets it to a name measured from a probe script that prints before it sleeps.
+
+The harness suppresses one artifact rather than asserting around it. A shell prints
+`Killed`/`Terminated` on its own stderr when a foreground child dies by a signal, and dash writes
+it to the *command's* redirected stderr (`SQ-084`), while `SQ-011` says a signal-killed remote
+command prints nothing at all. `FakeSSH` hands the session its real stderr on fd 4 and points its
+own at `/dev/null`.
 
 ### Process-wide state in a concurrent suite
 
-`swift test` runs the swift-testing suites concurrently with XCTest in one process, so
-anything installed process-wide is shared. Two rules follow.
+`swift test` runs the swift-testing suites concurrently with XCTest in one process, so anything
+installed process-wide is shared. Two rules follow:
 
-A scenario that sweeps or kills by prefix passes the directory it acts on:
-`ControlSocket.sweepOrphans(in:)`, `liveMasterPIDs(in:)` and `killStrayMasters(in:)` default
-to the real `$TMPDIR`, which is the blast radius `agent stop` needs, and a test passes one of
-its own. And a suite that installs `SSHProcess.sshBinaryPath` - which decides which stub every
-`ssh` in the process is - is `.serialized`, and its bed stops its agent before putting the
-path back, or a `DomainManager` handed to a detached task outlives its bed, goes on
-reconnecting on the breaker's schedule and dials the next scenario's stub.
+- A scenario that sweeps or kills by prefix passes the directory it acts on.
+  `ControlSocket.sweepOrphans(in:)`, `liveMasterPIDs(in:)` and `killStrayMasters(in:)` default to
+  the real `$TMPDIR`, which is the blast radius `agent stop` needs; a test passes one of its own.
+- A suite that installs `SSHProcess.sshBinaryPath` (which decides which stub every `ssh` in the
+  process is) is `.serialized`, and its bed stops its agent before putting the path back.
+  Otherwise a `DomainManager` handed to a detached task outlives its bed, goes on reconnecting on
+  the breaker's schedule and dials the next scenario's stub.
 
 ## The quirk catalogue
 
-`docs/quirks/` is the inventory of measured behaviour: [macos.md](../quirks/macos.md) (80 rows) and [servers.md](../quirks/servers.md)
-(82). [docs/quirks/README.md](../quirks/README.md) has the format; one entry per behaviour:
+`docs/quirks/` is the inventory of measured behaviour: [macos.md](../quirks/macos.md) (80 rows)
+and [servers.md](../quirks/servers.md) (82). [The catalog's README](../quirks/README.md) has the
+row format and the steps that turn a measurement into a model rule and a scenario.
 
-| Column | Meaning |
-|---|---|
-| id | `MQ-###` for macOS, `SQ-###` for a server. Stable for ever: never reused, never renumbered; a behaviour that stops being true keeps its id and gains a measurement saying so |
-| statement | one sentence, present tense, about what *the system* does. Never about what we do in response - that belongs to the design page |
-| measured on | every version or server it was observed on, each with its date. A version we support and have not measured is an empty cell, and that cell is a work item, not an assumption |
-| source | where the measurement is written down, and the gotcha number where there is one: item N of the numbered list in the repository's [`CLAUDE.md`](https://github.com/alecdwm/sshdrive/blob/main/CLAUDE.md) |
-| scenarios | the scenario ids that fail if the behaviour changes and we do not notice. A quirk with no scenario is a quirk nothing is defending |
-
-`MQ` rows are keyed to a macOS version. `SQ` rows are keyed to a testbed service or a real
-server, not to an OS version, so a new testbed image is the same kind of work as a new macOS
-and wants the same walk.
+`MQ` rows are keyed to a macOS version. `SQ` rows are keyed to a testbed service or a real server,
+not to an OS version, so a new testbed image is the same kind of work as a new macOS and wants the
+same walk.
 
 The models name the ids they read: `SystemModel`'s `Quirks.swift` and `QuirkCatalogue.swift`,
-`ServerModel`'s `ServerQuirks.swift`. Two tests keep the two halves from drifting -
-`QuirkCatalogueTests` asserts that every id the macOS model resolves is a row of [macos.md](../quirks/macos.md)
-and that every id resolves on both columns; `ServerProfileScenarios` asserts that every id
-`ServerModel` implements is a row of [servers.md](../quirks/servers.md) and that every profile cites only
-implemented ids.
+`ServerModel`'s `ServerQuirks.swift`. Two tests keep the halves from drifting:
 
-### How a measurement becomes a rule
+- `QuirkCatalogueTests` asserts that every id the macOS model resolves is a row of
+  [macos.md](../quirks/macos.md) and that every id resolves on both columns.
+- `ServerProfileScenarios` asserts that every id `ServerModel` implements is a row of
+  [servers.md](../quirks/servers.md) and that every profile cites only implemented ids.
 
-1. Measure on the VM against the testbed.
-2. New behaviour gets a new id and a row, carrying the date and the version or server it was
-   measured on. Changed behaviour gets a **new measurement on the existing id**; the old
-   measurement stays. Two measurements that disagree are the point of the table, not a problem
-   with it - `MQ-061` is one already, a quarantined install refused on 26.6 and passing on
-   26.4, and `P3` asserts both without deciding which is right.
-3. Teach `SystemModel` or `ServerModel` the rule, keyed on the id. If only the value moved,
-   nothing in the model changes.
-4. Write or extend a scenario if the measurement exposed a failure. A failure with no scenario
-   is not fixed.
-5. Run the whole suite on Linux.
-
-**The VM measures; it never proves.** A VM session that ends without a catalogue row, a model
-rule and a green Linux suite has not finished.
+**The VM measures; it never proves.** A VM session that ends without a catalogue row, a model rule
+and a green Linux suite has not finished.
 
 ### Adding a macOS version
 
-- Add the version to `MacOSVersion`.
-- Measure on a VM of that version against the testbed.
-- Walk **every** row of [macos.md](../quirks/macos.md) and record a value: confirmed, changed, or not measured.
-  Not-measured is a legitimate answer and shows as an empty cell.
-- Walk every row of [servers.md](../quirks/servers.md) too where the session touched a server.
-- For each changed value, add a measurement row and let the model branch on it.
-- Mark any value taken once, or bracketed, with a `confidence:` note in both the row and the
-  rule that reads it.
-- `swift test --filter QuirkCatalogueTests` checks that no id is in the model and missing from
-  the catalogue.
-- `swift test` on Linux, green.
-- Update [README.md](../quirks/README.md)'s supported-versions line, and [the platform page](platform.md) if the
-  minimum moved.
+1. Add the version to `MacOSVersion`.
+2. Measure on a VM of that version against the testbed.
+3. Walk **every** row of [macos.md](../quirks/macos.md) and record a value: confirmed, changed, or
+   not measured. Not-measured is a legitimate answer and shows as an empty cell.
+4. Walk every row of [servers.md](../quirks/servers.md) too where the session touched a server.
+5. For each changed value, add a measurement and let the model branch on it.
+6. Mark any value taken once, or bracketed, with a `confidence:` note in both the row and the rule
+   that reads it.
+7. `swift test --filter QuirkCatalogueTests` checks that no id is in the model and missing from
+   the catalogue.
+8. `swift test` on Linux, green.
+9. Update [the catalog README](../quirks/README.md)'s supported-versions table, and
+   [the platform page](platform.md) if the minimum moved.
 
 ## Scenarios
 
-A scenario is a numbered regression: a setup, an action and an assertion, named after the
-failure it defends against. Ids are stable for ever - a scenario is never renumbered, only
-retired with a reason - and the quirk rows cite them.
+A scenario is a numbered regression: a setup, an action and an assertion, named after the failure
+it defends against. Ids are stable for ever - a scenario is never renumbered, only retired with a
+reason - and the quirk rows cite them.
 
-There are 143 ids in fifteen families. They live beside the module they exercise:
-`Tests/SystemModelTests` for the ones that need a simulated macOS,
-`Tests/AgentRuntimeTests` for the agent's own decisions, `Tests/ServerModelTests` for the wire
-and the shells, and the module's own suite for the rest. 126 of the ids are named in `Tests/`
-today; the seventeen that are not - `C3`-`C6`, `D7`, `D8`, `E1`, `E4`-`E6`, `F3`, `G7`, `K8`,
-`L2`, `M1`, `P6`, `P7` - are the outstanding work, and several of the behaviours behind them
-are covered by a unit test that does not name the id.
+Scenarios live beside the module they exercise:
+
+| Where | What |
+|---|---|
+| `Tests/SystemModelTests` | the ones that need a simulated macOS |
+| `Tests/AgentRuntimeTests` | the agent's own decisions |
+| `Tests/ServerModelTests` | the wire and the shells |
+| the module's own suite | the rest |
+
+There are 143 ids in fifteen families, and 126 of them are named in `Tests/`. The seventeen that
+are not are the outstanding work: `C3`-`C6`, `D7`, `D8`, `E1`, `E4`-`E6`, `F3`, `G7`, `K8`, `L2`,
+`M1`, `P6`, `P7`. Several of the behaviours behind them are covered by a unit test that does not
+name the id.
 
 | Family | Covers | Design |
 |---|---|---|
@@ -550,8 +601,8 @@ are covered by a unit test that does not name the id.
 
 ### P - packaging and lifecycle
 
-The family whose ground truth is a Mac. Each of these asserts the state machine on Linux; the
-fact behind it is a runbook item.
+The family whose ground truth is a Mac. Each asserts the state machine on Linux; the fact behind
+it is a runbook item.
 
 | Id | Name |
 |---|---|
@@ -568,12 +619,15 @@ fact behind it is a runbook item.
 
 ### Q - `add`, askpass and the collect connection
 
-Each of these drives the shipping `add` end to end: `FakeSSH` at `SSHProcess.sshBinaryPath`
-answers `ssh -G`, raises the real prompt strings and binds a real control socket; an
-askpass-shaped program with a file mailbox in place of the XPC connection hands each prompt to
-the real broker; and the mount that follows runs the real SFTP transport over
-`FakeSFTPServer` on a real SFTP v3 wire. Nothing between the CLI's arguments and the server is
-a stub of ours.
+Each drives the shipping `add` end to end, and nothing between the CLI's arguments and the server
+is a stub of ours:
+
+- `FakeSSH` at `SSHProcess.sshBinaryPath` answers `ssh -G`, raises the real prompt strings and
+  binds a real control socket.
+- An askpass-shaped program, with a file mailbox in place of the XPC connection, hands each prompt
+  to the real broker.
+- The mount that follows runs the real SFTP transport over `FakeSFTPServer` on a real SFTP v3
+  wire.
 
 | Id | Name |
 |---|---|
@@ -587,97 +641,25 @@ a stub of ours.
 | Q8 | The askpass token lifecycle and prompt classification |
 | Q9 | The two-step collect connection |
 
-## What cannot be modelled
+## What stays a manual check
 
-These stay VM runbook items. They are listed so that nobody mistakes a green Linux suite for
-proof of them.
+These stay VM runbook items. They are listed so that nobody mistakes a green Linux suite for proof
+of them.
 
-**Drawing.** What Finder actually puts on the screen: the contextual menu's entries and their
-order, the badge's position, the dataless cloud badge, the static progress ring, the absence of
-a cancel control, the sidebar's composed label, the "downloaded from the Internet" dialog. The
-model evaluates activation rules and declarations; it cannot see pixels.
+| Area | What only a Mac can show |
+|---|---|
+| Drawing | what Finder puts on the screen: the contextual menu's entries and their order, the badge's position, the dataless cloud badge, the static progress ring, the absence of a cancel control, the sidebar's composed label, the "downloaded from the Internet" dialog. The model evaluates activation rules and declarations; it cannot see pixels |
+| Code signing, Gatekeeper, AMFI, notarization | that a provisioning profile must name the certificate the bundle is signed with; that an ad-hoc signature carrying `keychain-access-groups` is killed at exec; that `com.apple.application-identifier` on the agent makes launchd refuse it; that a stapled but unsigned DMG is rejected on the download path; that `notarytool store-credentials` cannot be run over ssh |
+| LaunchServices, PlugInKit, `SMAppService`, launchd | the model reproduces the state machine, because that is what our code reasons about. Whether LaunchServices really declines to register a quarantined bundle's plugins, and whether a fresh user really needs no visit to System Settings, are measurements |
+| TCC | that an agent's `stat` of its own domain's mount is allowed as `kTCCServiceFileProviderDomain` and draws no prompt |
+| The real keychain and key agents | the data-protection keychain under an access group, 1Password and Secretive behind `IdentityAgent`, Apple's `UseKeychain`, a FIDO key's user-presence notice and PIN prompt, and the 60 s deadline firing against a touch |
+| Local Network privacy | the prompt itself |
+| Timing, throughput and scale | the model reproduces the shape - that the rotation bounds a cycle, that `-cmin` costs a `stat` per entry - never the milliseconds |
+| The system's own schedulers | that the background-download scheduler takes 8-90 s to start an eager fetch on an idle headless Mac, and that a headless Mac throttles the working-set fetch at all. The model runs them instantly; a latency claim needs a Mac somebody is using |
+| IOKit power delivery | `IORegisterForSystemPower` registers on the VM, but the VM refuses `pmset sleepnow`, so that macOS actually delivers `kIOMessageSystemWillSleep` is unproven anywhere |
+| Filesystem semantics | APFS's `relatime` behaviour, case-insensitive comparison of NFC against NFD, `XATTR_FLAG_SYNCABLE` at the kernel level, and whatever advances a materialized file's atime minutes after a fetch. The model encodes the observation, not the mechanism |
+| Servers we do not have | a BSD *server*: FreeBSD's `sh`, FreeBSD kqueue and the helper's FreeBSD target (`aarch64-unknown-freebsd` cannot even be `cargo check`ed). A real Synology DSM box, its `sh` and its `max_user_watches`. armv7 hardware. The owner's own Tailscale server: a behaviour that reproduces on the testbed's `ts-ssh` is evidence about Tailscale SSH, not about that machine |
+| Real Finder-driven saves | by Pages, Numbers, Keynote, Microsoft Office and Xcode, none of which are on the VM |
 
-**Code signing, Gatekeeper, AMFI and notarization.** That a provisioning profile must name the
-certificate the bundle is signed with; that an ad-hoc signature carrying
-`keychain-access-groups` is killed at exec; that `com.apple.application-identifier` on the
-agent makes launchd refuse it; that a stapled but unsigned DMG is rejected on the download
-path; that `notarytool store-credentials` cannot be run over ssh.
-
-**LaunchServices, PlugInKit, `SMAppService` and launchd for real.** The model reproduces the
-state machine, because that is what our code reasons about. Whether LaunchServices really
-declines to register a quarantined bundle's plugins, and whether a fresh user really needs no
-visit to System Settings, are measurements.
-
-**TCC.** That an agent's `stat` of its own domain's mount is allowed as
-`kTCCServiceFileProviderDomain` and draws no prompt.
-
-**The real keychain and real key agents.** The data-protection keychain under an access group,
-1Password and Secretive behind `IdentityAgent`, Apple's `UseKeychain`, a FIDO key's
-user-presence notice and PIN prompt, and the 60 s deadline firing against a touch.
-
-**The Local Network privacy prompt.**
-
-**Timing, throughput and scale as numbers.** The model reproduces the shape - that the rotation
-bounds a cycle, that `-cmin` costs a `stat` per entry - and never the milliseconds.
-
-**The system's own schedulers.** That the background-download scheduler takes 8-90 s to start
-an eager fetch on an idle headless Mac, and that a headless Mac throttles the working-set
-fetch at all. The model runs them instantly; a latency claim needs a Mac somebody is using.
-
-**Delivery of IOKit power messages.** `IORegisterForSystemPower` registers on the VM, but the
-VM refuses `pmset sleepnow`, so that macOS actually delivers `kIOMessageSystemWillSleep` is
-unproven anywhere.
-
-**Real filesystem semantics.** APFS's `relatime` behaviour, case-insensitive comparison of NFC
-against NFD, `XATTR_FLAG_SYNCABLE` at the kernel level, and whatever advances a materialized
-file's atime minutes after a fetch. The model encodes the observation, not the mechanism.
-
-**Servers we do not have.** A BSD *server*: FreeBSD's `sh`, FreeBSD kqueue and the helper's
-FreeBSD target (`aarch64-unknown-freebsd` cannot even be `cargo check`ed). A real Synology DSM
-box, its `sh` and its `max_user_watches`. armv7 hardware. And the owner's own Tailscale
-server - a behaviour that reproduces on the testbed's `ts-ssh` is evidence about Tailscale SSH,
-not about that machine. A real BSD `find` is not on this list: macOS's `/usr/bin/find` is one,
-and `H4` and `H7` exercise the `.bsd` flavour against it when the suite runs on the Mac.
-
-**Real Finder-driven saves** by Pages, Numbers, Keynote, Microsoft Office and Xcode, none of
-which are on the VM.
-
-## Running it
-
-On Linux, which is where the suite is the gate:
-
-```sh
-. ~/.local/share/swiftly/env.sh
-cd Packages/SSHDriveCore
-swift test
-cd ../../helper && cargo test && cargo clippy -- -D warnings
-```
-
-No Mac, no VM, no network, no testbed, no `docker compose`. That is 819 XCTest tests with 41
-skipped, plus 63 swift-testing tests in twelve suites, and 54 crate tests for the helper. The
-41 skips are the testbed-backed tests in `SFTPTests` and `SSHProcessTests`, gated on
-`SSHDRIVE_TESTBED=1`; the testbed answers the build VM and nothing else, so they are inert
-here.
-
-The same `swift test` runs on the build VM and must be green there too. It is not a second
-suite: it is the same scenarios against a different box, and a row that cannot run there skips
-by name. The extra tests there are the mirrored-constant assertions, which need Apple's
-frameworks; the extra skips are the rows whose premise a Mac cannot hold. There is no
-`timeout` on macOS and none of the shells some rows want, so a long run is started detached on
-the VM and polled.
-
-```sh
-scripts/mac-build.sh test     # sync, xcodegen, swift build + swift test on the VM
-scripts/mac-build.sh app      # sync, xcodegen, xcodebuild, ad-hoc sign
-```
-
-`Apps/` needs a Mac only to compile and sign. `scripts/mac-build.sh` rsyncs the tree to the
-VM with `--delete` and there is no `build/` on the Linux side, so every run wipes the Mac's
-build directory: run `signed` last.
-
-The testbed is twelve real SSH servers in Docker Compose, run **on the Mac that hosts the
-build VM**, never on the Linux box; `testbed/README.md` has the account table, the
-`~/.ssh/config` stanzas and the per-service smoke tests. It exists to seed `SQ` rows and to
-answer questions the model cannot, and no ordinary run needs it.
-
-`.github/workflows/helper.yml` builds and tests the Rust crate and cross-compiles its targets.
+A real BSD `find` is not on this list: macOS's `/usr/bin/find` is one, and `H4` and `H7` exercise
+the `.bsd` flavour against it when the suite runs on the Mac.

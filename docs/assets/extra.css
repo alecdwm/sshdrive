@@ -11,3 +11,51 @@ a[data-sidebar="menu-button"] {
   min-height: 30px;
   padding-block: 5px;
 }
+
+/* Homepage hero: the icon beside the name and tagline, stacked on narrow screens. The hero
+   carries the name itself, so the theme's page title is hidden on the page that has one. */
+article:has(.hero) #page-header {
+  justify-content: flex-end;
+}
+article:has(.hero) #page-header > h1 {
+  display: none;
+}
+.typography .hero {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  margin: 0 0 2rem;
+}
+.typography .hero-icon {
+  flex: none;
+  width: 112px;
+  height: 112px;
+  margin: 0;
+}
+.typography .hero-text > p {
+  margin: 0;
+}
+.typography .hero-title {
+  font-size: 2.25rem;
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  color: var(--foreground);
+}
+.typography .hero-tagline {
+  margin-top: 0.5rem !important;
+  font-size: 1.125rem;
+  line-height: 1.5;
+  color: var(--muted-foreground);
+}
+@media (max-width: 640px) {
+  .typography .hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+  .typography .hero-icon {
+    width: 80px;
+    height: 80px;
+  }
+}

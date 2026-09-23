@@ -1,14 +1,14 @@
 # macOS quirks
 
-Measured behaviour of macOS — File Provider, Finder, fileproviderd, launchd, LaunchServices,
-TCC and APFS — that SSH Drive depends on. Format and rules: [README.md](README.md). Each row is the
-record of its own measurement: the statement carries the evidence, the **measured on** cell
-carries the version and the date it was taken.
+Measured behaviour of macOS that SSH Drive depends on: File Provider, Finder, fileproviderd,
+launchd, LaunchServices, TCC and APFS. Each row is the record of its own measurement: the
+statement carries the evidence, the **measured on** cell the version and the date. Format and
+rules are in [the catalog's README](README.md).
 
-**Nothing in this file has been measured on macOS 14 or 15,** which [docs/design/platform.md](../design/platform.md)
-names as the minimum. Every row's `14`/`15` cell is empty for that reason and each is an open
-question; `MQ-023` (atime) and `MQ-060` (TCC) are the two whose measurements explicitly ask
-for a re-run on 14 or 15.
+!!! warning "Nothing here has been measured on macOS 14 or 15"
+    [docs/design/platform.md](../design/platform.md) names 14 as the minimum, so every row's
+    `14`/`15` cell is empty and each one is an open question. `MQ-023` (atime) and `MQ-060` (TCC)
+    are the two whose measurements explicitly ask for a re-run on 14 or 15.
 
 ## Enumeration, the working set and anchors
 
