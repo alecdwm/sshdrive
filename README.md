@@ -1,8 +1,7 @@
-<p align="center">
-  <img src="docs/assets/icon-256.png" alt="" width="112">
-</p>
-
-<h1 align="center">SSH Drive</h1>
+<h1 align="center">
+  <img src="docs/assets/icon-256.png" alt="" width="112"><br>
+  SSH Drive
+</h1>
 
 <p align="center">
   Your SFTP servers in Finder's sidebar, next to iCloud Drive.<br>
