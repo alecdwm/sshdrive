@@ -18,6 +18,13 @@ import XPCProtocols
 /// It reproduces `MQ-062` on request: `register()` alone does **not** repair a
 /// registration whose bundle was replaced, so with `bundleWasReplaced` set the status
 /// stays `enabled` while the job is broken, and only `unregister()` clears it.
+///
+/// Given a clock it reproduces `MQ-063` as well: a `register()` less than
+/// `AgentLifecycle.unregisterGraceSeconds` after an `unregister()` leaves the job
+/// **constrained** - launchd holds it, `status` says `enabled`, and every spawn dies on
+/// the previous bundle's launch constraint, so nothing answers the mach service. A
+/// register after the grace produces a healthy job. `isConstrained` is what a scenario's
+/// `reachable` closure reads.
 public final class FakeLoginItem: LoginItemControlling, @unchecked Sendable {
     public enum Call: Equatable, Sendable { case register, unregister }
 
@@ -27,10 +34,22 @@ public final class FakeLoginItem: LoginItemControlling, @unchecked Sendable {
     private var _bundleWasReplaced = false
     private var _registerError: Error?
     private var _unregisterError: Error?
+    private let clock: (any AgentClock)?
+    private var _unregisteredAt: Double?
+    private var _constrained = false
 
-    public init(status: String = "not registered") { self._status = status }
+    public init(status: String = "not registered", clock: (any AgentClock)? = nil) {
+        self._status = status
+        self.clock = clock
+    }
 
     public var calls: [Call] { lock.lock(); defer { lock.unlock() }; return _calls }
+
+    /// Whether the last `register()` landed inside the window `unregister()` left open.
+    public var isConstrained: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _constrained
+    }
 
     /// The state `MQ-062` describes: the record names a bundle that is gone, every spawn
     /// fails, and `SMAppService` still says `enabled`.
@@ -53,6 +72,10 @@ public final class FakeLoginItem: LoginItemControlling, @unchecked Sendable {
         // `register()` is idempotent and not self-repairing: it returns success and leaves
         // the stale record exactly where it was.
         if !_bundleWasReplaced { _status = "enabled" }
+        if error == nil, let clock, let unregisteredAt = _unregisteredAt {
+            _constrained =
+                clock.uptime() - unregisteredAt < AgentLifecycle.unregisterGraceSeconds
+        }
         lock.unlock()
         if let error { throw error }
     }
@@ -64,6 +87,8 @@ public final class FakeLoginItem: LoginItemControlling, @unchecked Sendable {
         _unregisterError = nil
         if error == nil {
             _bundleWasReplaced = false
+            _constrained = false
+            _unregisteredAt = clock?.uptime()
             // `unregister()` returns, and `status` reports `notRegistered`, *before*
             // launchd has dropped the job. That gap is `FakeLaunchd`'s.
             _status = "not registered"
@@ -78,9 +103,10 @@ public final class FakeLoginItem: LoginItemControlling, @unchecked Sendable {
 /// `launchctl print`, as a countdown: the job is still loaded for the first
 /// `probesBeforeGone` answers and gone after that.
 ///
-/// That countdown **is** `MQ-063`. A `register()` inside the window leaves the job
-/// carrying the previous bundle's launch constraint and dying on a 10 s throttle for ever,
-/// so what `P2` asserts is that the unregister role kept asking until this said no.
+/// That countdown is half of `MQ-063`; `FakeLoginItem`'s grace is the other half. A
+/// `register()` inside the window leaves the job carrying the previous bundle's launch
+/// constraint and dying on a 10 s throttle for ever, so what `P2` asserts is that the
+/// unregister role kept asking until this said no and then waited the grace out.
 public final class FakeLaunchd: LaunchdControlling, @unchecked Sendable {
     private let lock = NSLock()
     private var remaining: Int

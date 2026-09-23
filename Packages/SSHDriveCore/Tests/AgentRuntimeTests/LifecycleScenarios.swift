@@ -55,6 +55,11 @@ extension AgentScenarios {
         /// spawn dies with `Launch Constraint Violation`, launchd retries on a 10 s throttle for
         /// ever, and the mach service never comes back. `SMAppService.status` cannot see this,
         /// so the job itself is asked - `launchctl print` answers non-zero once it is gone.
+        ///
+        /// The job being gone is not a sufficient condition either. Measured on 26.4.1
+        /// (2026-09-23): the poll said gone after 7 ms, the register 110 ms later was
+        /// constrained anyway, and about 5 s between the two worked. So a grace follows the
+        /// last probe, on the clock.
         @Test func p2TheUnregisterRolePollsUntilTheJobIsGone() async {
             let loginItem = FakeLoginItem()
             let launchd = FakeLaunchd(probesBeforeGone: 7)
@@ -68,14 +73,95 @@ extension AgentScenarios {
             #expect(
                 loginItem.status() == "not registered",
                 "the status said this from the first probe, which is exactly why it is not the test")
+            #expect(
+                clock.requestedSleeps == Array(repeating: 0.2, count: 7)
+                    + [AgentLifecycle.unregisterGraceSeconds],
+                "P2: the grace is waited after the last probe, not before it")
 
-            // And it gives up rather than blocking the cask's postflight for ever.
+            // And it gives up rather than blocking the cask's postflight for ever. A job
+            // launchd never let go of gets no grace: there is nothing to be graceful about.
+            let stuckClock = VirtualAgentClock(autoAdvance: true)
             let stuck = FakeLaunchd(probesBeforeGone: 10_000)
             let slow = await AgentLifecycle.unregisterAndWait(
-                loginItem: FakeLoginItem(), launchd: stuck, uid: 501, clock: clock, attempts: 150)
+                loginItem: FakeLoginItem(), launchd: stuck, uid: 501, clock: stuckClock,
+                attempts: 150)
             #expect(slow.unregistered)
             #expect(!slow.gone, "P2: 30 s and then it says so")
             #expect(stuck.probes == 150)
+            #expect(
+                stuckClock.requestedSleeps == Array(repeating: 0.2, count: 150),
+                "P2: and the give-up path gives up")
+        }
+
+        /// **P10** - a launch repairs a constrained registration.
+        ///
+        /// `MQ-063` from the other side. The cask's postflight unregisters and then opens the
+        /// app, and on 26.4.1 (2026-09-23) the two landed 110 ms apart: the registration the
+        /// `open -g` made carried the launch constraint captured from the previous bundle's
+        /// signature, every spawn died `EXC_CRASH SIGKILL (Code Signature Invalid)`, launchd
+        /// retried every 10 s for ever, and the mach service accepted the CLI's connection and
+        /// answered no command - so `doctor` said "the agent answered the connection but not
+        /// the command in time" and `add` said "The application cannot be used right now".
+        ///
+        /// Nothing in `register()`, `SMAppService.status` or the mach lookup reports that
+        /// state. Asking the agent a question and not getting an answer is the only thing that
+        /// does, so the launch asks, and repairs it with the same pair the postflight runs.
+        @Test func p10ALaunchRepairsAConstrainedRegistration() async {
+            let clock = VirtualAgentClock(autoAdvance: true)
+            let loginItem = FakeLoginItem(clock: clock)
+            let launchd = FakeLaunchd(probesBeforeGone: 2)
+            let reachable: @Sendable () async -> Bool = { [loginItem] in !loginItem.isConstrained }
+
+            // The postflight's unregister, and then the app launch on its heels.
+            try? loginItem.unregister()
+            let answered = await AgentLifecycle.registerAndVerify(
+                loginItem: loginItem, launchd: launchd, uid: 501, clock: clock,
+                reachable: reachable)
+
+            #expect(answered, "P10: the second registration is reachable")
+            #expect(
+                loginItem.calls == [.unregister, .register, .unregister, .register],
+                "P10: the repair is unregister-then-register, not a second register")
+            #expect(!loginItem.isConstrained)
+            #expect(
+                clock.requestedSleeps.contains(AgentLifecycle.unregisterGraceSeconds),
+                "P10: and the grace is what makes the second registration a healthy one")
+
+            // A launch that finds a healthy agent registers once and touches nothing else.
+            let healthyClock = VirtualAgentClock(autoAdvance: true)
+            let healthy = FakeLoginItem(clock: healthyClock)
+            let healthyLaunchd = FakeLaunchd()
+            let up = await AgentLifecycle.registerAndVerify(
+                loginItem: healthy, launchd: healthyLaunchd, uid: 501, clock: healthyClock,
+                reachable: { true })
+            #expect(up)
+            #expect(healthy.calls == [.register], "P10: no unregister on the ordinary launch")
+            #expect(healthyLaunchd.probes == 0)
+            #expect(healthyClock.requestedSleeps.isEmpty, "P10: and it waits for nothing")
+
+            // A registration that still fails after one repair gets another: on macOS 26.4.1
+            // a register made 100 ms after the grace died the same way and the second
+            // repair started the agent (2026-09-23).
+            let twiceClock = VirtualAgentClock(autoAdvance: true)
+            let twice = FakeLoginItem(clock: twiceClock)
+            let secondRepair = await AgentLifecycle.registerAndVerify(
+                loginItem: twice, launchd: FakeLaunchd(), uid: 501, clock: twiceClock,
+                reachable: { [twice] in twice.calls.filter { $0 == .register }.count >= 3 })
+            #expect(secondRepair, "P10: the second repair is tried and is enough")
+            #expect(
+                twice.calls == [.register, .unregister, .register, .unregister, .register],
+                "P10: two repairs, then reachable")
+
+            // An agent that never answers is reported after a bounded number of repairs.
+            let deadClock = VirtualAgentClock(autoAdvance: true)
+            let dead = FakeLoginItem(clock: deadClock)
+            let stillDown = await AgentLifecycle.registerAndVerify(
+                loginItem: dead, launchd: FakeLaunchd(), uid: 501, clock: deadClock,
+                reachable: { false })
+            #expect(!stillDown)
+            #expect(
+                dead.calls.filter { $0 == .unregister }.count == AgentLifecycle.repairAttempts,
+                "P10: repaired repairAttempts times, then reported")
         }
 
         /// **P1**, the other half - the upgrade handover never takes a half-copied bundle.

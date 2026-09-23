@@ -333,10 +333,10 @@ A scenario is a numbered regression: a setup, an action and an assertion, named 
 failure it defends against. Ids are stable for ever - a scenario is never renumbered, only
 retired with a reason - and the quirk rows cite them.
 
-There are 142 ids in fifteen families. They live beside the module they exercise:
+There are 143 ids in fifteen families. They live beside the module they exercise:
 `Tests/SystemModelTests` for the ones that need a simulated macOS,
 `Tests/AgentRuntimeTests` for the agent's own decisions, `Tests/ServerModelTests` for the wire
-and the shells, and the module's own suite for the rest. 125 of the ids are named in `Tests/`
+and the shells, and the module's own suite for the rest. 126 of the ids are named in `Tests/`
 today; the seventeen that are not - `C3`-`C6`, `D7`, `D8`, `E1`, `E4`-`E6`, `F3`, `G7`, `K8`,
 `L2`, `M1`, `P6`, `P7` - are the outstanding work, and several of the behaviours behind them
 are covered by a unit test that does not name the id.
@@ -564,6 +564,7 @@ fact behind it is a runbook item.
 | P7 | The profile names the signing certificate |
 | P8 | A nickname renames in place |
 | P9 | `add` waits for the first deployment |
+| P10 | A launch repairs a constrained registration |
 
 ### Q - `add`, askpass and the collect connection
 

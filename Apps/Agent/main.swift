@@ -19,8 +19,9 @@ import XPCProtocols
 //   app         what `open -g -a "SSH Drive"` launches, from the Homebrew postflight or
 //               from `sshdrive doctor`. Launching the app is what registers the extension
 //               with PlugInKit and the login item through SMAppService, and both must be
-//               done from the app's own bundle. It registers, pokes the mach service so
-//               launchd starts the real instance, and exits.
+//               done from the app's own bundle. It registers, pings the mach service so
+//               launchd starts the real instance and so a job that cannot run is seen as
+//               one, repairs that job if it finds it, and exits.
 //
 // Every decision inside those roles - what counts as a replacement bundle, how long to
 // wait for launchd, what registration does and does not repair - is `AgentRuntime`.
@@ -41,6 +42,57 @@ func warnIfQuarantined() {
     Log.agent.warning(
         "the bundle at \(path, privacy: .public) is quarantined (\(value, privacy: .public)); LaunchServices will not register the File Provider extension until it is cleared - run `sshdrive doctor`"
     )
+}
+
+/// One bounded ping of the mach service, on its own connection. The mach lookup itself is
+/// what makes launchd start the agent on a fresh install; the reply is what says the job
+/// launchd started can run.
+///
+/// Each call connects afresh: a connection that has been invalidated answers nothing. The
+/// timeout is needed because a job that cannot satisfy its launch constraint accepts the
+/// connection and then never replies (`MQ-063`), which no error handler fires for.
+func pingAgent(timeout: Double) async -> Bool {
+    let connection = NSXPCConnection(
+        machServiceName: SSHDriveIdentifiers.machServiceName, options: [])
+    connection.remoteObjectInterface = SSHDriveXPCInterface.agent
+    connection.resume()
+    return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        let outcome = PingOutcome()
+        let finish: @Sendable (Bool) -> Void = { answered in
+            guard outcome.claim() else { return }
+            connection.invalidate()
+            continuation.resume(returning: answered)
+        }
+        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+            Log.agent.error("the agent did not answer: \(error, privacy: .public)")
+            finish(false)
+        } as? SSHDriveAgentProtocol
+        guard let proxy else {
+            finish(false)
+            return
+        }
+        proxy.ping(interfaceVersion: sshDriveXPCInterfaceVersion) { version in
+            Log.agent.notice(
+                "the launchd agent answered, interface version \(version, privacy: .public)")
+            finish(true)
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { finish(false) }
+    }
+}
+
+/// The continuation may be resumed from the reply, from the error handler or from the
+/// timeout, and exactly one of them may win.
+final class PingOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
+    }
 }
 
 switch role {
@@ -78,31 +130,19 @@ case "launchd":
     dispatchMain()
 
 default:
-    // Launched from the bundle, not by launchd. Register and get out of the way.
+    // Launched from the bundle, not by launchd. Register, make sure the agent that
+    // registration produced can be talked to, and get out of the way.
     Log.agent.notice("app launch: registering the login item and the extension")
-    AgentLifecycle.register(loginItem: environment.loginItem)
-
-    // Poking the mach service is what makes launchd start the agent proper on a fresh
-    // install, and is how this process notices that one already holds it.
-    let connection = NSXPCConnection(
-        machServiceName: SSHDriveIdentifiers.machServiceName, options: [])
-    connection.remoteObjectInterface = SSHDriveXPCInterface.agent
-    connection.resume()
-
     let done = DispatchSemaphore(value: 0)
     var reachedAgent = false
-    let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-        Log.agent.error("the agent did not answer: \(error, privacy: .public)")
-        done.signal()
-    } as? SSHDriveAgentProtocol
-    proxy?.ping(interfaceVersion: sshDriveXPCInterfaceVersion) { version in
-        reachedAgent = true
-        Log.agent.notice("the launchd agent answered, interface version \(version, privacy: .public)")
+    Task {
+        reachedAgent = await AgentLifecycle.registerAndVerify(
+            loginItem: environment.loginItem, launchd: environment.launchd, uid: getuid(),
+            clock: environment.clock,
+            reachable: { await pingAgent(timeout: AgentLifecycle.pingTimeoutSeconds) })
         done.signal()
     }
-    if proxy == nil { done.signal() }
-    _ = done.wait(timeout: .now() + 10)
-    connection.invalidate()
+    done.wait()
     Log.agent.notice("app launch finished (agent reachable: \(reachedAgent, privacy: .public))")
     exit(0)
 }

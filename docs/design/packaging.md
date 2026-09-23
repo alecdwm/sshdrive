@@ -96,15 +96,32 @@ and upgrades it, and where the released artifacts come from.
   above, since a quarantined bundle registers no plugin however many
   times it is opened. The same two steps are what a developer replacing
   the bundle by hand has to run.
-- **The `unregister` role waits for launchd to drop the job before it
-  exits.** `SMAppService.unregister()` returns, and `status` says
-  `notRegistered`, while launchd is still spawning the old record; a
+- **The `unregister` role waits for launchd to drop the job, and then
+  waits a 5 s grace.** `SMAppService.unregister()` returns, and `status`
+  says `notRegistered`, while launchd is still spawning the old record; a
   `register()` inside that window leaves the job carrying the previous
   bundle's launch constraint and every spawn dies `EXC_CRASH (SIGKILL (Code
   Signature Invalid))` with a `Launch Constraint Violation` on a 10 s retry,
-  for ever (2026-09-05). So the role polls `launchctl print` until the
-  service is gone, which is what makes the cask's back-to-back postflight
-  steps safe.
+  for ever, with the mach service accepting connections and answering no
+  command. So the role polls `launchctl print` until the service is gone.
+  That alone is not sufficient: on 26.4.1 (2026-09-23) the poll answered
+  gone 7 ms after `unregister()` returned, the `open -g` 110 ms later was
+  constrained anyway, and about 5 s between the two worked first time. The
+  grace is `AgentLifecycle.unregisterGraceSeconds`, and the two together
+  are what make the cask's back-to-back postflight steps safe.
+- **The app launch verifies what it registered, and repairs it.** Nothing
+  in `register()`, `SMAppService.status` or the mach lookup distinguishes a
+  job holding a constraint it cannot satisfy; only asking the agent a
+  question and getting no answer does. So
+  `AgentLifecycle.registerAndVerify` registers, polls a ping of the mach
+  service for up to 10 s, and on silence logs the job as stuck, runs the
+  unregister-and-wait above, registers again and asks again, up to three
+  repairs before it reports failure. One repair is not always enough: on
+  macOS 26.4.1 a register made 100 ms after the grace died the same way and
+  the second repair started the agent (2026-09-23). The constraint is
+  captured from the bundle's signature, which is why an upgrade that
+  changes signing certificate is the one that hits this and an ordinary
+  version bump does not.
 - Locations, domains, the local replica and pending uploads all survive
   an upgrade untouched.
   `zap` is where the rest of removal lives, with one limit: Homebrew runs
