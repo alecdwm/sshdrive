@@ -442,6 +442,7 @@ name the id.
 | C4 | A stranger is dropped |
 | C5 | An agent error survives the trip |
 | C6 | A stalled replica call must not wedge the agent |
+| C7 | A torn-down instance reports `exited`, not `closed` |
 
 ### D - writes, conflicts, atomicity
 

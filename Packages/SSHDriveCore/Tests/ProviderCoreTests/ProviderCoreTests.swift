@@ -176,6 +176,17 @@ final class ProviderCoreTests: XCTestCase {
         XCTAssertEqual(elsewhereFailure, .cannotSynchronize, "the agent answered, not the refusal")
     }
 
+    /// The system tearing an instance down shuts the reader down; `close()` is the
+    /// restore's alone, and a teardown that called it would report the restore's `closed`
+    /// to `doctor` for every location.
+    func testInvalidateShutsTheReaderDownRatherThanClosingIt() {
+        let reader = UnusableReader()
+        let service = ProviderService(
+            domainIdentifier: "d", displayName: "nas", reader: reader, agent: RefusingAgent())
+        service.invalidate()
+        XCTAssertEqual(reader.calls, ["shutdown"])
+    }
+
     /// The working set is only a change stream: an `enumerateItems` on it returns nothing
     /// and finishes with no page token (`MQ-002`).
     func testTheWorkingSetEnumeratesNothing() throws {
@@ -199,8 +210,10 @@ final class UnusableReader: ReaderStoring {
     var isReady: Bool { false }
     var askAgent: ((@escaping (Bool?) -> Void) -> Void)?
     func markReady(_ ready: Bool?) {}
-    func close() {}
-    func reopen() {}
+    private(set) var calls: [String] = []
+    func close() { calls.append("close") }
+    func reopen() { calls.append("reopen") }
+    func shutdown() { calls.append("shutdown") }
     func item(identifier: ProviderItemIdentifier) throws -> ItemView? { nil }
     func changes(since anchor: Int64, limit: Int) throws -> ReaderChangePage? { nil }
     func currentSequence() -> Int64? { nil }

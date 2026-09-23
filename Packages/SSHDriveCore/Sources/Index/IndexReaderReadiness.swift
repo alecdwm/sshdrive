@@ -33,6 +33,10 @@ public struct IndexReaderReadiness: Equatable, Sendable {
         /// Opened or read and failed. Re-asked like `notReady`, because a transient
         /// failure - a file being replaced under us - is the common case.
         case failed
+        /// The system tore the extension instance down. Final for the instance: nothing
+        /// reads, nothing is re-asked, and no later answer, failure or reopen changes it.
+        /// The next instance starts at `unknown`.
+        case exited
     }
 
     public private(set) var state: State = .unknown
@@ -69,7 +73,7 @@ public struct IndexReaderReadiness: Equatable, Sendable {
     /// exists for.
     public mutating func answered(_ ready: Bool?, at now: Double) {
         lastAskedAt = now
-        guard state != .schemaTooNew else { return }
+        guard state != .schemaTooNew, state != .exited else { return }
         switch ready {
         case .some(true), .none:
             // A reader shut for a restore stays shut until the reopen callback; the
@@ -84,7 +88,7 @@ public struct IndexReaderReadiness: Equatable, Sendable {
     }
 
     public mutating func failed(_ description: String, at now: Double) {
-        guard state != .schemaTooNew else { return }
+        guard state != .schemaTooNew, state != .exited else { return }
         state = .failed
         lastError = description
         // A failure is evidence the answer we hold is stale, so the next read may ask
@@ -93,6 +97,7 @@ public struct IndexReaderReadiness: Equatable, Sendable {
     }
 
     public mutating func foundSchemaTooNew(_ description: String) {
+        guard state != .exited else { return }
         state = .schemaTooNew
         lastError = description
     }
@@ -103,5 +108,12 @@ public struct IndexReaderReadiness: Equatable, Sendable {
 
     public mutating func reopen() {
         if state == .closed { state = .ready }
+    }
+
+    /// The instance is going away. `schemaTooNew` is kept, because it describes the index
+    /// rather than the instance and is what `doctor` has to show; every other state
+    /// becomes `exited`.
+    public mutating func shutdown() {
+        if state != .schemaTooNew { state = .exited }
     }
 }

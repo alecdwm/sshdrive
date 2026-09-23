@@ -303,7 +303,11 @@ sends every read to the agent until the answer changes.
   value with tests of its own, `IndexReaderReadiness`.
 - **A schema newer than the extension understands is the one permanent answer:** waiting does not
   make it readable.
-- **A reader shut for a truncate** is lifted by the reopen callback and by nothing else.
+- **A reader shut for a truncate** (`closed`) is lifted by the reopen callback and by nothing else.
+- **An instance the system tears down** closes its reader and reports `exited`, a state of its
+  own and not the restore's `closed`. It is final for that instance: no later answer, failure or
+  reopen lifts it. A schema too new is kept instead, because it describes the index. The next
+  instance starts over.
 - **An agent that cannot be reached at all** leaves the instance free to open the reader; a missing
   agent is the case the direct reader exists for.
 - **Any SQLite error** - a corrupt page, a not-a-database header during the truncate window, a
@@ -312,7 +316,8 @@ sends every read to the agent until the answer changes.
 
 The extension writes what it last knew about its reader - state, the `meta.generation` it last
 saw, the last error, and when - to `domains/<id>/reader-state.json`, which `sshdrive doctor`
-reports. It is the one file the extension writes in the container besides the `-shm`. The
+reports: `ready` and `exited` pass, every other state warns ([the CLI](cli.md#doctor)). The
+states are `unknown`, `ready`, `not-ready`, `schema-too-new`, `closed`, `failed` and `exited`. It is the one file the extension writes in the container besides the `-shm`. The
 extension is sandboxed, short-lived and usually not running when the question is asked, so the
 last thing it said is the only evidence there is.
 

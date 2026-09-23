@@ -62,8 +62,10 @@ public final class ProviderService {
             "extension instance for \(self.displayName, privacy: .public) started")
     }
 
+    /// The system is tearing this instance down. The reader shuts down and reports
+    /// `exited`; `close()` belongs to the restore's truncate window alone.
     public func invalidate() {
-        reader.close()
+        reader.shutdown()
     }
 
     // MARK: The agent's presence

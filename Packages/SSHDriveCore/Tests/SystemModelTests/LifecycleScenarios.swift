@@ -1,4 +1,5 @@
 import XCTest
+import AgentCore
 import Config
 import Index
 import ProviderCore
@@ -61,6 +62,47 @@ final class LifecycleScenarios: XCTestCase {
         XCTAssertEqual(
             domain.disconnectReason, ProviderService.agentMissingMessage,
             "with a sentence about an agent that is running perfectly well")
+    }
+
+    // MARK: C7 - a torn-down instance is not a closed reader
+
+    /// An instance the system kills reports its reader `exited`, and `doctor` passes it.
+    ///
+    /// `MQ-073`: the system tears idle instances down all the time, so the reader-state
+    /// file of a healthy mount is almost always the last instance's goodbye. Written as
+    /// the restore's `closed`, every location warned "closed" after any quiet spell, the
+    /// same words a restore that never heard its reopen earns. The teardown has its own
+    /// state; `closed` keeps its warning and now means the restore alone.
+    func testC7_ATornDownInstanceReportsExitedAndDoctorPassesIt() throws {
+        let harness = try ScenarioHarness()
+        try harness.serverCreates("a.txt")
+        let domain = try harness.addDomain()
+        domain.openFolder()
+        XCTAssertEqual(try readerState(harness)["state"] as? String, "ready")
+
+        domain.killIdleInstance()
+        let exited = try readerState(harness)
+        XCTAssertEqual(exited["state"] as? String, "exited")
+        let report = ReaderStateReport(stateFile: exited, now: Date())
+        XCTAssertEqual(report.ok, true, "an instance that went away is not a fault")
+        XCTAssertNil(report.remedy)
+        XCTAssertTrue(report.detail.hasPrefix("last extension instance exited "), report.detail)
+
+        // The next instance starts over and says `ready` again.
+        domain.signalWorkingSet()
+        XCTAssertEqual(try readerState(harness)["state"] as? String, "ready")
+
+        // A restore's close, with no reopen after it, is still a warning.
+        domain.provider?.reader.close()
+        let closed = try readerState(harness)
+        XCTAssertEqual(closed["state"] as? String, "closed")
+        XCTAssertNil(ReaderStateReport(stateFile: closed, now: Date()).ok)
+    }
+
+    private func readerState(_ harness: ScenarioHarness) throws -> [String: Any] {
+        let url = try GroupContainer.readerStateURL(locationID: harness.locationID)
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 
     // MARK: C2 - a reader error is `.serverUnreachable`

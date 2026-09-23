@@ -196,11 +196,16 @@ If the extension is still missing, the app is probably not where LaunchServices 
 ### `index reader (<name>)` (warn)
 
 One line per mounted location, reporting how the Finder extension's direct read of that
-location's data last went. `ok` means `ready`. Anything else is a warning rather than a
-failure: the location keeps working, only more slowly.
+location's data last went. `ok` means `ready`, or **"last extension instance exited N s ago"**:
+macOS stops the extension whenever it is idle, and that is the line a quiet mount ordinarily
+shows. Anything else is a warning rather than a failure: the location keeps working, only more
+slowly.
 
 - **"the extension has never reported its reader"**: open the location in Finder once. If
   the line stays like this, the extension is not running; see `extension registered`.
+- **`closed`**: the agent shut the reader while it restored a damaged index, and the extension
+  never heard that the restore had finished. Opening the location in Finder starts a fresh
+  instance, which reads again.
 - **any other state**, shown with when it was reported and its last error: if it stays
   unready, open an issue with `sshdrive logs` attached.
 

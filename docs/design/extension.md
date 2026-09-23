@@ -167,6 +167,10 @@ A newer schema degrades a mid-upgrade mismatch to the slow path instead of faili
 refuses with `.serverUnreachable` ([error mapping](#error-mapping)). Readiness, the restore window
 and the reconcile are in [the index](item-index.md#reader-readiness).
 
+An instance the system tears down (`invalidate()`) closes its reader and writes `exited` to the
+state file `doctor` reads. The restore's close writes `closed`; the two are different states so
+that an idle mount does not read as a restore that never finished.
+
 ### The meta check
 
 The `meta` table carries three values the reader checks on every call: the schema version, the

@@ -87,6 +87,19 @@ public final class IndexReaderStore: ReaderStoring {
         publishState()
     }
 
+    public func shutdown() {
+        lock.lock()
+        reader?.close()
+        reader = nil
+        readiness.shutdown()
+        let snapshot = readiness.state
+        lock.unlock()
+        Log.extensionLog.notice(
+            "index reader for \(self.locationID, privacy: .public) shut down with its extension instance (\(snapshot.rawValue, privacy: .public))"
+        )
+        publishState()
+    }
+
     public func reopen() {
         lock.lock()
         reader = nil

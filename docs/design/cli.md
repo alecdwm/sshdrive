@@ -224,9 +224,10 @@ absolutely because zsh has a `log` builtin. Ctrl-C ends a `--follow`.
    extension; with the extension registered the line passes as "not checked".
 8. extension registered (`pluginkit`).
 9. index reader, one line per mounted location: the state the extension last wrote to
-   `reader-state.json` ([the index](item-index.md#reader-readiness)). `ready` passes; any other
-   state, and a file never written, warns: every read then goes to the agent, which is slower but
-   works.
+   `reader-state.json` ([the index](item-index.md#reader-readiness)). `ready` passes, and so does
+   `exited`, an instance the system tore down. `closed` (a restore that never reopened the
+   reader), `not-ready`, `failed`, `schema-too-new`, `unknown` and a file never written warn:
+   every read then goes to the agent, which is slower but works.
 10. `ssh`: `/usr/bin/ssh -V` runs.
 11. `~/.ssh/config` parses: `ssh -G` against a name nothing matches ([locations](locations.md)).
 12. control sockets: none left without a location ([ssh](ssh.md)). Reported, never swept.

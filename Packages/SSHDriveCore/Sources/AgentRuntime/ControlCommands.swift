@@ -755,10 +755,10 @@ public enum ControlCommands {
 
         // What the extension's own read-only index reader last said about itself. The
         // extension is sandboxed, short-lived and not running most of the time, so it
-        // writes its state into the group container and this is where it is read back. A
-        // reader that is not `ready` is not on its own a fault - every read falls back to
-        // the agent - but it is the difference between a mount that is slow and a mount
-        // that is silent.
+        // writes its state into the group container and this is where it is read back.
+        // `ready` and `exited` pass. Any other state is not on its own a fault - every
+        // read falls back to the agent - but it is the difference between a mount that is
+        // slow and a mount that is silent. `ReaderStateReport` has the verdict.
         for line in await readerStates() {
             check(
                 "index reader (\(line.name))", line.ok, line.detail, remedy: line.remedy)
@@ -898,33 +898,18 @@ public enum ControlCommands {
             guard let url = try? GroupContainer.readerStateURL(locationID: location.id) else {
                 continue
             }
-            guard let data = try? Data(contentsOf: url),
+            let report: ReaderStateReport
+            if let data = try? Data(contentsOf: url),
                 let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            else {
-                lines.append(
-                    ReaderStateLine(
-                        name: location.displayName, ok: nil,
-                        detail: "the extension has never reported its reader",
-                        remedy: "Open the location in Finder once. If this stays empty the "
-                            + "extension is not running; see the \"extension registered\" check."))
-                continue
+            {
+                report = ReaderStateReport(stateFile: object, now: Date())
+            } else {
+                report = .neverReported
             }
-            let state = (object["state"] as? String) ?? "unknown"
-            let at = (object["at"] as? Double).map { Date(timeIntervalSince1970: $0) }
-            let age = at.map { "\(Int(Date().timeIntervalSince($0))) s ago" } ?? "at an unknown time"
-            let generation = (object["generation"] as? Int64) ?? -1
-            let lastError = (object["lastError"] as? String) ?? ""
-            var detail = "\(state), generation \(generation), reported \(age)"
-            if !lastError.isEmpty { detail += "; last error: \(lastError)" }
-            if let path = object["path"] as? String, !path.isEmpty { detail += "; \(path)" }
-            let ok: Bool? = state == "ready" ? true : nil
             lines.append(
                 ReaderStateLine(
-                    name: location.displayName, ok: ok, detail: detail,
-                    remedy: ok == true
-                        ? nil
-                        : "Every read falls back to the agent over XPC, so the location still "
-                            + "works; a reader that stays unready is slower and worth reporting."))
+                    name: location.displayName, ok: report.ok, detail: report.detail,
+                    remedy: report.remedy))
         }
         return lines
     }

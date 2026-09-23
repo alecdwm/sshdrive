@@ -112,6 +112,50 @@ final class WorkingSetFallbackTests: XCTestCase {
         XCTAssertTrue(readiness.canRead)
     }
 
+    /// An instance the system tears down reports `exited`, which is its own state and not
+    /// the restore's `closed`, and nothing after it brings the reader back.
+    func testAShutdownIsFinalForTheInstance() {
+        var readiness = IndexReaderReadiness()
+        readiness.answered(true, at: 0)
+        readiness.shutdown()
+        XCTAssertEqual(readiness.state, .exited)
+        XCTAssertFalse(readiness.canRead)
+        XCTAssertFalse(readiness.isRetryable)
+        XCTAssertFalse(readiness.shouldAsk(at: 100))
+
+        // A late `indexReady` reply, a reopen, a failure or a schema finding arriving
+        // after the teardown all leave it where it is.
+        readiness.answered(true, at: 100)
+        readiness.reopen()
+        readiness.close()
+        readiness.failed("disk I/O error", at: 101)
+        readiness.foundSchemaTooNew("schema 9")
+        XCTAssertEqual(readiness.state, .exited)
+        XCTAssertFalse(readiness.canRead)
+        XCTAssertNil(readiness.lastError)
+
+        // From any other state it is `exited` too, except a schema too new, which
+        // describes the index rather than the instance.
+        var failed = IndexReaderReadiness()
+        failed.failed("disk I/O error", at: 0)
+        failed.shutdown()
+        XCTAssertEqual(failed.state, .exited)
+        XCTAssertEqual(failed.lastError, "disk I/O error")
+
+        var closed = IndexReaderReadiness()
+        closed.answered(true, at: 0)
+        closed.close()
+        closed.shutdown()
+        XCTAssertEqual(closed.state, .exited)
+
+        var tooNew = IndexReaderReadiness()
+        tooNew.foundSchemaTooNew("schema 9")
+        tooNew.shutdown()
+        XCTAssertEqual(tooNew.state, .schemaTooNew)
+
+        XCTAssertEqual(IndexReaderReadiness.State.exited.rawValue, "exited")
+    }
+
     // MARK: The two sources agree
 
     /// The fallback is only safe if the agent answers the same question the reader does.

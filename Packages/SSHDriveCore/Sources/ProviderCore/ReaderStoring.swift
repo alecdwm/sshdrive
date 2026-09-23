@@ -27,7 +27,7 @@ public struct ReaderChangePage: Equatable, Sendable {
 /// system holds.
 public protocol ReaderStoring: AnyObject {
     /// What `doctor` and the log call the reader's state: `ready`, `not-ready`,
-    /// `schema-too-new`, `closed`, `failed`, `unknown`.
+    /// `schema-too-new`, `closed`, `failed`, `exited`, `unknown`.
     var stateName: String { get }
     var isReady: Bool { get }
 
@@ -36,6 +36,9 @@ public protocol ReaderStoring: AnyObject {
     /// Shut for the truncate window of a restore (docs/design/item-index.md).
     func close()
     func reopen()
+    /// The system is tearing the extension instance down: the handle is closed and the
+    /// state file says `exited`, which `doctor` does not warn about.
+    func shutdown()
 
     /// One row, or nil when the reader is not usable and the caller should ask the agent.
     func item(identifier: ProviderItemIdentifier) throws -> ItemView?
