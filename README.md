@@ -14,6 +14,10 @@ Folders list without downloading anything. A file downloads when you open it, an
 clears itself later. There is no window: you set a location up with `sshdrive` in a terminal, then
 use Finder.
 
+<p align="center">
+  <img src="docs/assets/finder-screenshot.png" alt="A Finder window showing two SSH Drive locations in the sidebar under Locations, one open with a video and a text file that is not yet downloaded" width="560">
+</p>
+
 It connects with your own `/usr/bin/ssh`, so if `ssh nas` works in a terminal, so does this:
 `~/.ssh/config` aliases, `ProxyJump` chains, `ssh-agent`, 1Password, Secretive, FIDO keys. A key
 that needs a touch, a PIN or a one-time code on every connection is the exception, because the
