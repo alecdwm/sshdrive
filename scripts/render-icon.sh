@@ -3,6 +3,10 @@
 #
 #   Apps/Agent/Assets.xcassets/AppIcon.appiconset/icon_<size>[@2x].png   the macOS icon set
 #   docs/assets/icon-256.png                                            README and docs site
+#   docs/favicon.ico                                                    the docs site's /favicon.ico
+#
+# The .ico holds 16, 32 and 48 px PNGs. An ICO entry may be a whole PNG file, which every
+# current browser reads, so no BMP encoder is needed.
 #
 # The renderer is resvg (through the `resvg-py` wheel, which bundles it), driven by uv so
 # nothing has to be installed first. resvg is a self-contained Rust rasteriser: unlike
@@ -37,7 +41,7 @@ $iconset/icon_512x512@2x.png:1024
 $docs/icon-256.png:256
 "
 
-printf '%s\n' "$targets" | grep -v '^$' | SVG="$svg" uv run --quiet --with resvg-py python -c '
+printf '%s\n' "$targets" | grep -v '^$' | SVG="$svg" ICO="$root/docs/favicon.ico" uv run --quiet --with resvg-py python -c '
 import os, struct, sys
 
 import resvg_py
@@ -57,4 +61,18 @@ for line in sys.stdin:
     if (w, h) != (size, size):
         sys.exit("render-icon: %s came out %dx%d, wanted %d" % (path, w, h, size))
     print("%5d x %-5d %s" % (w, h, path))
+
+# ICONDIR, then one 16-byte ICONDIRENTRY per image, then the images. A width or height
+# of 256 would be written as 0; none of these reach it.
+ico = os.environ["ICO"]
+sizes = (16, 32, 48)
+pngs = [bytes(resvg_py.svg_to_bytes(svg_path=svg, width=s, height=s)) for s in sizes]
+out = struct.pack("<HHH", 0, 1, len(pngs))
+offset = 6 + 16 * len(pngs)
+for size, png in zip(sizes, pngs):
+    out += struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(png), offset)
+    offset += len(png)
+with open(ico, "wb") as f:
+    f.write(out + b"".join(pngs))
+print("%13s %s" % ("/".join(map(str, sizes)), ico))
 '
