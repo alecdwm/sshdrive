@@ -39,8 +39,8 @@ settings:
     # what the four hand-written Info.plists read as $(MARKETING_VERSION) and
     # $(CURRENT_PROJECT_VERSION), the second an integer derived from the first because
     # LaunchServices compares CFBundleVersion numerically. Edit VERSION, not this.
-    MARKETING_VERSION: 0.1.7
-    CURRENT_PROJECT_VERSION: 107
+    MARKETING_VERSION: 0.1.8
+    CURRENT_PROJECT_VERSION: 108
     DEVELOPMENT_TEAM: RWGDZAYBM8
     CODE_SIGN_STYLE: Automatic
     CODE_SIGN_IDENTITY: "Developer ID Application"

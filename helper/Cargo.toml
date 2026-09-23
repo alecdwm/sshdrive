@@ -9,7 +9,7 @@
 
 [package]
 name = "sshdrive-helper"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version = "1.74"
 description = "SSH Drive remote change-detection helper"
