@@ -40,6 +40,31 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.location(named: "nope"))
     }
 
+    func testDisplayNameWinsOverAnotherLocationsHost() throws {
+        let (store, directory) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let nicknamed = Location(
+            id: "AAAA1111-0000", nickname: "media", host: "nas", remotePath: "/srv/media")
+        let bare = Location(id: "BBBB2222-0000", host: "nas")
+        try store.mutate { $0.locations = [nicknamed, bare] }
+        XCTAssertEqual(try store.location(named: "nas").id, bare.id)
+        XCTAssertEqual(try store.location(named: "media").id, nicknamed.id)
+    }
+
+    func testHostSharedByTwoNicknamedLocationsIsAmbiguous() throws {
+        let (store, directory) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let media = Location(id: "AAAA1111-0000", nickname: "media", host: "nas")
+        let backup = Location(id: "BBBB2222-0000", nickname: "backup", host: "nas")
+        try store.mutate { $0.locations = [media, backup] }
+        XCTAssertThrowsError(try store.location(named: "nas")) { error in
+            guard case ConfigStoreError.ambiguousLocation(_, let names) = error else {
+                return XCTFail("expected ambiguousLocation, got \(error)")
+            }
+            XCTAssertEqual(names, ["media", "backup"])
+        }
+    }
+
     func testDecodesAConfigMissingLaterFields() throws {
         let json = """
             {"schemaVersion": 1, "macID": "abcd1234",

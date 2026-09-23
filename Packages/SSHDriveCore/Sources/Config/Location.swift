@@ -123,14 +123,6 @@ public struct Location: Codable, Equatable, Sendable, Identifiable {
     /// (docs/design/locations.md).
     public var displayName: String { nickname ?? host }
 
-    /// `<name>` on the CLI resolves nickname, then host, then id prefix
-    /// (docs/design/cli.md).
-    public func matches(name: String) -> Bool {
-        if let nickname, nickname == name { return true }
-        if host == name { return true }
-        return id.lowercased().hasPrefix(name.lowercased())
-    }
-
     // Defaults for fields added after a config was first written.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

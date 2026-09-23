@@ -572,6 +572,17 @@ public enum LocationCommands {
                 "changed": false,
             ])
         }
+        // Display names stay unique, as `add` keeps them, so `<name>` resolves to one location.
+        if updated.displayName != location.displayName {
+            let existing = try await AgentCommandContext.manager.configuration().locations
+            if let clash = existing.first(where: {
+                $0.id != location.id && $0.displayName == updated.displayName
+            }) {
+                throw SSHDriveAgentError.notImplemented.asNSError(
+                    "\"\(updated.displayName)\" is already a location (\(clash.id)). "
+                        + "Pick another \(key.rawValue), or remove it first.")
+            }
+        }
 
         var notes: [String] = []
         // The subset of `notes` that describes what the change does to the cache, the

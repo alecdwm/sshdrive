@@ -18,9 +18,11 @@ command that changes something prints nothing when it works.
   of each value against `~/.ssh/config` and, for `add`, the capability report. The flag belongs
   to each subcommand and is typed after it (`sshdrive add -v nas alec@nas`). The reporting
   commands - `list`, `show`, `status`, `pins`, `logs`, `doctor` - print either way.
-- **`<name>`** matches a nickname or a host (the first location in `config.json` order that has
-  either), then a prefix of the location id. An id prefix matching several locations is an
-  error that names them.
+- **`<name>`** matches a display name (`nickname ?? host`, what `list` prints), then a host,
+  then a prefix of the location id. The first stage with any match decides, so `nas` names the
+  location added as `nas` even when a nicknamed location also has host `nas`. A stage matching
+  several locations is an error that names them. Display names are unique: `add` and `set`
+  refuse one that is taken.
 - **A command naming a location is a touch** for the change-detection cadence (gotcha 77).
 - **Host-key changes** need no command of ours: `status` prints the `ssh-keygen -R` line to run
   ([host keys](secrets.md)).

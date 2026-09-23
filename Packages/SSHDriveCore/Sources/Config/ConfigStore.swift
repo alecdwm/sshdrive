@@ -92,19 +92,29 @@ public final class ConfigStore {
         return file
     }
 
-    /// Resolves a `<name>` the way the CLI does: nickname, then host, then id prefix.
+    /// Resolves a `<name>` the way the CLI does: display name, then host, then id prefix.
+    ///
+    /// The display name comes first because it is what `list` prints: a location added
+    /// as `nas` must win over a nicknamed location that happens to share the host `nas`,
+    /// whatever their order in `config.json`. Each stage that matches more than one
+    /// location is an error naming them, never a pick by file order.
     public func location(named name: String) throws -> Location {
-        let file = try load()
-        if let exact = file.locations.first(where: { $0.nickname == name || $0.host == name }) {
-            return exact
+        let locations = try load().locations
+        let stages: [(Location) -> Bool] = [
+            { $0.displayName == name },
+            { $0.host == name },
+            { $0.id.lowercased().hasPrefix(name.lowercased()) },
+        ]
+        for stage in stages {
+            let matched = locations.filter(stage)
+            switch matched.count {
+            case 0: continue
+            case 1: return matched[0]
+            default:
+                throw ConfigStoreError.ambiguousLocation(name, matched.map(\.displayName))
+            }
         }
-        let prefixed = file.locations.filter { $0.id.lowercased().hasPrefix(name.lowercased()) }
-        switch prefixed.count {
-        case 0: throw ConfigStoreError.unknownLocation(name)
-        case 1: return prefixed[0]
-        default:
-            throw ConfigStoreError.ambiguousLocation(name, prefixed.map(\.displayName))
-        }
+        throw ConfigStoreError.unknownLocation(name)
     }
 
     /// Drops the in-memory copy. The agent calls this after an external edit.
