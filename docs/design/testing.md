@@ -617,7 +617,6 @@ it is a runbook item.
 | P9 | `add` waits for the first deployment |
 | P10 | A launch repairs a constrained registration |
 | P11 | A launch sweeps a stale LaunchServices record |
-| P12 | The extension check retries a forced registration that fails |
 
 ### Q - `add`, askpass and the collect connection
 

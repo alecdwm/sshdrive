@@ -123,17 +123,6 @@ case "launchd":
 
     Task { await agent.start() }
 
-    // The extension's PlugInKit registration is checked here as well as on an app launch,
-    // because this is the one role that always runs: launchd starts the agent for the mach
-    // service whatever else failed, and right after a cask upgrade the postflight's
-    // lsregister and its `open -g` can both fail out of a LaunchServices that has just had
-    // the bundle moved under it (docs/design/packaging.md). Detached, so neither the
-    // listener nor the retry's waits hold the other up.
-    Task {
-        _ = await AgentLifecycle.ensureExtensionRegistered(
-            inspector: environment.bundle, clock: environment.clock)
-    }
-
     // A TERM from the cask's `uninstall` stanza exits 0 with every master shut down, and
     // the vnode watch on our own executable hands over to a bundle an upgrade put in our
     // place (docs/design/packaging.md).

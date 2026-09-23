@@ -331,13 +331,6 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
     /// An `lsregister` that will not run at all, for the launch that has to report
     /// rather than wait.
     public var forceSucceeds = true
-    /// How many forced registrations fail before one runs: LaunchServices right after the
-    /// bundle under it has been replaced, which recovers on its own.
-    public var forceFailures = 0
-    /// The forced registration from which the appex becomes visible, counting from 1. A
-    /// force before it runs and reveals nothing, which is what a registration answered
-    /// from another copy's record does.
-    public var revealFromForcedRegistration = 1
     private var inodes: [String: UInt64] = [:]
     private var identifiers: [String: String] = [:]
     private var readable: Set<String> = []
@@ -388,18 +381,6 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
         lock.unlock()
     }
 
-    /// PlugInKit answers nothing about the extension until `attempt` forced registrations
-    /// have run, and `line` from then on. No stale record is involved: this is the
-    /// LaunchServices that answers nothing for a while after the bundle under it moved.
-    public func revealPlugIn(_ line: String, fromForcedRegistration attempt: Int) {
-        lock.lock()
-        plugIn = nil
-        hiddenPlugIn = line
-        revealFromForcedRegistration = attempt
-        records = [bundleURL.path]
-        lock.unlock()
-    }
-
     public func launchServicesRecordPaths(bundleID: String) -> [String] {
         lock.lock(); defer { lock.unlock() }
         return bundleID == SSHDriveIdentifiers.appBundleID ? records : []
@@ -417,11 +398,6 @@ public final class FakeBundle: BundleInspecting, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         forcedRegistrations += 1
         guard forceSucceeds else { return false }
-        if forceFailures > 0 {
-            forceFailures -= 1
-            return false
-        }
-        guard forcedRegistrations >= revealFromForcedRegistration else { return true }
         // A record for another path under the same identifier answers the registration,
         // so the force runs and reveals nothing until that record has been dropped.
         guard records.allSatisfy({ $0 == bundleURL.path }) else { return true }
