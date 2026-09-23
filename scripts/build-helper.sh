@@ -15,6 +15,7 @@
 #   scripts/build-helper.sh                 the host's own musl target
 #   scripts/build-helper.sh aarch64-unknown-linux-musl x86_64-unknown-linux-musl
 #   HELPER_OUT=/tmp/x scripts/build-helper.sh …
+#   scripts/build-helper.sh --manifest          rebuild manifest.json only
 #
 # No cross C toolchain is needed for the musl targets: helper/.cargo/config.toml links them
 # with rustc's own `rust-lld` and its bundled self-contained objects, so `rustup target add`
@@ -31,7 +32,11 @@ CARGO="${CARGO:-cargo}"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$CRATE/Cargo.toml" | head -1)"
 [ -n "$VERSION" ] || { echo "could not read the helper's version"; exit 1; }
 
-if [ "$#" -gt 0 ]; then
+# `--manifest` rebuilds manifest.json over whatever is already in the directory and builds
+# nothing; release.sh uses it after signing the darwin binary, which changes its bytes.
+if [ "${1:-}" = --manifest ]; then
+	TARGETS=""
+elif [ "$#" -gt 0 ]; then
 	TARGETS="$*"
 else
 	TARGETS="$(uname -m)-unknown-linux-musl"

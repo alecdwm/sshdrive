@@ -306,6 +306,22 @@ if [ "$WHAT" = "all" ] || [ "$WHAT" = "build" ] || [ "$WHAT" = "dmg" ]; then
 		fi
 		rm -f \"\$APP/Contents/PlugIns/SSHDriveFileProvider.appex/Contents/embedded.provisionprofile\"
 
+		# Every Mach-O in the bundle needs a Developer ID signature with the hardened
+		# runtime and a timestamp or the notary service rejects the whole app, and the
+		# darwin helper arrives ad-hoc signed from build-helper.sh. Signing changes its
+		# bytes, so the manifest is rebuilt afterwards; the helper hashes its own
+		# executable at run time, so its --version line moves with it.
+		HELPERS=\"\$APP/Contents/Resources/helper\"
+		if [ -d \"\$HELPERS\" ]; then
+			for h in \"\$HELPERS\"/sshdrive-helper-*-darwin-*; do
+				[ -f \"\$h\" ] || continue
+				codesign --force --sign \"\$IDENTITY\" --options runtime --timestamp \
+					--identifier org.shirls.sshdrive.helper \"\$h\"
+				echo \"signed \$(basename \"\$h\")\"
+			done
+			HELPER_OUT=\"\$HELPERS\" scripts/build-helper.sh --manifest >/dev/null
+		fi
+
 		# Inside out: the CLI, askpass and the appex first, then the app.
 		codesign --force --sign \"\$IDENTITY\" --options runtime --timestamp \
 			--identifier org.shirls.sshdrive.cli \"\$APP/Contents/MacOS/sshdrive\"
@@ -446,10 +462,26 @@ EOF
 	mac "sh -eu -c '
 		cd $MAC_DIR
 		APP=\"build/Build/Products/Release/SSH Drive.app\"
+		# notarytool exits 0 whatever the verdict. Anything but Accepted stops the
+		# release here, with Apple'\''s own log printed, because stapling a rejected
+		# submission fails later with an unrelated CloudKit error.
+		notarize() {
+			out=\$(xcrun notarytool submit \"\$1\" $NOTARY_ARGS --wait 2>&1)
+			echo \"\$out\"
+			case \"\$out\" in
+			*\"status: Accepted\"*) ;;
+			*)
+				id=\$(printf %s \"\$out\" | sed -n \"s/^ *id: //p\" | head -1)
+				echo \"--- notarization of \$1 was not accepted; the notary log:\"
+				[ -z \"\$id\" ] || xcrun notarytool log \"\$id\" $NOTARY_ARGS || true
+				exit 1
+				;;
+			esac
+		}
 		mkdir -p dist
 		rm -f dist/SSH-Drive-app.zip
 		/usr/bin/ditto -c -k --keepParent \"\$APP\" dist/SSH-Drive-app.zip
-		xcrun notarytool submit dist/SSH-Drive-app.zip $NOTARY_ARGS --wait
+		notarize dist/SSH-Drive-app.zip
 		xcrun stapler staple \"\$APP\"
 		xcrun stapler validate \"\$APP\"
 		rm -f dist/SSH-Drive-app.zip
@@ -464,7 +496,7 @@ EOF
 		rm -rf \$STAGE
 		codesign --force --sign \"$SIGN_IDENTITY\" --timestamp \"dist/$DMG_NAME\"
 
-		xcrun notarytool submit \"dist/$DMG_NAME\" $NOTARY_ARGS --wait
+		notarize \"dist/$DMG_NAME\"
 		xcrun stapler staple \"dist/$DMG_NAME\"
 		xcrun stapler validate \"dist/$DMG_NAME\"
 		echo \"--- spctl on the stapled app\"
