@@ -43,6 +43,21 @@ public actor DomainManager {
     /// detector: an eviction pass makes a File Provider call per file and must never queue
     /// behind the index.
     private var evictors: [String: CacheEvictor] = [:]
+    /// A location whose runtime is being started, so a second caller waits for the same
+    /// start rather than building a second gate and runtime, and the gate's connected hook
+    /// - which can fire while `start()` is still connecting - waits until the runtime and
+    /// the detector both exist.
+    private var starting: [String: Task<LocationRuntime, Error>] = [:]
+    /// The reconnect sequence running or queued per location: each one waits for the one
+    /// before it (`ReconnectSequence`).
+    private var sequences: [String: Task<Void, Never>] = [:]
+    /// Budget re-checks in a row that came back inconclusive on a master that was still
+    /// running, per location, for the connection `generation` names.
+    private var inconclusiveBudgetRechecks: [String: (generation: Int, count: Int)] = [:]
+
+    /// The re-check of a connection that came up with an unanswered server probe or an
+    /// inconclusive channel budget, one per location and per connection.
+    private var rechecks: [String: Task<Void, Never>] = [:]
     private var started = false
 
     public init(
@@ -138,12 +153,12 @@ public actor DomainManager {
     private func removeStrandedDomains(keeping locations: [Location]) async {
         let known = Set(locations.map(\.id))
         let replica = environment.replica
-        guard let domains = try? await Deadline.run("listing the File Provider domains", {
+        guard let domains = try? await Deadline.run("listing the File Provider domains", clock: environment.clock, {
             try await replica.domains()
         }) else { return }
         for domain in domains where !known.contains(domain.identifier) {
             do {
-                try await Deadline.run("removing a stranded File Provider domain") {
+                try await Deadline.run("removing a stranded File Provider domain", clock: environment.clock) {
                     _ = try await replica.removeDomain(domain, mode: .removeAll)
                 }
                 Log.agent.notice(
@@ -193,7 +208,16 @@ public actor DomainManager {
         // this the location would sit at the ten-minute cadence while someone was plainly
         // working on it.
         await detectors[location.id]?.noteTouch()
+        await gates[location.id]?.noteUserAtTerminal()
         return location
+    }
+
+    /// A CLI command is someone at the Mac: for a while, a call it makes may connect a
+    /// location that depends on a key agent with the screen locked. `location(named:)`
+    /// does this for every command naming an existing location; `add`, and a command that
+    /// starts the runtime it named, call it once the gate exists.
+    public func noteUserAtTerminal(locationID: String) async {
+        await gates[locationID]?.noteUserAtTerminal()
     }
 
     @discardableResult
@@ -204,9 +228,24 @@ public actor DomainManager {
         return try await config.mutate(body)
     }
 
-    /// The runtime for a location, started on first use.
+    /// The runtime for a location, started on first use. Concurrent callers share one
+    /// start.
     public func runtime(for location: Location) async throws -> LocationRuntime {
         if let existing = runtimes[location.id] { return existing }
+        if let pending = starting[location.id] { return try await pending.value }
+        let task = Task { try await self.startRuntime(for: location) }
+        starting[location.id] = task
+        do {
+            let runtime = try await task.value
+            starting[location.id] = nil
+            return runtime
+        } catch {
+            starting[location.id] = nil
+            throw error
+        }
+    }
+
+    private func startRuntime(for location: Location) async throws -> LocationRuntime {
         try GroupContainer.createDomainDirectory(locationID: location.id)
         let transport: any SFTPTransport
         // The `<mac8>` in an upload temp file's name: the first eight hex digits of the
@@ -356,6 +395,7 @@ public actor DomainManager {
     public func startedGates() -> [ConnectionGate] { Array(gates.values) }
 
     public func dropRuntime(locationID: String) async {
+        rechecks.removeValue(forKey: locationID)?.cancel()
         if let detector = detectors.removeValue(forKey: locationID) { await detector.stop() }
         if let evictor = evictors.removeValue(forKey: locationID) { await evictor.stop() }
         if let gate = gates.removeValue(forKey: locationID) { await gate.shutdown() }
@@ -393,6 +433,8 @@ public actor DomainManager {
         self.evictors.removeAll()
         self.gates.removeAll()
         self.runtimes.removeAll()
+        for recheck in rechecks.values { recheck.cancel() }
+        rechecks.removeAll()
 
         await withTaskGroup(of: Void.self) { group in
             for detector in detectors { group.addTask { await detector.stop() } }
@@ -531,6 +573,7 @@ public actor DomainManager {
     /// The extension handed out a fresh working-set anchor, or a connection came back:
     /// either way one full sweep at once (docs/design/change-detection.md).
     private func connectionWentAway(locationID: String, reason: String) async {
+        rechecks.removeValue(forKey: locationID)?.cancel()
         await detectors[locationID]?.connectionWentAway(reason: reason)
     }
 
@@ -545,8 +588,32 @@ public actor DomainManager {
     /// the cue to retry pending uploads and fetches - and signal the working set.
     /// `signalErrorResolved` is the call that wakes the flush; `signalEnumerator` is sent
     /// either way, since it costs one call and the working set needs it regardless.
+    ///
+    /// The gate calls this on a task of its own for every connection it brings up, so two
+    /// can be in flight at once. Each waits for the one before it, and runs only for as
+    /// long as its connection is the gate's (`ReconnectSequence`): a sequence for a
+    /// connection that has already gone must not apply that connection's probe or budget
+    /// over the next one's.
     private func connectionCameUp(locationID: String, connected: ConnectionGate.Connected) async {
-        let suppressed = await gates[locationID]?.suppressRecoverySignals ?? false
+        rechecks.removeValue(forKey: locationID)?.cancel()
+        let previous = sequences[locationID]
+        let sequence = Task {
+            await previous?.value
+            await self.runReconnectSequence(locationID: locationID, connected: connected)
+        }
+        sequences[locationID] = sequence
+        await sequence.value
+        if sequences[locationID] == sequence { sequences[locationID] = nil }
+    }
+
+    private func runReconnectSequence(
+        locationID: String, connected: ConnectionGate.Connected
+    ) async {
+        // The hook can fire while `runtime(for:)` is still inside `start()`, before the
+        // runtime and the detector are in their maps; the sequence is for both.
+        if let pending = starting[locationID] { _ = try? await pending.value }
+        guard let gate = gates[locationID] else { return }
+        let suppressed = await gate.suppressRecoverySignals
         if suppressed {
             Log.agent.notice(
                 "\(locationID, privacy: .public): recovery signals suppressed by a debug hook")
@@ -557,14 +624,26 @@ public actor DomainManager {
         // re-opened *here* rather than left to the next poll cycle. Left to the poll cycle
         // it costs a reconnected location up to ten minutes with no push detection.
         for step in ReconnectSequence.steps {
+            guard ReconnectSequence.mayRun(
+                generation: connected.generation, current: await gate.connectionGeneration)
+            else {
+                Log.agent.notice(
+                    "\(locationID, privacy: .public): connection \(connected.generation, privacy: .public) went away before \(step.rawValue, privacy: .public); the next connection's sequence does the rest"
+                )
+                return
+            }
             switch step {
             case .applyConnection:
-                guard let runtime = runtimes[locationID] else { continue }
+                guard let runtime = runtimes[locationID],
+                    let live = await gate.connection(generation: connected.generation)
+                else { continue }
+                // The connection `start()` brought up was applied there, in full.
+                guard await !runtime.hasApplied(live) else { continue }
                 do {
-                    try await runtime.applyConnection(
-                        budget: connected.budget, probe: connected.probe,
-                        sharesMetadataChannel: connected.sharesMetadataChannel)
+                    try await runtime.applyConnection(live)
                 } catch {
+                    // The budget and the probe are recorded before anything in there can
+                    // fail, so the ladder below still decides on this connection.
                     Log.agent.error(
                         "\(locationID, privacy: .public): could not apply the new connection: \(error, privacy: .public)"
                     )
@@ -592,6 +671,191 @@ public actor DomainManager {
                 await signalWorkingSet(locationID: locationID)
             }
         }
+        Log.agent.notice(
+            "\(locationID, privacy: .public): connection \(connected.generation, privacy: .public) is applied")
+        // A probe refused a session says the budget on record may be wrong. It is marked
+        // suspect for the next connect, and measured again on this one.
+        startRecheck(
+            locationID: locationID, generation: connected.generation,
+            probe: connected.probe.unanswered,
+            budget: !connected.budget.conclusive || connected.probe.sessionRefused)
+    }
+
+    /// Asks again, on the connection that is up, what it came up without a clear answer
+    /// to, and what it answered that keeps the location below its best tier.
+    ///
+    /// - An unanswered server probe (it stalled, or met a dying channel) and a channel
+    ///   budget a probe could not settle are asked again 30 s after the connection came
+    ///   up, doubling to 10 minutes, until both are answered or the connection goes
+    ///   (docs/design/offline.md).
+    /// - Answers that hold the location below the tier its `watchMode` asks for - no
+    ///   shell, a `noexec` or unwritable cache directory, an unsupported `uname`, a budget
+    ///   with no channel to hold for the helper - are facts about the server that can stop
+    ///   being true while the connection stays up. Every
+    ///   `ChangeDetectionLadder.permanentRecheckSeconds` the probe runs again, and the
+    ///   budget too while it is below unrestricted, and the ladder decides on the result
+    ///   (docs/design/change-detection.md).
+    ///
+    /// The probe is one exec channel; the budget is two SFTP opens, and a clear answer
+    /// with room for more channels than the connection holds is the one case that drops
+    /// and reconnects it, because a channel cannot be added to a connection that is up.
+    private func startRecheck(locationID: String, generation: Int, probe: Bool, budget: Bool) {
+        rechecks[locationID]?.cancel()
+        let clock = environment.clock
+        rechecks[locationID] = Task { [weak self] in
+            var owed = (probe: probe, budget: budget)
+            var attempt = 0
+            while !Task.isCancelled {
+                if owed.probe || owed.budget {
+                    await clock.sleep(seconds: ReconnectSequence.recheckDelay(attempt: attempt))
+                    guard !Task.isCancelled, let self else { return }
+                    guard let left = await self.recheck(
+                        locationID: locationID, generation: generation, owed: owed)
+                    else { return }
+                    owed = left
+                    attempt += 1
+                    continue
+                }
+                await clock.sleep(seconds: ChangeDetectionLadder.permanentRecheckSeconds)
+                guard !Task.isCancelled, let self,
+                    let verdict = await self.verdictOwed(locationID: locationID, generation: generation)
+                else { return }
+                // One pass on the slow schedule. What it cannot settle is asked again in
+                // another 30 minutes, not on the fast schedule an unanswered probe gets.
+                guard await self.recheck(
+                    locationID: locationID, generation: generation, owed: verdict) != nil
+                else { return }
+            }
+        }
+    }
+
+    /// What the 30-minute pass asks again on this connection, or nil when the location is
+    /// at the tier its `watchMode` asks for (or the connection has gone) and there is
+    /// nothing to ask.
+    private func verdictOwed(locationID: String, generation: Int) async -> (probe: Bool, budget: Bool)? {
+        guard let gate = gates[locationID], let runtime = runtimes[locationID],
+            let live = await gate.connection(generation: generation)
+        else { return nil }
+        let location = runtime.location
+        let capabilities = await DomainManager.capabilities(of: runtime, location: location)
+        guard DomainManager.serverHoldsTierDown(capabilities, location: location) else { return nil }
+        return (
+            probe: true,
+            budget: live.budget.concurrentChannels < ChannelBudget.unrestricted.concurrentChannels)
+    }
+
+    /// Whether the server's answers - the probe and the channel budget - keep the location
+    /// below the tier its `watchMode` asks for. The user's own settings and a build with no
+    /// helper binaries are not the server's to change, and do not count.
+    static func serverHoldsTierDown(
+        _ capabilities: ChangeDetectionLadder.ServerCapabilities, location: Location
+    ) -> Bool {
+        let sweepCanStart = capabilities.hasExecChannel && capabilities.hasFind
+        let helperWanted = location.helper && HelperDeployer.manifest() != nil
+        let helperCanStart = capabilities.hasExecChannel && capabilities.helperAvailable
+        switch location.watchMode {
+        case .poll: return false
+        case .sweep: return !sweepCanStart
+        case .helper: return helperWanted && !helperCanStart
+        case .auto: return helperWanted ? !helperCanStart : !sweepCanStart
+        }
+    }
+
+    /// One re-check. Nil when there is nothing more to do on this connection: it went, or
+    /// it is being replaced by one with a bigger budget.
+    private func recheck(
+        locationID: String, generation: Int, owed: (probe: Bool, budget: Bool)
+    ) async -> (probe: Bool, budget: Bool)? {
+        guard let gate = gates[locationID], let runtime = runtimes[locationID],
+            let live = await gate.connection(generation: generation)
+        else { return nil }
+        var left = owed
+        if left.budget, inconclusiveBudgetRechecks[locationID].map({
+            $0.generation == generation
+                && $0.count >= ReconnectSequence.inconclusiveBudgetRecheckLimit
+        }) == true {
+            left.budget = false
+        }
+        if left.budget {
+            if let ssh = live as? SSHBackedTransport {
+                if let answer = await ssh.recheckChannelBudget() {
+                    inconclusiveBudgetRechecks[locationID] = nil
+                    CapabilityCache.store(answer, locationID: locationID)
+                    left.budget = false
+                    switch ReconnectSequence.budgetRecheckAction(
+                        current: live.budget.concurrentChannels,
+                        found: answer.concurrentChannels,
+                        transferInFlight: await runtime.hasTransferInFlight())
+                    {
+                    case .keep:
+                        break
+                    case .reconnect:
+                        Log.ssh.notice(
+                            "\(locationID, privacy: .public): the server has room for \(answer.concurrentChannels, privacy: .public) channels; reconnecting to use them"
+                        )
+                        await gate.drop(
+                            generation: generation,
+                            reason: "the channel budget re-check found room for more channels")
+                        return nil
+                    case .deferReconnect:
+                        Log.ssh.notice(
+                            "\(locationID, privacy: .public): the server has room for \(answer.concurrentChannels, privacy: .public) channels; a transfer is running, so the reconnect waits for the next re-check"
+                        )
+                        left.budget = true
+                    }
+                } else if await live.isMasterAlive() {
+                    // Neither opened nor refused, on a master that is still there. A few
+                    // of those in a row is wording nobody has seen, and asking again on
+                    // this connection will not change it.
+                    var misses = inconclusiveBudgetRechecks[locationID]
+                    if misses?.generation != generation { misses = (generation, 0) }
+                    misses?.count += 1
+                    inconclusiveBudgetRechecks[locationID] = misses
+                    if let misses, misses.count >= ReconnectSequence.inconclusiveBudgetRecheckLimit {
+                        Log.ssh.notice(
+                            "\(locationID, privacy: .public): \(misses.count, privacy: .public) channel budget re-checks in a row were inconclusive; not asking again on this connection"
+                        )
+                        left.budget = false
+                    }
+                }
+            } else {
+                left.budget = false
+            }
+        }
+        if left.probe {
+            if await runtime.allowsExecChannel() {
+                guard await gate.connection(generation: generation) != nil else { return nil }
+                if await runtime.rerunServerProbe(on: live) {
+                    left.probe = false
+                    Log.agent.notice(
+                        "\(locationID, privacy: .public): the server probe answered on the re-check")
+                    await reapplyCapabilities(locationID: locationID, runtime: runtime)
+                } else if CapabilityCache.channelBudgetIsSuspect(locationID: locationID) {
+                    // Refused a session: the budget is measured again on the next pass.
+                    left.budget = true
+                }
+            } else if !left.budget {
+                // A clear budget with no exec channel to spare: there is no shell to ask,
+                // and that is the answer.
+                left.probe = false
+            }
+        }
+        return left
+    }
+
+    /// The ladder re-decided on a probe that answered after the connection came up. Only
+    /// a change of tier re-opens the stream: an answer that agrees with the one the ladder
+    /// already had - from `capabilities.json`, or from the last 30-minute pass - leaves a
+    /// running helper, and every hold the ladder keeps, alone.
+    private func reapplyCapabilities(locationID: String, runtime: LocationRuntime) async {
+        guard let detector = detectors[locationID] else { return }
+        let capabilities = await DomainManager.capabilities(of: runtime, location: runtime.location)
+        let before = await detector.currentTier()
+        await detector.applyCapabilities(capabilities, watchMode: runtime.location.watchMode)
+        let after = await detector.currentTier()
+        guard before != after else { return }
+        await detector.connectionCameUp()
+        await runtime.setWatchTier(await detector.currentTier().rawValue)
     }
 
     /// `NSFileProviderManager.signalErrorResolved(.serverUnreachable)`: the system's cue to
@@ -599,7 +863,7 @@ public actor DomainManager {
     public nonisolated func signalErrorResolved(locationID: String) async {
         let replica = environment.replica
         do {
-            try await Deadline.run("signalling that serverUnreachable is resolved") {
+            try await Deadline.run("signalling that serverUnreachable is resolved", clock: environment.clock) {
                 try await replica.signalErrorResolved(locationID: locationID)
             }
             Log.agent.notice(
@@ -632,7 +896,7 @@ public actor DomainManager {
         let domain = ReplicaDomain(identifier: location.id, displayName: location.displayName)
         let replica = environment.replica
         do {
-            try await Deadline.run("adding the File Provider domain") {
+            try await Deadline.run("adding the File Provider domain", clock: environment.clock) {
                 try await replica.addDomain(domain, testingModes: testingModes)
             }
         } catch {
@@ -665,7 +929,7 @@ public actor DomainManager {
     ) async throws -> String? {
         let domain = ReplicaDomain(identifier: location.id, displayName: location.displayName)
         let replica = environment.replica
-        let preserved = try await Deadline.run("removing the File Provider domain") {
+        let preserved = try await Deadline.run("removing the File Provider domain", clock: environment.clock) {
             try await replica.removeDomain(domain, mode: mode)
         }
         if let preserved {
@@ -693,7 +957,7 @@ public actor DomainManager {
     ) async {
         let replica = environment.replica
         do {
-            try await Deadline.run("signalling an enumerator") {
+            try await Deadline.run("signalling an enumerator", clock: environment.clock) {
                 try await replica.signalEnumerator(locationID: locationID, container: container)
             }
             // At the default level, and not `debug`: this is the last thing the agent
@@ -713,7 +977,7 @@ public actor DomainManager {
     /// under a deadline and `NSFileProviderDomain` is not `Sendable`.
     public func existingDomainDescriptions() async throws -> [String] {
         let replica = environment.replica
-        return try await Deadline.run("listing the File Provider domains") {
+        return try await Deadline.run("listing the File Provider domains", clock: environment.clock) {
             try await replica.domains().map { "\($0.displayName) (\($0.identifier))" }
         }
     }

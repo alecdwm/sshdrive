@@ -4,10 +4,11 @@ import SSHProcess
 /// The per-location circuit breaker (docs/design/offline.md), as a pure state machine.
 ///
 /// It is a `struct` and it takes the time as an argument rather than reading a clock, so
-/// every rule - the 2 s doubling to 60 s, the bounded wait during an
-/// attempt, the fail-fast for everything else, the stop on an auth or host-key failure
-/// and the one re-armed attempt after a deadline stop - is a unit test with no sleeping
-/// in it. `ConnectionGate` is what owns one, runs the attempts and does the waiting.
+/// every rule - the 2 s doubling to 60 s, the bounded wait during an attempt, the
+/// fail-fast for everything else, the stop on an auth or host-key failure with its slow
+/// retry, and the one re-armed attempt after a deadline stop - is a unit test with no
+/// sleeping in it. `ConnectionGate` is what owns one, runs the attempts and does the
+/// waiting.
 ///
 /// The four rules, in the order docs/design/offline.md states them:
 ///
@@ -17,16 +18,18 @@ import SSHProcess
 ///    to 60 s - during which every call fails fast without touching the network. A path
 ///    change or wake from sleep resets it.
 /// 3. **While an attempt is in progress, calls wait for it,** bounded by the attempt's own
-///    remaining deadline: at most the 60 s authentication deadline
-///    (docs/design/secrets.md),
+///    remaining deadline: at most the 60 s authentication deadline (docs/design/secrets.md),
 ///    measured from the spawn of `ssh`, which already contains the 15 s `ConnectTimeout`.
 ///    Waiting rather than failing is deliberate: the first enumeration after login or
 ///    wake arrives during the connect, and the system never retries an enumeration on its
 ///    own, so failing it fast would leave Finder showing the folder as unavailable until
 ///    the user clicked again.
-/// 4. **Auth and host-key failures do not go through the breaker at all:** they stop
-///    reconnection until the user acts, or - for a deadline stop only - until the
-///    screen-unlock or present-user re-arm (`DeadlineRearmState`, docs/design/secrets.md).
+/// 4. **Auth and host-key failures do not go through the backoff:** they stop it. A
+///    refused key or host key is then retried on a slow schedule of its own - 5 minutes,
+///    doubling to 30 - and at most once early in each interval, on wake, a path change or
+///    a screen unlock (`retryStopNow`). A refused password is retried by nothing at all
+///    until the user acts. A deadline stop gets no schedule, only the screen-unlock or
+///    present-user re-arm (`DeadlineRearmState`, docs/design/secrets.md).
 public struct CircuitBreaker: Sendable {
 
     /// After a failed connection attempt the location is marked down for a backoff
@@ -35,6 +38,21 @@ public struct CircuitBreaker: Sendable {
     /// The authentication deadline, measured from the spawn, is the longest a call may be
     /// held during an attempt.
     public static let authenticationDeadlineSeconds: TimeInterval = 60
+    /// The slow retry of a refused key or host key: 5 minutes, doubling to 30, jittered
+    /// down to 4 minutes at the least. Each interval also allows one early attempt on
+    /// wake, a path change or an unlock, never within `earlyRetryDebounceSeconds` of the
+    /// attempt before it. The worst case is two attempts per interval: four in any ten
+    /// minutes, ten in the first hour and six an hour after that. A refused password is
+    /// not on this schedule at all (`SSHExitClassification.passwordRefused`), because
+    /// `pam_faillock` counts password failures and a `deny=3` locks the account; a refused
+    /// key costs the server a log line, and four in ten minutes stays under `fail2ban`'s
+    /// default of five. A home directory that mounts late is back within one interval.
+    public static let firstStopRetrySeconds: TimeInterval = 300
+    public static let stopRetryCapSeconds: TimeInterval = 1800
+    /// Wake, the network path coming back and the unlock arrive seconds apart when a lid
+    /// opens. An early retry asked for within this long of the last attempt is merged into
+    /// that attempt: it makes none of its own and does not use the interval's allowance.
+    public static let earlyRetryDebounceSeconds: TimeInterval = 60
 
     /// What a caller should do with the call it is holding.
     public enum Decision: Sendable, Equatable {
@@ -56,7 +74,8 @@ public struct CircuitBreaker: Sendable {
         case noNetworkPath
         /// Rule 2: the breaker is open and the backoff has this long left to run.
         case backingOff(remaining: TimeInterval)
-        /// Rule 4: reconnection has stopped until the user acts.
+        /// Rule 4: the backoff has stopped; `nextStopRetry` says whether a slow retry is
+        /// due and when.
         case stopped(SSHExitClassification)
 
         public var sentence: String {
@@ -68,9 +87,11 @@ public struct CircuitBreaker: Sendable {
             case let .stopped(classification):
                 switch classification {
                 case .authenticationFailed:
-                    return "authentication failed; fix it, then run `sshdrive debug breaker <name> --connect`"
+                    return "authentication failed; retried every few minutes, or at once with `sshdrive debug breaker <name> --connect`"
+                case .passwordRefused:
+                    return "the server refused the password; not retried until `sshdrive debug breaker <name> --connect`, a `set` or `sshdrive agent restart`"
                 case .hostKeyFailed:
-                    return "the server's host key did not match `known_hosts`"
+                    return "the server's host key did not match `known_hosts`; retried every few minutes against `known_hosts`"
                 case .authenticationDeadline:
                     return
                         "authentication did not complete within 60 s; a key agent may be waiting for a touch or approval"
@@ -89,8 +110,9 @@ public struct CircuitBreaker: Sendable {
         case up
         /// Open. Every call fails fast until `until`, then one half-open probe is let out.
         case backingOff(until: TimeInterval)
-        /// Reconnection has stopped until the user acts, or until the re-arm
-        /// (docs/design/secrets.md) for a deadline stop.
+        /// The backoff has stopped. An auth or host-key stop is retried on the slow
+        /// schedule (`stopRetryAt`); a deadline stop waits for the re-arm
+        /// (docs/design/secrets.md).
         case stopped(SSHExitClassification)
     }
 
@@ -104,6 +126,27 @@ public struct CircuitBreaker: Sendable {
     /// The cap the last failure asked for: 60 s normally, 300 s for a key agent that is
     /// not ready, since a locked key agent stays locked for hours (docs/design/ssh.md).
     public private(set) var backoffCapSeconds: TimeInterval = 60
+    /// When a stop that `retriesSlowly` lets its next attempt out. Nil for every other
+    /// state, and for a deadline stop.
+    public private(set) var stopRetryAt: TimeInterval?
+    /// How many slow retries in a row have failed again. The interval doubles with it; an
+    /// attempt let out early by wake, a path change or an unlock does not move it, so a
+    /// user who keeps opening the lid does not push the next unattended try further away.
+    public private(set) var stopRetryLevel = 0
+    /// Whether this stop interval's one early attempt has been made. Cleared when the
+    /// scheduled retry is let out, by a success, and by `clearStop`.
+    public private(set) var earlyRetryUsed = false
+    /// When the last attempt of any kind was let out, for the debounce.
+    public private(set) var lastAttemptAt: TimeInterval?
+
+    /// What let the attempt in flight out.
+    private enum AttemptKind { case ordinary, scheduledStopRetry, earlyStopRetry }
+    private var attemptKind = AttemptKind.ordinary
+    /// Set by `retryStopNow` for the attempt it lets out.
+    private var earlyRetryPending = false
+    /// The slow retry that was due when an early attempt was let out. A refused early
+    /// attempt goes back to it rather than starting the interval again.
+    private var stopRetryAtBeforeEarly: TimeInterval?
 
     /// Multiplies the computed backoff, which is jittered. A test injects `{ _ in 1 }`
     /// and gets exact numbers.
@@ -128,6 +171,9 @@ public struct CircuitBreaker: Sendable {
             return .proceed
         case .idle:
             state = .connecting(since: now)
+            attemptKind = earlyRetryPending ? .earlyStopRetry : .ordinary
+            earlyRetryPending = false
+            lastAttemptAt = now
             return .connect
         case let .connecting(since):
             // Rule 3. The bound is what is left of the attempt's own deadline, never the
@@ -139,10 +185,23 @@ public struct CircuitBreaker: Sendable {
                 // Half open: exactly one probe is let out, and everything that arrives
                 // while it runs waits on it like any other attempt.
                 state = .connecting(since: now)
+                attemptKind = .ordinary
+                earlyRetryPending = false
+                lastAttemptAt = now
                 return .connect
             }
             return .failFast(.backingOff(remaining: until - now))
         case let .stopped(classification):
+            if let due = stopRetryAt, now >= due {
+                // The slow retry: one attempt, a fresh `ssh` that checks `known_hosts` and
+                // offers its keys exactly as any other connect does.
+                state = .connecting(since: now)
+                stopRetryAt = nil
+                attemptKind = .scheduledStopRetry
+                earlyRetryUsed = false
+                lastAttemptAt = now
+                return .connect
+            }
             return .failFast(.stopped(classification))
         }
     }
@@ -153,16 +212,44 @@ public struct CircuitBreaker: Sendable {
         state = .up
         consecutiveFailures = 0
         backoffCapSeconds = 60
+        stopRetryAt = nil
+        stopRetryLevel = 0
+        earlyRetryUsed = false
+        earlyRetryPending = false
+        stopRetryAtBeforeEarly = nil
+        attemptKind = .ordinary
     }
 
     /// Reports the attempt's outcome. The classification decides between rule 2 and rule
     /// 4; it is the same `SSHExitClassifier` answer the master's exit produced, so there
     /// is one definition of "does this stop reconnection" and not two (docs/design/ssh.md).
     public mutating func attemptFailed(_ classification: SSHExitClassification, now: TimeInterval) {
+        let kind = attemptKind
+        attemptKind = .ordinary
+        let resumeAt = stopRetryAtBeforeEarly
+        stopRetryAtBeforeEarly = nil
         if classification.stopsReconnection {
             state = .stopped(classification)
+            guard classification.retriesSlowly else {
+                stopRetryAt = nil
+                return
+            }
+            switch kind {
+            case .scheduledStopRetry:
+                stopRetryLevel += 1
+                stopRetryAt = now + nextStopRetryInterval()
+            case .earlyStopRetry:
+                // The interval the early attempt was taken from carries on: its scheduled
+                // retry stays where it was, never sooner than the debounce after this
+                // one, and the allowance stays spent.
+                stopRetryAt = resumeAt.map { max($0, now + Self.earlyRetryDebounceSeconds) }
+                    ?? now + nextStopRetryInterval()
+            case .ordinary:
+                stopRetryAt = now + nextStopRetryInterval()
+            }
             return
         }
+        stopRetryAt = nil
         consecutiveFailures += 1
         backoffCapSeconds = TimeInterval(classification.backoffCapSeconds)
         state = .backingOff(until: now + nextBackoff())
@@ -179,6 +266,14 @@ public struct CircuitBreaker: Sendable {
         return jitter(base)
     }
 
+    /// The slow retry's interval at the current level: 5 minutes, doubling to 30, jittered
+    /// like the backoff and never past the cap.
+    public func nextStopRetryInterval() -> TimeInterval {
+        let base = min(
+            Self.firstStopRetrySeconds * pow(2, Double(stopRetryLevel)), Self.stopRetryCapSeconds)
+        return min(jitter(base), Self.stopRetryCapSeconds)
+    }
+
     /// A connection that was up has gone (the master exited, or a request hit its
     /// deadline twice). The next call connects straight away with no backoff owed: the
     /// connection worked a moment ago, so a fresh attempt is the right answer and a 2 s
@@ -189,7 +284,8 @@ public struct CircuitBreaker: Sendable {
     }
 
     /// A path change or wake from sleep (docs/design/offline.md). Clears a
-    /// backoff but never a stop: an auth failure is still an auth failure after a Wi-Fi hop.
+    /// backoff but never a stop; `retryStopNow` is what lets an auth or host-key stop make
+    /// its one attempt on the same events.
     public mutating func reset() {
         consecutiveFailures = 0
         backoffCapSeconds = 60
@@ -199,6 +295,29 @@ public struct CircuitBreaker: Sendable {
         case .idle, .up, .connecting, .stopped:
             break
         }
+    }
+
+    /// Wake, a path change or a screen unlock, on a stop that `retriesSlowly`: one attempt
+    /// now instead of at the scheduled time. The home directory that was not mounted, or
+    /// the network whose server presented another host key, is the kind of thing those
+    /// events change.
+    ///
+    /// At most one per stop interval, and none within `earlyRetryDebounceSeconds` of the
+    /// last attempt: a lid opening is a wake, a path and an unlock seconds apart, and the
+    /// first of them is the only attempt they make. A refused password and a deadline stop
+    /// are left alone; the deadline's triggers are the re-arm's.
+    @discardableResult
+    public mutating func retryStopNow(now: TimeInterval) -> Bool {
+        guard case let .stopped(classification) = state, classification.retriesSlowly,
+            !earlyRetryUsed
+        else { return false }
+        if let last = lastAttemptAt, now - last < Self.earlyRetryDebounceSeconds { return false }
+        state = .idle
+        stopRetryAtBeforeEarly = stopRetryAt
+        stopRetryAt = nil
+        earlyRetryUsed = true
+        earlyRetryPending = true
+        return true
     }
 
     /// The re-arm (docs/design/secrets.md): exactly one attempt after a deadline stop.
@@ -211,6 +330,7 @@ public struct CircuitBreaker: Sendable {
         }
         state = .idle
         consecutiveFailures = 0
+        earlyRetryPending = false
         return true
     }
 
@@ -220,6 +340,11 @@ public struct CircuitBreaker: Sendable {
         if case .stopped = state { state = .idle }
         consecutiveFailures = 0
         backoffCapSeconds = 60
+        stopRetryAt = nil
+        stopRetryLevel = 0
+        earlyRetryUsed = false
+        earlyRetryPending = false
+        stopRetryAtBeforeEarly = nil
     }
 
     /// Rule 1. Losing the path does not disturb an attempt that is running - it will fail
@@ -243,8 +368,15 @@ public struct CircuitBreaker: Sendable {
         case let .backingOff(until):
             return "backing off for \(Int(max(0, until - now).rounded(.up))) s after \(consecutiveFailures) failure(s)"
         case let .stopped(classification):
-            return "stopped: \(classification.rawValue)"
+            guard let due = stopRetryAt else { return "stopped: \(classification.rawValue)" }
+            return "stopped: \(classification.rawValue); next attempt in \(Self.duration(max(0, due - now)))"
         }
+    }
+
+    /// "45 s", "5 min".
+    static func duration(_ seconds: TimeInterval) -> String {
+        let whole = Int(seconds.rounded(.up))
+        return whole < 120 ? "\(whole) s" : "\(Int((Double(whole) / 60).rounded())) min"
     }
 
     public var isStopped: Bool { if case .stopped = state { return true }; return false }

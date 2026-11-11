@@ -155,6 +155,9 @@ public actor LocationRuntime {
     /// than read off the transport, because there may be no live connection at all:
     /// `status` on an offline location still has to print what the server was.
     public var serverProbeResult: ServerProbe.Result?
+    /// The connection `applyConnection` last ran to the end for. Weak, so a connection
+    /// that has gone can never be mistaken for a new one at the same address.
+    private weak var appliedConnection: AnyObject?
 
     /// The last transport error, for `show` and `status`.
     public var lastTransportError: String?
@@ -274,44 +277,33 @@ public actor LocationRuntime {
     /// identity behind the capability mapping, the channel budget, the two spellings of
     /// the root, and the root row itself.
     ///
-    /// Called from `start()` and again from `ConnectionGate`'s connected hook on every
-    /// reconnect, because a server can come back with a different `MaxSessions`, a
-    /// different `id`, or a root that has moved. Explicit values come from the hook;
-    /// without them it reads whatever the transport is holding now.
-    public func applyConnection(
-        budget: ChannelBudget? = nil, probe: ServerProbe.Result? = nil,
-        sharesMetadataChannel: Bool? = nil
-    ) async throws {
+    /// Called from `start()` and again from the reconnect sequence for every connection the
+    /// gate brings up, because a server can come back with a different `MaxSessions`, a
+    /// different `id`, or a root that has moved. The sequence hands over the connection it
+    /// is for; without one this reads whatever the gate is holding now.
+    ///
+    /// The budget and the probe are recorded **before** anything here can fail. A root that
+    /// is missing for the moment or a single missed deadline then fails the rest, and the
+    /// ladder still decides on what this connection found rather than on the last one's.
+    public func applyConnection(_ connection: (any LiveConnection)? = nil) async throws {
+        var applying = connection
+        if applying == nil { applying = await gateConnection() }
+        if let applying { await record(applying) }
+
         // Both spellings of the root, because on a host where `/home` is a symlink the
         // canonical root is `/var/home/alec` while every absolute link the user ever made
         // says `/home/alec/…`, and checked against the canonical spelling alone all of
         // them would be hidden.
         //
         // This is also the first remote call of the location, so on the `start()` path it
-        // is what makes the breaker open its first connection.
+        // is what makes the breaker open its first connection, and only then is there a
+        // connection to record.
         let canonical = try await transport.realpath(.root)
-
-        var live = probe
-        if live == nil || budget == nil, let reconnecting = transport as? ReconnectingTransport,
-            let connection = await reconnecting.gate.currentConnection()
-        {
-            if live == nil { live = connection.probe }
-            channelBudget = budget ?? connection.budget
-            await scheduler.setSharesMetadataChannel(
-                sharesMetadataChannel ?? connection.transfersShareMetadataChannel)
-        } else {
-            if let budget { channelBudget = budget }
-            if let sharesMetadataChannel {
-                await scheduler.setSharesMetadataChannel(sharesMetadataChannel)
-            }
+        if applying == nil, let connected = await gateConnection() {
+            applying = connected
+            await record(connected)
         }
-        // The identity comes from one `id` exec channel at connect, and an SFTP-only
-        // account - no shell, or no channel to spare for one - keeps `.unknown`, which is
-        // what gives every item full capabilities.
-        if let live {
-            identity = live.identity
-            serverProbeResult = live
-        }
+        let live = serverProbeResult
 
         var alternate: String? = nil
         if let typed = location.remotePath, typed.hasPrefix("/") {
@@ -341,11 +333,56 @@ public actor LocationRuntime {
         // that `status` never has to make one of its own.
         await refreshFreeSpace()
 
+        if let applying { appliedConnection = applying as AnyObject }
+
         // The rename-semantics probe runs once, in the location root. Off the start path,
         // because it is five round trips and nothing before the first write needs its
         // answer - `needsPreflight` assumes OpenSSH's refusal until it lands.
         let writer = self.writer
         Task.detached { await writer.probeRenameSemantics() }
+    }
+
+    private func gateConnection() async -> (any LiveConnection)? {
+        guard let reconnecting = transport as? ReconnectingTransport else { return nil }
+        return await reconnecting.gate.currentConnection()
+    }
+
+    /// Whether `applyConnection` has already run to the end for this connection, so the
+    /// reconnect sequence of the connection `start()` brought up does not pay for the root
+    /// row, the free-space figure and the rename probe a second time.
+    public func hasApplied(_ connection: any LiveConnection) -> Bool {
+        appliedConnection != nil && appliedConnection === (connection as AnyObject)
+    }
+
+    private func record(_ connection: any LiveConnection) async {
+        channelBudget = connection.budget
+        record(probe: connection.probe, on: connection)
+        await scheduler.setSharesMetadataChannel(connection.transfersShareMetadataChannel)
+    }
+
+    /// The identity comes from one `id` exec channel at connect, and an SFTP-only account -
+    /// no shell, or no channel to spare for one - keeps `.unknown`, which is what gives
+    /// every item full capabilities.
+    ///
+    /// A probe that went unanswered says nothing about the account, so the last probe the
+    /// server did answer - this runtime's own, or the one `capabilities.json` holds - stays
+    /// in force until the re-check on the live connection gets an answer
+    /// (docs/design/offline.md). With no answer ever, the unanswered one is all there is.
+    ///
+    /// The answer in force is handed to the connection too, because what runs on it - the
+    /// helper's deployment - reads the probe from the connection.
+    private func record(probe: ServerProbe.Result, on connection: any LiveConnection) {
+        var applied = probe
+        if probe.unanswered {
+            if let previous = serverProbeResult, !previous.unanswered {
+                applied = previous
+            } else if let cached = CapabilityCache.lastAnsweredProbe(locationID: location.id) {
+                applied = cached
+            }
+            if !applied.unanswered { (connection as? SSHBackedTransport)?.adopt(probe: applied) }
+        }
+        identity = applied.identity
+        serverProbeResult = applied
     }
 
     /// Whether this server's plain `rename` refuses an existing name, as the probe found
@@ -1450,13 +1487,32 @@ public actor LocationRuntime {
         // It is SFTP, not a shell, so it is asked before the exec channel is: an
         // SFTP-only account has no `id` to re-read and still has a disk.
         await refreshFreeSpace()
-        guard let master = ssh.execMaster else { return }
-        let probe = await ServerProbe.run(master: master)
+        await rerunServerProbe(on: ssh)
+    }
+
+    /// The server probe again on `connection`: from `status --probe`, and from the
+    /// re-check of a connection whose own probe went unanswered. True when the server
+    /// answered - "no shell access" included - and the answer is now the one in force; an
+    /// unanswered run changes nothing but the SFTP extensions on record.
+    @discardableResult
+    public func rerunServerProbe(on connection: any LiveConnection) async -> Bool {
+        guard let master = connection.execMaster, channelBudget.allowsExecChannel else {
+            return false
+        }
+        let probe = await ServerProbe.run(master: master, clock: environment.clock)
+        if probe.sessionRefused { CapabilityCache.markChannelBudgetSuspect(locationID: location.id) }
         CapabilityCache.storeProbe(
-            probe, extensions: await ssh.extensions,
-            advertised: await ssh.extensionNames, locationID: location.id)
-        if probe.identity.isKnown, location.permissions == .mode { identity = probe.identity }
+            probe, extensions: await connection.extensions,
+            advertised: await connection.extensionNames, locationID: location.id)
+        guard !probe.unanswered else { return false }
+        (connection as? SSHBackedTransport)?.adopt(probe: probe)
+        if probe.identity.isKnown, location.permissions == .mode {
+            identity = probe.identity
+            rows = RowBuilder(
+                permissions: location.permissions, identity: identity, roots: symlinkRoots)
+        }
         serverProbeResult = probe
+        return true
     }
 
     /// `-O check` on our own child. False for a location whose master has gone, which is
@@ -1752,6 +1808,14 @@ public actor LocationRuntime {
         guard writesFail else { return }
         throw SSHDriveAgentError.serverUnreachable.asNSError(
             "debug fault --writes on: the agent is refusing every upload.")
+    }
+
+    /// Whether a download or an upload is running on this location now. Dropping the
+    /// connection under one loses it: the system never re-issues a failed
+    /// `fetchContents` (gotcha 59), and an upload's source cannot be replayed.
+    public func hasTransferInFlight() async -> Bool {
+        if concurrentFetches > 0 { return true }
+        return !(await writer.inFlightPaths()).isEmpty
     }
 
     private func noteFetchStarted(path: String) -> Int {

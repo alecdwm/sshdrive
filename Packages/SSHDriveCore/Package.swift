@@ -101,12 +101,14 @@ let package = Package(
             ]),
 
         // In-memory implementations of every AgentRuntime seam, so the agent's logic can
-        // be driven on Linux with no Mac, no network and no keychain.
+        // be driven on Linux with no Mac, no network and no keychain. `ServerModel` is
+        // for the resilience harness, whose launcher connects the agent's real connect
+        // path to a `FakeRemoteHost`.
         .target(
             name: "AgentRuntimeTestSupport",
             dependencies: [
                 "AgentRuntime", "AgentCore", "Config", "Index", "Logging", "ProviderCore",
-                "SFTP", "SSHProcess", "Secrets", "XPCProtocols",
+                "SFTP", "SSHProcess", "Secrets", "XPCProtocols", "ServerModel",
             ]),
 
         // The simulated macOS: a fileproviderd that drives ProviderCore the way the real

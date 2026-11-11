@@ -7,12 +7,14 @@ final class ExitClassificationTests: XCTestCase {
 
     private func classify(
         role: SSHRole = .master, status: Int32 = 255, stderr: String,
-        channelOpened: Bool = true, deadlineExpired: Bool = false, agentDependent: Bool = false
+        channelOpened: Bool = true, deadlineExpired: Bool = false, agentDependent: Bool = false,
+        keyAgentSocketFailed: Bool = false, sentPassword: Bool = false
     ) -> SSHExitClassification {
         SSHExitClassifier.classify(
             role: role, exitStatus: status, stderr: stderr,
             channelOpened: channelOpened, deadlineExpired: deadlineExpired,
-            agentDependent: agentDependent
+            agentDependent: agentDependent, keyAgentSocketFailed: keyAgentSocketFailed,
+            sentPassword: sentPassword
         )
     }
 
@@ -26,7 +28,72 @@ final class ExitClassificationTests: XCTestCase {
             XCTAssertEqual(result, .authenticationFailed, text)
             XCTAssertTrue(result.stopsReconnection)
             XCTAssertFalse(result.isReArmable, "refusals are never re-armed")
+            XCTAssertTrue(result.retriesSlowly, "a refusal is retried on the slow schedule")
         }
+        XCTAssertTrue(SSHExitClassification.hostKeyFailed.retriesSlowly)
+        XCTAssertFalse(
+            SSHExitClassification.authenticationDeadline.retriesSlowly,
+            "an unattended attempt at a deadline stop can raise a prompt nobody answers")
+    }
+
+    /// Gotcha 40: a missing, dead or locked key agent all end in the same bare
+    /// `Permission denied (publickey)`, and so does a key the server refused. Only the
+    /// socket check tells them apart: with the socket missing or refusing it is the key
+    /// agent not being ready, on its own backoff; with the socket there it is a refusal,
+    /// on the slow retry.
+    func testABarePublickeyDenialIsTheKeyAgentOnlyWhenItsSocketFailed() {
+        for text in [
+            "alec@nas: Permission denied (publickey).\r\n",
+            "Permission denied (publickey).",
+            "alec@nas: Permission denied (publickey).\r\nalec@nas: Permission denied (publickey).\r\n",
+        ] {
+            XCTAssertEqual(
+                classify(stderr: text, agentDependent: true, keyAgentSocketFailed: true),
+                .keyAgentNotReady, text)
+            XCTAssertEqual(
+                classify(stderr: text, agentDependent: true), .authenticationFailed,
+                "a socket that answered: the server refused the key - \(text)")
+            XCTAssertEqual(classify(stderr: text, agentDependent: false), .authenticationFailed, text)
+        }
+        // Anything more than the bare line is a server answering about something else.
+        for text in [
+            "alec@nas: Permission denied (publickey,password).",
+            "Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures\r\nalec@nas: Permission denied (publickey).",
+        ] {
+            XCTAssertEqual(
+                classify(stderr: text, agentDependent: true, keyAgentSocketFailed: true),
+                .authenticationFailed, text)
+        }
+        // A mux client never authenticates, so the rule is the master's alone.
+        XCTAssertEqual(
+            classify(
+                role: .collect, stderr: "Permission denied (publickey).", agentDependent: true,
+                keyAgentSocketFailed: true),
+            .authenticationFailed)
+    }
+
+    /// A refusal after the broker served a password or keyboard-interactive prompt is a
+    /// failed password on the server's count, and nothing retries it on its own. The
+    /// method list in stderr does not decide: `(publickey,password)` is what the server
+    /// allows, and says nothing about what this connection sent.
+    func testARefusalAfterAPasswordPromptIsPasswordRefused() {
+        for text in [
+            "alec@nas: Permission denied (publickey,password).",
+            "alec@nas: Permission denied (keyboard-interactive).",
+            "Received disconnect from 10.0.0.1 port 22:2: Too many authentication failures",
+        ] {
+            let result = classify(stderr: text, sentPassword: true)
+            XCTAssertEqual(result, .passwordRefused, text)
+            XCTAssertTrue(result.stopsReconnection)
+            XCTAssertFalse(result.retriesSlowly, "no slow retry and no early retry")
+            XCTAssertFalse(result.isReArmable)
+            XCTAssertEqual(classify(stderr: text), .authenticationFailed, text)
+        }
+        XCTAssertEqual(
+            classify(stderr: "Host key verification failed.", sentPassword: true), .hostKeyFailed)
+        XCTAssertEqual(
+            classify(stderr: "ssh: connect to host nas port 22: Connection refused", sentPassword: true),
+            .transient)
     }
 
     func testHostKeyFailuresStopReconnection() {

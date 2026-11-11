@@ -97,7 +97,9 @@ impl Watcher {
         self.watches.len()
     }
 
-    pub fn set_roots(&mut self, roots: RootSet) {
+    /// Replaces the scope. `tick` is called throughout the walk, which can take minutes on
+    /// a large tree; the caller writes its heartbeat from it.
+    pub fn set_roots(&mut self, roots: RootSet, tick: &mut dyn FnMut()) {
         for (fd, _) in self.watches.drain() {
             unsafe { libc::close(fd) };
         }
@@ -105,12 +107,14 @@ impl Watcher {
         let shallow = self.roots.shallow.clone();
         let recursive = self.roots.recursive.clone();
         for root in shallow {
-            for directory in walk::directories_under(&self.root, &root, &self.roots, false) {
+            for directory in walk::directories_under(&self.root, &root, &self.roots, false, tick) {
+                tick();
                 self.add_one(&directory, false);
             }
         }
         for root in recursive {
-            for directory in walk::directories_under(&self.root, &root, &self.roots, true) {
+            for directory in walk::directories_under(&self.root, &root, &self.roots, true, tick) {
+                tick();
                 self.add_one(&directory, true);
             }
         }
@@ -187,7 +191,10 @@ impl Watcher {
         out
     }
 
-    pub fn poll(&mut self, timeout: Duration, out: &mut Coalescer) {
+    /// Waits up to `timeout` for events, and runs the content sweep when it is due. `tick`
+    /// is called throughout the sweep and the walk of a directory that appeared inside a
+    /// recursive root.
+    pub fn poll(&mut self, timeout: Duration, out: &mut Coalescer, tick: &mut dyn FnMut()) {
         let limit = timeout.min(SWEEP_INTERVAL);
         let mut events: [libc::kevent; 64] = unsafe { std::mem::zeroed() };
         let spec = libc::timespec {
@@ -235,8 +242,9 @@ impl Watcher {
                 for (path, entry) in &added {
                     if entry.is_dir {
                         let directories =
-                            walk::directories_under(&self.root, path, &self.roots, true);
+                            walk::directories_under(&self.root, path, &self.roots, true, tick);
                         for directory in directories {
+                            tick();
                             self.add_one(&directory, true);
                         }
                     }
@@ -269,7 +277,7 @@ impl Watcher {
         }
 
         if self.last_sweep.elapsed() >= SWEEP_INTERVAL {
-            self.run_sweep(out);
+            self.run_sweep(out, tick);
         }
         if let Some(complaint) = self.complaint.take() {
             out.push_overflow(complaint);
@@ -278,14 +286,14 @@ impl Watcher {
 
     /// The 60-second content sweep. It is the only thing on this platform that sees an
     /// in-place edit, because kqueue would need a descriptor per file to report one.
-    fn run_sweep(&mut self, out: &mut Coalescer) {
+    fn run_sweep(&mut self, out: &mut Coalescer, tick: &mut dyn FnMut()) {
         let now = fsmeta::now_seconds();
         let mut options = walk::SweepOptions::new(&self.root, &self.roots);
         // One second of overlap, for the same reason the agent's own sweep window has a
         // minute of it: a change landing in the same second as the last sweep must not
         // fall between two windows.
         options.since = if self.swept_at == 0 { None } else { Some(self.swept_at - 1) };
-        for event in walk::sweep(&options) {
+        for event in walk::sweep_ticking(&options, tick) {
             match event {
                 crate::proto::Event::Change { op, path, meta } => out.push(op, path, meta),
                 crate::proto::Event::Overflow { reason } => out.push_overflow(reason),

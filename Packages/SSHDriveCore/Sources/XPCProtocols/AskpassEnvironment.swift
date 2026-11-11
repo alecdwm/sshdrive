@@ -98,6 +98,12 @@ public protocol AskpassTokenProviding: AnyObject, Sendable {
     func attachToken(_ token: String, pid: Int32, argv: [String])
     /// Retire the token when the master exits, which ends every hop with it.
     func retireToken(_ token: String)
+    /// Whether the `ssh` this token was issued to, or a hop under it, was served a
+    /// password or keyboard-interactive prompt. Whatever the reply, `ssh` sent the server
+    /// an answer - an empty one when nothing was stored - so a refusal that follows is a
+    /// failed password on the server's count (docs/design/offline.md). Readable after the
+    /// token is retired. Defaulted to false for a test double.
+    func servedPasswordPrompt(token: String) -> Bool
 }
 
 extension AskpassTokenProviding {
@@ -106,4 +112,6 @@ extension AskpassTokenProviding {
     ) -> String {
         mintToken(locationID: locationID, argv: argv)
     }
+
+    public func servedPasswordPrompt(token: String) -> Bool { false }
 }

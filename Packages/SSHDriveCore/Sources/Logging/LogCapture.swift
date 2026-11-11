@@ -181,6 +181,11 @@ public final class LogCapture: @unchecked Sendable {
         LogBackend.shared.withLock { storage }
     }
 
+    /// How many entries have been collected, without copying them.
+    public var count: Int {
+        LogBackend.shared.withLock { storage.count }
+    }
+
     /// Forget everything collected so far, staying installed.
     public func clear() {
         LogBackend.shared.withLock { storage.removeAll() }

@@ -212,11 +212,17 @@ fn watch(options: Options) -> i32 {
         control.spawn_reader(std::io::stdin());
     }
 
-    watcher.set_roots(RootSet {
-        shallow: options.roots.shallow.clone(),
-        recursive: options.roots.recursive.clone(),
-        excluded: options.roots.excluded.clone(),
-    });
+    let mut heartbeat = Heartbeat::new(HEARTBEAT);
+    watcher.set_roots(
+        RootSet {
+            shallow: options.roots.shallow.clone(),
+            recursive: options.roots.recursive.clone(),
+            excluded: options.roots.excluded.clone(),
+        },
+        &mut || {
+            heartbeat.beat();
+        },
+    );
 
     emit(&Event::Ready {
         version: VERSION,
@@ -226,7 +232,6 @@ fn watch(options: Options) -> i32 {
         roots: options.roots.len(),
     });
 
-    let mut last_heartbeat = Instant::now();
     loop {
         // Two independent reasons to stop, and both mean the agent is gone: silence past
         // the timeout, and EOF on stdin. Neither depends on sshd noticing anything.
@@ -234,14 +239,18 @@ fn watch(options: Options) -> i32 {
             return 0;
         }
         if let Some(roots) = control.take_roots() {
-            watcher.set_roots(roots);
+            watcher.set_roots(roots, &mut || {
+                heartbeat.beat();
+            });
         }
         if let Some(complaint) = control.take_complaint() {
             emit(&Event::Error { message: complaint });
         }
 
         let mut batch = Coalescer::new();
-        watcher.poll(Duration::from_millis(250), &mut batch);
+        watcher.poll(Duration::from_millis(250), &mut batch, &mut || {
+            heartbeat.beat();
+        });
         if !batch.is_empty() {
             if batch.len() > BATCH_CEILING {
                 let mut replacement = Coalescer::new();
@@ -255,12 +264,43 @@ fn watch(options: Options) -> i32 {
             }
         }
 
-        if last_heartbeat.elapsed() >= HEARTBEAT {
-            if !write_line(&Event::Heartbeat { t: fsmeta::now_seconds() }.line()) {
-                return 0;
-            }
-            last_heartbeat = Instant::now();
+        if !heartbeat.beat() {
+            return 0;
         }
+    }
+}
+
+/// The helper's proof of life: a heartbeat line every `interval`, written from the main
+/// loop and from inside every walk the watcher makes, through one shared clock.
+///
+/// A walk of a large tree can take longer than the 60 s of silence after which the agent
+/// gives up on the helper, and the main loop does not run while one is in progress. The
+/// walk calls back into `beat` instead of a second thread writing on a timer: the
+/// watcher's events are queued in a `Coalescer` and written by the main loop, on this
+/// same thread, so a heartbeat written mid-walk is one whole line between two others.
+struct Heartbeat {
+    interval: Duration,
+    last: Instant,
+}
+
+impl Heartbeat {
+    fn new(interval: Duration) -> Heartbeat {
+        Heartbeat { interval, last: Instant::now() }
+    }
+
+    /// True when a heartbeat is due, which also counts it as sent.
+    fn due(&mut self) -> bool {
+        if self.last.elapsed() < self.interval {
+            return false;
+        }
+        self.last = Instant::now();
+        true
+    }
+
+    /// Writes a heartbeat if one is due. False when the far end is gone; a walk ignores
+    /// that and the main loop stops on it.
+    fn beat(&mut self) -> bool {
+        !self.due() || write_line(&Event::Heartbeat { t: fsmeta::now_seconds() }.line())
     }
 }
 
@@ -320,6 +360,54 @@ mod tests {
         assert_eq!(parsed.roots.shallow, vec![b"a".to_vec()]);
         assert_eq!(parsed.roots.recursive, vec![b"pin".to_vec()]);
         assert_eq!(parsed.roots.excluded, vec![b"pin/big".to_vec()]);
+    }
+
+    #[test]
+    fn a_heartbeat_comes_due_once_per_interval() {
+        let mut heartbeat = Heartbeat::new(Duration::from_secs(15));
+        assert!(!heartbeat.due());
+        heartbeat.last = Instant::now() - Duration::from_secs(16);
+        assert!(heartbeat.due());
+        assert!(!heartbeat.due());
+    }
+
+    /// The watcher's walk of a new root set is where the heartbeat has to come from while
+    /// it runs, and one sent from there restarts the main loop's interval rather than
+    /// being followed by a second straight after.
+    #[test]
+    fn the_watcher_offers_a_heartbeat_while_it_walks_a_root_set() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("sshdrive-helper-main-heartbeat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for i in 0..5 {
+            std::fs::create_dir_all(root.join(format!("d{i}/e{i}"))).unwrap();
+        }
+        let mut watcher = watcher_impl::Watcher::new(&root).unwrap();
+        let roots = || RootSet { recursive: vec![Vec::new()], ..Default::default() };
+
+        let mut every_time = Heartbeat::new(Duration::ZERO);
+        let mut beats = 0;
+        watcher.set_roots(roots(), &mut || {
+            if every_time.due() {
+                beats += 1;
+            }
+        });
+        // Eleven directories, ten of them also entries of their parents.
+        assert!(beats >= 21, "{beats}");
+
+        let mut heartbeat = Heartbeat::new(HEARTBEAT);
+        heartbeat.last = Instant::now() - HEARTBEAT;
+        let mut beats = 0;
+        watcher.set_roots(roots(), &mut || {
+            if heartbeat.due() {
+                beats += 1;
+            }
+        });
+        assert_eq!(beats, 1);
+        assert!(!heartbeat.due());
+
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

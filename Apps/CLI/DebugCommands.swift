@@ -567,7 +567,7 @@ struct Fault: ParsableCommand {
     @Option(
         name: .customLong("connect-failure"),
         help:
-            "transient | authenticationDeadline | authenticationFailed | hostKeyFailed | keyAgentNotReady: what --unreachable reports the attempt failed as, through the exit classifier.")
+            "transient | authenticationDeadline | authenticationFailed | passwordRefused | hostKeyFailed | keyAgentNotReady: what --unreachable reports the attempt failed as, through the exit classifier.")
     var connectFailure: String?
 
     @Option(

@@ -79,7 +79,10 @@ impl Watcher {
     /// `inotify_add_watch` on a path already watched returns the same descriptor rather
     /// than a second watch, and the diff would have to reason about a subtree that is in
     /// one root and out of another - which is where a watch leak would live.
-    pub fn set_roots(&mut self, roots: RootSet) {
+    ///
+    /// `tick` is called throughout the walk, which can take minutes on a large tree; the
+    /// caller writes its heartbeat from it.
+    pub fn set_roots(&mut self, roots: RootSet, tick: &mut dyn FnMut()) {
         for wd in self.watched.keys() {
             unsafe { libc::inotify_rm_watch(self.fd, *wd) };
         }
@@ -89,15 +92,16 @@ impl Watcher {
         let shallow = self.roots.shallow.clone();
         let recursive = self.roots.recursive.clone();
         for root in shallow {
-            self.add_tree(&root, false);
+            self.add_tree(&root, false, tick);
         }
         for root in recursive {
-            self.add_tree(&root, true);
+            self.add_tree(&root, true, tick);
         }
     }
 
-    fn add_tree(&mut self, start: &[u8], recursive: bool) {
-        for directory in walk::directories_under(&self.root, start, &self.roots, recursive) {
+    fn add_tree(&mut self, start: &[u8], recursive: bool, tick: &mut dyn FnMut()) {
+        for directory in walk::directories_under(&self.root, start, &self.roots, recursive, tick) {
+            tick();
             self.add_one(&directory);
         }
     }
@@ -125,8 +129,9 @@ impl Watcher {
         self.watched.insert(wd, relative.to_vec());
     }
 
-    /// Waits up to `timeout` for events and drains everything queued, coalesced.
-    pub fn poll(&mut self, timeout: Duration, out: &mut Coalescer) {
+    /// Waits up to `timeout` for events and drains everything queued, coalesced. `tick` is
+    /// called throughout the walk of a directory that appeared inside a recursive root.
+    pub fn poll(&mut self, timeout: Duration, out: &mut Coalescer, tick: &mut dyn FnMut()) {
         let mut fds = libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 };
         let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
         let ready = unsafe { libc::poll(&mut fds, 1, millis) };
@@ -142,7 +147,7 @@ impl Watcher {
             if read <= 0 {
                 break;
             }
-            self.decode(&buffer[..read as usize], out);
+            self.decode(&buffer[..read as usize], out, tick);
         }
         self.flush_pending_moves(out);
         if let Some(complaint) = self.complaint.take() {
@@ -152,7 +157,7 @@ impl Watcher {
 
     /// The inotify record is a fixed header followed by a NUL-padded name. It is read as
     /// bytes: a filename is bytes.
-    fn decode(&mut self, mut data: &[u8], out: &mut Coalescer) {
+    fn decode(&mut self, mut data: &[u8], out: &mut Coalescer, tick: &mut dyn FnMut()) {
         const HEADER: usize = 16;
         while data.len() >= HEADER {
             let wd = i32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
@@ -167,12 +172,20 @@ impl Watcher {
                 Some(end) => &name[..end],
                 None => name,
             };
-            self.handle(wd, mask, cookie, name, out);
+            self.handle(wd, mask, cookie, name, out, tick);
             data = &data[HEADER + length..];
         }
     }
 
-    fn handle(&mut self, wd: i32, mask: u32, cookie: u32, name: &[u8], out: &mut Coalescer) {
+    fn handle(
+        &mut self,
+        wd: i32,
+        mask: u32,
+        cookie: u32,
+        name: &[u8],
+        out: &mut Coalescer,
+        tick: &mut dyn FnMut(),
+    ) {
         if mask & libc::IN_Q_OVERFLOW != 0 {
             // The `overflow` event: the agent runs a sweep rather than silently missing
             // changes.
@@ -214,14 +227,14 @@ impl Watcher {
                 None => out.push(Op::Create, relative.clone(), meta),
             }
             if is_dir {
-                self.rewatch(&relative, out);
+                self.rewatch(&relative, out, tick);
             }
             return;
         }
         if mask & libc::IN_CREATE != 0 {
             out.push(Op::Create, relative.clone(), self.meta_of(&relative));
             if is_dir {
-                self.rewatch(&relative, out);
+                self.rewatch(&relative, out, tick);
             }
             return;
         }
@@ -237,7 +250,7 @@ impl Watcher {
     /// A directory that appeared inside a recursive root has to be watched, and whatever
     /// was put into it between the `mkdir` and the `inotify_add_watch` has to be
     /// reported: the kernel tells us nothing about a window we were not watching.
-    fn rewatch(&mut self, relative: &[u8], out: &mut Coalescer) {
+    fn rewatch(&mut self, relative: &[u8], out: &mut Coalescer, tick: &mut dyn FnMut()) {
         let recursive = self
             .roots
             .recursive
@@ -246,7 +259,7 @@ impl Watcher {
         if !recursive {
             return;
         }
-        self.add_tree(relative, true);
+        self.add_tree(relative, true, tick);
         let mut options = walk::SweepOptions::new(&self.root, &self.roots);
         options.limit = 20_000;
         let scoped = RootSet {
@@ -256,7 +269,7 @@ impl Watcher {
         };
         let mut scoped_options = walk::SweepOptions::new(&self.root, &scoped);
         scoped_options.limit = options.limit;
-        for event in walk::sweep(&scoped_options) {
+        for event in walk::sweep_ticking(&scoped_options, tick) {
             if let crate::proto::Event::Change { path, meta, .. } = event {
                 if path != relative {
                     out.push(Op::Create, path, meta);
@@ -313,12 +326,12 @@ mod tests {
     fn drain(watcher: &mut Watcher) -> Vec<Event> {
         let mut out = Coalescer::new();
         for _ in 0..20 {
-            watcher.poll(Duration::from_millis(50), &mut out);
+            watcher.poll(Duration::from_millis(50), &mut out, &mut || {});
             if !out.is_empty() {
                 break;
             }
         }
-        watcher.poll(Duration::from_millis(50), &mut out);
+        watcher.poll(Duration::from_millis(50), &mut out, &mut || {});
         out.drain()
     }
 
@@ -342,7 +355,7 @@ mod tests {
     fn create_modify_rename_and_delete_all_arrive() {
         let temp = Temp::new("basic");
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() });
+        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() }, &mut || {});
 
         fs::write(temp.0.join("a.txt"), b"one").unwrap();
         let events = drain(&mut watcher);
@@ -371,7 +384,7 @@ mod tests {
         let temp = Temp::new("chmod");
         fs::write(temp.0.join("f.txt"), b"x").unwrap();
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() });
+        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() }, &mut || {});
         fs::set_permissions(temp.0.join("f.txt"), std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let events = drain(&mut watcher);
@@ -382,7 +395,8 @@ mod tests {
     fn a_new_directory_under_a_recursive_root_is_watched_and_its_contents_reported() {
         let temp = Temp::new("recursive");
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { recursive: vec![Vec::new()], ..Default::default() });
+        let roots = RootSet { recursive: vec![Vec::new()], ..Default::default() };
+        watcher.set_roots(roots, &mut || {});
 
         fs::create_dir(temp.0.join("sub")).unwrap();
         fs::write(temp.0.join("sub/inside.txt"), b"x").unwrap();
@@ -402,7 +416,7 @@ mod tests {
         let temp = Temp::new("shallow");
         fs::create_dir(temp.0.join("sub")).unwrap();
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() });
+        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() }, &mut || {});
         assert_eq!(watcher.watch_count(), 1);
         fs::write(temp.0.join("sub/deep.txt"), b"x").unwrap();
         assert!(ops(&drain(&mut watcher)).is_empty());
@@ -417,7 +431,7 @@ mod tests {
             recursive: vec![b"pin".to_vec()],
             excluded: vec![b"pin/big".to_vec()],
             ..Default::default()
-        });
+        }, &mut || {});
         fs::write(temp.0.join("pin/.sshdrive-upload-aabbccdd-9"), b"x").unwrap();
         fs::write(temp.0.join("pin/big/huge.bin"), b"x").unwrap();
         assert!(ops(&drain(&mut watcher)).is_empty());
@@ -429,7 +443,7 @@ mod tests {
     fn a_burst_of_writes_to_one_file_is_one_line() {
         let temp = Temp::new("burst");
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() });
+        watcher.set_roots(RootSet { shallow: vec![Vec::new()], ..Default::default() }, &mut || {});
         for i in 0..50 {
             fs::write(temp.0.join("hot.log"), format!("{i}")).unwrap();
         }
@@ -445,7 +459,8 @@ mod tests {
         fs::create_dir(temp.0.join("elsewhere")).unwrap();
         fs::write(temp.0.join("watched/f.txt"), b"x").unwrap();
         let mut watcher = Watcher::new(&temp.0).unwrap();
-        watcher.set_roots(RootSet { shallow: vec![b"watched".to_vec()], ..Default::default() });
+        let roots = RootSet { shallow: vec![b"watched".to_vec()], ..Default::default() };
+        watcher.set_roots(roots, &mut || {});
         fs::rename(temp.0.join("watched/f.txt"), temp.0.join("elsewhere/f.txt")).unwrap();
         let seen = ops(&drain(&mut watcher));
         assert!(seen.contains(&("delete".into(), "watched/f.txt".into())), "{seen:?}");

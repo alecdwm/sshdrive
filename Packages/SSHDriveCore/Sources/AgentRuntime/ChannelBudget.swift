@@ -41,6 +41,12 @@ public struct ChannelBudget: Sendable, Equatable {
     public var allowsPersistentExecChannel: Bool
     /// The sentence `sshdrive status` shows. Empty when nothing was forced.
     public var note: String
+    /// Whether the server said so. False when the probe met a channel that neither opened
+    /// nor was refused in `ssh`'s own words (`ChannelProbeVerdict.inconclusive`): the
+    /// connection runs on the channels it did get, nothing is cached, and the budget is
+    /// asked again - on the live connection, and on every connect - until the server gives
+    /// a clear answer.
+    public var conclusive = true
 
     public static let unrestricted = ChannelBudget(
         concurrentChannels: 3, hasBulkChannel: true, allowsExecChannel: true,
@@ -70,6 +76,18 @@ public struct ChannelBudget: Sendable, Equatable {
         }
     }
 
+    /// The same budget, for one connection only: the probe got no clear answer past
+    /// `concurrentChannels`.
+    public var inconclusive: ChannelBudget {
+        var budget = self
+        budget.conclusive = false
+        let lead =
+            "the channel probe got no clear answer past \(concurrentChannels) channel(s), so "
+            + "this connection uses \(concurrentChannels) and the server is asked again"
+        budget.note = note.isEmpty ? lead : lead + "; " + note
+        return budget
+    }
+
     public var asJSON: [String: Any] {
         [
             "concurrentChannels": concurrentChannels,
@@ -77,6 +95,7 @@ public struct ChannelBudget: Sendable, Equatable {
             "execChannel": allowsExecChannel,
             "persistentExecChannel": allowsPersistentExecChannel,
             "note": note,
+            "conclusive": conclusive,
         ]
     }
 }
@@ -91,7 +110,7 @@ public enum ChannelProbe {
     public static let handshakeSeconds: Double = 10
 
     public struct Opened {
-        public let channel: SFTPChannel
+        public let channel: any RemoteSFTPChannel
         public let transport: RealSFTPTransport
     }
 
@@ -100,8 +119,8 @@ public enum ChannelProbe {
     /// refused session ever gives (`mux_client_request_session: session request failed`).
     public struct Refusal: Error {
         public let diagnostics: String
-        /// Whether the server refused a session or the connection died under the open.
-        /// Only the first may be turned into a cached budget.
+        /// Whether the server refused a session, the connection died under the open, or
+        /// neither can be told. Only the first may be turned into a cached budget.
         public let verdict: ChannelProbeVerdict
 
         public var connectionDied: Bool { verdict == .connectionDied }
@@ -110,12 +129,16 @@ public enum ChannelProbe {
     /// Spawns one SFTP mux client and completes the SFTP handshake on it, which is the
     /// only proof the session was actually granted: `ssh` exits at once when it was not,
     /// and the spawn itself always succeeds.
+    ///
+    /// `configuration` is the base the channel's client is built from; the handshake
+    /// deadline is set on top of it.
     public static func openVerifiedChannel(
-        master: SSHMaster, root: String, uploadTag: String
+        master: any RemoteMaster, root: String, uploadTag: String,
+        configuration base: SFTPClient.Configuration = SFTPClient.Configuration()
     ) async -> Result<Opened, Refusal> {
-        let channel: SFTPChannel
+        let channel: any RemoteSFTPChannel
         do {
-            channel = try await master.openSFTPChannel()
+            channel = try await master.openSFTPChannel(readinessDeadline: 15)
         } catch {
             return .failure(
                 Refusal(
@@ -123,7 +146,7 @@ public enum ChannelProbe {
                     verdict: ChannelProbeVerdict.classify(
                         diagnostics: "\(error)", masterIsRunning: await master.isRunning)))
         }
-        var configuration = SFTPClient.Configuration()
+        var configuration = base
         configuration.metadataDeadline = .seconds(handshakeSeconds)
         do {
             let transport = try await RealSFTPTransport.connect(
@@ -142,7 +165,7 @@ public enum ChannelProbe {
         }
     }
 
-    /// The probe, run once per location and cached.
+    /// The probe, run on a connect whenever the cache holds no trustworthy full budget.
     ///
     /// Returns the budget and, when the server allowed it, the bulk channel itself - the
     /// probe's second channel *is* the bulk channel, so nothing is opened twice.
@@ -151,29 +174,41 @@ public enum ChannelProbe {
     /// refusing a session. Nothing is recorded then: the caller fails the connect attempt
     /// and the breaker tries again. A budget measured on a dying connection would be
     /// cached with nothing left to re-probe it.
+    ///
+    /// A budget that is not `conclusive` is what the connection got when a channel neither
+    /// opened nor was refused: the connection runs on it, and the caller caches nothing.
     public static func probe(
-        master: SSHMaster, root: String, uploadTag: String, locationID: String
+        master: any RemoteMaster, root: String, uploadTag: String, locationID: String,
+        configuration: SFTPClient.Configuration = SFTPClient.Configuration()
     ) async -> (budget: ChannelBudget?, bulk: Opened?) {
         // Channel 2: the bulk channel.
-        let second = await openVerifiedChannel(master: master, root: root, uploadTag: uploadTag)
+        let second = await openVerifiedChannel(
+            master: master, root: root, uploadTag: uploadTag, configuration: configuration)
         guard case .success(let bulk) = second else {
-            if case .failure(let refusal) = second {
-                if refusal.connectionDied {
-                    Log.ssh.notice(
-                        "\(locationID, privacy: .public): the connection died while probing the second channel (\(refusal.diagnostics, privacy: .public)); recording no budget"
-                    )
-                    return (nil, nil)
-                }
+            guard case .failure(let refusal) = second else { return (nil, nil) }
+            switch refusal.verdict {
+            case .connectionDied:
+                Log.ssh.notice(
+                    "\(locationID, privacy: .public): the connection died while probing the second channel (\(refusal.diagnostics, privacy: .public)); recording no budget"
+                )
+                return (nil, nil)
+            case .inconclusive:
+                Log.ssh.notice(
+                    "\(locationID, privacy: .public): a second channel neither opened nor was refused (\(refusal.diagnostics, privacy: .public)); one channel for this connection, nothing recorded"
+                )
+                return (ChannelBudget.forConcurrentChannels(1).inconclusive, nil)
+            case .sessionRefused:
                 Log.ssh.notice(
                     "\(locationID, privacy: .public): a second channel was refused (\(refusal.diagnostics, privacy: .public))"
                 )
+                return (.forConcurrentChannels(1), nil)
             }
-            return (.forConcurrentChannels(1), nil)
         }
 
         // Channel 3: not kept. It stands in for the exec channel the sweep, the `id`
         // probe and the helper each want alongside the two SFTP channels.
-        let third = await openVerifiedChannel(master: master, root: root, uploadTag: uploadTag)
+        let third = await openVerifiedChannel(
+            master: master, root: root, uploadTag: uploadTag, configuration: configuration)
         switch third {
         case .success(let probe):
             await probe.transport.shutdown()
@@ -181,20 +216,69 @@ public enum ChannelProbe {
             Log.ssh.notice("\(locationID, privacy: .public): three channels held; full budget")
             return (.unrestricted, bulk)
         case .failure(let refusal):
-            if refusal.connectionDied {
+            await bulk.transport.shutdown()
+            bulk.channel.close()
+            switch refusal.verdict {
+            case .connectionDied:
                 Log.ssh.notice(
                     "\(locationID, privacy: .public): the connection died while probing the third channel (\(refusal.diagnostics, privacy: .public)); recording no budget"
                 )
-                await bulk.transport.shutdown()
-                bulk.channel.close()
                 return (nil, nil)
+            case .inconclusive:
+                Log.ssh.notice(
+                    "\(locationID, privacy: .public): a third channel neither opened nor was refused (\(refusal.diagnostics, privacy: .public)); two channels for this connection, nothing recorded"
+                )
+                return (ChannelBudget.forConcurrentChannels(2).inconclusive, nil)
+            case .sessionRefused:
+                Log.ssh.notice(
+                    "\(locationID, privacy: .public): a third channel was refused (\(refusal.diagnostics, privacy: .public)); dropping the bulk channel"
+                )
+                return (.forConcurrentChannels(2), nil)
             }
+        }
+    }
+
+    /// Asks the budget question again on a connection that is already up and running on
+    /// an inconclusive budget, and answers only when the server gave a clear answer.
+    ///
+    /// The connection already holds its metadata channel, so two more opens ask "may I
+    /// hold three at once" as the connect-time probe does. Both opening is a full budget.
+    /// A refusal is a verdict only for a connection running on one channel: on two, the
+    /// shared exec channel may be held by a sweep at that moment, and a refusal then says
+    /// nothing about whether three would fit. Everything else answers nil, and the caller
+    /// asks again later. Nothing opened here is kept.
+    public static func recheck(
+        master: any RemoteMaster, root: String, uploadTag: String, current: ChannelBudget,
+        locationID: String,
+        configuration: SFTPClient.Configuration = SFTPClient.Configuration()
+    ) async -> ChannelBudget? {
+        let refusalIsAVerdict = current.concurrentChannels <= 1
+        let first = await openVerifiedChannel(
+            master: master, root: root, uploadTag: uploadTag, configuration: configuration)
+        guard case .success(let opened) = first else {
+            if case .failure(let refusal) = first, refusal.verdict == .sessionRefused,
+                refusalIsAVerdict
+            {
+                return .forConcurrentChannels(1)
+            }
+            return nil
+        }
+        let second = await openVerifiedChannel(
+            master: master, root: root, uploadTag: uploadTag, configuration: configuration)
+        await opened.transport.shutdown()
+        opened.channel.close()
+        switch second {
+        case .success(let extra):
+            await extra.transport.shutdown()
+            extra.channel.close()
+            Log.ssh.notice("\(locationID, privacy: .public): the re-check held three channels; full budget")
+            return .unrestricted
+        case .failure(let refusal):
+            guard refusal.verdict == .sessionRefused, refusalIsAVerdict else { return nil }
             Log.ssh.notice(
-                "\(locationID, privacy: .public): a third channel was refused (\(refusal.diagnostics, privacy: .public)); dropping the bulk channel"
+                "\(locationID, privacy: .public): the re-check was refused a third channel (\(refusal.diagnostics, privacy: .public))"
             )
-            await bulk.transport.shutdown()
-            bulk.channel.close()
-            return (.forConcurrentChannels(2), nil)
+            return .forConcurrentChannels(2)
         }
     }
 }
@@ -251,20 +335,28 @@ public enum CapabilityCache {
             note: (stored["note"] as? String) ?? "")
     }
 
+    /// Records a budget the server gave a clear answer for. An inconclusive one is never
+    /// passed here.
     public static func store(_ budget: ChannelBudget, locationID: String) {
+        guard budget.conclusive else { return }
         var values = budget.asJSON
         values["probedAt"] = Date().timeIntervalSince1970
         values["suspect"] = false
         merge(locationID: locationID, ["channels": values])
     }
 
+    /// Whether the cached budget is marked suspect.
+    public static func channelBudgetIsSuspect(locationID: String) -> Bool {
+        (read(locationID: locationID)["channels"] as? [String: Any])?["suspect"] as? Bool == true
+    }
+
     /// Marks the cached budget as suspect, so the next connect probes again.
     ///
     /// Called on every abrupt loss of a connection that was up - a master that died, two
-    /// consecutive deadline misses, a path that went away, the will-sleep drop. The only
-    /// other invalidation is an explicit re-probe, so without this a location that probed
-    /// in a bad moment keeps that answer for the life of the install. Two extra channel
-    /// opens on the next connect is the whole cost.
+    /// consecutive deadline misses, a path that went away, the will-sleep drop. A budget
+    /// below the full three is re-probed on every connect anyway; this is what makes a
+    /// full one be asked again too, so a location that probed in a bad moment does not keep
+    /// that answer. Two extra channel opens on the next connect is the whole cost.
     public static func markChannelBudgetSuspect(locationID: String) {
         guard var channels = read(locationID: locationID)["channels"] as? [String: Any] else {
             return
@@ -277,10 +369,24 @@ public enum CapabilityCache {
     /// The capability report's own half of the file. The agent never sees a server banner
     /// on this path, so what is stored beside the timestamp is `uname -sm`, the closest
     /// thing the probe can actually read.
+    ///
+    /// An unanswered probe (`ServerProbe.Result.unanswered`) is not a verdict about the
+    /// server and does not replace one: where a probe is already stored only the SFTP
+    /// extensions are refreshed, and where none is it is stored marked `unanswered`, so an
+    /// offline `status` has something to print and nothing reads it as "no shell".
     public static func storeProbe(
         _ probe: ServerProbe.Result, extensions: SFTPServerExtensions,
         advertised: [String] = [], locationID: String
     ) {
+        if probe.unanswered,
+            var stored = read(locationID: locationID)["probe"] as? [String: Any],
+            stored["unanswered"] as? Bool != true
+        {
+            stored["sftpExtensions"] = SFTPExtensionNames.list(extensions)
+            stored["sftpExtensionsAdvertised"] = advertised
+            merge(locationID: locationID, ["probe": stored])
+            return
+        }
         merge(
             locationID: locationID,
             [
@@ -306,6 +412,7 @@ public enum CapabilityCache {
                     // Everything the server offered, so a missing `fsync@openssh.com` can
                     // be told from a client that failed to read one.
                     "sftpExtensionsAdvertised": advertised,
+                    "unanswered": probe.unanswered,
                 ] as [String: Any]
             ])
     }
@@ -337,9 +444,19 @@ public enum CapabilityCache {
         result.checksumTool = stored["checksumTool"] as? String ?? ""
         result.cacheDirectory = stored["cacheDirectory"] as? String ?? ""
         result.cacheNote = stored["cacheNote"] as? String ?? ""
+        result.unanswered = stored["unanswered"] as? Bool ?? false
         let extensions = SFTPExtensionNames.parse(stored["sftpExtensions"] as? [String] ?? [])
         let at = Date(timeIntervalSince1970: stored["probedAt"] as? Double ?? 0)
         return (result, extensions, at)
+    }
+
+    /// The last probe the server actually answered, for a connection whose own probe went
+    /// unanswered: the ladder decides on this until the re-check answers.
+    public static func lastAnsweredProbe(locationID: String) -> ServerProbe.Result? {
+        guard let cached = probe(locationID: locationID)?.probe, !cached.unanswered else {
+            return nil
+        }
+        return cached
     }
 
     /// The "Server free space" line of `status`, taken at probe time.

@@ -85,4 +85,24 @@ final class PollScheduleTests: XCTestCase {
         XCTAssertEqual(PollSchedule.touchWindow, 600)
         XCTAssertEqual(PollSchedule.insuranceInterval, 1800)
     }
+
+    /// A sweep that keeps timing out backs off: one paced interval after the first
+    /// timeout, doubling, never more than 30 minutes, and the first sweep that completes
+    /// ends it.
+    func testConsecutiveSweepTimeoutsSkipTheSweepForADoublingInterval() {
+        var backoff = SweepTimeoutBackoff()
+        XCTAssertFalse(backoff.skipsSweep(now: 0))
+        backoff.sweepTimedOut(now: 300, interval: 900)
+        XCTAssertTrue(backoff.skipsSweep(now: 900), "the next paced cycle polls")
+        XCTAssertFalse(backoff.skipsSweep(now: 1200))
+        backoff.sweepTimedOut(now: 1500, interval: 900)
+        XCTAssertEqual(backoff.skipUntil, 3300)
+        backoff.sweepTimedOut(now: 3600, interval: 900)
+        XCTAssertEqual(backoff.skipUntil, 3600 + SweepTimeoutBackoff.capSeconds)
+        backoff.sweepTimedOut(now: 6000, interval: 900)
+        XCTAssertEqual(backoff.skipUntil, 6000 + 1800, "capped at 30 minutes")
+        backoff.sweepCompleted()
+        XCTAssertFalse(backoff.skipsSweep(now: 6001))
+        XCTAssertEqual(backoff.consecutiveTimeouts, 0)
+    }
 }

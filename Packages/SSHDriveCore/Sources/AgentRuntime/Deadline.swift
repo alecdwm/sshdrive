@@ -38,15 +38,20 @@ public enum Deadline {
         }
     }
 
+    /// The timer is a sleep on `clock`, so a scenario's driven clock decides when it
+    /// fires. A cancelled sleep returns rather than throwing, so the timer checks for
+    /// cancellation itself: a cancelled caller sees `CancellationError`, never `Expired`.
     static func run<T: Sendable>(
         _ operation: String,
         seconds: Double = fileProviderSeconds,
+        clock: any AgentClock = SystemAgentClock(),
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await body() }
             group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                await clock.sleep(seconds: seconds)
+                try Task.checkCancellation()
                 throw Expired(operation: operation, seconds: seconds)
             }
             defer { group.cancelAll() }
@@ -57,20 +62,17 @@ public enum Deadline {
         }
     }
 
-    /// The same bound, measured on the **agent's** clock rather than on the process's.
+    /// The same bound, with the work abandoned rather than awaited when the timer wins.
     ///
-    /// `status` runs one of these per location, and a scenario that had to live through
-    /// twenty real seconds to see a stuck location print its note would not be written
+    /// `status` runs one of these per location, on the agent's clock, so a scenario sees
+    /// a stuck location print its note without living through twenty real seconds
     /// (docs/design/testing.md: there is no real sleeping in the suite).
-    /// `SystemAgentClock.sleep` is `Task.sleep`, so a shipping agent behaves exactly as
-    /// the task-group form above.
     ///
-    /// It is not a task group, and that is deliberate: a driven clock's `sleep` does not
-    /// observe cancellation, and a task group awaits its children before it returns - so
-    /// the timer child would hold the whole call open after the work had finished. The two
-    /// tasks are unstructured and the loser is abandoned, which is what `Deadline` does
-    /// with a stalled File Provider call anyway.
-    static func run<T: Sendable>(
+    /// It is not a task group, and that is deliberate: a task group awaits its children
+    /// before it returns, so a section wedged on something that does not observe
+    /// cancellation would hold the whole call open past its bound. The two tasks are
+    /// unstructured and the loser is abandoned.
+    static func race<T: Sendable>(
         _ operation: String, seconds: Double, clock: any AgentClock,
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {

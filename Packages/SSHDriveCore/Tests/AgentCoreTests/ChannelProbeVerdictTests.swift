@@ -51,10 +51,18 @@ final class ChannelProbeVerdictTests: XCTestCase {
         }
     }
 
-    /// Wording we have never seen, on a master that is still there, still has to produce a
-    /// budget: a location that cannot settle on a tier is worse than one that settles on a
-    /// pessimistic tier, and `sshdrive debug transport reprobe` is the way out.
-    func testAnUnfamiliarRefusalStillCountsAsARefusal() {
-        XCTAssertEqual(classify("some sshd nobody here has ever run said no"), .sessionRefused)
+    /// Wording we have never seen, on a master that is still there, is not a refusal: the
+    /// connection runs on the channels it got and nothing is cached, so a stall or an odd
+    /// sshd can never leave a location at a low budget for good.
+    func testAnUnfamiliarAnswerOnALiveMasterIsInconclusive() {
+        XCTAssertEqual(classify("some sshd nobody here has ever run said no"), .inconclusive)
+        XCTAssertEqual(classify("channel 2: open failed"), .inconclusive)
+    }
+
+    /// A handshake that missed its deadline with nothing on stderr is the stall of `R14`,
+    /// not `MaxSessions`.
+    func testASilentHandshakeDeadlineIsInconclusive() {
+        XCTAssertEqual(classify(""), .inconclusive)
+        XCTAssertEqual(classify("deadlineExceeded"), .inconclusive)
     }
 }

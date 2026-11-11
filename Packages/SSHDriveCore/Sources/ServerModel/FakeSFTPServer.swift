@@ -37,11 +37,18 @@ public final class FakeSFTPServer: @unchecked Sendable {
         public var gid: UInt32
         /// The raw target bytes of a symlink, exactly as the server would give them.
         public var target: Data?
+        /// The inode change time, which `find -cmin` tests and SFTP v3 cannot carry. It
+        /// moves with every content, mode or name change, and with a child's create,
+        /// delete or rename for a directory.
+        public var ctime: Int64
+        /// What `find -printf %i` and the helper report. Zero for a node seeded before
+        /// numbering mattered.
+        public var inode: UInt64
 
         public init(
             type: SFTPNodeType, contents: Data = Data(), mode: UInt32? = nil,
             mtime: Int64 = 1_700_000_000, uid: UInt32 = 1000, gid: UInt32 = 1000,
-            target: Data? = nil
+            target: Data? = nil, ctime: Int64? = nil, inode: UInt64 = 0
         ) {
             self.type = type
             self.contents = contents
@@ -50,6 +57,26 @@ public final class FakeSFTPServer: @unchecked Sendable {
             self.uid = uid
             self.gid = gid
             self.target = target
+            self.ctime = ctime ?? mtime
+            self.inode = inode
+        }
+    }
+
+    /// One change to the tree, as an `inotify` watch on the server would see it. Paths
+    /// are absolute server bytes.
+    public struct Change: Sendable, Equatable {
+        public enum Kind: String, Sendable { case create, modify, delete, rename }
+        public var kind: Kind
+        public var path: Data
+        /// A rename's old path.
+        public var from: Data?
+        public var isDirectory: Bool
+
+        public init(kind: Kind, path: Data, from: Data? = nil, isDirectory: Bool) {
+            self.kind = kind
+            self.path = path
+            self.from = from
+            self.isDirectory = isDirectory
         }
     }
 
@@ -81,11 +108,25 @@ public final class FakeSFTPServer: @unchecked Sendable {
     public var readdirPageSize = 100
     /// Serve short reads, to exercise the client's "ask for the rest" path.
     public var shortReadFactor = 1.0
+    /// The server's clock, in whole seconds. When set, every change a client makes over
+    /// the wire is stamped with it - the node's mtime and ctime, and its parent
+    /// directory's - as a real filesystem stamps them. Nil keeps every timestamp exactly
+    /// as it was seeded.
+    public var clock: (@Sendable () -> Int64)?
+    /// OpenSSH's `realpath` is `realpath(3)`, which fails `NO_SUCH_FILE` for a path that
+    /// does not exist. Off by default, where the path is echoed back unresolved.
+    public var realpathRequiresExistence = false
+    /// Called after every change to the tree, from the wire or from the mutation methods
+    /// below, outside the server's lock.
+    public var onChange: (@Sendable ([Change]) -> Void)?
+
+    private var nextInode: UInt64 = 2
+    private var pendingChanges: [Change] = []
 
     public init(profile: ServerProfile, root: String? = nil) {
         self.profile = profile
         self.root = root ?? profile.home
-        nodes[Data(self.root.utf8)] = Node(type: .directory, mode: 0o755)
+        nodes[Data(self.root.utf8)] = Node(type: .directory, mode: 0o755, inode: 1)
     }
 
     // MARK: - Seeding
@@ -101,12 +142,14 @@ public final class FakeSFTPServer: @unchecked Sendable {
                     mtime: Int64 = 1_700_000_000) {
         lock.withLock {
             nodes[absolute(path)] = Node(
-                type: .file, contents: contents, mode: mode, mtime: mtime)
+                type: .file, contents: contents, mode: mode, mtime: mtime, inode: mintInode())
         }
     }
 
     public func putDirectory(_ path: String, mode: UInt32 = 0o755) {
-        lock.withLock { nodes[absolute(path)] = Node(type: .directory, mode: mode) }
+        lock.withLock {
+            nodes[absolute(path)] = Node(type: .directory, mode: mode, inode: mintInode())
+        }
     }
 
     /// A symlink whose target is stored verbatim and never resolved on the server, exactly
@@ -233,14 +276,249 @@ public final class FakeSFTPServer: @unchecked Sendable {
         }
         var reader = packet.reader()
         guard let id = try? reader.readUInt32() else { return Data() }
+        let reply: Data
         do {
-            return try handle(type: type, id: id, reader: &reader)
+            reply = try handle(type: type, id: id, reader: &reader)
         } catch let status as SFTPWire.Status {
-            return statusPacket(id: id, status)
+            reply = statusPacket(id: id, status)
         } catch {
-            return statusPacket(id: id, .failure)
+            reply = statusPacket(id: id, .failure)
+        }
+        publishChanges()
+        return reply
+    }
+
+    // MARK: - Change times and notifications
+
+    /// Hands whatever the last call changed to `onChange`, outside the lock.
+    private func publishChanges() {
+        let (changes, observer) = lock.withLock { () -> ([Change], (@Sendable ([Change]) -> Void)?) in
+            defer { pendingChanges.removeAll() }
+            return (pendingChanges, onChange)
+        }
+        guard !changes.isEmpty, let observer else { return }
+        observer(changes)
+    }
+
+    /// Records a change and stamps the times a filesystem would. Called with the lock
+    /// held. Without a clock nothing is stamped, which is what every scenario written
+    /// before the clock existed relies on.
+    private func record(_ kind: Change.Kind, _ path: Data, from: Data? = nil) {
+        let isDirectory = nodes[path]?.type == .directory
+        if let last = pendingChanges.last, last.kind == .modify, kind == .modify,
+            last.path == path
+        {
+            // A burst of writes to one handle is one change, as the helper's coalescing
+            // would report it.
+        } else {
+            pendingChanges.append(
+                Change(kind: kind, path: path, from: from, isDirectory: isDirectory))
+        }
+        guard let now = clock?() else { return }
+        if kind != .delete, var node = nodes[path] {
+            node.ctime = now
+            if kind != .rename { node.mtime = now }
+            nodes[path] = node
+        }
+        // A directory's own mtime and ctime move when a name in it is added or removed,
+        // which is what lets a `-type d -cmin` sweep find a deletion at all.
+        if kind != .modify {
+            touchDirectory(parent(path), at: now)
+            if let from { touchDirectory(parent(from), at: now) }
         }
     }
+
+    private func touchDirectory(_ path: Data, at time: Int64) {
+        guard var directory = nodes[path], directory.type == .directory else { return }
+        directory.mtime = time
+        directory.ctime = time
+        nodes[path] = directory
+    }
+
+    /// A `setstat`: the ctime moves, and the mtime is whatever the client set.
+    private func recordAttributeChange(_ path: Data) {
+        pendingChanges.append(
+            Change(kind: .modify, path: path, isDirectory: nodes[path]?.type == .directory))
+        guard let now = clock?(), var node = nodes[path] else { return }
+        node.ctime = now
+        nodes[path] = node
+    }
+
+    /// `rename(2)`: whatever was at the destination goes, and the source's whole subtree
+    /// moves under the new name. Called with the lock held.
+    private func replace(_ destination: Data, withTreeAt source: Data) {
+        if nodes[destination] != nil {
+            for child in descendants(of: destination) { nodes[child] = nil }
+            nodes[destination] = nil
+        }
+        moveTree(from: source, to: destination)
+        record(.rename, destination, from: source)
+    }
+
+    private func mintInode() -> UInt64 {
+        defer { nextInode += 1 }
+        return nextInode
+    }
+
+    /// Every path strictly under `path`.
+    private func descendants(of path: Data) -> [Data] {
+        var prefix = path
+        prefix.append(0x2F)
+        return nodes.keys.filter { $0.count > prefix.count && $0.starts(with: prefix) }
+    }
+
+    /// Moves a node and everything under it, as `rename(2)` does.
+    private func moveTree(from: Data, to: Data) {
+        guard let node = nodes[from] else { return }
+        let moved = descendants(of: from)
+        nodes[from] = nil
+        nodes[to] = node
+        for path in moved {
+            let child = nodes.removeValue(forKey: path)
+            var target = to
+            target.append(path.dropFirst(from.count))
+            nodes[target] = child
+        }
+    }
+
+    // MARK: - Mutations, as something on the server makes them
+
+    /// Writes a file at `time`: a create when nothing is there, a modify otherwise. The
+    /// parent must exist. Returns false when it does not.
+    @discardableResult
+    public func writeFile(
+        _ path: String, contents: Data, mode: UInt32? = nil, at time: Int64
+    ) -> Bool {
+        let done = lock.withLock { () -> Bool in
+            let key = absolute(path)
+            guard nodes[parent(key)]?.type == .directory else { return false }
+            if var node = nodes[key], node.type == .file {
+                node.contents = contents
+                if let mode { node.mode = mode }
+                node.mtime = time
+                node.ctime = time
+                nodes[key] = node
+                pendingChanges.append(Change(kind: .modify, path: key, isDirectory: false))
+            } else {
+                nodes[key] = Node(
+                    type: .file, contents: contents, mode: mode, mtime: time, ctime: time,
+                    inode: mintInode())
+                touchDirectory(parent(key), at: time)
+                pendingChanges.append(Change(kind: .create, path: key, isDirectory: false))
+            }
+            return true
+        }
+        publishChanges()
+        return done
+    }
+
+    /// `mkdir`, with the parent's times moved. False when the parent is missing or the
+    /// name is taken.
+    @discardableResult
+    public func makeDirectory(_ path: String, mode: UInt32 = 0o755, at time: Int64) -> Bool {
+        let done = lock.withLock { () -> Bool in
+            let key = absolute(path)
+            guard nodes[key] == nil, nodes[parent(key)]?.type == .directory else { return false }
+            nodes[key] = Node(type: .directory, mode: mode, mtime: time, ctime: time, inode: mintInode())
+            touchDirectory(parent(key), at: time)
+            pendingChanges.append(Change(kind: .create, path: key, isDirectory: true))
+            return true
+        }
+        publishChanges()
+        return done
+    }
+
+    /// `chmod`: the ctime moves and the mtime does not.
+    @discardableResult
+    public func changeMode(_ path: String, to mode: UInt32, at time: Int64) -> Bool {
+        let done = lock.withLock { () -> Bool in
+            let key = absolute(path)
+            guard var node = nodes[key] else { return false }
+            node.mode = mode
+            node.ctime = time
+            nodes[key] = node
+            pendingChanges.append(Change(kind: .modify, path: key, isDirectory: node.type == .directory))
+            return true
+        }
+        publishChanges()
+        return done
+    }
+
+    /// `rm -rf`: the node, everything under it, and the parent's times.
+    @discardableResult
+    public func removeTree(_ path: String, at time: Int64) -> Bool {
+        let done = lock.withLock { () -> Bool in
+            let key = absolute(path)
+            guard let node = nodes[key] else { return false }
+            for child in descendants(of: key) { nodes[child] = nil }
+            nodes[key] = nil
+            touchDirectory(parent(key), at: time)
+            pendingChanges.append(Change(kind: .delete, path: key, isDirectory: node.type == .directory))
+            return true
+        }
+        publishChanges()
+        return done
+    }
+
+    /// `mv`, over whatever was at the destination.
+    @discardableResult
+    public func moveNode(_ from: String, to: String, at time: Int64) -> Bool {
+        let done = lock.withLock { () -> Bool in
+            let source = absolute(from)
+            let destination = absolute(to)
+            guard var node = nodes[source], nodes[parent(destination)]?.type == .directory
+            else { return false }
+            if nodes[destination] != nil {
+                for child in descendants(of: destination) { nodes[child] = nil }
+                nodes[destination] = nil
+            }
+            moveTree(from: source, to: destination)
+            node.ctime = time
+            nodes[destination] = node
+            touchDirectory(parent(source), at: time)
+            touchDirectory(parent(destination), at: time)
+            pendingChanges.append(
+                Change(kind: .rename, path: destination, from: source,
+                       isDirectory: node.type == .directory))
+            return true
+        }
+        publishChanges()
+        return done
+    }
+
+    /// Takes a subtree out of the tree and hands it back, for a root that is missing for
+    /// a while (an autofs mount, a locked dataset). No change is reported: nothing on the
+    /// server was deleted, the path simply stopped resolving.
+    public func detachTree(_ path: String) -> [Data: Node] {
+        lock.withLock {
+            let key = absolute(path)
+            var taken: [Data: Node] = [:]
+            for child in descendants(of: key) { taken[child] = nodes.removeValue(forKey: child) }
+            if let node = nodes.removeValue(forKey: key) { taken[key] = node }
+            return taken
+        }
+    }
+
+    /// Puts back what `detachTree` took.
+    public func attachTree(_ taken: [Data: Node]) {
+        lock.withLock { for (path, node) in taken { nodes[path] = node } }
+    }
+
+    /// Every node at or under `path`, absolute paths, in no particular order.
+    public func entries(under path: String) -> [(path: Data, node: Node)] {
+        lock.withLock {
+            let key = absolute(path)
+            var out: [(path: Data, node: Node)] = []
+            if let node = nodes[key] { out.append((key, node)) }
+            for child in descendants(of: key) {
+                if let node = nodes[child] { out.append((child, node)) }
+            }
+            return out
+        }
+    }
+
+    /// The node at an absolute path given as bytes.
+    public func node(absolute path: Data) -> Node? { lock.withLock { nodes[path] } }
 
     private func statusPacket(id: UInt32, _ status: SFTPWire.Status) -> Data {
         var writer = SFTPWire.Writer(.status, requestID: id)
@@ -350,6 +628,9 @@ public final class FakeSFTPServer: @unchecked Sendable {
         case .realpath:
             let path = try reader.readString()
             log("realpath \(text(path))")
+            if realpathRequiresExistence, lookup(path) == nil {
+                throw SFTPWire.Status.noSuchFile
+            }
             var writer = SFTPWire.Writer(.name, requestID: id)
             writer.writeUInt32(1)
             writer.writeString(path)
@@ -403,6 +684,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
                 }
             }
             nodes[resolved] = node
+            recordAttributeChange(resolved)
             return statusPacket(id: id, .ok)
 
         case .open:
@@ -435,13 +717,16 @@ public final class FakeSFTPServer: @unchecked Sendable {
                 // a separate measurement.
                 nodes[resolved] = Node(
                     type: .file,
-                    mode: ((attributes.permissions ?? 0o644) & ~profile.umask) & 0o7777)
+                    mode: ((attributes.permissions ?? 0o644) & ~profile.umask) & 0o7777,
+                    inode: mintInode())
+                record(.create, resolved)
             } else if flags & SFTPWire.OpenFlags.exclusive != 0,
                       flags & SFTPWire.OpenFlags.create != 0 {
                 // EEXIST, which is also a bare FAILURE (`SQ-028`).
                 throw SFTPWire.Status.failure
             } else if flags & SFTPWire.OpenFlags.truncate != 0 {
                 nodes[resolved]?.contents = Data()
+                record(.modify, resolved)
             }
             let handle = makeHandle()
             handles[handle] = resolved
@@ -550,6 +835,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
             }
             node.contents.replaceSubrange(offset ..< (offset + payload.count), with: payload)
             nodes[path] = node
+            record(.modify, path)
             return statusPacket(id: id, .ok)
 
         case .mkdir:
@@ -562,7 +848,9 @@ public final class FakeSFTPServer: @unchecked Sendable {
             // 0700 lands 0755 on a 022 server and the mode has to be asserted with a
             // `setstat` afterwards.
             let asked = attributes.permissions ?? 0o777
-            nodes[path] = Node(type: .directory, mode: (asked & ~profile.umask) & 0o7777)
+            nodes[path] = Node(
+                type: .directory, mode: (asked & ~profile.umask) & 0o7777, inode: mintInode())
+            record(.create, path)
             return statusPacket(id: id, .ok)
 
         case .rmdir:
@@ -572,6 +860,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
             guard nodes[resolved]?.type == .directory else { throw SFTPWire.Status.noSuchFile }
             // ENOTEMPTY: a bare FAILURE, which is why the caller confirms with a readdir.
             guard children(of: resolved).isEmpty else { throw SFTPWire.Status.failure }
+            record(.delete, resolved)
             nodes[resolved] = nil
             return statusPacket(id: id, .ok)
 
@@ -581,6 +870,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
             let resolved = key(path)
             guard let node = nodes[resolved] else { throw SFTPWire.Status.noSuchFile }
             guard node.type != .directory else { throw SFTPWire.Status.failure }
+            record(.delete, resolved)
             nodes[resolved] = nil
             return statusPacket(id: id, .ok)
 
@@ -589,14 +879,13 @@ public final class FakeSFTPServer: @unchecked Sendable {
             let destination = try reader.readString()
             log("rename \(text(source)) -> \(text(destination))")
             let from = key(source)
-            guard let node = nodes[from] else { throw SFTPWire.Status.noSuchFile }
+            guard nodes[from] != nil else { throw SFTPWire.Status.noSuchFile }
             // `SQ-034`: some servers refuse an existing name and some overwrite it, and
             // the probe is what decides. busybox + internal-sftp refuses.
             if nodes[key(destination)] != nil, !profile.renameOverwrites {
                 throw SFTPWire.Status.failure
             }
-            nodes[from] = nil
-            nodes[destination] = node
+            replace(destination, withTreeAt: from)
             return statusPacket(id: id, .ok)
 
         case .readlink:
@@ -619,7 +908,8 @@ public final class FakeSFTPServer: @unchecked Sendable {
             let linkPath = try reader.readString()
             log("symlink \(text(linkPath)) -> \(text(target))")
             guard nodes[key(linkPath)] == nil else { throw SFTPWire.Status.failure }
-            nodes[linkPath] = Node(type: .symlink, target: target)
+            nodes[linkPath] = Node(type: .symlink, target: target, inode: mintInode())
+            record(.create, linkPath)
             return statusPacket(id: id, .ok)
 
         case .extended:
@@ -645,9 +935,9 @@ public final class FakeSFTPServer: @unchecked Sendable {
                 let destination = try reader.readString()
                 log("posix-rename \(text(source)) -> \(text(destination))")
                 let from = key(source)
-                guard let node = nodes[from] else { throw SFTPWire.Status.noSuchFile }
-                nodes[from] = nil
-                nodes[destination] = node   // always overwrites: that is the point of it
+                guard nodes[from] != nil else { throw SFTPWire.Status.noSuchFile }
+                // Always overwrites: that is the point of it.
+                replace(destination, withTreeAt: from)
                 return statusPacket(id: id, .ok)
             case "fsync@openssh.com":
                 _ = try? reader.readString()
@@ -660,6 +950,7 @@ public final class FakeSFTPServer: @unchecked Sendable {
                 if let permissions = attributes.permissions { node.mode = permissions & 0o7777 }
                 if let mtime = attributes.mtime { node.mtime = Int64(mtime) }
                 nodes[resolved] = node
+                recordAttributeChange(resolved)
                 return statusPacket(id: id, .ok)
             case "statvfs@openssh.com":
                 _ = try reader.readString()

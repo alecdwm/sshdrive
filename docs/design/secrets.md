@@ -94,9 +94,13 @@ Items are keyed `password:<user>@<hostname>:<port>` and `passphrase:<keypath>`, 
 
 ## Prompts with no stored answer
 
-A refused PIN, one-time code or `confirm` makes `ssh` fail. The domain shows `.notAuthenticated`,
-reconnection stops ([SSH process management](ssh.md)), and `sshdrive status` prints the prompt text
-so the user knows what the server wanted.
+A refused PIN or `confirm` makes `ssh` fail. The domain shows `.notAuthenticated`, the fast backoff
+stops and only the slow retry of [offline behaviour](offline.md) rule 6 is left
+([SSH process management](ssh.md)), and `sshdrive status` prints the prompt text so the user knows
+what the server wanted. Each slow retry meets the same refusal from askpass, with no prompt shown.
+A one-time code is different: it is a keyboard-interactive prompt, and `ssh` sends the server an
+empty answer when askpass refuses it, so the refusal that follows is a refused password and nothing
+retries it (rule 6).
 
 A passphrase prompt for a key with no stored item is answered with an empty passphrase, and nothing
 is stopped:
@@ -111,9 +115,11 @@ is stopped:
   one try and moves to the next. If no key works, the "Permission denied" that follows is
   classified on exit like any other.
 
-A password prompt with no stored item is answered the same way. `ssh` gets one password attempt, so
-the exit that follows stops reconnection with the prompt text in `status`: the right outcome for a
-server that has started asking for a credential the location does not have.
+A password prompt with no stored item is answered the same way. `ssh` gets one password attempt and
+sends the empty answer, so the exit that follows is a refused password with the prompt text in
+`status`: the location stops and nothing retries it until the user acts ([offline
+behaviour](offline.md) rule 6), which is the right outcome for a server that has started asking for
+a credential the location does not have.
 
 ## Collecting secrets at `add`
 
@@ -175,7 +181,9 @@ The collect connection of `set host|user|port|identity` repeats the same two pas
 
 A second location on a host whose password has since changed finds the shared
 `password:<user>@<hostname>:<port>` item; `ssh` uses it for its single prompt
-(`NumberOfPasswordPrompts=1`) and is refused. `add` then repeats the collect connection with the
+(`NumberOfPasswordPrompts=1`) and is refused. On a running location that refusal stops reconnection
+with no retry of any kind, because every retry would be one more failed login on the server's count
+([offline behaviour](offline.md) rule 6). `add` then repeats the collect connection with the
 stored items for that host masked, so every prompt reaches the terminal, and on success replaces
 the item for every location that names it.
 
@@ -254,7 +262,7 @@ What a deadline expiry means depends on the location:
 
 | Location | Treated as | Result |
 |---|---|---|
-| `agentDependent` | an authentication failure, for the reconnect loop | Reconnection stops. `status` says "authentication did not complete within 60 s; a key agent may be waiting for a touch or approval", with the fix: use a stored passphrase, a key-agent key that does not prompt, or a password, then `sshdrive debug breaker <name> --connect` |
+| `agentDependent` | an authentication stop, for the reconnect loop | Reconnection stops, with no timer at all: an unattended attempt is exactly what raises the prompt nobody answers. It is re-armed only as below. `status` says "authentication did not complete within 60 s; a key agent may be waiting for a touch or approval", with the fix: use a stored passphrase, a key-agent key that does not prompt, or a password, then `sshdrive debug breaker <name> --connect` |
 | any other | a slow or wedged server: it runs with `IdentityAgent=none`, so nothing on the Mac can be waiting for a human | Retried with the network backoff like any other connection failure ([offline behaviour](offline.md)) |
 
 ### Re-arming after a deadline stop
@@ -286,14 +294,33 @@ The rules around it:
 
 - The domain is not disconnected for a deadline stop ([offline behaviour](offline.md)), so requests
   keep arriving and failing fast (MQ-038), which is what the request trigger rides on.
-- An `agentDependent` location makes no attempt at all while the screen is locked, wake included.
-  Its first attempt after a sleep is the one the unlock re-arms, so it never spends 60 s prompting a
-  key agent at a locked screen.
+- An `agentDependent` location whose last attempt ran out the authentication deadline or found the
+  key agent not ready has shown that it needs the user, and makes no attempt while the screen is
+  locked, wake included: the unlock is its next one, so it never spends 60 s prompting a key agent
+  at a locked screen more than once. A call is not an exception: a File Provider request or a
+  change-detection cycle that finds nothing connected then fails fast like any other offline call.
+  A CLI command is: someone typed it (over `ssh`, the screen can be locked), so for five minutes
+  after a command naming the location - and after `add` - its calls may connect. That window is
+  measured on the wall clock and closed by the will-sleep message, so it never outlasts a sleep.
+- Any other `agentDependent` location connects while the screen is locked like a location with no
+  key agent: one whose key agent has its keys loaded needs nobody, and a server that restarts
+  overnight, or a `cron` job working against the mount from another machine, must not wait for the
+  morning's unlock. Its first attempt after a sleep is made at the wake whatever the screen says;
+  if that attempt finds the key agent locked or waiting for a touch, the rule above takes over.
 - The re-armed attempt has the same 60 s deadline. If it times out again the location is stopped
   until the next trigger, so an unattended Mac never retries and the prompt appears only when the
   user is there to see it.
 - Refused prompts (a PIN, a one-time code, a `confirm` outside `add`) are never re-armed: they
-  cannot succeed attended or unattended.
+  cannot succeed attended or unattended. A PIN or a `confirm` is an authentication failure and gets
+  the slow retry of [offline behaviour](offline.md) rule 6 rather than this one; a one-time code
+  put an empty answer on the wire, and is a refused password with no retry at all.
+- An `agentDependent` location's master that exits with nothing but a bare
+  `Permission denied (publickey)` is the key agent not being ready only when the agent's socket is
+  missing or refuses a connection, checked again after the exit: stderr cannot tell a missing,
+  dead or locked agent from a key the server refused, since all of them end in exactly that line
+  ([SSH process management](ssh.md)). Then it is retried on the key-agent backoff. With the socket
+  answering it is a refused key, on the slow retry of [offline behaviour](offline.md) rule 6, and
+  the screen unlock - which is usually when a locked agent is unlocked too - is its early attempt.
 
 Measured against a forced deadline stop (2026-09-04): the unlock trigger re-arms exactly one
 attempt, a request with input idle at 45 s re-arms nothing, a request with input idle at 2 s re-arms
@@ -311,10 +338,11 @@ of our own, so `ssh`, `sftp` and SSH Drive can never disagree about a server.
 | Connection | Host-key options | An unknown or changed key |
 |---|---|---|
 | `add` (collect) | `ssh`'s default `StrictHostKeyChecking=ask`; `--trust-first` passes `accept-new` instead | Unknown: `ssh`'s fingerprint question arrives at askpass with `SSH_ASKPASS_PROMPT` unset, is recognised by its text, and is relayed to the terminal; `ssh` writes the answer to `known_hosts` as it would from a tty. Under `--trust-first` no question is asked |
-| every other | `StrictHostKeyChecking=yes`, `UpdateHostKeys=no`; any `confirm` prompt is refused | Changed: `ssh` exits with its "REMOTE HOST IDENTIFICATION HAS CHANGED" banner, which the agent recognises on stderr. The domain goes `.notAuthenticated`, reconnection stops ([SSH process management](ssh.md)), and `status` shows the fingerprint `ssh` reported and the fix |
+| every other | `StrictHostKeyChecking=yes`, `UpdateHostKeys=no`; any `confirm` prompt is refused | Changed: `ssh` exits with its "REMOTE HOST IDENTIFICATION HAS CHANGED" banner, which the agent recognises on stderr. The domain goes `.notAuthenticated`, the fast backoff stops ([SSH process management](ssh.md)), and `status` shows the fingerprint `ssh` reported and the fix. The slow retry of [offline behaviour](offline.md) rule 6 continues, each attempt a fresh `ssh` against `known_hosts`, so a location that met another server's key on a foreign network comes back on its own at home and never connects to the other one |
 
 The fix for a changed key is `ssh-keygen -R <host>`, accepting the new key with `ssh` once, then
-`sshdrive debug breaker <name> --connect`.
+`sshdrive debug breaker <name> --connect`, which retries at once rather than at the next slow
+attempt.
 
 `UpdateHostKeys=no` matters because `UpdateHostKeys ask` in the user's config passes straight
 through `ssh -G` and would raise a `confirm` on a healthy server, which the refusal rule would turn

@@ -23,6 +23,11 @@ public struct ProcessExit: Sendable, Equatable {
     public var status: Int32
     public var signal: Int32?
     public var isClean: Bool { signal == nil && status == 0 }
+
+    public init(status: Int32, signal: Int32? = nil) {
+        self.status = status
+        self.signal = signal
+    }
 }
 
 public enum Spawn {

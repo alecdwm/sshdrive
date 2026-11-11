@@ -37,13 +37,23 @@ impl<'a> SweepOptions<'a> {
 /// One sweep, as a list of events ready to write. The caller wraps them in
 /// `sweep_start` / `sweep_end`.
 pub fn sweep(options: &SweepOptions) -> Vec<Event> {
+    sweep_ticking(options, &mut || {})
+}
+
+/// `sweep`, calling `tick` at every directory and every entry it reads.
+///
+/// A walk of a large tree can outlast the agent's 60 s silence limit, and the watcher
+/// runs its walks on the thread that writes the heartbeat, so the walk hands that thread
+/// a chance to write one. `tick` is called far more often than a heartbeat is due and
+/// has to be cheap: deciding whether one is due is the caller's job.
+pub fn sweep_ticking(options: &SweepOptions, tick: &mut dyn FnMut()) -> Vec<Event> {
     let mut out = Coalescer::new();
     let mut budget = options.limit;
     for root in &options.roots.shallow {
-        walk(options, root, false, &mut out, &mut budget);
+        walk(options, root, false, &mut out, &mut budget, tick);
     }
     for root in &options.roots.recursive {
-        walk(options, root, true, &mut out, &mut budget);
+        walk(options, root, true, &mut out, &mut budget, tick);
     }
     if budget == 0 {
         out.push_overflow("the sweep hit its entry limit");
@@ -53,11 +63,18 @@ pub fn sweep(options: &SweepOptions) -> Vec<Event> {
 
 /// Every directory under `start`, for the watcher to put a watch on. Excluded subtrees
 /// are pruned and symlinks are never descended, which is what keeps the watch set inside
-/// the root.
-pub fn directories_under(root: &Path, start: &[u8], roots: &RootSet, recursive: bool) -> Vec<Vec<u8>> {
+/// the root. `tick` is called at every directory and every entry, as in `sweep_ticking`.
+pub fn directories_under(
+    root: &Path,
+    start: &[u8],
+    roots: &RootSet,
+    recursive: bool,
+    tick: &mut dyn FnMut(),
+) -> Vec<Vec<u8>> {
     let mut found = Vec::new();
     let mut stack = vec![start.to_vec()];
     while let Some(current) = stack.pop() {
+        tick();
         if roots.is_excluded(&current) {
             continue;
         }
@@ -71,6 +88,7 @@ pub fn directories_under(root: &Path, start: &[u8], roots: &RootSet, recursive: 
         }
         let Ok(entries) = std::fs::read_dir(&absolute) else { continue };
         for entry in entries.flatten() {
+            tick();
             let name = entry.file_name();
             let name = std::os::unix::ffi::OsStrExt::as_bytes(name.as_os_str()).to_vec();
             if paths::is_ignored(&name) {
@@ -92,9 +110,11 @@ fn walk(
     recursive: bool,
     out: &mut Coalescer,
     budget: &mut usize,
+    tick: &mut dyn FnMut(),
 ) {
     let mut stack = vec![start.to_vec()];
     while let Some(current) = stack.pop() {
+        tick();
         if *budget == 0 {
             return;
         }
@@ -111,6 +131,7 @@ fn walk(
         report(options, &current, &stat, out, budget);
         let Ok(entries) = std::fs::read_dir(&absolute) else { continue };
         for entry in entries.flatten() {
+            tick();
             if *budget == 0 {
                 return;
             }
@@ -327,20 +348,38 @@ mod tests {
     }
 
     #[test]
+    fn both_walks_tick_at_every_directory_and_every_entry() {
+        let temp = Temp::new("tick");
+        fs::create_dir_all(temp.path().join("a/b/c")).unwrap();
+        fs::write(temp.path().join("a/f.txt"), b"x").unwrap();
+        fs::write(temp.path().join("a/b/g.txt"), b"x").unwrap();
+        // Three directories (a, a/b, a/b/c) and four entries (f.txt and b in a, g.txt and
+        // c in a/b).
+        let mut ticks = 0;
+        directories_under(temp.path(), b"a", &RootSet::default(), true, &mut || ticks += 1);
+        assert_eq!(ticks, 7);
+
+        let roots = RootSet { recursive: vec![b"a".to_vec()], ..Default::default() };
+        let mut ticks = 0;
+        sweep_ticking(&SweepOptions::new(temp.path(), &roots), &mut || ticks += 1);
+        assert_eq!(ticks, 7);
+    }
+
+    #[test]
     fn directories_under_finds_what_the_watcher_must_watch() {
         let temp = Temp::new("dirs");
         fs::create_dir_all(temp.path().join("a/b/c")).unwrap();
         fs::create_dir_all(temp.path().join("a/skip")).unwrap();
         fs::write(temp.path().join("a/f.txt"), b"x").unwrap();
         let roots = RootSet { excluded: vec![b"a/skip".to_vec()], ..Default::default() };
-        let mut found = directories_under(temp.path(), b"a", &roots, true)
+        let mut found = directories_under(temp.path(), b"a", &roots, true, &mut || {})
             .into_iter()
             .map(|p| String::from_utf8_lossy(&p).into_owned())
             .collect::<Vec<_>>();
         found.sort();
         assert_eq!(found, vec!["a", "a/b", "a/b/c"]);
 
-        let flat = directories_under(temp.path(), b"a", &roots, false);
+        let flat = directories_under(temp.path(), b"a", &roots, false, &mut || {});
         assert_eq!(flat.len(), 1);
     }
 }

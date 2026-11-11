@@ -382,9 +382,9 @@ extension AgentScenarios {
             #expect(backingOff.contains("backing off"))
             #expect(live.aliveCheckCount == 0)
 
-            // Stopped until the user acts: an auth failure gets no reconnect schedule at
-            // all (docs/design/offline.md), and that is the one the user has to be told
-            // about.
+            // Stopped: an auth failure leaves the backoff for the slow retry
+            // (docs/design/offline.md), and the user is told both that it is failing and
+            // when it is tried next.
             harness.launcher.fail(classification: .authenticationFailed, stderr: "Permission denied")
             // The breaker's backoff is also a reconnect schedule (docs/design/offline.md),
             // so the next attempt is the one the clock brings round - and it is the attempt
@@ -392,7 +392,8 @@ extension AgentScenarios {
             await harness.clock.advanceAndSettle(5)
             await harness.settle { await gate.stateSentence().contains("stopped") }
             let stopped = await Self.stateWord(harness, "nas")
-            #expect(stopped == "offline (stopped: authenticationFailed)")
+            #expect(stopped.hasPrefix("offline (stopped: authenticationFailed; next attempt in "))
+            #expect(stopped.hasSuffix(" min)"))
             #expect(live.aliveCheckCount == 0, "N8: still nothing spawned")
 
             await harness.manager.dropRuntime(locationID: location.id)

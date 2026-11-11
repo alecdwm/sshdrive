@@ -179,6 +179,33 @@ final class AskpassBrokerTests: XCTestCase {
         XCTAssertEqual(harness.misses.first?.key, .password(nas))
     }
 
+    /// Whether the server saw a password from this spawn: every password or
+    /// keyboard-interactive prompt counts, answered or not, because `ssh` sends an empty
+    /// answer when the askpass has none. A passphrase never leaves the Mac and does not
+    /// count. Still readable once the token is retired, which is when the master's exit
+    /// is classified.
+    func testAPasswordPromptIsRecordedWhateverTheAnswer() {
+        let (broker, _) = makeBroker(
+            secrets: [
+                SecretKey.password(nas).account: "hunter2",
+                "passphrase:/Users/alec/.ssh/id_nas": "open sesame",
+            ])
+        let keyOnly = AskpassHarness(broker: broker, resolution: SSHResolution(destination: nas))
+        keyOnly.prompt("Enter passphrase for key '/Users/alec/.ssh/id_nas': ")
+        XCTAssertFalse(broker.servedPasswordPrompt(token: keyOnly.token))
+
+        let stored = AskpassHarness(broker: broker, resolution: SSHResolution(destination: nas))
+        XCTAssertEqual(stored.prompt("alec@nas.example's password: "), .answer("hunter2"))
+        broker.retire(token: stored.token)
+        XCTAssertTrue(broker.servedPasswordPrompt(token: stored.token))
+
+        let (empty, _) = makeBroker()
+        let unanswered = AskpassHarness(broker: empty, resolution: SSHResolution(destination: nas))
+        XCTAssertEqual(unanswered.prompt("(alec@nas.example) Password: "), .empty)
+        XCTAssertTrue(empty.servedPasswordPrompt(token: unanswered.token))
+        XCTAssertEqual(unanswered.info?.passwordPrompts, 1)
+    }
+
     func testTheHostKeyQuestionIsRefusedOutsideAdd() {
         let (broker, _) = makeBroker()
         let harness = AskpassHarness(broker: broker, resolution: SSHResolution(destination: nas))

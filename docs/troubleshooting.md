@@ -287,20 +287,34 @@ line follows when there is one.
 | `not mounted` | Saved, but not in Finder | `sshdrive mount <name>` |
 | `idle (not connected)` | Mounted, and nothing has asked for it since the agent started | Open it in Finder; that connects it |
 | `online` | Connected | - |
-| `offline (<reason>)` | Not connected. The reason is no network, a failed attempt with the next one due in so many seconds, or reconnection stopped | For a stop, see below |
+| `offline (<reason>)` | Not connected. The reason is no network, a failed attempt with the next one due in so many seconds, or a stop with the time of the next slow retry | For a stop, see below |
 
 `sshdrive show <name>` prints the resolved `ssh` command and the last error too. A location
 that suddenly asks for a password it had stored has a keychain problem; see
 [`keychain`](#keychain-fail).
 
-Reconnection stops after an authentication failure, a host key that did not match, or the
-60 s authentication deadline. The deadline is the usual cause of a listing that hangs and
-then fails: SSH Drive never waits for a person unattended, so a connection that needs a
-touch, a one-time code or a passphrase it has not stored is stopped
-([secrets and host keys](design/secrets.md)).
+A refused password stops the location, and nothing tries it again until you act. Every try
+would send the same stale password, and a server that locks an account after three failed
+logins, or bans an address after five, would lock you out or ban your Mac. A one-time code the
+server asked for counts as a password here: SSH Drive cannot answer it, and the server still
+sees an empty one. `sshdrive status <name>` says the location is stopped and why.
+
+A refused key or a host key that did not match stops the ordinary reconnect backoff, and the
+location is retried slowly instead: 5 minutes after the failure, doubling to every 30 minutes,
+plus at most one attempt in between on wake, a network change or a screen unlock. Opening the
+lid wakes the Mac, brings the network back and unlocks the screen within seconds, and that
+counts as one attempt. A cause that goes away on its own - a home directory the server had not
+mounted yet, a server reached from another network, a key agent you unlock along with the
+screen - therefore clears without you ([offline behaviour](design/offline.md)).
+
+The 60 s authentication deadline stops a location too, and is the usual cause of a listing
+that hangs and then fails: SSH Drive never waits for a person unattended, so a connection whose
+key agent waits for a touch or an approval is stopped, and tried again only when you unlock the
+screen or use the mount ([secrets and host keys](design/secrets.md)).
 
 Once you have fixed the cause (added a key to the agent, changed a password back on the
-server), clear the stop and try once:
+server), clear the stop and try once. For a refused key this saves waiting for the next slow
+retry; a refused password waits for it:
 
 ```sh
 sshdrive debug breaker <name> --connect
@@ -322,8 +336,10 @@ sshdrive add nas alec@nas.local
 ### The host key changed
 
 A changed host key stops the location, and `sshdrive status <name>` prints the `ssh-keygen
--R` line to run. SSH Drive never accepts a new key on its own, so connect once with your own
-`ssh` to write it to `~/.ssh/known_hosts`, then clear the stop:
+-R` line to run. SSH Drive never accepts a new key on its own: its slow retries check
+`known_hosts` like any other connection, so they recover a location that met another server on
+another network, never one whose server really has a new key. Connect once with your own `ssh`
+to write it to `~/.ssh/known_hosts`, then clear the stop:
 
 ```sh
 ssh-keygen -R nas.local

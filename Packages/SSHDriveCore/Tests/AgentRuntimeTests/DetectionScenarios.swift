@@ -216,7 +216,8 @@ extension AgentScenarios {
                 armed.entries.contains { $0.path.isEmpty && $0.reasons.contains(.viewed) },
                 "H9: the `viewed` reason is armed from our own enumerateItems")
 
-            let now = Date().timeIntervalSince1970
+            // The agent's clock, which is what the touch below is recorded on.
+            let now = harness.clock.now()
             var status = await detector.status(now: now)
             #expect(status["active"] as? Bool == false, "H9: nothing has touched it yet")
             #expect(status["intervalSeconds"] as? Double == PollSchedule.idleInterval)
@@ -294,7 +295,7 @@ extension AgentScenarios {
 
             // No exec channel and no `find`: tier 0, which is the cheapest cycle there is
             // and still the one the rule is about.
-            let base = Date().timeIntervalSince1970
+            let base = clock.now()
             let detector = ChangeDetector(
                 locationID: location.id, runtime: runtime, location: location,
                 capabilities: ChangeDetectionLadder.ServerCapabilities(),

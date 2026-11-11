@@ -20,26 +20,69 @@ on the first that starts successfully. For the helper that means its `ready` lin
 |---|---|
 | `watchMode` set to one tier | No ladder, except the fall to `poll`, which always works |
 | `helper off` on the location | Tier 2 is skipped; the binary is removed on the next connection |
-| A tier fails with a **permanent** reason | The location drops one tier for the rest of the session |
+| A tier fails with a **permanent** reason | The location drops one tier for the rest of the connection, and for at most 30 minutes on a connection that stays up |
 | A tier fails with any other reason | The location drops one tier for a backoff of 2 s doubling to 60 s, then climbs back |
-| A connection comes up | Any transient hold and its backoff are cleared outright |
+| A sweep fails for any reason but no shell | That cycle falls back to a poll; the tier is unchanged and the next cycle sweeps again |
+| A connection comes up | Every hold, permanent or transient, and the backoff are cleared outright; the new connection's probe and deployment decide again |
 
-Permanent means a failure that will be just as true on the next connection:
+Permanent means a typed fact about the server, and nothing else:
 
-- no shell, or no exec channel
-- an unsupported OS or arch
-- a `noexec` directory
+- no shell (`ForceCommand internal-sftp`), or no channel the helper can hold
+- an unsupported OS or arch, or a build that ships no helper for it
+- no writable, executable directory of the account's own: `noexec`, owned by another uid,
+  writable by others and refusing 0700
 - a hash that came back and disagreed after a redeploy
-- a `find` that is missing
 
-Everything else is transient, and in particular the death of the helper's stream: it dies with
+Everything else is transient: a channel that failed or was refused, output that was unusable
+this time, a timeout, a stream that died, went silent or never said `ready`, an SFTP error, and
+any error nobody anticipated. In particular the death of the helper's stream: it dies with
 **every** connection (`SQ-077`), so reading it as a verdict about the server would leave a
-location at the sweep tier after any network blink until the agent restarted. The loop is woken
-when a hold is recorded; otherwise a 2 s hold taken while the detector sleeps out its minute
-measures as a 21 s climb back.
+location at the sweep tier after any network blink. A failure met on a connection that is no
+longer the location's says nothing at all and is not recorded.
+
+A permanent verdict is a verdict about one connection. The next connection decides again, and a
+connection that stays up for hours decides again every 30 minutes, because a server can be fixed
+without the connection noticing and a verdict that was wrong would otherwise never be looked at
+again. The cost is one deployment attempt per connection or per half hour, and for a hash
+mismatch that attempt is an upload: a server whose copy keeps coming back different - a
+filesystem that corrupts it, something on the server rewriting it - gets the whole binary
+again on every reconnect and every 30 minutes for as long as that lasts. A laptop that reconnects
+a dozen times a day pays it a dozen times.
+
+The same holds for the facts the ladder reads before any tier runs: the server probe and the
+channel budget a connection came up with. While those answers keep the location below the tier
+its `watchMode` asks for - no shell, a cache directory that is `noexec` or not writable, an
+unsupported `uname`, a budget with no channel for the helper to hold - the agent runs the probe
+again on the live connection every 30 minutes, and the channel budget question too while the
+budget is below unrestricted, and re-applies the ladder from the answers. A budget re-check that
+finds room for more channels than the connection holds reconnects to use them, once no download
+or upload is running on the location ([offline behaviour](offline.md#after-a-connection-comes-up)). Settings the user chose (`watchMode`,
+`helper off`) and a build that ships no helper are not the server's to change and start no
+re-check.
+
+A sweep is never what costs a tier. `find` runs as `find … || true`, so a `find` that is missing
+or rejects an option produces an empty, complete sweep, and whether the server has a usable
+`find` is the probe's answer. A sweep that times out (an NFS stall, a Mac that slept through
+the deadline) or meets a dying channel costs the cycle it ran in: the cycle polls instead, and
+the cycle's duration paces the next one. A sweep standing in for a helper that is being
+restarted never costs the helper tier, whatever it met.
+
+Sweeps that keep timing out back off, still without a verdict. A `find` stuck on a hung mount
+below a root times out on every cycle and holds an exec channel and a process on the server for
+the whole of its deadline each time, so after consecutive timeouts the sweep is skipped for a
+doubling interval - one paced interval after the first, capped at 30 minutes - and those cycles
+poll instead. `status` says so on the cycle's note. The first sweep that completes ends the
+backoff (`SweepTimeoutBackoff`).
+
+The loop is woken when a hold is recorded and wakes for its expiry, permanent or transient;
+otherwise a 2 s hold taken while the detector sleeps out its minute measures as a 21 s climb
+back.
 
 `sshdrive status` shows the tier, why a location is below the top, whether the downgrade is
-permanent or transient, and for a transient one when the higher tier is tried next.
+permanent or transient, for a transient one when the higher tier is tried next, and for a
+permanent one when the 30 minutes are up (`permanentRecheckInSeconds`). A permanent downgrade
+that has been lifted is listed as `lifted`, like a transient one already climbed out of. The
+history keeps the 20 most recent downgrades.
 
 ### What every tier produces
 
@@ -293,7 +336,26 @@ Over the existing connection:
 3. **Start** `<path>/sshdrive-helper watch --json --root <root> --roots-from-stdin` from the same
    `sh -s` wrapper as every other remote command ([security](security.md)), path and root
    single-quoted into the script and never on the command line. Feed it the root set and read
-   NDJSON events (below). The agent pings every 15 s and the helper exits after 60 s without one.
+   NDJSON events (below). The agent pings every 15 s from the moment the channel opens, not from
+   `ready`, and the helper exits after 60 s without one.
+    - `ready` may take up to **120 s**. The helper's first act is a walk of the root set to
+      establish its watches, and on a large pinned tree that is tens of seconds; a shorter
+      deadline fails a healthy helper on every attempt. A `ready` that never comes is a
+      transient failure, and the channel is closed.
+    - **One stream per connection.** A cycle, a reconnect and `add` can each ask for the stream,
+      and only one attempt runs at a time. A stream that comes up on a connection that has since
+      been replaced is stopped rather than installed, and a reconnect ends any attempt still
+      waiting for `ready` on the old one.
+    - **The silence watchdog.** The helper writes a heartbeat every 15 s whether or not anything
+      changed, so a running stream that has delivered nothing at all for **60 s** on the agent's
+      monotonic clock is dead: a helper that hung, or a channel that stalled under a connection
+      whose other channels still work. It is torn down and counted as a transient failure.
+    - **A new root set is a walk.** The helper applies a root set by walking every root again,
+      synchronously. It writes a heartbeat at least every 15 s while it walks, but a helper built
+      before it did says nothing until the walk ends, so for **120 s** after a root set is sent -
+      the allowance `ready` gets for the first walk - silence is not death. The allowance is not
+      ended early by the next byte, since a heartbeat already in the pipe would end it before the
+      walk began.
 
 ### The NDJSON protocol
 
@@ -361,7 +423,20 @@ renames, and finds content changes with its own `sweep` every 60 s over its root
 - `status` shows the exact remote path and version.
 - `helper off` stops it and removes the binary on the next connection; `helper on` re-enables it.
 - A deployment failure is never fatal: the location continues at the next tier and `status` says
-  why.
+  why. A transient one is retried on the ladder's backoff; a permanent one on the next connection
+  or after 30 minutes, whichever is first.
+- A helper that cannot be started for a reason that is not about the server - no exec channel to
+  spare right now, a location root that does not resolve for a while - holds the tier on the
+  same backoff, so the retry is seconds away rather than at the next idle cycle. A location that
+  is offline holds nothing: the reconnect starts the stream.
+
+Every deployment asks the exec channel first, whether or not the file is there, because the
+same channel has to vouch for the upload afterwards. A channel that does not answer at all -
+refused, closed, or silent to the deadline - is a transient failure, "the server's exec channel
+did not answer", and **nothing is uploaded**: an upload it could not verify would be removed
+again, and on a connection whose exec channels keep failing that is the whole binary uploaded
+every minute for as long as the connection lasts. A server probe refused a session marks the
+cached channel budget suspect too, so the next connect measures it again.
 
 "The helper could not be uploaded" is two verdicts (`HelperDeployment.uploadFailureIsPermanent`,
 gotcha 105):

@@ -44,11 +44,11 @@ extension AgentScenarios {
                 ChannelProbeVerdict.classify(
                     diagnostics: "mux_client_request_session: session request failed",
                     masterIsRunning: true) == .sessionRefused)
-            // And an sshd whose wording we have never seen still produces a budget, or the
-            // location would retry for ever instead of settling at the tier it can run.
+            // Wording that is neither a refusal nor a death, on a live master, is not cached
+            // either: the connection uses what it got and the server is asked again.
             #expect(
                 ChannelProbeVerdict.classify(diagnostics: "channel 2: open failed", masterIsRunning: true)
-                    == .sessionRefused)
+                    == .inconclusive)
 
             // Nothing was probed, so nothing is cached: the connect attempt fails and
             // docs/design/offline.md's breaker tries again.

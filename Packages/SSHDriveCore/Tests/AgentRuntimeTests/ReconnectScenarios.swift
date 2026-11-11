@@ -6,6 +6,7 @@ import Foundation
 import SFTP
 import SSHProcess
 import Testing
+import XPCProtocols
 
 /// Suite F on the agent's side: the breaker, the reconnect sequence, the ladder's
 /// climb-back and the will-sleep drop (`docs/design/testing.md` section 5).
@@ -73,9 +74,9 @@ extension AgentScenarios {
             let harness = try AgentHarness()
             let location = try await harness.addLocation(nickname: "nas", watchMode: .auto)
             let runtime = try await harness.manager.runtime(for: location)
-            // The ladder's own clock is wall-clock, because `status` counts the hold down
-            // against it; the cycles below are offsets from the same base.
-            let t0 = Date().timeIntervalSince1970
+            // The ladder runs on the agent's clock, which `status` counts the hold down
+            // against; the cycles below are offsets from the same base.
+            let t0 = harness.clock.now()
             let detector = ChangeDetector(
                 locationID: location.id, runtime: runtime, location: location,
                 capabilities: Self.helperCapable, environment: harness.environment,
@@ -116,7 +117,7 @@ extension AgentScenarios {
             let harness = try AgentHarness()
             let location = try await harness.addLocation(nickname: "nas", watchMode: .auto)
             let runtime = try await harness.manager.runtime(for: location)
-            let t0 = Date().timeIntervalSince1970
+            let t0 = harness.clock.now()
             let detector = ChangeDetector(
                 locationID: location.id, runtime: runtime, location: location,
                 capabilities: Self.helperCapable, environment: harness.environment,
@@ -430,6 +431,134 @@ extension AgentScenarios {
             #expect(breaker.admit(now: 0) == .failFast(.noNetworkPath))
             var unguarded = CircuitBreaker(jitter: { $0 })
             #expect(unguarded.admit(now: 0) == .connect, "without rule 1 it would dial")
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **F12** - while the breaker is backing off there is exactly one retry asleep
+        /// until the backoff ends, whatever drops arrive meanwhile. A second call failing on
+        /// the stale connection after a failed reconnect and a will-sleep drop both find no
+        /// connection up; neither may take the retry away, or the location sits at "backing
+        /// off for 0 s" with nothing left to try again (docs/design/offline.md).
+        @Test func f12ADropWithNoConnectionKeepsTheScheduledRetry() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas")
+            _ = try await harness.manager.runtime(for: location)
+            await harness.manager.detector(locationID: location.id)?.stop()
+            await harness.manager.evictor(locationID: location.id)?.stop()
+            await harness.quiesceConnects()
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+
+            harness.launcher.fail(classification: .transient, stderr: "no route to host")
+            await gate.drop(reason: "the link went")
+            await harness.settle { await (gate.report()["state"] as? String)?.hasPrefix("backing off") == true }
+            #expect(await gate.report()["retryScheduled"] as? Bool == true)
+            let sleepers = harness.clock.sleeperCount
+
+            await gate.noteCallFailed(.connectionLost, generation: 1)
+            #expect(
+                await gate.report()["retryScheduled"] as? Bool == true,
+                "a stale call's failure cancelled the retry")
+            await gate.willSleep()
+            #expect(
+                await gate.report()["retryScheduled"] as? Bool == true,
+                "the will-sleep drop cancelled the retry")
+            await harness.settle()
+            #expect(harness.clock.sleeperCount == sleepers, "one retry, not one per drop")
+
+            // No wake message: the retry alone brings the connection back.
+            harness.launcher.succeed()
+            harness.clock.advance(CircuitBreaker.firstBackoffSeconds * 1.2 + 0.1)
+            await harness.settle { await gate.isConnected }
+            #expect(await gate.isConnected, "the scheduled retry did not reconnect")
+            #expect(await gate.report()["retryScheduled"] as? Bool == false)
+            await harness.manager.dropRuntime(locationID: location.id)
+        }
+
+        /// **F13** - a gate released while its attempt is still connecting: the runtime was
+        /// dropped by `set` or `remove`, or the agent is shutting down. The master that
+        /// attempt brings up belongs to nobody, and is shut down rather than left running.
+        @Test func f13AnAttemptThatOutlivesItsGateShutsItsMasterDown() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas")
+            let held = HeldLauncher()
+            var environment = harness.environment
+            environment.launcher = held
+            var gate: ConnectionGate? = ConnectionGate(
+                location: location, askpassPath: nil, askpass: nil, uploadTag: "f13",
+                environment: environment)
+            await gate?.setPresenceSource {
+                PresenceReading(secondsSinceLastInputEvent: 1, screenLocked: false)
+            }
+            await gate?.connectInBackground(trigger: "F13")
+            await harness.settle { held.isWaiting }
+            await gate?.shutdown()
+            gate = nil
+            let connection = FakeLiveConnection(
+                transport: FakeTransport(root: "/srv/fake"), budget: .unrestricted,
+                probe: ServerProbe.Result(), uploadTag: "f13")
+            held.release(connection)
+            await harness.settle { connection.shutdownCount > 0 }
+            #expect(connection.shutdownCount == 1, "F13: the orphaned master was left running")
+        }
+
+        /// A launcher whose one connect waits until the test hands it a connection.
+        final class HeldLauncher: TransportLauncher, @unchecked Sendable {
+            private let lock = NSLock()
+            private var waiting: CheckedContinuation<any LiveConnection, Never>?
+
+            var isWaiting: Bool { lock.withLock { waiting != nil } }
+
+            func release(_ connection: any LiveConnection) {
+                let continuation = lock.withLock { () -> CheckedContinuation<any LiveConnection, Never>? in
+                    defer { waiting = nil }
+                    return waiting
+                }
+                continuation?.resume(returning: connection)
+            }
+
+            func connect(
+                location: Location, askpassPath: String?, askpass: (any AskpassTokenProviding)?,
+                uploadTag: String, reprobeChannels: Bool
+            ) async throws -> any LiveConnection {
+                await withCheckedContinuation { continuation in
+                    lock.withLock { waiting = continuation }
+                }
+            }
+        }
+
+        /// **F14** - a call's failure counts against the connection it ran on and no other.
+        /// A call that started on a connection since dropped and replaced, and fails late,
+        /// neither drops the new connection nor counts as one of its missed deadlines.
+        @Test func f14ALateFailureFromAReplacedConnectionLeavesItsSuccessorAlone() async throws {
+            let harness = try AgentHarness()
+            let location = try await harness.addLocation(nickname: "nas")
+            _ = try await harness.manager.runtime(for: location)
+            await harness.manager.detector(locationID: location.id)?.stop()
+            await harness.manager.evictor(locationID: location.id)?.stop()
+            await harness.quiesceConnects()
+            let gate = try #require(await harness.manager.gate(locationID: location.id))
+            let first = try #require(await gate.connectionGeneration)
+
+            await gate.drop(reason: "the master was killed")
+            await harness.settle { await gate.connectionGeneration.map { $0 != first } ?? false }
+            let second = try #require(await gate.connectionGeneration)
+            #expect(second != first)
+            let attempts = harness.launcher.attempts
+
+            await gate.noteCallFailed(.connectionLost, generation: first)
+            #expect(await gate.connectionGeneration == second, "a late loss dropped the successor")
+            await gate.noteCallFailed(.deadlineExceeded, generation: first)
+            await gate.noteCallFailed(.deadlineExceeded, generation: second)
+            await gate.noteCallFailed(.deadlineExceeded, generation: first)
+            #expect(
+                await gate.connectionGeneration == second,
+                "the old connection's misses counted against the new one")
+            await harness.settle()
+            #expect(harness.launcher.attempts == attempts)
+
+            // The connection's own second miss in a row is what drops it.
+            await gate.noteCallFailed(.deadlineExceeded, generation: second)
+            #expect(await gate.connectionGeneration != second)
             await harness.manager.dropRuntime(locationID: location.id)
         }
 

@@ -137,7 +137,8 @@ extension LocationRuntime {
 
     /// The re-check schedule: 5 minutes, then 30, then the deletions are
     /// applied. One re-`readdir` per directory that holds anything.
-    public func recheckHeldDeletions(now: Double = Date().timeIntervalSince1970) async -> ChangeApplication {
+    public func recheckHeldDeletions(now: Double? = nil) async -> ChangeApplication {
+        let now = now ?? environment.clock.now()
         var application = ChangeApplication()
         let rows: [IndexWriter.HeldRow]
         do { rows = try index.heldRows() } catch {
@@ -311,9 +312,10 @@ extension LocationRuntime {
     /// `materialized`-only roots, round-robin by least recent listing. `fullSweep`
     /// suspends the rotation for that one cycle, which is what a reconnect and a fresh
     /// working-set anchor both ask for.
-    public func runPollCycle(fullSweep: Bool, now: Double = Date().timeIntervalSince1970) async
+    public func runPollCycle(fullSweep: Bool, now: Double? = nil) async
         -> ChangeApplication
     {
+        let now = now ?? environment.clock.now()
         var application = ChangeApplication()
         var paths: [Data]
         do {
@@ -627,7 +629,8 @@ extension LocationRuntime {
         (try? index.meta(IndexSchema.MetaKey.sweepServerTime)).flatMap { $0 }.flatMap(Int64.init)
     }
 
-    public func setSweepServerTime(_ value: Int64, localNow: Double = Date().timeIntervalSince1970) {
+    public func setSweepServerTime(_ value: Int64, localNow: Double? = nil) {
+        let localNow = localNow ?? environment.clock.now()
         try? index.setMeta(IndexSchema.MetaKey.sweepServerTime, String(value))
         // Our own clock at the moment that server stamp was stored. The next window is
         // the *elapsed* time since then, measured here and applied to the server's value,
@@ -664,7 +667,7 @@ extension LocationRuntime {
     public func probeForSweep() -> ServerProbe.Result? { serverProbeResult }
 
     /// The master an exec channel is opened on, or nil while the location is offline.
-    public func execMaster() async -> SSHMaster? {
+    public func execMaster() async -> (any RemoteMaster)? {
         await liveConnection()?.execMaster
     }
 

@@ -53,17 +53,18 @@ public actor CacheEvictor {
 
     // MARK: Lifecycle
 
-    public func start(now: Double = Date().timeIntervalSince1970) {
+    public func start(now: Double? = nil) {
         guard loop == nil else { return }
         // The first pass is one interval away, not at startup: a location that has just
         // mounted has just been listed, and the agent has no atime for anything yet.
-        lastRun = now
+        let clock = environment.clock
+        lastRun = now ?? clock.now()
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 let wait = await self.secondsUntilNextPass()
                 if wait > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(min(wait, 30) * 1_000_000_000))
+                    await clock.sleep(seconds: min(wait, 30))
                     continue
                 }
                 _ = await self.runPass(reason: "timer")
@@ -109,8 +110,8 @@ public actor CacheEvictor {
         return ttl.seconds
     }
 
-    private func secondsUntilNextPass(now: Double = Date().timeIntervalSince1970) -> Double {
-        max(0, nextRunAt() - now)
+    private func secondsUntilNextPass() -> Double {
+        max(0, nextRunAt() - environment.clock.now())
     }
 
     // MARK: One pass
@@ -120,13 +121,15 @@ public actor CacheEvictor {
     /// pass, which `sshdrive evict <name>` triggers on demand.
     @discardableResult
     public func runPass(
-        reason: String, now: Double = Date().timeIntervalSince1970
+        reason: String, now: Double? = nil
     ) async -> [String: Any] {
         guard !running else { return ["skipped": "a pass is already running"] }
         running = true
-        defer { running = false; lastRun = Date().timeIntervalSince1970 }
+        let clock = environment.clock
+        defer { running = false; lastRun = clock.now() }
+        let now = now ?? clock.now()
 
-        let started = Date()
+        let started = clock.now()
         guard let identifiers = await environment.replica.materializedIdentifiers(
             locationID: locationID)
         else {
@@ -166,8 +169,8 @@ public actor CacheEvictor {
         let totals = EvictionPlan.totals(candidates)
         let pass: [String: Any] = [
             "reason": reason,
-            "at": Date().timeIntervalSince1970,
-            "seconds": Date().timeIntervalSince(started).rounded(toPlaces: 3),
+            "at": clock.now(),
+            "seconds": (clock.now() - started).rounded(toPlaces: 3),
             "ttl": ttlOverrideSeconds.map { "\(Int($0))s (debug override)" } ?? ttl.rawValue,
             "materializedFiles": totals.files,
             "materializedBytes": totals.bytes,

@@ -487,18 +487,28 @@ struct Status: ParsableCommand {
                         + "tried again in \(Int(retry))s, and at once when the connection "
                         + "comes back")
                 }
+                if let recheck = watch["permanentRecheckInSeconds"] as? Double {
+                    print("         note: the server was found unable to run the higher tier; "
+                        + "that is checked again in \(Int(recheck))s, and at once when the "
+                        + "connection comes back")
+                }
                 if let skew = watch["clockSkewSeconds"] as? Int, skew != 0 {
                     print("         note: the sweep's server-clock reference is shifted by "
                         + "\(skew)s by a debug hook")
                 }
                 for downgrade in watch["downgrades"] as? [[String: Any]] ?? [] {
-                    // A transient one is history, not a state: say so, or a location that
-                    // has already climbed back reads as one that is still down a tier.
-                    let temporary = (downgrade["permanence"] as? String) == "transient"
+                    // A transient one, or a permanent one a new connection or its 30
+                    // minutes have lifted, is history, not a state: say so, or a location
+                    // that has already climbed back reads as one that is still down a tier.
+                    let suffix: String
+                    switch downgrade["permanence"] as? String {
+                    case "transient": suffix = " (temporary)"
+                    case "lifted": suffix = " (no longer in force)"
+                    default: suffix = ""
+                    }
                     print("         note: dropped from \(downgrade["from"] as? String ?? "") to "
                         + "\(downgrade["to"] as? String ?? "") - "
-                        + "\(downgrade["reason"] as? String ?? "")"
-                        + (temporary ? " (temporary)" : ""))
+                        + "\(downgrade["reason"] as? String ?? "")" + suffix)
                 }
                 if let last = watch["lastCycle"] as? [String: Any] {
                     let seconds = last["seconds"] as? Double ?? 0

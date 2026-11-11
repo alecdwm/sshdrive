@@ -34,6 +34,11 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     private let lock = NSLock()
     private var _calls: [Call] = []
+    /// When each of `_calls` was made, on `clock`'s wall clock; empty without a clock.
+    private var _callTimes: [Double] = []
+    /// The same moments on `clock`'s monotonic clock, which a jump of the wall clock
+    /// does not move.
+    private var _callUptimes: [Double] = []
     private var _domains: [ReplicaDomain] = []
     private var _materialized: [String: [String]] = [:]
     private var _pending: [String: [String]] = [:]
@@ -69,6 +74,10 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     /// Where the mount lives, so `getUserVisibleURL` answers something a `stat` can be
     /// staged against.
     public var mountRoot: URL
+    /// When set, every call is stamped with this clock's wall time, so a scenario can ask
+    /// not only whether `signalErrorResolved` was sent but whether it came after the
+    /// reconnect it belongs to.
+    public var clock: (any AgentClock)?
 
     public init(mountRoot: URL = URL(fileURLWithPath: "/tmp/sshdrive-fake-replica")) {
         self.mountRoot = mountRoot
@@ -108,7 +117,33 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     }
 
     public func resetCalls() {
-        lock.lock(); _calls.removeAll(); lock.unlock()
+        lock.lock(); _calls.removeAll(); _callTimes.removeAll(); _callUptimes.removeAll(); lock.unlock()
+    }
+
+    /// Every call with the wall time it was made at. Empty unless `clock` was set before
+    /// the calls were made.
+    public var timedCalls: [(at: Double, call: Call)] {
+        lock.lock(); defer { lock.unlock() }
+        guard _callTimes.count == _calls.count else { return [] }
+        return zip(_callTimes, _calls).map { ($0, $1) }
+    }
+
+    /// Every call with the monotonic time it was made at, for an ordering that has to
+    /// hold across a jump of the wall clock. Empty unless `clock` was set before the calls
+    /// were made.
+    public var monotonicCalls: [(uptime: Double, call: Call)] {
+        lock.lock(); defer { lock.unlock() }
+        guard _callUptimes.count == _calls.count else { return [] }
+        return zip(_callUptimes, _calls).map { ($0, $1) }
+    }
+
+    /// Records one call. Called with the lock held.
+    private func record(_ call: Call) {
+        _calls.append(call)
+        if let clock {
+            _callTimes.append(clock.now())
+            _callUptimes.append(clock.uptime())
+        }
     }
 
     // MARK: What a scenario stages
@@ -191,7 +226,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func domains() async throws -> [ReplicaDomain] {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.domains)
+        record(.domains)
         return _domains
     }
 
@@ -200,7 +235,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
     /// exactly what `P8` asserts.
     public func addDomain(_ domain: ReplicaDomain, testingModes: [String]) async throws {
         lock.lock()
-        _calls.append(
+        record(
             .addDomain(
                 identifier: domain.identifier, displayName: domain.displayName,
                 testingModes: testingModes))
@@ -229,7 +264,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         _ domain: ReplicaDomain, mode: DomainRemovalMode
     ) async throws -> String? {
         lock.lock()
-        _calls.append(.removeDomain(identifier: domain.identifier, mode: mode))
+        record(.removeDomain(identifier: domain.identifier, mode: mode))
         _domains.removeAll { $0.identifier == domain.identifier }
         lock.unlock()
         return mode == .preserveDownloadedUserData ? preservedPath(for: domain) : nil
@@ -239,20 +274,20 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
         locationID: String, container: ProviderItemIdentifier
     ) async throws {
         lock.lock()
-        _calls.append(
+        record(
             .signalEnumerator(locationID: locationID, container: container.rawValue))
         lock.unlock()
     }
 
     public func signalErrorResolved(locationID: String) async throws {
         lock.lock()
-        _calls.append(.signalErrorResolved(locationID: locationID))
+        record(.signalErrorResolved(locationID: locationID))
         lock.unlock()
     }
 
     public func materializedIdentifiers(locationID: String) async -> [String]? {
         lock.lock()
-        _calls.append(.materialized(locationID: locationID))
+        record(.materialized(locationID: locationID))
         let hook = _onMaterialized
         let unmanaged = _unmanaged.contains(locationID)
         let answer = _materialized[locationID] ?? []
@@ -273,7 +308,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func pendingIdentifiers(locationID: String) async -> [String]? {
         lock.lock()
-        _calls.append(.pending(locationID: locationID))
+        record(.pending(locationID: locationID))
         let hook = _onPending
         let unmanaged = _unmanaged.contains(locationID)
         let answer = _pending[locationID] ?? []
@@ -293,7 +328,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func evict(locationID: String, identifier: String) async -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.evict(locationID: locationID, identifier: identifier))
+        record(.evict(locationID: locationID, identifier: identifier))
         if let refusal = _evictionRefusals[identifier] {
             if let remaining = _refusalsRemaining[identifier] {
                 if remaining <= 1 {
@@ -314,7 +349,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func userVisibleURL(locationID: String, identifier: String) async throws -> URL {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.userVisibleURL(locationID: locationID, identifier: identifier))
+        record(.userVisibleURL(locationID: locationID, identifier: identifier))
         if _unmanaged.contains(locationID) {
             throw SSHDriveFakeReplicaError.noDomain(locationID)
         }
@@ -330,7 +365,7 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func identifierForUserVisibleFile(at url: URL, locationID: String) async -> String? {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.identifierForFile(path: url.path))
+        record(.identifierForFile(path: url.path))
         let prefix = mountRoot.appendingPathComponent(locationID).path + "/"
         guard url.path.hasPrefix(prefix) else { return nil }
         return String(url.path.dropFirst(prefix.count))
@@ -361,13 +396,13 @@ public final class FakeReplica: ReplicaControlling, @unchecked Sendable {
 
     public func stabilize(locationID: String) async throws -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.stabilize(locationID: locationID))
+        record(.stabilize(locationID: locationID))
         return ["stabilizeSeconds": 0, "waitForChangesSeconds": 0]
     }
 
     public func testingOperations(locationID: String, run: Bool) async throws -> [String: Any] {
         lock.lock(); defer { lock.unlock() }
-        _calls.append(.testingOperations(locationID: locationID, run: run))
+        record(.testingOperations(locationID: locationID, run: run))
         return ["available": []]
     }
 

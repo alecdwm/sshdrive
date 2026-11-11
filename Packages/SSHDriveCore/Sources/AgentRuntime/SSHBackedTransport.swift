@@ -80,26 +80,33 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
     static let transferDeadlineSeconds: Double = 3600
 
     public let locationID: String
-    public let master: SSHMaster
+    /// `SSHMaster` in the agent; an in-process server's master in a scenario.
+    public let master: any RemoteMaster
     /// The same master, as the seam names it (docs/design/testing.md): nil means "no exec
     /// channel", which is what a location with no real `ssh` behind it means everywhere in
     /// change detection.
-    public var execMaster: SSHMaster? { master }
+    public var execMaster: (any RemoteMaster)? { master }
     /// What the server let us hold at once, and what that cost.
     public let budget: ChannelBudget
     /// What the capability probe found on one exec channel at connect: the account the
     /// server sees us as, `uname`, the `find` flavour, a checksum tool and a cache
     /// directory for the helper. Everything below `uname` is unknown where there is no
     /// shell, or no channel to spare for one.
-    public let probe: ServerProbe.Result
+    ///
+    /// Where the probe went unanswered this is replaced by the answer in force - the last
+    /// one the server gave, then the re-check's (`adopt(probe:)`) - so the helper's
+    /// deployment, which reads it here, decides on an answer rather than on a stall.
+    public var probe: ServerProbe.Result { probeLock.withLock { currentProbe } }
+    private let probeLock = NSLock()
+    private var currentProbe: ServerProbe.Result
 
     /// Channel 1: `stat`, `readdir`, `rename`, small files. Never carries a transfer
     /// unless the budget dropped the bulk channel.
-    private let channel: SFTPChannel
+    private let channel: any RemoteSFTPChannel
     private let inner: RealSFTPTransport
     /// Channel 2: fetches and uploads, so a long transfer never blocks a listing. Nil on
     /// a `MaxSessions 2` server, where transfers share channel 1 under the scheduler.
-    private let bulkChannel: SFTPChannel?
+    private let bulkChannel: (any RemoteSFTPChannel)?
     private let bulk: RealSFTPTransport?
 
     /// Where a transfer runs. The same object on a degraded location: at a `MaxSessions`
@@ -120,11 +127,23 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
     /// so it leaves request slots free for the metadata calls served ahead of them.
     public var transfersShareMetadataChannel: Bool { bulk == nil }
 
+    /// What every call's deadline is measured on.
+    private let clock: any AgentClock
+    /// The canonical root and the client configuration the channels were opened with, so
+    /// a channel opened later - the budget re-check - is opened the same way.
+    private let root: String
+    private let sftpConfiguration: SFTPClient.Configuration
+
     private init(
-        locationID: String, master: SSHMaster, channel: SFTPChannel, inner: RealSFTPTransport,
-        bulkChannel: SFTPChannel?, bulk: RealSFTPTransport?,
-        budget: ChannelBudget, probe: ServerProbe.Result, uploadTag: String
+        locationID: String, master: any RemoteMaster, channel: any RemoteSFTPChannel,
+        inner: RealSFTPTransport, bulkChannel: (any RemoteSFTPChannel)?,
+        bulk: RealSFTPTransport?, budget: ChannelBudget, probe: ServerProbe.Result,
+        uploadTag: String, clock: any AgentClock, root: String,
+        sftpConfiguration: SFTPClient.Configuration
     ) {
+        self.clock = clock
+        self.root = root
+        self.sftpConfiguration = sftpConfiguration
         self.uploadTag = uploadTag
         self.locationID = locationID
         self.master = master
@@ -133,19 +152,29 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         self.bulkChannel = bulkChannel
         self.bulk = bulk
         self.budget = budget
-        self.probe = probe
+        self.currentProbe = probe
+    }
+
+    /// Puts an answered probe in force on this connection in place of one that went
+    /// unanswered. An answer already in force is not replaced by a stall.
+    public func adopt(probe: ServerProbe.Result) {
+        guard !probe.unanswered else { return }
+        probeLock.withLock { currentProbe = probe }
     }
 
     /// Snapshot, spawn, open, verify. In that order, because each step needs the one
     /// before it: the master cannot authenticate without the snapshot's `SSH_AUTH_SOCK`
     /// and `PATH`, the channel cannot open without the master's socket, and the root
     /// cannot be canonicalised without the channel (sections 6.1, 9.1).
+    ///
+    /// This is the first two; `establish` is everything after the master is up.
     public static func connect(
         location: Location,
         askpassPath: String?,
         askpass: (any AskpassTokenProviding)?,
         uploadTag: String,
-        reprobeChannels: Bool = false
+        reprobeChannels: Bool = false,
+        clock: any AgentClock = SystemAgentClock()
     ) async throws -> SSHBackedTransport {
         let environment = await AgentSSHEnvironment.shared.environment()
         let snapshot = await AgentSSHEnvironment.shared.current()
@@ -162,10 +191,29 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
                 "master for \(location.id, privacy: .public) did not come up: \(error, privacy: .public)")
             throw error
         }
+        return try await establish(
+            master: master, location: location, uploadTag: uploadTag,
+            reprobeChannels: reprobeChannels, clock: clock)
+    }
 
-        let channel: SFTPChannel
+    /// Everything after authentication, on a master that is already up: channel 1 and the
+    /// canonical root, the channel budget (cached, or probed with the bulk channel as its
+    /// second channel), the server probe on one exec channel, and the capability cache.
+    ///
+    /// The master is shut down when anything here fails. `sftpConfiguration` is the base
+    /// every SFTP channel's client is built from; the agent takes the default, and a
+    /// scenario sets its `clock` so a missed request deadline happens in model time.
+    public static func establish(
+        master: any RemoteMaster,
+        location: Location,
+        uploadTag: String,
+        reprobeChannels: Bool = false,
+        clock: any AgentClock = SystemAgentClock(),
+        sftpConfiguration: SFTPClient.Configuration = SFTPClient.Configuration()
+    ) async throws -> SSHBackedTransport {
+        let channel: any RemoteSFTPChannel
         do {
-            channel = try await master.openSFTPChannel()
+            channel = try await master.openSFTPChannel(readinessDeadline: 15)
         } catch {
             await master.shutdown()
             throw error
@@ -178,70 +226,88 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
             let transport = try await RealSFTPTransport.connect(
                 stream: channel.stream,
                 root: location.remotePath ?? ".",
-                uploadTag: uploadTag)
+                uploadTag: uploadTag,
+                configuration: sftpConfiguration)
             try await transport.verifyRoot()
             let root = await transport.root
             Log.sftp.notice(
                 "location \(location.id, privacy: .public) rooted at \(root, privacy: .public)")
 
             // Channel 2, the bulk channel, and with it the answer to "may I hold three
-            // channels at once" that becomes the whole channel budget.
+            // channels at once" that becomes the whole channel budget. Only a cached full
+            // budget is taken on trust, and only as far as the bulk channel actually opening:
+            // anything less is asked again on every connect, because two channel opens is
+            // all a wrong "MaxSessions 1" would have cost to correct.
             if reprobeChannels { CapabilityCache.forgetChannelBudget(locationID: location.id) }
-            var budget: ChannelBudget
+            var budget: ChannelBudget?
             var bulk: ChannelProbe.Opened?
-            if let cached = CapabilityCache.channelBudget(locationID: location.id) {
-                budget = cached
-                if cached.hasBulkChannel {
-                    switch await ChannelProbe.openVerifiedChannel(
-                        master: master, root: root, uploadTag: uploadTag)
-                    {
-                    case .success(let opened): bulk = opened
-                    case .failure(let refusal):
-                        // The cache said three were affordable and two are not. Believe
-                        // the server, not the cache, and re-probe from scratch - unless
-                        // what failed was the connection, in which case there is nothing
-                        // to believe either way.
-                        guard !refusal.connectionDied else {
-                            throw SFTPError.connectionLost
-                        }
-                        Log.ssh.notice(
-                            "\(location.id, privacy: .public): cached budget no longer holds (\(refusal.diagnostics, privacy: .public)); re-probing"
-                        )
-                        let probed = await ChannelProbe.probe(
-                            master: master, root: root, uploadTag: uploadTag,
-                            locationID: location.id)
-                        // A probe that failed because the connection died records nothing:
-                        // the attempt fails and the breaker tries again.
-                        guard let measured = probed.budget else { throw SFTPError.connectionLost }
-                        budget = measured
-                        bulk = probed.bulk
-                        CapabilityCache.store(budget, locationID: location.id)
+            if let cached = CapabilityCache.channelBudget(locationID: location.id),
+                cached.hasBulkChannel
+            {
+                switch await ChannelProbe.openVerifiedChannel(
+                    master: master, root: root, uploadTag: uploadTag,
+                    configuration: sftpConfiguration)
+                {
+                case .success(let opened):
+                    budget = cached
+                    bulk = opened
+                case .failure(let refusal):
+                    // The cache said three were affordable and two are not. Ask the server
+                    // from scratch - unless what failed was the connection, in which case
+                    // there is nothing to believe either way.
+                    guard !refusal.connectionDied else {
+                        throw SFTPError.connectionLost
                     }
+                    Log.ssh.notice(
+                        "\(location.id, privacy: .public): cached budget no longer holds (\(refusal.diagnostics, privacy: .public)); re-probing"
+                    )
                 }
-            } else {
+            }
+            if budget == nil {
                 let probed = await ChannelProbe.probe(
-                    master: master, root: root, uploadTag: uploadTag, locationID: location.id)
+                    master: master, root: root, uploadTag: uploadTag, locationID: location.id,
+                    configuration: sftpConfiguration)
+                // A probe that failed because the connection died records nothing: the
+                // attempt fails and the breaker tries again. An inconclusive one is used for
+                // this connection and recorded nowhere.
                 guard let measured = probed.budget else { throw SFTPError.connectionLost }
                 budget = measured
                 bulk = probed.bulk
-                CapabilityCache.store(budget, locationID: location.id)
+                CapabilityCache.store(measured, locationID: location.id)
             }
-            if !budget.note.isEmpty {
-                Log.ssh.notice("\(location.id, privacy: .public): \(budget.note, privacy: .public)")
+            let granted = budget ?? .forConcurrentChannels(1)
+            if !granted.note.isEmpty {
+                Log.ssh.notice("\(location.id, privacy: .public): \(granted.note, privacy: .public)")
             }
 
             // The server identity, from one `id` exec channel. At a budget of 1 there
-            // is no channel to spare and the location is SFTP-only in every respect.
+            // is no channel to spare and the location is SFTP-only in every respect - a
+            // verdict when the server refused the second channel, and no answer at all when
+            // the budget itself was inconclusive.
             var probe = ServerProbe.Result()
-            if budget.allowsExecChannel {
-                probe = await ServerProbe.run(master: master)
+            if granted.allowsExecChannel {
+                probe = await ServerProbe.run(master: master, clock: clock)
+                if probe.sessionRefused {
+                    CapabilityCache.markChannelBudgetSuspect(locationID: location.id)
+                }
+                if probe.unanswered, await !master.isRunning {
+                    // The connection went during the probe. Handing it out would apply "no
+                    // shell" for a server that has one, so the attempt fails instead and
+                    // the breaker tries again.
+                    if let bulk {
+                        await bulk.transport.shutdown()
+                        bulk.channel.close()
+                    }
+                    throw SFTPError.connectionLost
+                }
                 if !probe.failure.isEmpty {
                     Log.agent.notice(
-                        "\(location.id, privacy: .public): no remote identity (\(probe.failure, privacy: .public)); every item gets full capabilities"
+                        "\(location.id, privacy: .public): no remote identity (\(probe.failure, privacy: .public))\(probe.unanswered ? "; the probe is asked again on this connection" : ""); every item gets full capabilities"
                     )
                 }
             } else {
                 probe.failure = "the server allows only one channel at a time"
+                probe.unanswered = !granted.conclusive
             }
             // The probe's result is cached in `domains/<id>/capabilities.json` with a
             // timestamp, beside the channel budget that `CapabilityCache` already owns.
@@ -256,7 +322,8 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
             return SSHBackedTransport(
                 locationID: location.id, master: master, channel: channel, inner: transport,
                 bulkChannel: bulk?.channel, bulk: bulk?.transport,
-                budget: budget, probe: probe, uploadTag: uploadTag)
+                budget: granted, probe: probe, uploadTag: uploadTag, clock: clock, root: root,
+                sftpConfiguration: sftpConfiguration)
         } catch {
             let diagnostics = channel.stderrText
             channel.close()
@@ -287,6 +354,15 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         return await master.check()
     }
 
+    /// The channel-budget question again, on this connection, for a budget that was
+    /// inconclusive when it came up (`ChannelProbe.recheck`). Nil until the server answers
+    /// clearly; nothing opened for it is kept.
+    public func recheckChannelBudget() async -> ChannelBudget? {
+        await ChannelProbe.recheck(
+            master: master, root: root, uploadTag: uploadTag, current: budget,
+            locationID: locationID, configuration: sftpConfiguration)
+    }
+
     // MARK: The deadline and the lost-master rule
 
     private func guarded<T: Sendable>(
@@ -295,7 +371,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
         _ body: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         do {
-            return try await Deadline.run("SFTP \(what)", seconds: seconds, body)
+            return try await Deadline.run("SFTP \(what)", seconds: seconds, clock: clock, body)
         } catch let expired as Deadline.Expired {
             Log.sftp.error(
                 "\(expired.operation, privacy: .public) missed its deadline on \(self.locationID, privacy: .public)"
@@ -307,7 +383,7 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
             if await !master.isRunning { throw SFTPError.connectionLost }
             throw error
         } catch is CancellationError {
-            // The deadline of `Deadline.run` is a second child task on a `Task.sleep`,
+            // The deadline of `Deadline.run` is a second child task on the clock's sleep,
             // and a cancelled sleep throws `CancellationError` before the body notices
             // its own cancellation - so without this the caller sees Swift's error rather
             // than the transport's, and a user who cancelled a download in Finder gets an
@@ -451,7 +527,11 @@ public final class SSHBackedTransport: SFTPTransport, LiveConnection, @unchecked
 /// (`ServerModel.FakeSSH`), not this code, which is the whole point of `SQ-035`'s argv
 /// scenarios exercising the real assembly.
 public struct SSHTransportLauncher: TransportLauncher {
-    public init() {}
+    private let clock: any AgentClock
+
+    public init(clock: any AgentClock = SystemAgentClock()) {
+        self.clock = clock
+    }
 
     public func connect(
         location: Location, askpassPath: String?, askpass: (any AskpassTokenProviding)?,
@@ -459,6 +539,6 @@ public struct SSHTransportLauncher: TransportLauncher {
     ) async throws -> any LiveConnection {
         try await SSHBackedTransport.connect(
             location: location, askpassPath: askpassPath, askpass: askpass,
-            uploadTag: uploadTag, reprobeChannels: reprobeChannels)
+            uploadTag: uploadTag, reprobeChannels: reprobeChannels, clock: clock)
     }
 }

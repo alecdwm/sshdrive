@@ -100,8 +100,14 @@ public actor SSHMaster {
 
     public private(set) var configuration: Configuration
     private var process: SpawnedProcess?
+    /// The running master's exit, once a `waitpid` has collected it. Whichever reader reaps
+    /// the child - `isRunning` or `classifyExitIfEnded` - keeps the status here, because a
+    /// second `waitpid` on a reaped pid answers `ECHILD` and the real reason is gone.
+    private var reapedExit: ProcessExit?
     private var stderrCollector: StderrCollector?
     public private(set) var lastClassification: SSHExitClassification?
+    /// The exit status the last classified exit carried.
+    public private(set) var lastExit: ProcessExit?
     public private(set) var lastStderr: String = ""
     /// `ssh`'s "remote software version <x>", when this master was asked for it.
     public private(set) var remoteSoftwareVersion: String?
@@ -139,9 +145,17 @@ public actor SSHMaster {
         )
     }
 
+    /// The running master's pid, or nil while none is.
+    public var pid: Int32? { process?.pid }
+
+    /// Whether the master is still running. Reaps it when it has exited, and keeps the
+    /// status for `classifyExitIfEnded`.
     public var isRunning: Bool {
         guard let process else { return false }
-        return Spawn.poll(pid: process.pid) == nil
+        if reapedExit != nil { return false }
+        guard let exit = Spawn.poll(pid: process.pid) else { return true }
+        reapedExit = exit
+        return false
     }
 
     /// Spawns the master and waits for its control socket, which is created only once
@@ -155,6 +169,7 @@ public actor SSHMaster {
             }
         }
         ControlSocket.unlink(configuration.controlPath)
+        reapedExit = nil
         let invocation = self.invocation
         // One token per spawn, in this process's environment and nowhere else. Every hop
         // of an agent-built ProxyCommand inherits it, which is what
@@ -189,9 +204,12 @@ public actor SSHMaster {
             if let exit = Spawn.poll(pid: spawned.pid) {
                 let stderr = absorb(collector.text)
                 lastStderr = stderr
+                lastExit = exit
                 let classification = SSHExitClassifier.classify(
                     role: .master, exitStatus: exit.status, terminationSignal: exit.signal,
-                    stderr: stderr, agentDependent: configuration.agentDependent
+                    stderr: stderr, agentDependent: configuration.agentDependent,
+                    keyAgentSocketFailed: keyAgentSocketFailedNow(),
+                    sentPassword: servedPasswordPrompt()
                 )
                 lastClassification = classification
                 process = nil
@@ -247,11 +265,13 @@ public actor SSHMaster {
             executable: invocation.executable, argv: invocation.argv,
             environment: configuration.environment, timeout: 10
         )
-        if let process {
-            _ = Spawn.poll(pid: process.pid)
+        // A reaped pid is no longer ours and may already name another process, so only a
+        // master that has not been reaped is signalled.
+        if let process, reapedExit == nil, Spawn.poll(pid: process.pid) == nil {
             Spawn.terminate(process, grace: 1)
         }
         process = nil
+        reapedExit = nil
         retireToken()
         ControlSocket.unlink(configuration.controlPath)
     }
@@ -321,17 +341,37 @@ public actor SSHMaster {
     /// Reads the master's exit once it has one, and classifies it. The exit of the `-N`
     /// master is the disconnect signal for the location.
     public func classifyExitIfEnded() -> SSHExitClassification? {
-        guard let process, let exit = Spawn.poll(pid: process.pid) else { return nil }
+        guard let process, let exit = reapedExit ?? Spawn.poll(pid: process.pid) else {
+            return nil
+        }
         let stderr = absorb(stderrCollector?.text ?? "")
         lastStderr = stderr
+        lastExit = exit
         let classification = SSHExitClassifier.classify(
             role: .master, exitStatus: exit.status, terminationSignal: exit.signal,
             stderr: stderr, agentDependent: configuration.agentDependent
         )
         lastClassification = classification
         self.process = nil
+        reapedExit = nil
         retireToken()
         return classification
+    }
+
+    /// The socket check again, after `ssh` has given up: a key agent that was there at the
+    /// spawn and has gone since leaves the same bare `Permission denied (publickey)` as a
+    /// key the server refused, and only the socket can tell them apart (gotcha 40).
+    private func keyAgentSocketFailedNow() -> Bool {
+        guard configuration.agentDependent else { return false }
+        return IdentityAgentCheck.probe(configuration.identityAgentSocket).isTransientFailure
+    }
+
+    /// Whether this spawn's token was served a password or keyboard-interactive prompt.
+    /// The collect connection is left out: `add` reads its refusals itself and a person is
+    /// at the terminal for it.
+    private func servedPasswordPrompt() -> Bool {
+        guard !configuration.isCollectConnection, let token = askpassToken else { return false }
+        return configuration.askpass?.servedPasswordPrompt(token: token) ?? false
     }
 
     /// The environment for the master itself: the location's, plus the askpass variables

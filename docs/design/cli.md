@@ -310,6 +310,11 @@ authentication deadline, and on an idle one they *start* a connection the user h
 for. See [free space](#server-free-space) for where the figure comes from. The `online` /
 `offline (<reason>)` word comes from the connection gate and the breaker, never from
 `ssh -O check`, which spawns a process and waits up to ten seconds inside the master's actor.
+The reason is the breaker's own sentence: `no network path`, `backing off for 8 s after 3
+failure(s)`, or for a stopped location the classification and, where a slow retry is due, when -
+`stopped: authenticationFailed; next attempt in 5 min` ([offline](offline.md) rule 6). A deadline
+stop and a refused password have no next attempt and say only `stopped: authenticationDeadline`
+or `stopped: passwordRefused`. `debug breaker` prints the same as `nextAttemptSeconds`.
 
 ### Layout
 
@@ -406,6 +411,14 @@ The probe runs on every connection and on `status --probe`. Its result is cached
 
 The `find` flavour comes from the `busybox` banner and the `-cmin` answer, never from an exit
 status: busybox `find --version` exits 0 (SQ-002).
+
+Only an answer is recorded. "No shell access" is the server's answer - a `ForceCommand` sentence or
+SFTP framing on the exec channel ([security](security.md)) - and is cached like any other. A probe
+that got no answer - the script stalled past its deadline, the channel was refused or died with
+the master, the output stopped short - is not: the last answer stays in `capabilities.json` and in
+force, and the probe is asked again on the live connection ([offline](offline.md#after-a-connection-comes-up)).
+A location that has never had an answer stores the unanswered one marked as such, so an offline
+`status` has something to print and nothing reads it as a verdict.
 
 The report always renders the extension set recorded with the probe, including on the cached
 path, never an empty default. A line saying the server does not advertise an extension has to

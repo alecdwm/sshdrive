@@ -337,7 +337,7 @@ public protocol LiveConnection: SFTPTransport, Sendable {
     var extensionNames: [String] { get async }
     /// The master an exec channel is opened on: the tier-1 sweep, the `id` probe and the
     /// helper's stream. Nil where there is no real `ssh`, which reads as "no exec channel".
-    var execMaster: SSHMaster? { get }
+    var execMaster: (any RemoteMaster)? { get }
     /// The metadata channel's client, for the one caller that addresses a path outside
     /// every location root: the helper's deployment (docs/design/change-detection.md).
     var metadataTransport: RealSFTPTransport? { get }
@@ -383,12 +383,13 @@ public protocol AgentEndpoint: Sendable {
 /// since the reference the caller chose - the agent uses `timeIntervalSince1970` for
 /// schedules and `systemUptime` for the breaker, and both are answered here so a scenario
 /// can drive them together.
-public protocol AgentClock: Sendable {
-    /// Wall clock, seconds since 1970.
-    func now() -> Double
+///
+/// `now()` and `sleep(seconds:)` are `SSHProcess.TimeSource`'s, which is what lets the
+/// same clock reach the deadline loops in `AgentCore`, `SSHProcess` and `SFTP` that
+/// cannot see this module. A sleep returns early when its task is cancelled.
+public protocol AgentClock: TimeSource {
     /// Monotonic seconds, which is what the breaker's backoff is measured in.
     func uptime() -> Double
-    func sleep(seconds: Double) async
 }
 
 /// The system clock, and the only implementation that ships.

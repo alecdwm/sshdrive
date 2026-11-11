@@ -101,7 +101,7 @@ final class ChangeDetectionLadderTests: XCTestCase {
 
     // MARK: Runtime failures
 
-    func testAFailureAtSweepDropsToPollForTheSessionAndIsRecorded() {
+    func testAFailureAtSweepDropsToPollAndIsRecorded() {
         var ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(), now: 0)
         XCTAssertEqual(ladder.tier, .sweep)
         XCTAssertTrue(ladder.recordRuntimeFailure(reason: "find is missing", now: 120))
@@ -135,17 +135,17 @@ final class ChangeDetectionLadderTests: XCTestCase {
 
     // MARK: A new probe
 
-    func testANewProbeIsNeverRaisedBackOverAFailureThisSessionSaw() {
+    func testANewProbeIsNeverRaisedBackOverAPermanentFailureStillBinding() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
-        ladder.recordRuntimeFailure(reason: "the stream died", now: 10)
+        ladder.recordRuntimeFailure(reason: "cache directory is noexec", now: 10)
         XCTAssertEqual(ladder.tier, .sweep)
-        // A reconnect re-probes and finds the same capable server. The runtime-failure
-        // drop holds "for the rest of the session" (docs/design/change-detection.md), and
-        // a reconnect is not a new session.
+        // The same capabilities applied again on the same connection - a `watchMode`
+        // change, say - do not lift a verdict. Only a connection coming up
+        // (`noteConnected`) or its 30 minutes running out do.
         ladder.applyCapabilities(gnuServer(helperAvailable: true), watchMode: .auto, now: 100)
         XCTAssertEqual(ladder.tier, .sweep)
-        XCTAssertEqual(ladder.note, "helper failed: the stream died")
+        XCTAssertEqual(ladder.note, "helper failed: cache directory is noexec")
     }
 
     func testANewProbeCanStillLowerTheTier() {
@@ -230,24 +230,33 @@ final class ChangeDetectionLadderTests: XCTestCase {
         }
     }
 
-    /// "A tier that fails at runtime (the helper's stream dies with a non-network error)
-    /// drops the location one tier down for the rest of the session and records why."
-    func testAHelperStreamThatDiesDropsToSweepForTheSession() {
+    /// A permanent failure of the helper drops the location one tier down for the rest of
+    /// the connection and records why; a probe on the same connection that still says the
+    /// helper is available does not put it back on the tier that just failed.
+    func testAPermanentHelperFailureDropsToSweepForTheConnection() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
         XCTAssertEqual(ladder.tier, .helper)
-        XCTAssertTrue(ladder.recordRuntimeFailure(reason: "the helper exited", now: 100))
+        XCTAssertTrue(ladder.recordRuntimeFailure(
+            reason: "helper upload failed: the copy on the server does not match this build",
+            permanence: .permanent, now: 100))
         XCTAssertEqual(ladder.tier, .sweep)
         XCTAssertEqual(ladder.downgrades.count, 1)
         XCTAssertEqual(ladder.downgrades[0].from, .helper)
         XCTAssertEqual(ladder.downgrades[0].to, .sweep)
-        XCTAssertEqual(ladder.note, "helper failed: the helper exited")
+        XCTAssertNil(ladder.downgrades[0].liftedAt)
+        XCTAssertEqual(
+            ladder.note,
+            "helper failed: helper upload failed: the copy on the server does not match this build")
 
-        // "for the rest of the session": a later probe that still says the helper is
-        // available must not put the location back on the tier that just failed.
         ladder.applyCapabilities(gnuServer(helperAvailable: true), watchMode: .auto, now: 200)
         XCTAssertEqual(ladder.tier, .sweep)
-        XCTAssertEqual(ladder.note, "helper failed: the helper exited")
+
+        // The next connection decides again.
+        XCTAssertTrue(ladder.noteConnected(now: 300))
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.note)
+        XCTAssertEqual(ladder.downgrades[0].liftedAt, 300)
     }
 
     /// Two failures walk the location all the way to the floor, and the floor holds.
@@ -363,24 +372,84 @@ final class ChangeDetectionLadderTests: XCTestCase {
         }
     }
 
-    /// A permanent failure is still permanent, and a reconnect does not lift it: the
-    /// permanent reasons (docs/design/change-detection.md) are no shell, no exec channel,
-    /// an unsupported architecture, a `noexec` directory and a hash that did not match
-    /// after a redeploy.
-    func testAPermanentFailureSurvivesAConnectionAndAClimbBack() {
+    /// A permanent failure is not a transient hold: it outlives the backoff and every
+    /// cycle's climb back on the same connection, until `permanentRecheckSeconds` have
+    /// passed, and then the tier is tried again.
+    func testAPermanentFailureLastsThirtyMinutesOnALongLivedConnection() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
         ladder.recordRuntimeFailure(
-            reason: "helper unsupported: Linux mips", permanence: .permanent, now: 10)
+            reason: "/home/alec/.cache/sshdrive is owned by uid 0, not by this account",
+            permanence: .permanent, now: 10)
         XCTAssertEqual(ladder.tier, .sweep)
         XCTAssertFalse(ladder.isHeldByTransientFailure)
-        XCTAssertFalse(ladder.climbBack(now: 10_000))
-        XCTAssertFalse(ladder.noteConnected(now: 10_000))
+        XCTAssertNil(ladder.transientHoldExpiresAt)
+        XCTAssertEqual(ladder.permanentHoldExpiresAt, 10 + 1800)
+        XCTAssertEqual(ladder.nextClimbBackAt, 10 + 1800)
+        XCTAssertFalse(ladder.climbBack(now: 120))
+        XCTAssertFalse(ladder.climbBack(now: 1809))
         XCTAssertEqual(ladder.tier, .sweep)
-        XCTAssertEqual(ladder.note, "helper failed: helper unsupported: Linux mips")
+        XCTAssertEqual(
+            ladder.note, "helper failed: /home/alec/.cache/sshdrive is owned by uid 0, not by this account")
+
+        XCTAssertTrue(ladder.climbBack(now: 1810))
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.note)
+        XCTAssertNil(ladder.nextClimbBackAt)
+        XCTAssertEqual(ladder.downgrades.map(\.liftedAt), [1810])
+
+        // The same verdict again on the same connection holds for another 30 minutes.
+        ladder.recordRuntimeFailure(reason: "still owned by uid 0", permanence: .permanent, now: 1811)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertFalse(ladder.climbBack(now: 1811 + 1799))
+        XCTAssertTrue(ladder.climbBack(now: 1811 + 1800))
     }
 
-    /// A transient failure below a permanent one climbs back only to the permanent ceiling.
+    /// A connection coming up lifts a permanent failure at once, whatever is left of its
+    /// 30 minutes: the verdict was about the connection it was made on.
+    func testAConnectionComingUpLiftsAPermanentFailure() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(reason: "no shell access (ForceCommand).", permanence: .permanent, now: 10)
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertTrue(ladder.noteConnected(now: 20))
+        XCTAssertEqual(ladder.tier, .helper)
+        XCTAssertNil(ladder.permanentHoldExpiresAt)
+        XCTAssertEqual(ladder.downgrades[0].liftedAt, 20)
+        // Nothing left to lift.
+        XCTAssertFalse(ladder.noteConnected(now: 30))
+    }
+
+    /// When the new probe is what rules the tier out, the lifted verdict does not put the
+    /// location back above what the capabilities allow.
+    func testALiftedPermanentFailureClimbsOnlyAsFarAsTheCapabilities() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        ladder.recordRuntimeFailure(reason: "noexec", permanence: .permanent, now: 10)
+        var capabilities = gnuServer()
+        capabilities.helperBlockReason = "cache directory is noexec"
+        ladder.applyCapabilities(capabilities, watchMode: .auto, now: 20)
+        XCTAssertFalse(ladder.noteConnected(now: 20))
+        XCTAssertEqual(ladder.tier, .sweep)
+        XCTAssertEqual(ladder.note, "cache directory is noexec")
+    }
+
+    /// The history is for `status`, which prints every entry: an outage of hours at one
+    /// transient retry a minute must not grow it without bound.
+    func testTheHistoryKeepsOnlyTheMostRecentDowngrades() {
+        var ladder = ChangeDetectionLadder(
+            watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)
+        for minute in 0 ..< 100 {
+            let now = Double(minute) * 60
+            ladder.climbBack(now: now)
+            ladder.recordRuntimeFailure(reason: "outage \(minute)", permanence: .transient, now: now)
+        }
+        XCTAssertEqual(ladder.downgrades.count, ChangeDetectionLadder.historyLimit)
+        XCTAssertEqual(ladder.downgrades.last?.reason, "outage 99")
+    }
+
+    /// A transient failure below a permanent one climbs back only to the permanent ceiling
+    /// while that ceiling binds.
     func testAClimbBackNeverPassesAPermanentCeiling() {
         var ladder = ChangeDetectionLadder(
             watchMode: .auto, capabilities: gnuServer(helperAvailable: true), now: 0)

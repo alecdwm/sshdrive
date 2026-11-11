@@ -109,3 +109,41 @@ public struct PollSchedule: Sendable, Equatable {
         now - lastFullSweep >= insuranceInterval
     }
 }
+
+/// The sweep's own backoff after timeouts (docs/design/change-detection.md).
+///
+/// A sweep that does not finish in time - a `find` stuck on a hung NFS mount below a root -
+/// is a note on that cycle and never a tier verdict, but one that times out on every
+/// cycle holds an exec channel and a `find` on the server for the whole of its deadline,
+/// every interval, for as long as the mount stays hung. So consecutive timeouts skip the
+/// sweep for a doubling interval - one paced interval after the first, capped at 30
+/// minutes - and those cycles poll instead. The first sweep that completes ends it.
+public struct SweepTimeoutBackoff: Sendable, Equatable {
+    public static let capSeconds: TimeInterval = 1800
+
+    public private(set) var consecutiveTimeouts = 0
+    /// Until when cycles poll instead of sweeping. Nil while sweeps run.
+    public private(set) var skipUntil: Double?
+
+    public init() {}
+
+    /// A sweep timed out at `now`; `interval` is the paced interval the next cycle is due
+    /// on.
+    public mutating func sweepTimedOut(now: Double, interval: TimeInterval) {
+        consecutiveTimeouts += 1
+        let length = min(
+            interval * pow(2, Double(min(consecutiveTimeouts - 1, 20))), Self.capSeconds)
+        skipUntil = now + length
+    }
+
+    public mutating func sweepCompleted() {
+        consecutiveTimeouts = 0
+        skipUntil = nil
+    }
+
+    /// Whether a cycle starting at `now` skips its sweep.
+    public func skipsSweep(now: Double) -> Bool {
+        guard let skipUntil else { return false }
+        return now < skipUntil
+    }
+}

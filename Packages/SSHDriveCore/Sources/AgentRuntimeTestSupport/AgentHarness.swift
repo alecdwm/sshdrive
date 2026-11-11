@@ -41,9 +41,10 @@ public final class AgentHarness: @unchecked Sendable {
         clock: VirtualAgentClock = VirtualAgentClock(),
         launchdProbesBeforeGone: Int = 0,
         secrets: AgentSecrets? = nil,
+        containerParent: URL? = nil,
         configure: (inout AgentEnvironment) -> Void = { _ in }
     ) throws {
-        container = FileManager.default.temporaryDirectory
+        container = (containerParent ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("sshdrive-agent-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: container, withIntermediateDirectories: true)

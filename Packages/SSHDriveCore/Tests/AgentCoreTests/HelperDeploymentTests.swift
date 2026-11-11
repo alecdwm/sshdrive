@@ -209,7 +209,7 @@ final class HelperDeploymentTests: XCTestCase {
 
     /// Nothing vouching for the file at all is a statement about the exec channel, not
     /// about the server: the location retries on the ladder's backoff rather than losing
-    /// the tier for the session.
+    /// the tier for the connection.
     func testNoEvidenceAtAllIsTransient() {
         XCTAssertFalse(
             HelperDeployment.uploadFailureIsPermanent(

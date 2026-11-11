@@ -120,6 +120,13 @@ because stderr cannot tell the key-agent states apart (SQ-052, gotcha 40):
   `ssh-agent`, locked, answers that it holds no identities rather than refusing.
 - 1Password and Secretive print `agent refused operation` between login and their first unlock.
   The classifier keeps that text as corroboration for the present-but-locked case, not as the test.
+- A key the server refused ends in the same line too. So for an `agentDependent` master, stderr
+  that is nothing but that bare `Permission denied (publickey)` line is a key agent that is not
+  ready only when the socket, probed again after the exit, is missing or refuses a connection. With
+  the socket answering it is an authentication failure on the slow retry, whose early attempt on a
+  screen unlock is what brings a location back once a locked agent is unlocked. Anything more than
+  the bare line - another method offered, a second complaint - is the server answering, and is
+  classified as auth.
 
 The socket probed is the one `ssh -G` resolves as `identityagent`, printed with `~` already
 expanded. Only when that is unset or reads `SSH_AUTH_SOCK` does the snapshot's variable apply:
@@ -139,15 +146,21 @@ stderr is kept for `sshdrive status` in every case.
 | What happened | Classified as | What follows |
 |---|---|---|
 | Connection error | `.serverUnreachable` | Reconnect with jittered backoff on the agent's own schedule, not when something next asks ([offline](offline.md) rule 5) |
-| Auth or host-key banner, with keys actually offered | `.notAuthenticated` ([secrets](secrets.md)) | **Reconnection stops** until `sshdrive set` changes the location, `sshdrive agent restart`, or `sshdrive debug breaker <name> --connect` |
-| 60 s authentication deadline, `agentDependent` location | as auth | Stops; re-armed for one attempt on screen unlock and on the next File Provider request for its domain arriving while the user is at the keyboard ([secrets](secrets.md)) |
+| Auth refusal after the askpass broker served this `ssh` a password or keyboard-interactive prompt (`passwordRefused`) | `.notAuthenticated` ([secrets](secrets.md)) | **Reconnection stops**, with no retry of any kind: every retry is one more failed login on the server's count. At once on a `sshdrive set` change, `sshdrive agent restart` or `sshdrive debug breaker <name> --connect` ([offline](offline.md) rule 6) |
+| Any other auth refusal, or a host-key banner | `.notAuthenticated` ([secrets](secrets.md)) | **The fast backoff stops.** Retried slowly - 5 minutes doubling to 30, and at most once early per interval on wake, the path coming back or a screen unlock - and at once on a `sshdrive set` change, `sshdrive agent restart` or `sshdrive debug breaker <name> --connect` ([offline](offline.md) rule 6) |
+| 60 s authentication deadline, `agentDependent` location | as auth | Stops, with no timer; re-armed for one attempt on screen unlock and on the next File Provider request for its domain arriving while the user is at the keyboard ([secrets](secrets.md)) |
 | 60 s authentication deadline, first-pass location | transient | Retried through the breaker: no key agent can be holding it up |
-| Key-agent socket missing or refusing (pre-spawn probe), or `agent refused operation` | transient | `ssh` not run; network backoff capped at 5 minutes |
+| Key-agent socket missing or refusing (pre-spawn probe), `agent refused operation`, or a bare `Permission denied (publickey)` from an `agentDependent` master whose socket is missing or refusing after the exit | transient | `ssh` not run (probe) or not retried at once; network backoff capped at 5 minutes |
 | Mux client exited before its channel opened | master lost | `-O check`, then drop and reconnect, or retry the channel once ([Mux clients](#mux-clients)) |
 
-A stale password retried every minute is a `fail2ban` ban within the hour, and a refused prompt is
-never going to succeed unattended; that is why auth failures stop. Only an `agentDependent`
-location's deadline is an auth stop.
+A stale password retried every minute is a `fail2ban` ban within the hour, and three tries are an
+account locked by `pam_faillock deny=3`; that is why auth failures leave the backoff, and why a
+refused password is not retried at all. A refused key or host key is still retried, slowly, because
+the cause is often something that changes on its own - a home directory mounted late, a network
+with another server on the same name. The password case is told apart by the askpass broker's
+record of the prompts it served that `ssh`, never by stderr: `Permission denied
+(publickey,password)` lists what the server allows, not what was tried. A refused password and an
+`agentDependent` location's deadline are the two auth stops with no retry of their own.
 
 ## Channels and `MaxSessions`
 
@@ -171,22 +184,37 @@ A channel is proved open by completing the SFTP handshake on it: `ssh` spawns su
 or not the session was granted, and only the refusal on stderr or a handshake that never lands
 tells the two apart (SQ-022).
 
-A failed open is evidence about `MaxSessions` only if the master is alive (SQ-079, gotcha 106).
-`ssh` fails a channel open just as readily because the master has gone (`Control socket connect:
-No such file or directory`, `mux_client_hello_exchange: … Broken pipe`, or nothing at all). So:
+A failed open is evidence about `MaxSessions` only if the master is alive, and only when `ssh` says
+so in its own words (SQ-079, gotcha 106). `ssh` fails a channel open just as readily because the
+master has gone (`Control socket connect: No such file or directory`, `mux_client_hello_exchange: …
+Broken pipe`, or nothing at all), and a handshake can stall on a master that is fine. So a failed
+open is one of three things:
 
-- a refusal against a master that is still running counts as a refusal;
-- a probe that met a dead connection **records nothing** and fails the connect attempt instead, so
-  the breaker ([offline](offline.md)) tries again;
-- an abrupt loss of a connection that was up marks the cached answer suspect, so the next connect
-  probes again. The values stay in the file for an offline `status` to print.
+- **refused**: `session request failed` or `administratively prohibited`, on a master that is still
+  running. A fact about the server, and the only answer that is cached;
+- **the connection died**: the master is gone, or stderr names a dead socket, pipe or link. The
+  probe **records nothing** and fails the connect attempt, so the breaker ([offline](offline.md))
+  tries again;
+- **inconclusive**: anything else on a running master - a handshake that missed its 10 s deadline,
+  empty stderr, wording nobody here has seen. The connection runs on the channels it did get,
+  nothing is cached, and the budget is asked again on that connection 30 s later, doubling to 10
+  minutes ([offline](offline.md#after-a-connection-comes-up)). A clear answer with room for more
+  channels than the connection holds reconnects it. On a connection running on one channel a
+  refusal is a clear answer too; on one running on two it is not, because the shared exec channel
+  may be held by a sweep at that moment.
+
+An abrupt loss of a connection that was up marks the cached answer suspect, so the next connect
+probes again. The values stay in the file for an offline `status` to print.
 
 ### The cache
 
-The answer is cached in `capabilities.json`, keyed by the location, and re-probed on
-`status --probe`. It cannot be keyed on a server banner because the agent never sees one: masters
-run at `LogLevel=ERROR` and mux clients speak to the socket (SQ-023). A cached budget that stops
-holding is noticed anyway, because opening the bulk channel is what the answer is used for.
+The answer is cached in `capabilities.json`, keyed by the location. It cannot be keyed on a server
+banner because the agent never sees one: masters run at `LogLevel=ERROR` and mux clients speak to
+the socket (SQ-023). Only a full budget is taken from the cache on trust, and only as far as the
+bulk channel actually opening: a cached full budget that stops holding is noticed, because opening
+the bulk channel is what the answer is used for. A cached budget below three is probed again on
+every connect, an agent restart's included - two channel opens is all a wrong "MaxSessions 1"
+costs to correct. `debug transport reprobe` forgets the cache outright.
 
 The one `ssh` that can read the server's identification string is the collect connection
 ([secrets](secrets.md)). It alone runs at `LogLevel=DEBUG1`, reads the string once for the
@@ -250,13 +278,20 @@ running with no socket at all, visible only by its command line (SQ-043).
 Keepalive alone leaves a 30 s window (`15 s × 2`) in which every request stalls, so a dead
 connection is detected three ways:
 
-1. **Keepalive** (`ServerAliveInterval=15`, `ServerAliveCountMax=2`).
+1. **Keepalive** (`ServerAliveInterval=15`, `ServerAliveCountMax=2`), and the **master watch**:
+   while a connection is up the agent polls the master process every 15 s - a `waitpid`, no
+   `ssh -O check` and nothing on the wire - and drops and reconnects when it has exited, so a
+   master that keepalive or a `kill` ended is replaced without waiting for a request.
 2. **The per-request deadline** in the SFTP client ([sftp](sftp.md#request-deadlines)): the request
    fails with `.serverUnreachable` and the channel is killed; after a second consecutive timeout,
    the master too.
 3. **Sleep.** At the will-sleep message the agent runs `-O exit` on every master and reconnects on
    wake. A connection that slept through a network change is dead more often than not, and dropping
-   it first leaves no request in flight on a connection the Mac is about to abandon.
+   it first leaves no request in flight on a connection the Mac is about to abandon. A connection
+   still held on wake - the message never came - is checked rather than trusted: its master must
+   still be running and one `lstat` of the root must come back within 10 s, or it is dropped and
+   reconnected. A half-open connection has a live master process and nothing at the far end, so
+   only the round trip can tell.
 
 Sleep and wake come from IOKit (`IORegisterForSystemPower`, `kIOMessageSystemWillSleep`,
 `kIOMessageSystemHasPoweredOn`), not `NSWorkspace`, since the agent runs no `NSApplication`. The

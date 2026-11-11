@@ -31,8 +31,20 @@ public enum ServerProbe {
         public var identity: ServerIdentity = .unknown
         /// What the account printed before our sentinel, which `status` shows.
         public var shellPrefix: String = ""
-        /// Empty when the probe worked. Non-empty means no shell access.
+        /// Empty when the probe worked. Non-empty means no shell access was found on this
+        /// connection; `unanswered` says whether that is a fact about the account.
         public var failure: String = ""
+        /// The probe got no answer at all: the script stalled past its deadline, the
+        /// channel did not open on a master that was going away or was refused a session,
+        /// or the output ended before the records did. None of that says the account has no
+        /// shell, so an unanswered probe is never cached as a verdict and the agent asks
+        /// again on the live connection (docs/design/offline.md). False for a real answer,
+        /// including "no shell access (ForceCommand)".
+        public var unanswered = false
+        /// The probe's exec channel was refused a session (`MaxSessions`). Unanswered, and
+        /// also evidence that the channel budget on record may be wrong, so the caller
+        /// marks it suspect and the next connect probes it again.
+        public var sessionRefused = false
         /// `id`'s own line, for `sshdrive show`.
         public var description: String = ""
 
@@ -97,21 +109,29 @@ public enum ServerProbe {
     /// How many NUL-delimited records the script above prints.
     public static let recordCount = 11
 
-    public static func run(master: SSHMaster, timeout: TimeInterval = 25) async -> Result {
+    /// `clock` bounds the read; the system clock unless a scenario drives one.
+    public static func run(
+        master: any RemoteMaster, timeout: TimeInterval = 25,
+        clock: any TimeSource = SystemTimeSource()
+    ) async -> Result {
         var result = Result()
         let remote = RemoteScript(body: script)
-        let channel: ExecChannel
+        let channel: any RemoteExecChannel
         do {
             channel = try await master.openExecChannel(script: remote, readinessDeadline: timeout)
         } catch let error as SSHProcessError {
             // A ForceCommand account answers with a plain sentence or with SFTP framing,
             // and is reported as "no shell access", never as unusable output
             // (docs/design/security.md). Either way the identity is unknown and the
-            // SFTP-only rule takes over.
+            // SFTP-only rule takes over. That is the one answer here; every other failure
+            // to open the channel is the probe not being answered.
             result.failure = "\(error.localizedDescription)"
+            if case .noShellAccess = error {} else { result.unanswered = true }
+            if error.classification == .channelLimitReached { result.sessionRefused = true }
             return result
         } catch {
             result.failure = "\(error)"
+            result.unanswered = true
             return result
         }
         defer { channel.close() }
@@ -119,16 +139,18 @@ public enum ServerProbe {
         result.shellPrefix = String(decoding: channel.prefix, as: UTF8.self)
 
         var payload = Data()
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = clock.now() + timeout
         do {
-            while Date() < deadline {
-                let chunk = try await channel.stream.read(upTo: 16 * 1024, deadline: deadline)
+            while clock.now() < deadline {
+                let chunk = try await channel.stream.read(
+                    upTo: 16 * 1024, deadline: Date(timeIntervalSince1970: deadline))
                 if chunk.isEmpty { break }
                 payload.append(chunk)
                 if payload.filter({ $0 == 0 }).count >= recordCount { break }
             }
         } catch {
             result.failure = "the shell did not answer in time"
+            result.unanswered = true
             return result
         }
 
@@ -139,6 +161,9 @@ public enum ServerProbe {
         result.uname = record(0)
         guard records.count >= 4, let uid = UInt32(record(1)), let gid = UInt32(record(2)) else {
             result.failure = "the shell did not answer `id`"
+            // Output that stopped short is a channel that went, not an account without
+            // `id`: the script prints a record for every value whether or not it is empty.
+            result.unanswered = records.count <= recordCount
             return result
         }
         let groups = Set(record(3).split(separator: " ").compactMap { UInt32($0) })

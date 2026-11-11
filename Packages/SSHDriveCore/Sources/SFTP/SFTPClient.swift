@@ -72,6 +72,10 @@ public actor SFTPClient {
         public var deadlineTick: Duration = .milliseconds(200)
         /// A packet larger than this is a desynchronised stream, not a big directory.
         public var maximumPacketLength = 64 * 1024 * 1024
+        /// The clock every deadline above and the sweeper's tick are measured on. Nil is
+        /// `ContinuousClock` and `Task.sleep`, which is what the agent runs; a scenario
+        /// passes its driven clock so a missed deadline happens in model time.
+        public var clock: (any TimeSource)?
 
         public init() {}
     }
@@ -115,7 +119,8 @@ public actor SFTPClient {
     private var sweeperTask: Task<Void, Never>?
 
     private var versionWaiter: CheckedContinuation<UInt32, Error>?
-    private var versionDeadline: ContinuousClock.Instant?
+    /// On `now()`'s scale, like every deadline here.
+    private var versionDeadline: Double?
     /// SSH_FXP_VERSION carries no request id, so it cannot be registered before it is
     /// sent for the way every other reply is. It can therefore land while `connect` is
     /// still suspended inside the write of SSH_FXP_INIT, in which case there is no
@@ -135,7 +140,21 @@ public actor SFTPClient {
 
     private struct PendingRequest {
         let continuation: CheckedContinuation<SFTPReply, Error>
-        let deadline: ContinuousClock.Instant
+        let deadline: Double
+    }
+
+    /// Seconds on the deadline clock: the configured one, or `ContinuousClock` counted
+    /// from the first reading in the process. Only differences are ever taken.
+    private func now() -> Double {
+        if let clock = configuration.clock { return clock.now() }
+        return SFTPClient.seconds(ContinuousClock.now - SFTPClient.continuousOrigin)
+    }
+
+    private static let continuousOrigin = ContinuousClock.now
+
+    private static func seconds(_ duration: Duration) -> Double {
+        let parts = duration.components
+        return Double(parts.seconds) + Double(parts.attoseconds) * 1e-18
     }
 
     public init(stream: any ByteStream, configuration: Configuration = Configuration()) {
@@ -154,7 +173,7 @@ public actor SFTPClient {
 
         var writer = SFTPPacketWriter(.initialize)
         writer.writeUInt32(3)
-        versionDeadline = ContinuousClock.now.advanced(by: configuration.metadataDeadline)
+        versionDeadline = now() + SFTPClient.seconds(configuration.metadataDeadline)
         let version: UInt32
         do {
             try await stream.write(writer.finish())
@@ -230,9 +249,14 @@ public actor SFTPClient {
     private func startSweeper() {
         guard sweeperTask == nil else { return }
         let tick = configuration.deadlineTick
+        let clock = configuration.clock
         sweeperTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: tick)
+                if let clock {
+                    await clock.sleep(seconds: SFTPClient.seconds(tick))
+                } else {
+                    try? await Task.sleep(for: tick)
+                }
                 guard let self else { return }
                 await self.expireOverdueRequests()
             }
@@ -243,8 +267,8 @@ public actor SFTPClient {
     /// maps that to `.serverUnreachable` and drops the master (docs/design/ssh.md);
     /// nothing here knows about masters.
     private func expireOverdueRequests() {
-        let now = ContinuousClock.now
-        if let versionDeadline, now >= versionDeadline {
+        let current = now()
+        if let versionDeadline, current >= versionDeadline {
             self.versionDeadline = nil
             let waiter = versionWaiter
             versionWaiter = nil
@@ -252,8 +276,8 @@ public actor SFTPClient {
             die(with: .connectionLost)
             return
         }
-        guard pending.values.contains(where: { now >= $0.deadline }) else { return }
-        let overdue = pending.filter { now >= $0.value.deadline }
+        guard pending.values.contains(where: { current >= $0.deadline }) else { return }
+        let overdue = pending.filter { current >= $0.value.deadline }
         for (id, request) in overdue {
             pending.removeValue(forKey: id)
             request.continuation.resume(throwing: SFTPError.deadlineExceeded)
@@ -468,7 +492,7 @@ public actor SFTPClient {
         if let deathError { throw deathError }
         if Task.isCancelled { throw SFTPError.cancelled }
         let packet = writer.finish()
-        let instant = ContinuousClock.now.advanced(by: deadline)
+        let instant = now() + SFTPClient.seconds(deadline)
         return try await withCheckedThrowingContinuation { continuation in
             // Registering before the packet reaches the outbox is what makes a reply
             // that arrives during the write impossible to lose.

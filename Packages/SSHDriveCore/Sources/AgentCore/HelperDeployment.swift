@@ -100,8 +100,8 @@ public enum HelperDeployment {
     /// A hash that came back and disagreed is about the file. No hash coming back at all -
     /// neither `sha256sum`/`shasum` nor the binary's own `--version` - is about the exec
     /// channel that would have produced one, and a connection going away is how that
-    /// happens. Treating the second as permanent left a location at the sweep tier for the
-    /// session against a server that is fine a minute later.
+    /// happens. Read as permanent, the second would hold a location at the sweep tier
+    /// against a server that is fine a minute later.
     public static func uploadFailureIsPermanent(after evidence: RemoteEvidence) -> Bool {
         evidence.sha256 != nil || evidence.reportedDigest != nil
     }

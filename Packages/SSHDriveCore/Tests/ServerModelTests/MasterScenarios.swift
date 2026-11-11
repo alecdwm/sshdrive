@@ -394,6 +394,30 @@ final class MasterScenarios: XCTestCase {
         XCTAssertEqual(exit.signal, SIGKILL, "SQ-041: the master's death is ours to see")
     }
 
+    /// **K4**, the exit kept: the gate's master watch asks `isRunning`, which reaps a
+    /// master that has exited. The status that `waitpid` collected is the one
+    /// `classifyExitIfEnded` reads afterwards - a second `waitpid` on the reaped pid
+    /// answers `ECHILD` and the signal would be lost - and `shutdown()` signals nothing.
+    func testK4_aMasterReapedByIsRunningKeepsItsExitStatus() async throws {
+        let stub = try fakeSSH(.debian)
+        let master = self.master(.debian, controlPath: controlPath(stub))
+        try await master.connect()
+        let spawned = await master.pid
+        let pid = try XCTUnwrap(spawned)
+        XCTAssertEqual(kill(pid, SIGKILL), 0)
+        let deadline = Date().addingTimeInterval(10)
+        while await master.isRunning, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let running = await master.isRunning
+        XCTAssertFalse(running, "the killed master was never seen to exit")
+        let classification = await master.classifyExitIfEnded()
+        XCTAssertNotNil(classification, "the exit isRunning reaped was lost")
+        let exit = await master.lastExit
+        XCTAssertEqual(exit?.signal, SIGKILL, "the master's real exit, not ECHILD's -1")
+        await master.shutdown()
+    }
+
     /// **K4**, the bite (`SQ-041`): `ControlPersist` set makes `ssh` fork the master into
     /// the background after authentication and the process the agent spawned exits - even
     /// under `-N`. Run for real: the child exits 0 with nothing to say, while the socket

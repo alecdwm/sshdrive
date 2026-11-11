@@ -29,6 +29,16 @@ public enum ReconnectStep: String, Sendable, Equatable, CaseIterable {
     public var needsAppliedConnection: Bool { self != .applyConnection }
 }
 
+/// The sequence runs once per connection, after the gate has handed the connection out,
+/// on a task of its own. Two rules keep it about the connection it was started for:
+///
+/// - **One at a time per location.** A sequence for connection N+1 starts only once N's
+///   has finished, so N's steps can never land after N+1's.
+/// - **Every step is for the current connection.** Each connection the gate brings up has
+///   a generation, and a step runs only while that generation is still the gate's. A
+///   connection that dropped during its own sequence - during the server probe, during
+///   `applyConnection` - leaves the rest of it undone; the next connection's sequence does
+///   all of it.
 public enum ReconnectSequence {
     public static let steps: [ReconnectStep] = [
         .applyConnection, .applyCapabilities, .reopenHelperStream,
@@ -39,5 +49,49 @@ public enum ReconnectSequence {
     /// channels it shares a master with.
     public static func indexOf(_ step: ReconnectStep) -> Int {
         steps.firstIndex(of: step) ?? -1
+    }
+
+    /// Whether a sequence started for `generation` may run its next step, given the
+    /// generation of the connection the gate holds now (nil when it holds none).
+    public static func mayRun(generation: Int, current: Int?) -> Bool {
+        current == generation
+    }
+
+    /// When a connection that came up with an unanswered server probe or an inconclusive
+    /// channel budget asks again on the same connection: 30 s after it came up, doubling to
+    /// 10 minutes, for as long as that connection lasts (docs/design/offline.md).
+    public static let firstRecheckSeconds: Double = 30
+    public static let recheckCapSeconds: Double = 600
+
+    /// The wait before the re-check numbered `attempt`, counting from 0.
+    public static func recheckDelay(attempt: Int) -> Double {
+        min(firstRecheckSeconds * pow(2, Double(max(0, min(attempt, 20)))), recheckCapSeconds)
+    }
+
+    /// How many budget re-checks in a row may come back inconclusive, with the master
+    /// still running, before the connection stops asking. Wording nobody has seen keeps a
+    /// channel neither opened nor refused for good; the next connect probes again from
+    /// scratch, as it does for any budget below the full one.
+    public static let inconclusiveBudgetRecheckLimit = 3
+
+    /// What a budget re-check that found room for `found` channels does with the
+    /// connection that holds `current`.
+    public enum BudgetRecheckAction: Sendable, Equatable {
+        /// Nothing to gain: the connection keeps what it has.
+        case keep
+        /// Drop the connection and reconnect, which is the only way to add a channel.
+        case reconnect
+        /// Not now: a download or an upload is running, and dropping the connection under
+        /// it loses it - the system never re-issues a failed `fetchContents` (gotcha 59).
+        /// The next re-check, or the next reconnect that happens anyway, picks up the
+        /// budget, which is on record by then.
+        case deferReconnect
+    }
+
+    public static func budgetRecheckAction(
+        current: Int, found: Int, transferInFlight: Bool
+    ) -> BudgetRecheckAction {
+        guard found > current else { return .keep }
+        return transferInFlight ? .deferReconnect : .reconnect
     }
 }

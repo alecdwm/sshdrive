@@ -200,6 +200,7 @@ public enum LocationCommands {
             // the promise that a location which passes `add` works from the agent has been
             // demonstrated rather than asserted.
             let runtime = try await AgentCommandContext.manager.runtime(for: created)
+            await AgentCommandContext.manager.noteUserAtTerminal(locationID: created.id)
             // `LocationRuntime.start()` deliberately swallows a failed `applyConnection`,
             // because a location whose server is down still has to mount.
             // `add` is the one moment where that is wrong: the user is at the terminal,
@@ -673,6 +674,7 @@ public enum LocationCommands {
         }
         if wasMounted {
             let runtime = try await AgentCommandContext.manager.runtime(for: saved)
+            await AgentCommandContext.manager.noteUserAtTerminal(locationID: saved.id)
             _ = try await runtime.enumerateItems(
                 container: IndexWriter.rootIdentifier, pageToken: nil)
             try await AgentCommandContext.manager.addDomain(for: saved)
@@ -749,6 +751,7 @@ public enum LocationCommands {
             }
         }
         let runtime = try await AgentCommandContext.manager.runtime(for: saved)
+        await AgentCommandContext.manager.noteUserAtTerminal(locationID: saved.id)
         _ = try await runtime.enumerateItems(container: IndexWriter.rootIdentifier, pageToken: nil)
         try await AgentCommandContext.manager.addDomain(for: saved)
         return try ControlCommands.json([
@@ -863,7 +866,7 @@ public enum LocationCommands {
         ])
         let clock = AgentCommandContext.manager.environment.clock
         do {
-            try await Deadline.run(
+            try await Deadline.race(
                 "the \(location.displayName) section of status",
                 seconds: Deadline.statusSeconds, clock: clock
             ) {
@@ -978,7 +981,7 @@ public enum LocationCommands {
             ]
             if let evictor = await manager.evictor(locationID: location.id) {
                 cache["nextPassInSeconds"] = max(
-                    0, await evictor.nextRunAt() - Date().timeIntervalSince1970)
+                    0, await evictor.nextRunAt() - manager.environment.clock.now())
                 let pass = await evictor.lastPass
                 if !pass.isEmpty { cache["lastPass"] = pass }
             }

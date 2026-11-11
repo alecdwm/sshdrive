@@ -48,16 +48,17 @@ enum HelperDeployer {
     }
 
     enum Failure: Error, LocalizedError {
-        /// The reason `status` prints on the change-detection line, and whether it will
-        /// still be true on the next connection.
+        /// The reason `status` prints on the change-detection line, and whether it is a
+        /// fact about the server.
         ///
-        /// `permanent` is the fixed list - no shell, no exec channel, no writable or
-        /// executable directory, an unsupported architecture, a hash that did not match
-        /// after a redeploy - and it is what costs the location the tier for the session. A
-        /// helper that simply did not answer this time is `permanent: false` and is retried
-        /// on a bounded backoff: an outage read as a verdict about the server parks the
-        /// mount at the sweep tier for the session.
-        case unavailable(String, permanent: Bool = true)
+        /// `permanent` is set, explicitly, only on the fixed list - no shell, no channel to
+        /// hold, no writable or executable directory of the account's own, an unsupported
+        /// architecture or a build that ships nothing for it, a hash that did not match
+        /// after a redeploy - and it costs the location the tier for the rest of the
+        /// connection, re-decided after 30 minutes on one that stays up. Anything else is
+        /// transient and retried on a bounded backoff: an outage read as a verdict about
+        /// the server parks the mount at the sweep tier long after the link is back.
+        case unavailable(String, permanent: Bool = false)
 
         var errorDescription: String? {
             switch self {
@@ -73,10 +74,11 @@ enum HelperDeployer {
     }
 
     /// Steps 1 and 2 of the deployment, on one exec channel and the metadata SFTP
-    /// channel.
+    /// channel. `clock` bounds the two shell questions.
     static func ensureDeployed(
         connection: any LiveConnection,
-        locationID: String
+        locationID: String,
+        clock: any AgentClock = SystemAgentClock()
     ) async throws -> Deployment {
         let probe = connection.probe
         // Before anything about the *server*: is there a channel to do it on right now?
@@ -87,33 +89,39 @@ enum HelperDeployer {
             throw SFTPError.noConnection
         }
         guard probe.hasShellAccess else {
-            throw Failure.unavailable("the account has no shell access")
+            throw Failure.unavailable("the account has no shell access", permanent: true)
         }
         guard connection.budget.allowsPersistentExecChannel else {
             throw Failure.unavailable(
-                "the server will not give the helper a channel of its own (MaxSessions \(connection.budget.concurrentChannels))")
+                "the server will not give the helper a channel of its own (MaxSessions \(connection.budget.concurrentChannels))",
+                permanent: true)
         }
         guard !probe.cacheDirectory.isEmpty else {
             throw Failure.unavailable(
-                probe.cacheNote.isEmpty ? "no writable directory for helper" : probe.cacheNote)
+                probe.cacheNote.isEmpty ? "no writable directory for helper" : probe.cacheNote,
+                permanent: true)
         }
         guard let directory = HelperDirectory(absolute: probe.cacheDirectory) else {
-            throw Failure.unavailable("the helper directory \(probe.cacheDirectory) is not usable")
+            throw Failure.unavailable(
+                "the helper directory \(probe.cacheDirectory) is not usable", permanent: true)
         }
         guard let manifest = manifest() else {
-            throw Failure.unavailable("this build ships no helper binaries")
+            throw Failure.unavailable("this build ships no helper binaries", permanent: true)
         }
         guard let binary = manifest.binary(forUname: probe.uname) else {
             throw Failure.unavailable(
-                "helper unsupported: \(probe.uname.isEmpty ? "unknown" : probe.uname)")
+                "helper unsupported: \(probe.uname.isEmpty ? "unknown" : probe.uname)",
+                permanent: true)
         }
         guard let resources = resourcesDirectory,
             let bytes = try? Data(contentsOf: resources.appendingPathComponent(binary.file))
         else {
-            throw Failure.unavailable("this build ships no helper for \(binary.os)/\(binary.arch)")
+            throw Failure.unavailable(
+                "this build ships no helper for \(binary.os)/\(binary.arch)", permanent: true)
         }
         guard let target = directory.file(binary.file) else {
-            throw Failure.unavailable("the helper's file name is not usable on this server")
+            throw Failure.unavailable(
+                "the helper's file name is not usable on this server", permanent: true)
         }
 
         // `mkdir -m 700`, and it has to be ours: `/tmp/sshdrive-<uid>` is a predictable
@@ -123,7 +131,8 @@ enum HelperDeployer {
         var directoryAttributes = try await sftp.helperLstat(directory)
         if probe.identity.isKnown, directoryAttributes.uid != probe.identity.uid {
             throw Failure.unavailable(
-                "\(directory.path) is owned by uid \(directoryAttributes.uid), not by this account")
+                "\(directory.path) is owned by uid \(directoryAttributes.uid), not by this account",
+                permanent: true)
         }
         // Ours but too open - a server umask that widened our `mkdir`, or a directory an
         // older build left at 0755. The mode wanted is 0700 and we may set it, so it is
@@ -138,7 +147,8 @@ enum HelperDeployer {
         }
         if directoryAttributes.mode & 0o022 != 0 {
             throw Failure.unavailable(
-                "\(directory.path) is writable by others and would not take mode 0700")
+                "\(directory.path) is writable by others and would not take mode 0700",
+                permanent: true)
         }
 
         var evidence = HelperDeployment.RemoteEvidence()
@@ -146,8 +156,16 @@ enum HelperDeployer {
         let existing = listing.first { $0.name == Data(binary.file.utf8) }
         evidence.size = existing.map { $0.attributes.size }
         var verifiedBy = "size"
+        // Asked whether or not the file is there, because the same channel has to vouch
+        // for an upload afterwards. A channel that does not answer at all - refused, or
+        // opened and silent - could not verify the copy either, and an upload it cannot
+        // verify is removed again: on a connection whose exec channels keep failing that
+        // is an upload of the whole binary every minute, for as long as it stays up.
+        let answers = await interrogate(master: master, file: target, clock: clock)
+        guard answers.answered else {
+            throw Failure.unavailable("the server's exec channel did not answer")
+        }
         if existing != nil {
-            let answers = await interrogate(master: master, file: target)
             evidence.sha256 = answers.checksum
             evidence.reportedDigest = answers.digest
             evidence.reportedVersion = answers.version
@@ -167,7 +185,7 @@ enum HelperDeployer {
             uploaded = true
             // The helper is verified before every launch, and an upload is the one
             // moment where a failure would otherwise be silent.
-            let answers = await interrogate(master: master, file: target)
+            let answers = await interrogate(master: master, file: target, clock: clock)
             let after = HelperDeployment.RemoteEvidence(
                 size: (try? await sftp.helperLstat(target)).map(\.size),
                 sha256: answers.checksum, reportedDigest: answers.digest,
@@ -180,8 +198,7 @@ enum HelperDeployer {
                 // connection going away is exactly how that happens. A location whose
                 // exec channel is broken by an orphaned master reports "the server could
                 // not verify the helper's contents"; read as permanent, that parks it at
-                // the sweep tier for the session against a server that is fine a minute
-                // later.
+                // the sweep tier against a server that is fine a minute later.
                 throw Failure.unavailable(
                     "helper upload failed: \(why)",
                     permanent: HelperDeployment.uploadFailureIsPermanent(after: after))
@@ -199,7 +216,7 @@ enum HelperDeployer {
         }
         var removed: [String] = []
         for name in HelperDeployment.stale(
-            files, keeping: manifest.fileNames, serverNow: await serverTime(master))
+            files, keeping: manifest.fileNames, serverNow: await serverTime(master, clock: clock))
         {
             guard let file = directory.file(name) else { continue }
             if (try? await sftp.helperRemove(file)) != nil { removed.append(name) }
@@ -245,6 +262,9 @@ enum HelperDeployer {
     // MARK: The two things only a shell can answer
 
     struct Answers {
+        /// The script printed its first record, the checksum tool's name. False when the
+        /// channel was refused, closed, or said nothing before the deadline.
+        var answered = false
         var checksum: String?
         var tool = "sha256sum"
         var digest: String?
@@ -257,7 +277,9 @@ enum HelperDeployer {
     /// No heartbeat wrapper: this runs to completion in milliseconds and starts nothing in
     /// the background, so there is nothing that could outlive the channel: the lifetime
     /// rule is about children we leave running.
-    static func interrogate(master: SSHMaster, file: HelperFile) async -> Answers {
+    static func interrogate(
+        master: any RemoteMaster, file: HelperFile, clock: any AgentClock = SystemAgentClock()
+    ) async -> Answers {
         let body = """
             __sd_f="$1"
             if command -v sha256sum >/dev/null 2>&1; then
@@ -277,9 +299,10 @@ enum HelperDeployer {
         else { return Answers() }
         defer { channel.close() }
         var payload = Data()
-        let deadline = Date().addingTimeInterval(20)
-        while Date() < deadline, payload.filter({ $0 == 0 }).count < 3 {
-            guard let chunk = try? await channel.stream.read(upTo: 8 * 1024, deadline: deadline),
+        let deadline = clock.now() + 20
+        while clock.now() < deadline, payload.filter({ $0 == 0 }).count < 3 {
+            guard let chunk = try? await channel.stream.read(
+                    upTo: 8 * 1024, deadline: Date(timeIntervalSince1970: deadline)),
                 !chunk.isEmpty
             else { break }
             payload.append(chunk)
@@ -287,7 +310,10 @@ enum HelperDeployer {
         let records = payload.split(separator: 0, omittingEmptySubsequences: false)
             .map { String(decoding: $0, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) }
         var answers = Answers()
-        if records.count > 0 { answers.tool = records[0] }
+        if payload.contains(0), let tool = records.first, !tool.isEmpty {
+            answers.answered = true
+            answers.tool = tool
+        }
         if records.count > 1, records[1].count == 64, records[1].allSatisfy(\.isHexDigit) {
             answers.checksum = records[1]
         }
@@ -301,22 +327,26 @@ enum HelperDeployer {
     /// The server's own clock, for the seven-day staleness rule. A server mtime compared
     /// against the Mac's wall clock measures the two clocks' disagreement as well as the
     /// file's age.
-    static func serverTime(_ master: SSHMaster) async -> Int64 {
+    /// Our own clock is the fallback when the server cannot say.
+    static func serverTime(
+        _ master: any RemoteMaster, clock: any AgentClock = SystemAgentClock()
+    ) async -> Int64 {
         let script = RemoteScript(body: "printf '%s\\000' \"$(date +%s)\"")
         guard let channel = try? await master.openExecChannel(script: script, readinessDeadline: 15)
-        else { return Int64(Date().timeIntervalSince1970) }
+        else { return Int64(clock.now()) }
         defer { channel.close() }
-        let deadline = Date().addingTimeInterval(15)
+        let deadline = clock.now() + 15
         var payload = Data()
-        while Date() < deadline, !payload.contains(0) {
-            guard let chunk = try? await channel.stream.read(upTo: 256, deadline: deadline),
+        while clock.now() < deadline, !payload.contains(0) {
+            guard let chunk = try? await channel.stream.read(
+                    upTo: 256, deadline: Date(timeIntervalSince1970: deadline)),
                 !chunk.isEmpty
             else { break }
             payload.append(chunk)
         }
         let text = String(decoding: payload.prefix(while: { $0 != 0 }), as: UTF8.self)
         return Int64(text.trimmingCharacters(in: .whitespacesAndNewlines))
-            ?? Int64(Date().timeIntervalSince1970)
+            ?? Int64(clock.now())
     }
 
     /// Temp name, then rename into place - never written over the existing file. A helper

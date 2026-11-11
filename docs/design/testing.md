@@ -335,6 +335,65 @@ installed process-wide is shared. Two rules follow:
   Otherwise a `DomainManager` handed to a detached task outlives its bed, goes on reconnecting on
   the breaker's schedule and dials the next scenario's stub.
 
+## The resilience suite
+
+A location is meant to be added once and then forgotten: whatever the laptop, the network or
+the server does in the meantime, once it is over the location is connected again, at the best
+change-detection tier the server supports, with an index that agrees with the server. The
+resilience suite holds the agent to that. It drives one location through an adverse sequence in
+virtual time, lifts the fault, waits the shortest quiet period the recovery policy allows, and
+then checks convergence.
+
+**`ServerModel.FakeRemoteHost`** is one in-process server. Its SFTP side is `FakeSFTPServer`
+on the real wire, and its exec side answers each script the agent sends - the server probe, the
+helper's interrogation, `date +%s`, the sweep's `find`, the helper's `watch --json` - in the
+format the agent parses, from the same tree. A file a scenario changes on the server is seen by
+an SFTP listing, by the sweep's window and by the helper's event stream alike, and the helper the
+agent uploads is the file the interrogation hashes. The host's master conforms to
+`SSHProcess.RemoteMaster`, and `AgentRuntimeTestSupport.FakeHostLauncher` hands it to
+`SSHBackedTransport.establish`, so everything after authentication is the shipping code: channel
+1, the root check, the channel probe and its cache, the server probe, the deployment, the stream.
+
+Faults are set on the host and reach the agent the way real ones do, with the stderr real `ssh`
+prints and the real `SSHExitClassifier` deciding what it means: a link that is unreachable or
+black-holed, sshd refusing or never sending its banner, refused keys, refused passwords and
+changed host keys for N attempts, a severed or half-open connection (with `ServerAliveInterval`'s
+45 s death), exec channels refused, `MaxSessions` changed at runtime, a stalled probe or `find`, a
+helper that is slow to say `ready`, never says it, goes silent, walks a new root set in silence
+or is killed, a wiped cache directory, a missing root, a full disk. A refused password goes
+through the agent's own askpass broker as a prompt, so the classification reads the same record
+of it that it reads on a Mac. `ResilienceHarness` adds the Mac's side: the network path, sleep with and
+without the will-sleep message, time asleep, a jump of the wall clock, and an agent restart over
+the same group container.
+
+`ResilienceHarness.converged()` returns the violations, not a Bool:
+
+| Check | What converged means |
+|---|---|
+| C1 | the gate is connected and the breaker is not stopped |
+| C2 | the tier is the best the server supports, with no permanent downgrade in force |
+| C3 | exactly one helper runs, and a file written on the server reaches the index through a helper event within 3 s, with no sweep |
+| C4 | every change made on the server during the fault is in the index |
+| C5 | `signalErrorResolved` was sent after the last connect |
+| C6 | `capabilities.json` holds the server's true channel budget and probe |
+| C7 | one master, holding the SFTP sessions its budget allows and one exec session for the helper, and never two helpers on one connection. A helper left behind on a half-open connection runs until its wrapper's 60 s heartbeat timeout, as it does on a real server |
+| C8 | connect attempts stayed within the effort bound, and none were made once connected |
+
+The rows are the scenarios in `Tests/AgentRuntimeTests/ResilienceScenarios*.swift`,
+`DetectionResilienceScenarios.swift` and `ConnectionResilienceScenarios.swift`, one per adverse
+sequence. `ResilienceFuzzer.swift` builds a reproducible random sequence of faults, server
+changes and user touches from each seed (SplitMix64, never the system generator), lifts
+everything and checks convergence. `SSHDRIVE_RESILIENCE_SEEDS=<n>` runs seeds 1 to n,
+`SSHDRIVE_RESILIENCE_SEED=<n>` replays one, and a failure prints its seed and step list.
+`SSHDRIVE_RESILIENCE_LOG=debug` prints the agent's whole log with a failure. The breaker's
+jitter is not seeded, so a replay follows the same steps but not always the same backoffs.
+
+The harness advances the clock to each next deadline and lets the agent's tasks settle in
+between, with real time only as a hang guard. "Settled" includes the agent's log and SQL
+activity, and the group container lives in `/dev/shm` where there is one: on a slow disk an
+atomic write takes long enough that virtual time would run ahead of work still in flight and fire
+deadlines the agent never really missed.
+
 ## The quirk catalogue
 
 `docs/quirks/` is the inventory of measured behaviour: [macos.md](../quirks/macos.md) (80 rows)
@@ -387,10 +446,11 @@ Scenarios live beside the module they exercise:
 | `Tests/ServerModelTests` | the wire and the shells |
 | the module's own suite | the rest |
 
-There are 143 ids in fifteen families, and 126 of them are named in `Tests/`. The seventeen that
-are not are the outstanding work: `C3`-`C6`, `D7`, `D8`, `E1`, `E4`-`E6`, `F3`, `G7`, `K8`, `L2`,
-`M1`, `P6`, `P7`. Several of the behaviours behind them are covered by a unit test that does not
-name the id.
+There are 143 ids in the fifteen families A to Q, and 126 of them are named in `Tests/`. The
+seventeen that are not are the outstanding work: `C3`-`C6`, `D7`, `D8`, `E1`, `E4`-`E6`, `F3`,
+`G7`, `K8`, `L2`, `M1`, `P6`, `P7`. Several of the behaviours behind them are covered by a unit
+test that does not name the id. The R family's rows are the resilience suite's, named after the
+fault they apply.
 
 | Family | Covers | Design |
 |---|---|---|
@@ -409,6 +469,7 @@ name the id.
 | N | the capability report and probes | [the CLI](cli.md) |
 | P | packaging and lifecycle | [packaging](packaging.md) |
 | Q | `add`, askpass and the collect connection | [secrets and host keys](secrets.md), [the location model](locations.md) |
+| R | resilience: an adverse sequence, then convergence ([the resilience suite](#the-resilience-suite)) | [offline behaviour](offline.md), [change detection](change-detection.md) |
 
 ### A - the working set, anchors and enumeration
 

@@ -118,7 +118,7 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     public func killMaster() { lock.lock(); _alive = false; lock.unlock() }
 
     public var extensionNames: [String] { get async { [] } }
-    public var execMaster: SSHMaster? { nil }
+    public var execMaster: (any RemoteMaster)? { nil }
     public var metadataTransport: RealSFTPTransport? { nil }
 
     public func shutdown() async {

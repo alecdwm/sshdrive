@@ -64,6 +64,9 @@ public struct AskpassSessionInfo: Sendable {
     public var refusalReason: String?
     /// FIDO keys that asked for a touch. `add` refuses a location that saw one.
     public var touchRequiredKeys: [String]
+    /// How many password or keyboard-interactive prompts the spawn raised. Each one put
+    /// an answer on the wire, empty or not.
+    public var passwordPrompts: Int
 }
 
 /// The agent's half of the askpass token protocol (docs/design/secrets.md).
@@ -94,6 +97,8 @@ public final class AskpassBroker: @unchecked Sendable {
         var maskedAccounts: Set<String>
         var refusalReason: String?
         var touchRequiredKeys: [String] = []
+        /// Password and keyboard-interactive prompts this spawn raised, answered or not.
+        var passwordPrompts = 0
 
         init(
             token: String, locationID: String, purpose: AskpassPurpose,
@@ -224,7 +229,17 @@ public final class AskpassBroker: @unchecked Sendable {
             destination: session.resolution?.destination, sshPID: session.sshPID,
             mintedAt: session.mintedAt, expiresAt: session.expiresAt, retired: session.retired,
             invocations: session.invocations, misses: session.misses,
-            refusalReason: session.refusalReason, touchRequiredKeys: session.touchRequiredKeys)
+            refusalReason: session.refusalReason, touchRequiredKeys: session.touchRequiredKeys,
+            passwordPrompts: session.passwordPrompts)
+    }
+
+    /// Whether the spawn this token belongs to raised a password or keyboard-interactive
+    /// prompt. `ssh` answers every one of them to the server - with the stored value,
+    /// with an empty line, or with an empty string when the askpass refuses - so the
+    /// answer is "the server saw a password attempt", whatever the reply was.
+    public func servedPasswordPrompt(token: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (sessions[token]?.passwordPrompts ?? 0) > 0
     }
 
     public func misses(token: String) -> [AskpassMiss] {
@@ -308,6 +323,14 @@ public final class AskpassBroker: @unchecked Sendable {
         }
 
         let classified = AskpassPromptClassifier.classify(prompt: prompt, promptKind: promptKind)
+        switch classified {
+        case .password, .keyboardInteractivePassword, .keyboardInteractiveChallenge:
+            lock.lock()
+            session.passwordPrompts += 1
+            lock.unlock()
+        default:
+            break
+        }
         let resolution = self.resolution(for: session, parentArguments: parentArguments)
         return reply(to: classified, promptText: prompt, session: session, resolution: resolution)
     }

@@ -260,8 +260,9 @@ public struct CapabilityReport {
         // watch-mode <x>` and no `upgrade:` line (docs/design/cli.md). Poll is also where a
         // location with no shell at all lands.
         // The ladder, not the probe, is the authority on which tier is running once the
-        // location has been up: a sweep that failed drops to poll for the session even
-        // though the probe still says the shell is there (docs/design/change-detection.md).
+        // location has been up: a tier the server failed to run is held down for the
+        // connection even though the probe still says the shell is there
+        // (docs/design/change-detection.md).
         if location.watchMode == .poll || !shell || activeTier == "poll" {
             var note: String?
             if location.watchMode == .poll {

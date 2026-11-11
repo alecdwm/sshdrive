@@ -38,4 +38,38 @@ final class ReconnectSequenceTests: XCTestCase {
         XCTAssertFalse(ReconnectStep.applyConnection.needsAppliedConnection)
         XCTAssertTrue(ReconnectStep.reopenHelperStream.needsAppliedConnection)
     }
+
+    /// A step runs only for the connection the gate holds now: a sequence whose connection
+    /// went, or was replaced, does nothing more.
+    func testAStepRunsOnlyForTheCurrentConnection() {
+        XCTAssertTrue(ReconnectSequence.mayRun(generation: 3, current: 3))
+        XCTAssertFalse(ReconnectSequence.mayRun(generation: 3, current: 4))
+        XCTAssertFalse(ReconnectSequence.mayRun(generation: 3, current: nil))
+    }
+
+    /// The re-check of an unanswered probe or an inconclusive budget: 30 s, doubling to
+    /// ten minutes.
+    func testTheRecheckBacksOffFromThirtySecondsToTenMinutes() {
+        XCTAssertEqual(
+            (0..<8).map(ReconnectSequence.recheckDelay(attempt:)),
+            [30, 60, 120, 240, 480, 600, 600, 600])
+        XCTAssertEqual(ReconnectSequence.recheckDelay(attempt: 1000), 600)
+    }
+
+    /// A re-check that finds room for more channels reconnects to use them, except under a
+    /// running transfer, which a dropped connection would lose for good.
+    func testABudgetRecheckNeverDropsATransfer() {
+        XCTAssertEqual(
+            ReconnectSequence.budgetRecheckAction(current: 2, found: 3, transferInFlight: false),
+            .reconnect)
+        XCTAssertEqual(
+            ReconnectSequence.budgetRecheckAction(current: 2, found: 3, transferInFlight: true),
+            .deferReconnect)
+        XCTAssertEqual(
+            ReconnectSequence.budgetRecheckAction(current: 3, found: 3, transferInFlight: false),
+            .keep)
+        XCTAssertEqual(
+            ReconnectSequence.budgetRecheckAction(current: 2, found: 1, transferInFlight: false),
+            .keep)
+    }
 }
