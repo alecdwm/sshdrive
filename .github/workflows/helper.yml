@@ -117,7 +117,7 @@ jobs:
 
   macos:
     name: darwin/arm64 and the manifest
-    runs-on: macos-14
+    runs-on: macos-26
     needs: linux
     steps:
       - uses: actions/checkout@v4
