@@ -541,6 +541,10 @@ extension AgentScenarios {
 
             await gate.drop(reason: "the master was killed")
             await harness.settle { await gate.connectionGeneration.map { $0 != first } ?? false }
+            // The successor's reconnect sequence makes calls of its own, and a success on
+            // it resets its run of missed deadlines. It finishes before the misses below are
+            // counted, or one of its calls can land between them.
+            await harness.quiesceConnects()
             let second = try #require(await gate.connectionGeneration)
             #expect(second != first)
             let attempts = harness.launcher.attempts
