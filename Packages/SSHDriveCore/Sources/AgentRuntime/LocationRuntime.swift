@@ -441,18 +441,22 @@ public actor LocationRuntime {
 
     /// Directory listings travel as XPC values, paged for directories with tens of
     /// thousands of entries. One `readdir` and one reconcile produce the whole listing;
-    /// the pages are cut from it, so a page token is an offset into a listing the agent
-    /// already holds and a second page never re-lists the directory.
+    /// the pages are cut from it, so a page token names a listing the agent already holds
+    /// and an offset into it, and a second page never re-lists the directory.
+    ///
+    /// Every page's token is different. The system restarts the enumeration from the
+    /// first page when a page hands back the token it was asked with, and a 10,000-entry
+    /// folder then never finishes listing: `ls` answers `fts_read: Operation timed out`
+    /// (measured on macOS 27.2, 2026-11-24).
     public static let enumerationPageSize = 2_000
 
     private struct PendingListing {
         let items: [SSHDriveItemSnapshot]
-        var deliveredThrough: Int
         let takenAt: Date
     }
 
-    /// Cut listings, by token. Dropped as soon as their last page is handed over, and
-    /// after five minutes in case the system abandons an enumeration half way.
+    /// Cut listings, by listing id. Dropped as soon as their last page is handed over,
+    /// and after five minutes in case the system abandons an enumeration half way.
     private var pendingListings: [String: PendingListing] = [:]
 
     /// readdir the mapped path, reconcile with the index, return items. Records the
@@ -462,7 +466,7 @@ public actor LocationRuntime {
     {
         try refuseWhileReconciling()
         if let pageToken {
-            return continueListing(token: pageToken)
+            return try continueListing(token: pageToken)
         }
         guard let containerRow = try index.item(identifier: identifier) else {
             throw SSHDriveAgentError.noSuchItem.asNSError("No row for \(identifier).")
@@ -472,28 +476,39 @@ public actor LocationRuntime {
         let items = try await reconcile(directory: path, containerRow: containerRow).items
         guard items.count > LocationRuntime.enumerationPageSize else { return (items, nil) }
 
-        let token = UUID().uuidString
+        let listingID = UUID().uuidString
         expireStaleListings()
-        pendingListings[token] = PendingListing(
-            items: items, deliveredThrough: 0, takenAt: Date())
+        pendingListings[listingID] = PendingListing(items: items, takenAt: Date())
         Log.agent.notice(
             "paging \(items.count, privacy: .public) entries of \(path.description, privacy: .public) in \(LocationRuntime.enumerationPageSize, privacy: .public)s"
         )
-        return continueListing(token: token)
+        return try continueListing(token: "\(listingID)/0")
     }
 
-    private func continueListing(token: String) -> (items: [SSHDriveItemSnapshot], nextPageToken: String?) {
-        guard var listing = pendingListings[token] else { return ([], nil) }
-        let start = listing.deliveredThrough
+    /// A token is `<listing id>/<offset>`. One the agent no longer holds - it expired, or
+    /// the agent restarted between pages - is `.pageExpired`, which makes the system start
+    /// the listing again. An empty last page would instead tell it the folder ends there.
+    private func continueListing(token: String) throws
+        -> (items: [SSHDriveItemSnapshot], nextPageToken: String?)
+    {
+        let parts = token.split(separator: "/", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let start = Int(parts[1]), start >= 0,
+            let listing = pendingListings[parts[0]], start < listing.items.count
+        else {
+            // `.pageExpired` is `.syncAnchorExpired`'s code; the extension passes an error
+            // in the system's own domain through unchanged.
+            throw NSError(
+                domain: ProviderFailure.syncAnchorExpired.appleErrorDomain,
+                code: ProviderFailure.syncAnchorExpired.appleErrorCode,
+                userInfo: [NSLocalizedDescriptionKey: "The listing this page belongs to has expired."])
+        }
         let end = min(start + LocationRuntime.enumerationPageSize, listing.items.count)
         let page = Array(listing.items[start..<end])
-        listing.deliveredThrough = end
         if end >= listing.items.count {
-            pendingListings.removeValue(forKey: token)
+            pendingListings.removeValue(forKey: parts[0])
             return (page, nil)
         }
-        pendingListings[token] = listing
-        return (page, token)
+        return (page, "\(parts[0])/\(end)")
     }
 
     private func expireStaleListings() {

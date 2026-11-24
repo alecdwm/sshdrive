@@ -112,6 +112,10 @@ extension AgentScenarios {
                 items.count == Self.entryCount - 2,
                 "the two collision losers hold their names and are not enumerated")
             #expect(pages.count == 5, "2,000 to a page (docs/design/extension.md)")
+            let tokens = pages.compactMap(\.nextPageToken)
+            #expect(
+                Set(tokens).count == tokens.count,
+                "a page that hands back the token it was asked with restarts the listing")
             #expect(pages.dropLast().allSatisfy { $0.items.count == 2_000 })
             #expect(seen == items.count, "every identifier the listing handed out has a row")
             #expect(replayed == items.count, "and an anchor")
