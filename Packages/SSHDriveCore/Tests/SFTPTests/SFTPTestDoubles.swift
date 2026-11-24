@@ -215,6 +215,8 @@ final class InMemorySFTPServer: @unchecked Sendable {
     /// Serve short reads, to exercise the client's "ask for the rest" path.
     var shortReadFactor = 1.0
     var availableBlocks: UInt64 = 1000
+    /// `f_bsize`. APFS answers 4161536 here beside an `f_frsize` of 4096.
+    var preferredIOSize: UInt64 = 4096
 
     let root = Data("/home/alec/root".utf8)
 
@@ -548,7 +550,7 @@ final class InMemorySFTPServer: @unchecked Sendable {
             case SFTPExtensionName.statvfs:
                 _ = try reader.readString()
                 var writer = SFTPPacketWriter(.extendedReply, requestID: id)
-                writer.writeUInt64(4096)  // f_bsize
+                writer.writeUInt64(preferredIOSize)  // f_bsize
                 writer.writeUInt64(4096)  // f_frsize
                 writer.writeUInt64(2048)  // f_blocks
                 writer.writeUInt64(availableBlocks)  // f_bfree

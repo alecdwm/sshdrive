@@ -166,6 +166,16 @@ final class SFTPClientTests: XCTestCase {
         await client.shutdown()
     }
 
+    func testStatvfsCountsBlocksInFragmentSizeUnits() async throws {
+        // APFS's statvfs, as an OpenSSH sftp-server on macOS 27.2 relays it.
+        let server = InMemorySFTPServer()
+        server.preferredIOSize = 4_161_536
+        let (client, _) = try await connectedClient(server)
+        let stats = try await client.statvfs(path(server, ""))
+        XCTAssertEqual(stats.blockSize, 4096, "f_blocks counts f_frsize units, not f_bsize")
+        await client.shutdown()
+    }
+
     // MARK: readdir paging
 
     func testReaddirPagesUntilEOF() async throws {

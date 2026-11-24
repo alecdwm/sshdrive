@@ -66,6 +66,7 @@ public struct SFTPDirectoryEntry: Sendable, Equatable {
 /// told apart from any other bare FAILURE (docs/design/extension.md,
 /// docs/design/sftp.md).
 public struct SFTPFilesystemStats: Sendable, Equatable {
+    /// The unit `totalBlocks` and `availableBlocks` count in: `f_frsize`, not `f_bsize`.
     public var blockSize: UInt64
     public var totalBlocks: UInt64
     public var availableBlocks: UInt64

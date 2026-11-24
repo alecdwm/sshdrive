@@ -637,8 +637,13 @@ public actor SFTPClient {
             $0.writeString(path.bytes)
         }
         var reader = SFTPPacketReader(try reply.expectExtendedReply())
-        let blockSize = try reader.readUInt64()
-        _ = try reader.readUInt64()  // f_frsize
+        let preferredIOSize = try reader.readUInt64()  // f_bsize
+        let fragmentSize = try reader.readUInt64()  // f_frsize
+        // POSIX counts `f_blocks` and `f_bavail` in `f_frsize` units. `f_bsize` is only the
+        // preferred I/O size: equal on most Linux filesystems, 4161536 against 4096 on APFS,
+        // which multiplied out is a thousand times the disk. Zero means a server that left
+        // the field unset.
+        let blockSize = fragmentSize != 0 ? fragmentSize : preferredIOSize
         let totalBlocks = try reader.readUInt64()
         _ = try reader.readUInt64()  // f_bfree
         let availableBlocks = try reader.readUInt64()
