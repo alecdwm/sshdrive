@@ -79,7 +79,11 @@ public final class AgentHarness: @unchecked Sendable {
             keychain: InMemoryKeychainDiagnostics(store: secretsStore),
             launcher: launcher,
             endpoint: endpoint,
-            clock: clock)
+            clock: clock,
+            // The stray-master sweep in `shutdownAll()` kills every `ssh` whose argv names
+            // a control path in this directory. The real one holds the masters of an
+            // installed agent and of every other suite running alongside.
+            controlSocketDirectory: container.appendingPathComponent("sockets").path)
         configure(&environment)
         self.environment = environment
         // The askpass broker and keychain (docs/design/secrets.md). The default one is

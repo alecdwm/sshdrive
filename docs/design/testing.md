@@ -146,6 +146,12 @@ Two protocols sit beside the fifteen: `TerminalRelaying` (the CLI as the collect
 it, one note and one prompt; `ScriptedTerminal` off Darwin) and `LiveConnection` (an
 `SFTPTransport` the gate hands out or does not).
 
+`AgentEnvironment` also carries one value, `controlSocketDirectory`: the only directory the orphan
+sweep and the stray-master sweep act on. The agent's is the per-user `$TMPDIR`; `AgentHarness`
+gives each harness a directory inside its own container, because those sweeps kill `ssh`
+processes by the control path on their command line, and the real directory holds the masters of
+an installed agent and of every suite running alongside.
+
 Details that matter when writing a scenario:
 
 - `AgentClock` answers `now()` (wall clock, what the schedules are in), `uptime()` (monotonic,

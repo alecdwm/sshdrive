@@ -426,6 +426,11 @@ public struct AgentEnvironment: Sendable {
     public var launcher: any TransportLauncher
     public var endpoint: any AgentEndpoint
     public var clock: any AgentClock
+    /// Where the agent's control sockets live, and so the one directory the orphan sweep
+    /// and the stray-master sweep may act on. Those two kill processes by what they find
+    /// there, so a harness points this at a directory of its own: the real one is shared
+    /// with an installed agent's masters on the same Mac.
+    public var controlSocketDirectory: String
 
     public init(
         replica: any ReplicaControlling,
@@ -442,7 +447,8 @@ public struct AgentEnvironment: Sendable {
         keychain: any KeychainDiagnosing,
         launcher: any TransportLauncher,
         endpoint: any AgentEndpoint,
-        clock: any AgentClock = SystemAgentClock()
+        clock: any AgentClock = SystemAgentClock(),
+        controlSocketDirectory: String = ControlSocket.temporaryDirectory()
     ) {
         self.replica = replica
         self.secrets = secrets
@@ -459,6 +465,7 @@ public struct AgentEnvironment: Sendable {
         self.launcher = launcher
         self.endpoint = endpoint
         self.clock = clock
+        self.controlSocketDirectory = controlSocketDirectory
     }
 }
 

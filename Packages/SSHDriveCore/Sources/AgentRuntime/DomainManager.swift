@@ -89,13 +89,15 @@ public actor DomainManager {
         // Orphans are not adopted. A master left behind by a crashed agent still owns
         // its socket, and `ControlMaster=yes` against an existing socket disables
         // multiplexing, so later mux clients would attach to the orphan.
-        let swept = ControlSocket.sweepOrphans(environment: await AgentSSHEnvironment.shared.environment())
+        let swept = ControlSocket.sweepOrphans(
+            environment: await AgentSSHEnvironment.shared.environment(),
+            in: environment.controlSocketDirectory)
         if !swept.isEmpty {
             Log.ssh.notice("swept \(swept.count, privacy: .public) orphaned control socket(s)")
         }
         // A master whose socket is already gone leaves the sweep above nothing to iterate
         // over, so the command line is the other way in. Nothing of ours is connected yet.
-        let strays = ControlSocket.killStrayMasters()
+        let strays = ControlSocket.killStrayMasters(in: environment.controlSocketDirectory)
         if !strays.isEmpty {
             Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) at start")
         }
@@ -448,7 +450,7 @@ public actor DomainManager {
         // finds only masters the agent had lost track of - a restarted location can hold
         // two, and the second has no socket for the sweep to find on the next start. Safe
         // here and only here, because every transport above is down.
-        let strays = ControlSocket.killStrayMasters()
+        let strays = ControlSocket.killStrayMasters(in: environment.controlSocketDirectory)
         if !strays.isEmpty {
             Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) on exit")
         }
