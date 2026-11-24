@@ -65,6 +65,27 @@ final class ConfigStoreTests: XCTestCase {
         }
     }
 
+    /// The CLI prints this message as it is, so it has to name the file; a bare
+    /// `DecodingError` reads "The data couldn't be read because it isn't in the correct
+    /// format." and says nothing about which data.
+    func testAFileCutShortIsUnreadableAndNamed() throws {
+        let (store, directory) = temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try store.mutate { $0.locations = [Location(nickname: "media", host: "nas")] }
+        let url = directory.appendingPathComponent("config.json")
+        let whole = try Data(contentsOf: url)
+        try whole.prefix(whole.count / 2).write(to: url)
+        store.invalidate()
+        XCTAssertThrowsError(try store.load()) { error in
+            guard case ConfigStoreError.unreadable(let path, _) = error else {
+                return XCTFail("expected unreadable, got \(error)")
+            }
+            XCTAssertEqual(path, url.path)
+            XCTAssertTrue(error.localizedDescription.contains("config.json"))
+        }
+        XCTAssertEqual(try Data(contentsOf: url), whole.prefix(whole.count / 2), "and it is left alone")
+    }
+
     func testDecodesAConfigMissingLaterFields() throws {
         let json = """
             {"schemaVersion": 1, "macID": "abcd1234",

@@ -28,6 +28,8 @@ public enum ConfigStoreError: Error, LocalizedError {
     case schemaTooNew(found: Int, understood: Int)
     case unknownLocation(String)
     case ambiguousLocation(String, [String])
+    /// The file is there and could not be read or decoded. Nothing is changed until it can.
+    case unreadable(path: String, reason: String)
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +39,8 @@ public enum ConfigStoreError: Error, LocalizedError {
             return "No location matches \"\(name)\"."
         case let .ambiguousLocation(name, matches):
             return "\"\(name)\" matches \(matches.joined(separator: ", "))."
+        case let .unreadable(path, reason):
+            return "Cannot read \(path): \(reason) Every location is left as it is until it can be read."
         }
     }
 }
@@ -63,8 +67,12 @@ public final class ConfigStore {
             try save(fresh)
             return fresh
         }
-        let data = try Data(contentsOf: url)
-        let file = try JSONDecoder().decode(ConfigFile.self, from: data)
+        let file: ConfigFile
+        do {
+            file = try JSONDecoder().decode(ConfigFile.self, from: try Data(contentsOf: url))
+        } catch {
+            throw ConfigStoreError.unreadable(path: url.path, reason: error.localizedDescription)
+        }
         guard file.schemaVersion <= ConfigFile.currentSchemaVersion else {
             throw ConfigStoreError.schemaTooNew(
                 found: file.schemaVersion, understood: ConfigFile.currentSchemaVersion)
