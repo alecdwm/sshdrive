@@ -33,6 +33,12 @@ public final class ConfigAccess: @unchecked Sendable {
         try await perform { try $0.location(named: name) }
     }
 
+    /// Runs `body` on the config queue with the file as it is, so no save can land between
+    /// the read and whatever `body` does with it.
+    public func withLoaded<T>(_ body: @escaping (ConfigFile) throws -> T) async throws -> T {
+        try await perform { try body($0.load()) }
+    }
+
     @discardableResult
     public func mutate(_ body: @escaping (inout ConfigFile) throws -> Void) async throws -> ConfigFile {
         try await perform { try $0.mutate(body) }

@@ -111,6 +111,7 @@ public actor DomainManager {
         do {
             let file = try await config.load()
             await removeStrandedDomains(keeping: file.locations)
+            await removeStrandedIndexDirectories(config)
             for location in file.locations where location.mounted {
                 do {
                     let started = try await runtime(for: location)
@@ -180,6 +181,40 @@ public actor DomainManager {
                     "could not remove stranded domain \(domain.identifier, privacy: .public): \(error, privacy: .public)"
                 )
             }
+        }
+    }
+
+    /// Deletes each `domains/<id>` directory whose id no location in `config.json` has: the
+    /// index, its backup and the per-location state files of a location that is gone.
+    /// `remove --keep-files` leaves its directory behind, and so does a removal the agent
+    /// never saw, such as a stranded domain cleared by the pass above.
+    ///
+    /// The listing and the deletes run on the config queue, after the read and before any
+    /// later save. Every path that creates one of these directories (`add`, `set`, `mount`)
+    /// saves its location first, so a directory created concurrently belongs to a location
+    /// this pass already sees. Only names that parse as a UUID are touched, because a
+    /// location id is one and the container is not ours alone to tidy.
+    private func removeStrandedIndexDirectories(_ config: ConfigAccess) async {
+        guard let parent = try? GroupContainer.domainsURL() else { return }
+        let removed: [String]
+        do {
+            removed = try await config.withLoaded { file in
+                let known = Set(file.locations.map { $0.id.uppercased() })
+                let names = (try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []
+                var removed: [String] = []
+                for name in names where UUID(uuidString: name) != nil && !known.contains(name.uppercased()) {
+                    if (try? FileManager.default.removeItem(at: parent.appendingPathComponent(name))) != nil {
+                        removed.append(name)
+                    }
+                }
+                return removed.sorted()
+            }
+        } catch {
+            return
+        }
+        for name in removed {
+            Log.agent.notice(
+                "removed the index directory of \(name, privacy: .public): no such location in config.json")
         }
     }
 

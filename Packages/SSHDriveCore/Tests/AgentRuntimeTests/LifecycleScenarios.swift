@@ -559,6 +559,36 @@ extension AgentScenarios {
             #expect(afterReadable == [owned.id], "P6: only the domain no location owns is removed")
         }
 
+        /// The index directory of a location `config.json` no longer names goes at start, and
+        /// only that: not an owned one, not a name that is no location id, and nothing at all
+        /// while the config cannot be read.
+        @Test func strandedIndexDirectoriesGoAtStart() async throws {
+            let harness = try AgentHarness()
+            let owned = try await harness.addLocation(nickname: "owned")
+            try await harness.manager.mutateConfiguration { file in
+                for index in file.locations.indices { file.locations[index].mounted = false }
+            }
+            let ownedDirectory = try GroupContainer.createDomainDirectory(locationID: owned.id)
+            let strandedDirectory = try GroupContainer.createDomainDirectory(
+                locationID: UUID().uuidString)
+            try Data("index".utf8).write(to: strandedDirectory.appendingPathComponent("index.sqlite"))
+            let foreign = try GroupContainer.domainsURL().appendingPathComponent("notes")
+            try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)
+            func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
+
+            let configURL = try GroupContainer.configURL()
+            let whole = try Data(contentsOf: configURL)
+            try whole.prefix(whole.count / 2).write(to: configURL)
+            await harness.manager.startLocations(ConfigAccess(store: ConfigStore(url: configURL)))
+            #expect(exists(strandedDirectory), "a config that cannot be read removes nothing")
+
+            try whole.write(to: configURL)
+            await harness.manager.startLocations(ConfigAccess(store: ConfigStore(url: configURL)))
+            #expect(!exists(strandedDirectory), "no location owns it, so it goes")
+            #expect(exists(ownedDirectory), "the owned location keeps its index")
+            #expect(exists(foreign), "a name that is not a location id is never touched")
+        }
+
         /// `remove --keep-files` removes the domain in the system's preserve-downloaded-data
         /// mode and reports the folder the system moved the files to; a plain `remove`
         /// removes everything and reports no folder (docs/design/cli.md).

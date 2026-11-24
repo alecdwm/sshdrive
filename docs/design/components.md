@@ -124,6 +124,10 @@ domains/<location-id>/
     capabilities.json        cached server probe (cli.md)
 ```
 
+A `domains/<location-id>/` directory whose id `config.json` no longer names is deleted when the
+agent starts: `remove --keep-files` leaves it behind, and so does a stranded domain the agent
+removes at start ([packaging](packaging.md)).
+
 Secrets (passwords, key passphrases) are never in `config.json`. They go in the keychain under
 access group `RWGDZAYBM8.org.shirls.sshdrive`, keyed `password:<user>@<hostname>:<port>` or
 `passphrase:<keypath>`, shared by every location that names the same item, and read and written
