@@ -241,7 +241,9 @@ What `zap` does and cannot do:
     The cask's `caveats`, the docs and `sshdrive doctor` all say this. A user who skips it is left
     with sidebar entries for a provider that no longer exists, shown as unavailable, until a
     reinstall. On its first launch the reinstalled app removes every domain whose identifier is
-    not in `config.json`, or every domain of ours when the container is gone too.
+    not in `config.json`, or every domain of ours when the container is gone too. A `config.json`
+    that is there and cannot be read - refused, cut short, or written by a newer build - removes
+    nothing: it says nothing about which locations exist.
 
 ## The Local Network prompt
 

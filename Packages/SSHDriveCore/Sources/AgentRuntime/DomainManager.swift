@@ -101,6 +101,13 @@ public actor DomainManager {
         if !strays.isEmpty {
             Log.ssh.notice("killed \(strays.count, privacy: .public) stray ssh master(s) at start")
         }
+        await startLocations(config)
+    }
+
+    /// The config walk of `start()`: clears the domains no location owns, then brings up a
+    /// runtime and a domain for every mounted location. Separate so a harness can run it
+    /// without the login-shell snapshot and the orphan sweep, which reach the real Mac.
+    public func startLocations(_ config: ConfigAccess) async {
         do {
             let file = try await config.load()
             await removeStrandedDomains(keeping: file.locations)
@@ -132,13 +139,15 @@ public actor DomainManager {
             }
             Log.agent.notice("agent ready with \(file.locations.count) location(s)")
         } catch {
-            Log.agent.error("cannot read config.json: \(error, privacy: .public)")
-            // No config at all - a `brew zap` deleted the group container, or this is a
-            // reinstall over a removal that never ran `sshdrive remove --all`. The app on
-            // its first launch removes every domain of ours when the container is gone
-            // too, because nothing else can. A domain we cannot serve shows in the sidebar
-            // as unavailable for ever otherwise.
-            await removeStrandedDomains(keeping: [])
+            // The file is there and could not be read: a permission refusal, a file cut
+            // short, or a schema from a newer build after a downgrade. None of that says the
+            // locations are gone, and removing their domains would take the replica and
+            // every pending upload with them, so every domain is left in place. A missing
+            // file never reaches here: `load()` answers it with a fresh, empty config, and
+            // the stranded-domain pass above then removes every domain of ours - which is
+            // the `brew zap` case (docs/design/packaging.md).
+            Log.agent.error(
+                "cannot read config.json; every File Provider domain is left in place: \(error, privacy: .public)")
         }
     }
 

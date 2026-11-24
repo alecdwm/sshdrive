@@ -522,6 +522,43 @@ extension AgentScenarios {
             #expect(stopSummary.locations == 0, "and by then there is nothing left to shut down")
         }
 
+        /// **P6** - stranded domains are removed, and only when `config.json` says so.
+        ///
+        /// A domain no location owns is removed on start: it is what a `brew uninstall`
+        /// without `sshdrive remove --all` leaves behind. A config that is there and cannot
+        /// be read says nothing about which locations exist - a permission refusal, a file
+        /// cut short, a schema from a newer build - and removing on it would take every
+        /// replica and pending upload with it, so nothing is removed.
+        @Test func p6StrandedDomainsGoButAnUnreadableConfigRemovesNothing() async throws {
+            let harness = try AgentHarness()
+            let owned = try await harness.addLocation(nickname: "owned")
+            // Not mounted: this scenario is about the domain pass, not about connecting.
+            try await harness.manager.mutateConfiguration { file in
+                for index in file.locations.indices { file.locations[index].mounted = false }
+            }
+            let ownedDomain = ReplicaDomain(identifier: owned.id, displayName: "owned")
+            let stranded = ReplicaDomain(identifier: UUID().uuidString, displayName: "gone")
+            try await harness.replica.addDomain(ownedDomain, testingModes: [])
+            try await harness.replica.addDomain(stranded, testingModes: [])
+
+            // Unreadable: the bytes of a config cut short. A fresh store, so nothing cached
+            // from the writes above stands in for the file.
+            let configURL = try GroupContainer.configURL()
+            let whole = try Data(contentsOf: configURL)
+            try whole.prefix(whole.count / 2).write(to: configURL)
+            await harness.manager.startLocations(ConfigAccess(store: ConfigStore(url: configURL)))
+            let afterUnreadable = Set(try await harness.replica.domains().map(\.identifier))
+            #expect(
+                afterUnreadable == [owned.id, stranded.identifier],
+                "P6: a config that cannot be read removes no domain at all")
+
+            // Readable again: the stranded one goes and the owned one stays.
+            try whole.write(to: configURL)
+            await harness.manager.startLocations(ConfigAccess(store: ConfigStore(url: configURL)))
+            let afterReadable = Set(try await harness.replica.domains().map(\.identifier))
+            #expect(afterReadable == [owned.id], "P6: only the domain no location owns is removed")
+        }
+
         /// `remove --keep-files` removes the domain in the system's preserve-downloaded-data
         /// mode and reports the folder the system moved the files to; a plain `remove`
         /// removes everything and reports no folder (docs/design/cli.md).
