@@ -102,4 +102,14 @@ final class LogQueryTests: XCTestCase {
         XCTAssertEqual(LogQuery.showArguments().first, "/usr/bin/log")
         XCTAssertEqual(LogQuery.streamArguments().first, "/usr/bin/log")
     }
+
+    /// `logs --print-command` is pasted into a shell, and the predicate carries single
+    /// quotes of its own.
+    func testTheCommandLineQuotesTheWayAShellReadsIt() {
+        XCTAssertEqual(
+            LogQuery.commandLine(["/usr/bin/log", "show", "--predicate", "a == 'b c'", ""]),
+            #"/usr/bin/log show --predicate 'a == '\''b c'\''' ''"#)
+        XCTAssertEqual(LogQuery.shellWord("it's"), #"'it'\''s'"#)
+        XCTAssertEqual(LogQuery.shellWord("1h"), "1h")
+    }
 }

@@ -96,6 +96,20 @@ public enum LogQuery {
         return argv
     }
 
+    /// `argv` as one line a POSIX shell reads back into the same words: what
+    /// `logs --print-command` prints. The predicate is full of NSPredicate's own single
+    /// quotes, so each word that needs quoting is single-quoted with every `'` inside it
+    /// written `'\''`.
+    public static func commandLine(_ argv: [String]) -> String {
+        argv.map(shellWord).joined(separator: " ")
+    }
+
+    static func shellWord(_ word: String) -> String {
+        let plain = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_./=:@%+,")
+        if !word.isEmpty, word.allSatisfy(plain.contains) { return word }
+        return "'" + word.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    }
+
     /// NSPredicate string quoting: single quotes, with a backslash before a quote or a
     /// backslash. A display name is user-typed and can carry either.
     static func quote(_ value: String) -> String {

@@ -76,7 +76,7 @@ struct Logs: ParsableCommand {
                 debug: debug)
 
         if printCommand {
-            print(argv.map { $0.contains(" ") ? "'\($0)'" : $0 }.joined(separator: " "))
+            print(LogQuery.commandLine(argv))
             return
         }
 
