@@ -351,7 +351,8 @@ public actor DomainManager {
             takesCmin: probe?.findTakesCmin ?? false,
             takesPrintf: probe?.findTakesPrintf ?? false,
             helperAvailable: false,
-            helperEnabledForLocation: location.helper)
+            helperEnabledForLocation: location.helper,
+            serverProbed: probe != nil)
         guard exec, let probe else { return capabilities }
         let persistent = await runtime.allowsPersistentExecChannel()
         guard persistent else {

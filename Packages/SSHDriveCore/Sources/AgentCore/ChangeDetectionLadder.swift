@@ -66,10 +66,15 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
         /// reason - `cache directory is noexec`, `helper unsupported: Linux mips`, `helper
         /// upload failed: …` - rather than a category (docs/design/cli.md).
         public var helperBlockReason: String?
+        /// Whether the server probe has answered since the agent started. Until then every
+        /// field above is false for want of an answer, not because the server said so,
+        /// and a location that has not connected yet must not read as one with no shell.
+        public var serverProbed: Bool
 
         public init(hasExecChannel: Bool = false, hasFind: Bool = false, takesCmin: Bool = false,
                     takesPrintf: Bool = false, helperAvailable: Bool = false,
-                    helperEnabledForLocation: Bool = true, helperBlockReason: String? = nil) {
+                    helperEnabledForLocation: Bool = true, helperBlockReason: String? = nil,
+                    serverProbed: Bool = true) {
             self.hasExecChannel = hasExecChannel
             self.hasFind = hasFind
             self.takesCmin = takesCmin
@@ -77,6 +82,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
             self.helperAvailable = helperAvailable
             self.helperEnabledForLocation = helperEnabledForLocation
             self.helperBlockReason = helperBlockReason
+            self.serverProbed = serverProbed
         }
     }
 
@@ -203,6 +209,7 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     /// because nothing above `poll` works without it; then availability.
     private static func helperBlocked(_ capabilities: ServerCapabilities) -> String {
         if !capabilities.helperEnabledForLocation { return "the helper is off for this location" }
+        if !capabilities.serverProbed { return notProbed }
         if !capabilities.hasExecChannel { return "the account has no shell access" }
         if let reason = capabilities.helperBlockReason { return reason }
         if !capabilities.helperAvailable { return "the server cannot run the remote helper" }
@@ -210,10 +217,13 @@ public struct ChangeDetectionLadder: Sendable, Equatable {
     }
 
     private static func sweepBlocked(_ capabilities: ServerCapabilities) -> String {
+        if !capabilities.serverProbed { return notProbed }
         if !capabilities.hasExecChannel { return "the account has no shell access" }
         if !capabilities.hasFind { return "the server has no usable find" }
         return "the sweep did not start"
     }
+
+    static let notProbed = "not connected yet; the tier is chosen when the location connects"
 
     private static func note(tier: Tier, watchMode: WatchMode, capabilities: ServerCapabilities) -> String? {
         guard tier != .helper else { return nil }

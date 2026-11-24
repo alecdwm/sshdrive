@@ -31,6 +31,15 @@ final class ChangeDetectionLadderTests: XCTestCase {
         XCTAssertTrue(ladder.downgrades.isEmpty)
     }
 
+    /// A location that has not connected since the agent started has no probe answer, and
+    /// the empty capabilities that stand in for it are not a server without a shell.
+    func testAutoBeforeTheFirstProbeSaysSoRatherThanNoShell() {
+        let unprobed = Capabilities(serverProbed: false)
+        let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: unprobed, now: 0)
+        XCTAssertEqual(ladder.tier, .poll)
+        XCTAssertEqual(ladder.note, "not connected yet; the tier is chosen when the location connects")
+    }
+
     func testAutoWithShellAndFindSettlesAtSweepAndSaysWhyItIsNotHigher() {
         let ladder = ChangeDetectionLadder(watchMode: .auto, capabilities: gnuServer(), now: 0)
         XCTAssertEqual(ladder.tier, .sweep)
