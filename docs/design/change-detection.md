@@ -327,7 +327,8 @@ Over the existing connection:
       leaves the old inode to the process using it.
     - The version is tied to the app release; upgrades take the same path. Other versions whose
       mtime is older than seven days are removed, so two Macs on one account running different
-      app versions each keep their own file.
+      app versions each keep their own file. A `.sshdrive-upload-*` temp file that old is an
+      upload cut off before its rename and goes by the same rule.
     - This is the one exception to the `RelativePath` chokepoint ([security](security.md)), since
       it writes outside every location root. The SFTP layer exposes a probe-chosen absolute
       directory plus one filename component, no `..` and no nesting, and nothing on the File

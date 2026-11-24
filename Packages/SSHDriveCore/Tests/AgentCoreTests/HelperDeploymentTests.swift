@@ -161,6 +161,18 @@ final class HelperDeploymentTests: XCTestCase {
             [".sshdrive-helper-in-2020583176", ".sshdrive-helper-in-3182005498"])
     }
 
+    /// A helper upload cut off before its rename leaves its temp file behind, and nothing
+    /// else ever removes it: one from 2026-09-23 was still in `~/.cache/sshdrive` on the
+    /// build VM two months and several deployments later.
+    func testAnAbandonedUploadGoesAfterSevenDays() {
+        let now: Int64 = 1_800_000_000
+        let temp = HelperDeployment.temporaryName(macID: "608c7a0c")
+        let fresh = [HelperDeployment.RemoteFile(name: temp, size: 1, mtime: now - 60)]
+        XCTAssertEqual(HelperDeployment.stale(fresh, keeping: manifest().fileNames, serverNow: now), [])
+        let old = [HelperDeployment.RemoteFile(name: temp, size: 1, mtime: now - 8 * 24 * 3600)]
+        XCTAssertEqual(HelperDeployment.stale(old, keeping: manifest().fileNames, serverNow: now), [temp])
+    }
+
     // MARK: the version line
 
     func testTheVersionLineIsParsedIntoItsThreeClaims() {

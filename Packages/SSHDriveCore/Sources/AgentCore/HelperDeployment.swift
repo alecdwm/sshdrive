@@ -127,7 +127,10 @@ public enum HelperDeployment {
         files.filter { file in
             guard !keep.contains(file.name) else { return false }
             if file.name.hasPrefix(relayPrefix) { return true }
-            guard file.name.hasPrefix("sshdrive-helper-") else { return false }
+            // An upload cut off before its rename (`temporaryName`) is never finished by
+            // anyone; the age rule spares one another Mac is writing right now.
+            guard file.name.hasPrefix("sshdrive-helper-") || file.name.hasPrefix(".sshdrive-upload-")
+            else { return false }
             return Double(serverNow - file.mtime) > staleAfter
         }
         .map(\.name)
