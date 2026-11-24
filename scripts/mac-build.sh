@@ -59,7 +59,10 @@ echo "==> syncing $REPO_ROOT to $MAC_HOST:$MAC_DIR"
 # helper/target is the Rust crate's build directory on the Linux side: hundreds of
 # megabytes of object files for targets the Mac cannot use. Resources/helper - the
 # binaries themselves - is NOT excluded: that is what gets embedded in the bundle.
-rsync -a --delete --exclude .git --exclude helper/target "$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
+# .build is SwiftPM's build directory, Linux objects on this side; excluded, the Mac's own
+# survives the --delete and the next `swift build` there is incremental.
+rsync -a --delete --exclude .git --exclude helper/target --exclude .build \
+	"$REPO_ROOT/" "$MAC_HOST:$MAC_DIR/"
 
 echo "==> generating the Xcode project"
 ssh -o BatchMode=yes "$MAC_HOST" "cd $MAC_DIR && $XCODEGEN generate"
