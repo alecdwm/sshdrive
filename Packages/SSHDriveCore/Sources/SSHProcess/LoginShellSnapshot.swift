@@ -138,7 +138,7 @@ public enum LoginShellSnapshotReader {
         // Kill the group whatever happened: the answer is complete at the closing
         // sentinel and a background child may still be holding the pipe open.
         kill(-spawned.pid, SIGKILL)
-        _ = Spawn.wait(pid: spawned.pid)
+        _ = spawned.wait()
 
         guard parser.sawClosingSentinel else {
             if snapshot.diagnostic == nil {

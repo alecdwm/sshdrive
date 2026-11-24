@@ -17,6 +17,73 @@ public struct SpawnedProcess: @unchecked Sendable {
     /// Our end of the child's stderr. -1 when not requested.
     public let stderrFD: Int32
     public let ownProcessGroup: Bool
+    let child: TrackedChild
+
+    /// The child's exit, or nil while it is still running. Never calls `waitpid`.
+    public func poll() -> ProcessExit? { child.exit }
+
+    /// Blocks until the child has exited. For a background thread.
+    public func wait() -> ProcessExit { child.waitForExit() }
+}
+
+/// One child of `Spawn.run`, and the thread that reaps it.
+///
+/// Every child gets a thread blocked in `waitpid` on its pid from the moment it is
+/// spawned, so it never lingers as a zombie whatever its owner does or forgets to do
+/// with it. That thread is the only caller of `waitpid` for the pid: `poll` and `wait`
+/// answer from the exit it stored, because a second `waitpid` gets `ECHILD` and the exit
+/// status every classifier reads would come back as -1. Nothing here waits on pid -1,
+/// which would take the children Foundation's `Process` reaps for itself.
+final class TrackedChild: @unchecked Sendable {
+    let pid: pid_t
+    /// Guarded by `TrackedChild.condition`.
+    private var storedExit: ProcessExit?
+
+    private static let condition = NSCondition()
+    /// The latest child spawned under each pid. An entry is replaced when a later spawn
+    /// reuses the pid, which is also its whole lifetime: until then a late `Spawn.poll`
+    /// still reads the real exit, and the table cannot outgrow the pid space.
+    private static var byPID: [pid_t: TrackedChild] = [:]
+
+    private init(pid: pid_t) { self.pid = pid }
+
+    static func track(_ pid: pid_t) -> TrackedChild {
+        let child = TrackedChild(pid: pid)
+        condition.lock()
+        byPID[pid] = child
+        condition.unlock()
+        let thread = Thread {
+            var raw: Int32 = 0
+            var result: pid_t
+            repeat { result = waitpid(pid, &raw, 0) } while result < 0 && errno == EINTR
+            let exit = result == pid ? Spawn.decode(raw) : ProcessExit(status: -1, signal: nil)
+            condition.lock()
+            child.storedExit = exit
+            condition.broadcast()
+            condition.unlock()
+        }
+        thread.name = "org.shirls.sshdrive.reaper"
+        thread.start()
+        return child
+    }
+
+    static func lookup(_ pid: pid_t) -> TrackedChild? {
+        condition.lock(); defer { condition.unlock() }
+        return byPID[pid]
+    }
+
+    var exit: ProcessExit? {
+        TrackedChild.condition.lock(); defer { TrackedChild.condition.unlock() }
+        return storedExit
+    }
+
+    func waitForExit() -> ProcessExit {
+        TrackedChild.condition.lock(); defer { TrackedChild.condition.unlock() }
+        while true {
+            if let storedExit { return storedExit }
+            TrackedChild.condition.wait()
+        }
+    }
 }
 
 public struct ProcessExit: Sendable, Equatable {
@@ -134,12 +201,15 @@ public enum Spawn {
             stdinFD: inPipe[1],
             stdoutFD: outPipe[0],
             stderrFD: errPipe[0],
-            ownProcessGroup: newProcessGroup
+            ownProcessGroup: newProcessGroup,
+            child: TrackedChild.track(pid)
         )
     }
 
-    /// Blocking `waitpid`, for a background thread.
+    /// Blocks until the child has exited, for a background thread. A pid `run` spawned
+    /// is answered by its reaper; any other pid is waited on directly.
     public static func wait(pid: pid_t) -> ProcessExit {
+        if let child = TrackedChild.lookup(pid) { return child.waitForExit() }
         var raw: Int32 = 0
         while waitpid(pid, &raw, 0) < 0 {
             if errno != EINTR { return ProcessExit(status: -1, signal: nil) }
@@ -147,8 +217,10 @@ public enum Spawn {
         return decode(raw)
     }
 
-    /// Non-blocking reap. Nil while the child is still running.
+    /// Nil while the child is still running. A pid `run` spawned is answered by its
+    /// reaper; any other pid is reaped here with `WNOHANG`.
     public static func poll(pid: pid_t) -> ProcessExit? {
+        if let child = TrackedChild.lookup(pid) { return child.exit }
         var raw: Int32 = 0
         let result = waitpid(pid, &raw, WNOHANG)
         if result == 0 { return nil }
@@ -162,10 +234,17 @@ public enum Spawn {
     }
 
     /// TERM, then KILL after `grace`, to the process group when the child has its own.
+    ///
+    /// A lone child that has already been reaped is not signalled: its reaper runs as soon
+    /// as it exits, so its pid is free and may already name another process. A process
+    /// group is signalled either way, because its leader's exit says nothing about the
+    /// members it left behind.
     public static func terminate(_ process: SpawnedProcess, grace: TimeInterval = 2) {
         let target = process.ownProcessGroup ? -process.pid : process.pid
+        guard process.ownProcessGroup || process.poll() == nil else { return }
         kill(target, SIGTERM)
         DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
+            guard process.ownProcessGroup || process.poll() == nil else { return }
             kill(target, SIGKILL)
         }
     }
@@ -239,7 +318,7 @@ public enum Spawn {
         let waiter = DispatchGroup()
         waiter.enter()
         DispatchQueue.global().async {
-            let result = Spawn.wait(pid: process.pid)
+            let result = process.wait()
             lock.lock(); exit = result; lock.unlock()
             waiter.leave()
         }

@@ -87,9 +87,9 @@ public final class ExecChannel: @unchecked Sendable {
     }
 
     /// Nil while still running.
-    public func exitStatus() -> ProcessExit? { Spawn.poll(pid: process.pid) }
+    public func exitStatus() -> ProcessExit? { process.poll() }
 
-    public func waitForExit() -> ProcessExit { Spawn.wait(pid: process.pid) }
+    public func waitForExit() -> ProcessExit { process.wait() }
 }
 
 /// An SFTP channel: `ssh $MUX -s <host> sftp`. Handed to the SFTP client as a byte stream
@@ -116,7 +116,7 @@ public final class SFTPChannel: @unchecked Sendable {
         Spawn.terminate(process, grace: 1)
     }
 
-    public func exitStatus() -> ProcessExit? { Spawn.poll(pid: process.pid) }
+    public func exitStatus() -> ProcessExit? { process.poll() }
 }
 
 /// What killed an exec channel, once it has an exit (docs/design/ssh.md,

@@ -176,8 +176,8 @@ public enum ControlSocket {
     ///
     /// **A zombie is not alive** (`SQ-075`, measured 2026-09-04). An `ssh` mux client
     /// killed with `-9` stays in `pgrep -f` output, and in `kill(pid, 0)`, as `Z` until
-    /// it is reaped - and every master the agent starts is a child of the agent, so the
-    /// unreaped state is the ordinary one between the kill and the `waitpid`. Reading the
+    /// it is reaped. The agent reaps its own children the moment they exit
+    /// (docs/design/ssh.md), but a master another process started need not be. Reading the
     /// name alone would make the sweep report a master it had already killed as a live
     /// stray, sweep it again on every pass, and let the session budget of `N3` count it.
     /// The process **state** is the one to read.

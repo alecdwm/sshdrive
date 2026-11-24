@@ -273,15 +273,23 @@ running with no socket at all, visible only by its command line (SQ-043).
 `sshdrive agent stop` shuts every location's masters and mux clients down before the agent exits
 ([cli](cli.md)), so the ordinary case never reaches the sweep.
 
+Every process the agent spawns itself - masters, mux clients, `-O` commands, the login-shell
+snapshot - is reaped by a thread of its own, blocked in `waitpid` from the moment the process
+starts, so a channel that is closed and never asked about is not left behind as a zombie. That
+thread is the only `waitpid` for the pid: everything that reads an exit status reads the one it
+stored, because a second `waitpid` answers `ECHILD`. A lone process that has already been reaped
+is never signalled, since its pid may already name another process; a process group is, because
+its leader's exit says nothing about the members it left behind.
+
 ## Dead connections
 
 Keepalive alone leaves a 30 s window (`15 s × 2`) in which every request stalls, so a dead
 connection is detected three ways:
 
 1. **Keepalive** (`ServerAliveInterval=15`, `ServerAliveCountMax=2`), and the **master watch**:
-   while a connection is up the agent polls the master process every 15 s - a `waitpid`, no
-   `ssh -O check` and nothing on the wire - and drops and reconnects when it has exited, so a
-   master that keepalive or a `kill` ended is replaced without waiting for a request.
+   while a connection is up the agent checks the master process every 15 s - the exit its reaper
+   stored, no `ssh -O check` and nothing on the wire - and drops and reconnects when it has
+   exited, so a master that keepalive or a `kill` ended is replaced without waiting for a request.
 2. **The per-request deadline** in the SFTP client ([sftp](sftp.md#request-deadlines)): the request
    fails with `.serverUnreachable` and the channel is killed; after a second consecutive timeout,
    the master too.

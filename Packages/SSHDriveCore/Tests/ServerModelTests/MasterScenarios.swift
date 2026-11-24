@@ -35,7 +35,8 @@ final class MasterScenarios: XCTestCase {
         // is exactly the mess `SQ-074` is about.
         for master in masters { await master.shutdown() }
         masters = []
-        for process in spawned where !reaped.contains(process.pid) {
+        // Only a child still running is signalled: a reaped one's pid may name a stranger.
+        for process in spawned where process.poll() == nil {
             kill(process.pid, SIGKILL)
             _ = Spawn.wait(pid: process.pid)
             reaped.insert(process.pid)
@@ -130,7 +131,7 @@ final class MasterScenarios: XCTestCase {
         XCTFail("the control socket never appeared at \(path)")
     }
 
-    /// Polls for the child to exit and reaps it. Nil while it is still running.
+    /// Polls for the child's exit, which its reaper collected. Nil while it is still running.
     private func exitOf(_ process: SpawnedProcess, within seconds: TimeInterval) async
         -> ProcessExit?
     {
@@ -145,8 +146,8 @@ final class MasterScenarios: XCTestCase {
         return nil
     }
 
-    /// Whether a child is still running, **without** reaping it: the zombie state is what
-    /// `SQ-075` is about and `waitpid` would destroy the evidence.
+    /// Whether a child is still running, read the way the product reads a process it did
+    /// not spawn: `SQ-075` is about the zombie state, which `kill(pid, 0)` cannot see.
     ///
     /// The state is read through `ControlSocket.isZombie`, which is the product's own
     /// reader and answers on both platforms - `/proc/<pid>/stat` here, `p_stat` from
@@ -157,7 +158,7 @@ final class MasterScenarios: XCTestCase {
         return kill(process.pid, 0) == 0 && !ControlSocket.isZombie(process.pid)
     }
 
-    /// Waits for a signalled child to actually die, **without** reaping it.
+    /// Waits for a signalled child to actually die.
     /// `ControlSocket.terminate` returns once it has delivered a signal, and the KILL
     /// half a second behind the TERM takes effect a moment after that.
     private func waitUntilStopped(_ process: SpawnedProcess, within seconds: TimeInterval = 15)
@@ -394,10 +395,10 @@ final class MasterScenarios: XCTestCase {
         XCTAssertEqual(exit.signal, SIGKILL, "SQ-041: the master's death is ours to see")
     }
 
-    /// **K4**, the exit kept: the gate's master watch asks `isRunning`, which reaps a
-    /// master that has exited. The status that `waitpid` collected is the one
-    /// `classifyExitIfEnded` reads afterwards - a second `waitpid` on the reaped pid
-    /// answers `ECHILD` and the signal would be lost - and `shutdown()` signals nothing.
+    /// **K4**, the exit kept: the gate's master watch asks `isRunning`, which keeps the
+    /// exit the master's reaper collected. That status is the one `classifyExitIfEnded`
+    /// reads afterwards - a second `waitpid` on the reaped pid answers `ECHILD` and the
+    /// signal would be lost - and `shutdown()` signals nothing.
     func testK4_aMasterReapedByIsRunningKeepsItsExitStatus() async throws {
         let stub = try fakeSSH(.debian)
         let master = self.master(.debian, controlPath: controlPath(stub))
@@ -412,7 +413,7 @@ final class MasterScenarios: XCTestCase {
         let running = await master.isRunning
         XCTAssertFalse(running, "the killed master was never seen to exit")
         let classification = await master.classifyExitIfEnded()
-        XCTAssertNotNil(classification, "the exit isRunning reaped was lost")
+        XCTAssertNotNil(classification, "the exit isRunning saw was lost")
         let exit = await master.lastExit
         XCTAssertEqual(exit?.signal, SIGKILL, "the master's real exit, not ECHILD's -1")
         await master.shutdown()
@@ -641,9 +642,10 @@ final class MasterScenarios: XCTestCase {
     ///   3. the argv match on `ControlPath=$TMPDIR/sshdrive-` - the two with no socket,
     ///      which no socket-based sweep can see at all.
     ///
-    /// `SQ-075` is the last assertion: a master killed but not yet reaped is a zombie, so
-    /// "did I kill it?" is read from the process **state** and not from the pid still
-    /// being there, which `pgrep` and `kill(pid, 0)` both are fooled by.
+    /// `SQ-075` is the last assertion: a master killed but not yet reaped would be a zombie,
+    /// which `pgrep` and `kill(pid, 0)` both count as alive, so "did I kill it?" is read
+    /// from the process **state** - and `Spawn` reaps each of these the moment it exits,
+    /// so none is left a zombie at all (docs/design/ssh.md).
     func testK6_agentStopTakesEveryMasterByAllThreeRoutes() async throws {
         let stub = try fakeSSH(.debian)
 
@@ -757,7 +759,7 @@ final class MasterScenarios: XCTestCase {
         XCTAssertTrue(live.contains(beta2.pid), "SQ-044: and so is this one (\(identity))")
         XCTAssertFalse(
             live.contains(alpha1.pid),
-            "SQ-075: alpha1 was killed a moment ago and is an unreaped zombie, not a master")
+            "SQ-075: alpha1 was killed a moment ago and is not a master")
         let strays = ControlSocket.killStrayMasters(in: temporaryDirectory)
         XCTAssertTrue(strays.contains(alpha2.pid))
         XCTAssertTrue(strays.contains(beta2.pid))
@@ -766,21 +768,21 @@ final class MasterScenarios: XCTestCase {
         XCTAssertTrue(alpha2Stopped, "route 3: found by its argv and killed by its pid")
         XCTAssertTrue(beta2Stopped)
 
-        // Every master is gone - and this is where `pgrep` would still say four.
+        // Every master is gone, and none is left a zombie for `pgrep` to count (`SQ-075`):
+        // `Spawn` reaps each child the moment it exits (docs/design/ssh.md).
         for process in [alpha1, alpha2, beta2] {
-            XCTAssertEqual(kill(process.pid, 0), 0,
-                           "SQ-075: the pid is still there, because nothing has reaped it")
-            XCTAssertTrue(ControlSocket.isZombie(process.pid),
-                          "SQ-075: and the process **state** is what says it is gone")
+            let deadline = Date().addingTimeInterval(10)
+            var gone = false
+            while !gone, Date() < deadline {
+                gone = kill(process.pid, 0) != 0 && errno == ESRCH
+                if !gone { try await Task.sleep(nanoseconds: 25_000_000) }
+            }
+            XCTAssertTrue(gone, "docs/design/ssh.md: nothing the agent spawned is left a zombie")
             #if !canImport(Darwin)
-                // The same answer read straight out of `/proc`, so the product's reader is
-                // corroborated rather than merely agreed with. There is no `/proc` on a Mac
-                // and `p_stat` is the whole of the evidence there.
-                XCTAssertEqual(processState(of: process.pid), "Z",
-                               "SQ-075: `ps -o stat` is the one to read")
+                XCTAssertNil(processState(of: process.pid), "not even as `Z` in `/proc`")
             #endif
             XCTAssertFalse(ControlSocket.isLiveSSH(process.pid),
-                           "SQ-075: and a zombie is not a live master")
+                           "SQ-075: and a master that is gone is not a live master")
         }
         let secondPass = ControlSocket.killStrayMasters(in: temporaryDirectory)
         for process in [alpha1, alpha2, beta2] {

@@ -148,12 +148,12 @@ public actor SSHMaster {
     /// The running master's pid, or nil while none is.
     public var pid: Int32? { process?.pid }
 
-    /// Whether the master is still running. Reaps it when it has exited, and keeps the
-    /// status for `classifyExitIfEnded`.
+    /// Whether the master is still running. Once it has exited, keeps the status for
+    /// `classifyExitIfEnded`.
     public var isRunning: Bool {
         guard let process else { return false }
         if reapedExit != nil { return false }
-        guard let exit = Spawn.poll(pid: process.pid) else { return true }
+        guard let exit = process.poll() else { return true }
         reapedExit = exit
         return false
     }
@@ -201,7 +201,7 @@ public actor SSHMaster {
                 Log.ssh.info("master up for \(self.configuration.locationID, privacy: .public)")
                 return
             }
-            if let exit = Spawn.poll(pid: spawned.pid) {
+            if let exit = spawned.poll() {
                 let stderr = absorb(collector.text)
                 lastStderr = stderr
                 lastExit = exit
@@ -267,7 +267,7 @@ public actor SSHMaster {
         )
         // A reaped pid is no longer ours and may already name another process, so only a
         // master that has not been reaped is signalled.
-        if let process, reapedExit == nil, Spawn.poll(pid: process.pid) == nil {
+        if let process, reapedExit == nil, process.poll() == nil {
             Spawn.terminate(process, grace: 1)
         }
         process = nil
@@ -341,7 +341,7 @@ public actor SSHMaster {
     /// Reads the master's exit once it has one, and classifies it. The exit of the `-N`
     /// master is the disconnect signal for the location.
     public func classifyExitIfEnded() -> SSHExitClassification? {
-        guard let process, let exit = reapedExit ?? Spawn.poll(pid: process.pid) else {
+        guard let process, let exit = reapedExit ?? process.poll() else {
             return nil
         }
         let stderr = absorb(stderrCollector?.text ?? "")
@@ -491,7 +491,7 @@ public actor SSHMaster {
     }
 
     private func channelFailure(spawned: SpawnedProcess, collector: StderrCollector) throws -> Error {
-        let exit = Spawn.poll(pid: spawned.pid) ?? Spawn.wait(pid: spawned.pid)
+        let exit = spawned.wait()
         let stderr = collector.text
         let classification = SSHExitClassifier.classify(
             role: .muxClient, exitStatus: exit.status, terminationSignal: exit.signal,
