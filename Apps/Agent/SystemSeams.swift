@@ -152,8 +152,17 @@ final class NWPathNetworkGate: NetworkPathObserving, @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.shirls.sshdrive.path")
     private(set) var lastStatus: NWPath.Status = .satisfied
     private(set) var changes = 0
+    private var delivery: Task<Void, Never>?
 
+    /// Changes reach the agent one at a time and in the order the monitor reported them.
+    /// A `Task` per change would not promise either, and a "down" handled after the "up"
+    /// that followed it leaves every location believing it has no network on a Mac whose
+    /// path is satisfied, with no further change coming to correct it.
     func start(changed: @escaping @Sendable (Bool) async -> Void) {
+        let (stream, continuation) = AsyncStream.makeStream(of: Bool.self)
+        delivery = Task {
+            for await satisfied in stream { await changed(satisfied) }
+        }
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             let satisfied = path.status == .satisfied
@@ -163,7 +172,7 @@ final class NWPathNetworkGate: NetworkPathObserving, @unchecked Sendable {
             self.changes += 1
             Log.agent.notice(
                 "network path is now \(String(describing: path.status), privacy: .public)")
-            Task { await changed(satisfied) }
+            continuation.yield(satisfied)
         }
         monitor.start(queue: queue)
     }

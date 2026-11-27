@@ -35,6 +35,11 @@ public actor DomainManager {
     /// than inside the runtime because sleep, wake, a path change and a screen unlock all
     /// arrive for every location at once and none of them wants the index actor.
     private var gates: [String: ConnectionGate] = [:]
+    /// The network path as the last change reported it, and that change's number. A gate
+    /// built later starts from the first; the second is how a path change that was
+    /// overtaken while it awaited a gate knows to stop (`networkPathChanged`).
+    private var networkPathAvailable = true
+    private var networkPathGeneration = 0
     /// Change detection, one per location. Held here rather than inside the runtime
     /// because a cycle must never queue behind an `item(for:)` fallback or a three-minute
     /// sweep of a large tree.
@@ -310,7 +315,8 @@ public actor DomainManager {
                 askpassPath: secrets.askpassPath,
                 askpass: secrets.broker,
                 uploadTag: macID,
-                environment: environment)
+                environment: environment,
+                networkPathAvailable: networkPathAvailable)
             gates[location.id] = gate
             await gate.setOnConnected { [weak self] id, connected in
                 await self?.connectionCameUp(locationID: id, connected: connected)
@@ -541,9 +547,29 @@ public actor DomainManager {
         for detector in detectors.values { await detector.requestFullSweep(reason: "wake") }
     }
 
+    /// `NWPathMonitor` reported a change: every gate learns the path, a lost path drops
+    /// every master, and a path that came back reconnects and sweeps.
+    ///
+    /// Two changes can overlap. Losing the path drops every master, each `-O exit` is a
+    /// suspension, and the actor takes the next change in the middle of it. So every gate
+    /// records the path before any gate acts on it, and a change stops at its next
+    /// suspension once a newer one has started: carrying on would put the older answer
+    /// back on every gate after the one it was waiting on, with the Mac's path satisfied
+    /// and no further change coming to correct it.
     public func networkPathChanged(available: Bool) async {
-        for gate in gates.values { await gate.setNetworkPath(available) }
-        guard available else { return }
+        networkPathGeneration += 1
+        let generation = networkPathGeneration
+        networkPathAvailable = available
+        var recorded: [(gate: ConnectionGate, had: Bool)] = []
+        for gate in gates.values {
+            guard generation == networkPathGeneration else { return }
+            recorded.append((gate, await gate.recordNetworkPath(available)))
+        }
+        for (gate, had) in recorded {
+            guard generation == networkPathGeneration else { return }
+            await gate.actOnNetworkPath(available, had: had)
+        }
+        guard available, generation == networkPathGeneration else { return }
         // The poll schedule runs a cycle immediately on network-up.
         for detector in detectors.values {
             await detector.requestFullSweep(reason: "network up")

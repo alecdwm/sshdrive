@@ -566,6 +566,53 @@ extension AgentScenarios {
             await harness.manager.dropRuntime(locationID: location.id)
         }
 
+        /// **F15** - a path that goes away and comes back while the first change is still
+        /// dropping masters leaves every location with a path.
+        ///
+        /// The two changes overlap whenever an `-O exit` is slow: the "down" pass is
+        /// suspended in one location's drop, and the "up" pass runs through every location
+        /// in the meantime. If the "down" pass then carried on, every location after the
+        /// one it stopped at would be marked as having no path - with the Mac's path
+        /// satisfied, no further change coming, and no timer, because a location with no
+        /// path fails every call fast and schedules nothing.
+        @Test func f15AnOverlappingPathChangeLeavesNoLocationWithoutAPath() async throws {
+            let harness = try AgentHarness()
+            var gates: [(location: Location, gate: ConnectionGate)] = []
+            for name in ["shirls", "plex", "talisapp", "labcfg"] {
+                let location = try await harness.addLocation(nickname: name)
+                _ = try await harness.manager.runtime(for: location)
+                gates.append(
+                    (location, try #require(await harness.manager.gate(locationID: location.id))))
+            }
+            await harness.quiesceConnects()
+            #expect(harness.launcher.connections.count == 4)
+
+            // The first master the "down" pass drops takes as long as the scenario says.
+            let hold = AsyncHold()
+            for connection in harness.launcher.connections { connection.shutdownHold = hold }
+
+            let manager = harness.manager
+            let down = Task { await manager.networkPathChanged(available: false) }
+            await harness.settle { hold.waiters == 1 }
+            #expect(hold.waiters == 1, "the down pass never reached a drop")
+
+            await manager.networkPathChanged(available: true)
+            hold.release()
+            await down.value
+            await harness.quiesceConnects()
+
+            for (location, gate) in gates {
+                let report = await gate.report()
+                #expect(
+                    report["hasNetworkPath"] as? Bool == true,
+                    "F15: \(location.nickname) was left with no network path")
+                #expect(
+                    report["connected"] as? Bool == true,
+                    "F15: \(location.nickname) did not reconnect")
+            }
+            for (location, _) in gates { await harness.manager.dropRuntime(locationID: location.id) }
+        }
+
         /// A server that can run the helper as far as the probe can tell: `auto` tries the
         /// tiers from the top, and the deployment is what refutes it.
         static let helperCapable = ChangeDetectionLadder.ServerCapabilities(

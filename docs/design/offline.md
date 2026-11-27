@@ -63,7 +63,13 @@ number.
 
 1. **No path.** `NWPathMonitor` says there is no path at all: `.serverUnreachable` immediately.
    This covers Wi-Fi off, but not a powered-down NAS or a tailnet that is down while the Mac is
-   online.
+   online. A location with no path fails every call fast and schedules no retry, so the path
+   it holds must always be the last one reported. Changes reach the agent one at a time, in
+   the order the monitor reported them; every location records a change before any location
+   acts on it (acting on a lost path drops a master, and the `-O exit` is a suspension the
+   next change can arrive in); and a change that a newer one has overtaken stops where it is
+   rather than writing its older answer over the newer one (`F15`). A location started while
+   the path is down starts with no path.
 
 2. **Circuit breaker.** A per-location breaker covers the rest. After a failed connection attempt
    the location is marked down for a backoff interval, during which every call fails fast without

@@ -310,6 +310,7 @@ public actor ConnectionGate {
     public init(
         location: Location, askpassPath: String?, askpass: (any AskpassTokenProviding)?,
         uploadTag: String, environment: AgentEnvironment = .unconfigured,
+        networkPathAvailable: Bool = true,
         jitter: @escaping @Sendable (TimeInterval) -> TimeInterval = CircuitBreaker.defaultJitter
     ) {
         self.environment = environment
@@ -319,7 +320,9 @@ public actor ConnectionGate {
         self.askpassPath = askpassPath
         self.askpass = askpass
         self.uploadTag = uploadTag
-        self.breaker = CircuitBreaker(jitter: jitter)
+        var breaker = CircuitBreaker(jitter: jitter)
+        breaker.setNetworkPath(networkPathAvailable)
+        self.breaker = breaker
     }
 
     private var now: TimeInterval { environment.clock.uptime() }
@@ -795,8 +798,26 @@ public actor ConnectionGate {
     /// the same way when nothing is connected; the agent's `NWPathMonitor` passes on only
     /// changes, so on a Mac that comes from the debug hooks.
     public func setNetworkPath(_ available: Bool) async {
+        let had = recordNetworkPath(available)
+        await actOnNetworkPath(available, had: had)
+    }
+
+    /// The first half of `setNetworkPath`: the breaker learns the path, and nothing
+    /// suspends. Answers whether the breaker had a path before.
+    ///
+    /// `DomainManager` records the path on every gate before any gate acts on it, because
+    /// acting on a lost path drops a master and that `-O exit` is a suspension during
+    /// which the next path change can arrive.
+    @discardableResult
+    public func recordNetworkPath(_ available: Bool) -> Bool {
         let had = breaker.hasNetworkPath
         breaker.setNetworkPath(available)
+        return had
+    }
+
+    /// The second half of `setNetworkPath`: the drop for a lost path, the reconnect for
+    /// one that came back. `had` is what `recordNetworkPath` answered.
+    public func actOnNetworkPath(_ available: Bool, had: Bool) async {
         guard available else {
             await drop(reason: "the network path went away", reconnect: false)
             return

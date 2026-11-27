@@ -7,6 +7,40 @@ import XPCProtocols
 import SSHProcess
 import Secrets
 
+/// A point every caller waits at until the scenario releases it, once. After `release()`
+/// it is open for good, so a hold shared by several connections stops only the first
+/// caller that reaches it while it is closed, and every one after the release passes.
+public final class AsyncHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    public init() {}
+
+    /// How many callers are parked here now.
+    public var waiters: Int { lock.withLock { waiting.count } }
+
+    public func wait() async {
+        await withCheckedContinuation { continuation in
+            let resume = lock.withLock { () -> Bool in
+                if released { return true }
+                waiting.append(continuation)
+                return false
+            }
+            if resume { continuation.resume() }
+        }
+    }
+
+    public func release() {
+        let parked = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            released = true
+            defer { waiting = [] }
+            return waiting
+        }
+        for continuation in parked { continuation.resume() }
+    }
+}
+
 /// One location's connection, without an `ssh` (the `TransportLauncher` seam,
 /// docs/design/testing.md).
 ///
@@ -48,6 +82,10 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     /// calls would be serialised by the executor whatever the caller did. A delay is what
     /// makes the high-water mark below mean something.
     public var readlinkDelay: Duration?
+    /// Held inside `shutdown()` before it is counted. A real `-O exit` takes a moment,
+    /// and anything that awaits a drop is suspended for that moment; this is how a
+    /// scenario holds it open while something else runs.
+    public var shutdownHold: AsyncHold?
 
     public init(
         transport: any SFTPTransport,
@@ -122,6 +160,7 @@ public final class FakeLiveConnection: LiveConnection, @unchecked Sendable {
     public var metadataTransport: RealSFTPTransport? { nil }
 
     public func shutdown() async {
+        if let shutdownHold { await shutdownHold.wait() }
         lock.lock()
         _shutdowns += 1
         _alive = false
