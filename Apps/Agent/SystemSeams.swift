@@ -40,6 +40,8 @@ final class IOKitPowerEvents: PowerObserving, @unchecked Sendable {
     private static let systemHasPoweredOn: UInt32 = 0xE000_0300  // iokit_common_msg(0x300)
 
     private var port: IONotificationPortRef?
+    /// Where IOKit delivers the messages. Serial, so `handle` never runs twice at once.
+    private let queue = DispatchQueue(label: "org.shirls.sshdrive.power")
     private var notifier: io_object_t = 0
     private var rootPort: io_connect_t = 0
     private(set) var willSleepCount = 0
@@ -78,10 +80,10 @@ final class IOKitPowerEvents: PowerObserving, @unchecked Sendable {
         rootPort = connect
         port = notificationPort
         notifier = notifierObject
-        CFRunLoopAddSource(
-            CFRunLoopGetMain(),
-            IONotificationPortGetRunLoopSource(notificationPort).takeUnretainedValue(),
-            .defaultMode)
+        // A dispatch queue, never the main run loop: the agent parks its main thread in
+        // `dispatchMain()`, which services the main queue and never runs the main
+        // `CFRunLoop`, so a run-loop source added there registers and is never called.
+        IONotificationPortSetDispatchQueue(notificationPort, queue)
         Log.agent.notice("registered for system power notifications")
     }
 

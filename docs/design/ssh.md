@@ -303,7 +303,10 @@ connection is detected three ways:
 
 Sleep and wake come from IOKit (`IORegisterForSystemPower`, `kIOMessageSystemWillSleep`,
 `kIOMessageSystemHasPoweredOn`), not `NSWorkspace`, since the agent runs no `NSApplication`. The
-constants do not import into Swift (MQ-070, gotcha 64).
+constants do not import into Swift (MQ-070, gotcha 64). The notification port delivers on a
+dispatch queue (`IONotificationPortSetDispatchQueue`): the agent parks its main thread in
+`dispatchMain()`, which never runs the main run loop, so a source added to it registers and is
+never called (MQ-082, gotcha 68).
 
 ## The binary is `/usr/bin/ssh`
 

@@ -26,7 +26,7 @@ numbering are expected and mean nothing.
 
 | File | Entries |
 |---|---|
-| [macos.md](macos.md) | 80 |
+| [macos.md](macos.md) | 82 |
 | [servers.md](servers.md) | 82 |
 
 ## Versions and servers
